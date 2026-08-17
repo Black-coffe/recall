@@ -13,8 +13,8 @@
 ![Stack](https://img.shields.io/badge/RAG-local-purple)
 ![Backup](https://img.shields.io/badge/backup-restic+GDrive-success)
 
-> Внутрішня технічна назва репозиторію — `whisper-ui` (бо ядро транскрипції
-> — Whisper). UI-обличчя продукту — **Recall**, tagline «пам'ять ваших дзвінків».
+> Ядро транскрипції — Whisper, тому нижній стек, шляхи й venv історично
+> звуться `whisper`. UI-обличчя — **Recall**, tagline «пам'ять ваших дзвінків».
 
 ## ✨ Можливості
 
@@ -39,8 +39,8 @@ UI — клієнтський SPA «Recall»: тепла паперова ест
 
 ```cmd
 REM Клонуйте репозиторій
-git clone https://github.com/Black-coffe/whisper-ui.git
-cd whisper-ui
+git clone https://github.com/Black-coffe/recall.git
+cd recall
 
 REM Встановіть Python-залежності
 .venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -108,7 +108,7 @@ faster-whisper (CTranslate2 + VAD) дає кратне прискорення п
 ## 📁 Структура проекту
 
 ```
-whisper-ui/  (Recall)
+recall/  (Recall)
 ├── app.py                     # Flask: boot, singletons, реєстрація 14 blueprints
 ├── config.py                  # Конфіги Dev/Prod/Test + env-прапори
 ├── whisper_manager_new.py     # Двигун транскрипції (faster-whisper / openai fallback)
@@ -205,4 +205,4 @@ Pull requests вітаються! Для великих змін спочатк�
 
 **Створено з ❤️ для української спільноти**
 
-📧 Підтримка: [створіть issue](https://github.com/Black-coffe/whisper-ui/issues)
+📧 Підтримка: [створіть issue](https://github.com/Black-coffe/recall/issues)
