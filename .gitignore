@@ -1,0 +1,168 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.Python
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Virtual Environment
+Scripts/
+Lib/
+Include/
+pyvenv.cfg
+# Exception: проектные скрипты у /scripts/ (не плутати з .venv/Scripts/)
+!/scripts/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+nul
+
+# Project specific
+uploads/
+youtube_downloads/
+transcripts/
+models/
+db_backups/
+logs/
+downloads/
+recordings/
+documents/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+*.log.*
+# cookies.txt: сам файл видалено як мертвий артефакт (pytubefix не читає cookies
+# взагалі). Правило лишаємо — щоб випадково створений файл з реальними токенами
+# Google не потрапив у публічний репозиторій.
+cookies.txt
+.tmp_test_sse/
+.tmp_screens/
+.claude/scheduled_tasks.lock
+
+# Phase 17: Telegram — сесія = ПОВНИЙ доступ до акаунта, медіа = особисті дані.
+# НІКОЛИ не комітити.
+*.session
+*.session-journal
+telegram_media/
+telegram_control.token
+telegram_qr.png
+# Стан догонки (коли який чат востаннє догоняли) і недоставлене в ingest —
+# робочі артефакти конкретної машини, у репозиторії їм робити нічого.
+telegram_catchup.json
+telegram_deadletter.jsonl
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+tmp/
+temp/
+
+# Audio/Video files (user data)
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.webm
+*.ogg
+*.flac
+*.mpeg
+*.mpga
+
+# Whisper model cache
+.cache/
+~/.cache/whisper/
+
+# Python cache
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environments
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+tests/screenshots/
+
+# Model update-check state (local, per-machine)
+model_update_state.json
+
+# evals: локальний golden-set і результати прогонів (реальні дані архіву — не комітити)
+evals/golden_set.local.json
+evals/*_rerank.json
+
+# Робочі документи з конкретикою особистого архіву (гриль-брифи, плани треків):
+# імена людей, назви проєктів, цифри використання. Лишаються локально.
+docs/grill/
+docs/plans/
+
+# Локальна карта чат→напрямок (назви чатів і людей — не в публічний репозиторій)
+data/*.local.json
+
+# Результати прогонів eval (реальні питання і назви джерел архіву)
+evals/after_*.json
+evals/before_*.json
+
+# Одноразові вивантаження з архіву (цитати з реальних дзвінків) — не комітити
+_plans.txt
+
+# Дампи стану сесій Claude Code (містять уривки робочого контексту)
+.claude/handoff/
