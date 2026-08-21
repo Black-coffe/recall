@@ -1,0 +1,6 @@
+# Shell/Python/hooks мусять чекаутитись із LF: CRLF-шебанг ламає bash на
+# Git Bash/macOS/Linux (кросплатформність) — правило принесене з Vulyk 21.08.2026.
+*.sh text eol=lf
+*.py text eol=lf
+scripts/git-hooks/* text eol=lf
+.claude/hooks/* text eol=lf

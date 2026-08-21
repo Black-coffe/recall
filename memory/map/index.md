@@ -1,4 +1,4 @@
-# 🗺️ docs/map — карта коду Recall
+# 🗺️ memory/map — карта коду Recall
 
 > Запозичено з [VULYK](https://github.com/Black-coffe/vulyk) (layer 4 — `memory/map/`),
 > адаптовано під наш репозиторій. Це **підказка для навігації**, а не істина:

@@ -142,14 +142,14 @@ recall/  (Recall)
 └── .venv/
 ```
 
-> 🗺️ **Карта коду:** [`docs/map/`](docs/map/README.md) — навігація по модулях для
+> 🗺️ **Карта коду:** [`memory/map/`](memory/map/README.md) — навігація по модулях для
 > розробників і Claude Code (звіряти перед правкою великих модулів). Технічний
 > довідник стеку + routing-матриця моделей — [`CLAUDE.md`](CLAUDE.md).
 
 ## 🔧 API Endpoints (вибірка)
 
 Маршрути розподілені по 14 blueprints у `app/blueprints/*` (повний перелік — у
-[`docs/map/blueprints.md`](docs/map/blueprints.md)).
+[`memory/map/blueprints.md`](memory/map/blueprints.md)).
 
 - **Транскрипція**: `POST /api/transcribe`, `GET /api/history`, `POST /api/transcription/<id>/{polish,summarize,translate,topics}`, `POST /api/export/<format>`
 - **YouTube**: `POST /api/youtube/{info,download}`, `GET /api/youtube/progress/<id>`
