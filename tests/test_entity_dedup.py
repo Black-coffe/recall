@@ -86,12 +86,12 @@ def _insert_alias(db_path: str, entity_id: int, alias: str) -> None:
 
 
 def _insert_meeting_entity(db_path: str, tid: int, eid: int, mentions: int = 1,
-                            salience=None, role_in_meeting=None) -> None:
+                            salience=None, role_in_meeting=None, source=None) -> None:
     with get_db_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO meeting_entities (transcription_id, entity_id, mention_count, "
-            "salience, role_in_meeting) VALUES (?, ?, ?, ?, ?)",
-            (tid, eid, mentions, salience, role_in_meeting),
+            "salience, role_in_meeting, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (tid, eid, mentions, salience, role_in_meeting, source),
         )
         conn.commit()
 
@@ -589,6 +589,135 @@ def test_person_in_group_does_not_hide_the_mergeable_rest(db_path):
     assert len(groups) == 1
     assert groups[0]["keep"]["id"] == project
     assert [m["id"] for m in groups[0]["merge"]] == [org]
+
+
+def _rowcount(db_path: str, table: str) -> int:
+    with get_db_connection(db_path) as conn:
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+# ============================================================
+# find_alias_cross_type_collisions
+# ============================================================
+
+def test_alias_cross_type_finds_wynn_dubai(db_path):
+    """«WYNN Дубай» — аліас org #670 і водночас канонічна назва project #2301
+    (наскрізний трейсер-кейс з історії)."""
+    org = _insert_entity(db_path, "org", "Wynn Casino Las Vegas")
+    _insert_alias(db_path, org, "WYNN Дубай")
+    project = _insert_entity(db_path, "project", "WYNN Дубай")
+
+    groups = entity_dedup.find_alias_cross_type_collisions(db_path)
+
+    assert len(groups) == 1
+    g = groups[0]
+    assert not g.get("ambiguous")
+    assert g["evidence"] == {"alias_of": org, "alias": "WYNN Дубай"}
+    assert g["keep"]["id"] == project          # project вище org у _TYPE_RANK
+    assert [m["id"] for m in g["merge"]] == [org]
+
+
+def test_alias_cross_type_ignores_own_alias(db_path):
+    """Аліас, що збігається з ВЛАСНИМ канонічним іменем сутності — не колізія."""
+    e = _insert_entity(db_path, "org", "Робота Fund")
+    _insert_alias(db_path, e, "робота fund")  # той самий фолд-ключ, та сама сутність
+
+    assert entity_dedup.find_alias_cross_type_collisions(db_path) == []
+
+
+def test_alias_cross_type_same_type_is_not_our_class(db_path):
+    """Аліас org == канонічна назва ІНШОГО org — не кросс-типовий клас цієї функції."""
+    a = _insert_entity(db_path, "org", "Alpha")
+    _insert_alias(db_path, a, "Beta")
+    _insert_entity(db_path, "org", "Beta")
+
+    assert entity_dedup.find_alias_cross_type_collisions(db_path) == []
+
+
+def test_alias_cross_type_three_referents_are_ambiguous(db_path):
+    """Одне написання не можна зарахувати двом: три різні сутності — ambiguous,
+    жодна не потрапляє в пропозицію злиття."""
+    org = _insert_entity(db_path, "org", "Робота Fund")
+    _insert_alias(db_path, org, "Робота")
+    project = _insert_entity(db_path, "project", "Робота")
+    topic = _insert_entity(db_path, "topic", "робота")
+
+    groups = entity_dedup.find_alias_cross_type_collisions(db_path)
+
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["ambiguous"] is True
+    assert "keep" not in g and "merge" not in g
+    assert {m["id"] for m in g["members"]} == {org, project, topic}
+
+
+def test_alias_cross_type_person_excluded_by_default(db_path):
+    p = _insert_entity(db_path, "person", "Руслан")
+    _insert_alias(db_path, p, "Робота")
+    project = _insert_entity(db_path, "project", "Робота")
+
+    assert entity_dedup.find_alias_cross_type_collisions(db_path) == []
+
+    included = entity_dedup.find_alias_cross_type_collisions(db_path, include_person=True)
+    assert len(included) == 1
+    assert {included[0]["keep"]["id"], included[0]["merge"][0]["id"]} == {p, project}
+
+
+def test_alias_cross_type_folds_cyrillic_case_not_via_sqlite_lower(db_path):
+    """Згортання — `_fold_name`/Python `casefold`, кирилична пара, яку SQLite
+    LOWER не звужує."""
+    org = _insert_entity(db_path, "org", "СВІТЛО")
+    _insert_alias(db_path, org, "Світло Груп")
+    project = _insert_entity(db_path, "project", "світло груп")
+
+    groups = entity_dedup.find_alias_cross_type_collisions(db_path)
+
+    assert len(groups) == 1
+    assert {groups[0]["keep"]["id"], groups[0]["merge"][0]["id"]} == {org, project}
+
+
+def test_alias_cross_type_is_read_only(db_path):
+    org = _insert_entity(db_path, "org", "Wynn Casino Las Vegas")
+    _insert_alias(db_path, org, "WYNN Дубай")
+    _insert_entity(db_path, "project", "WYNN Дубай")
+
+    before = {t: _rowcount(db_path, t) for t in ("entities", "entity_aliases")}
+    entity_dedup.find_alias_cross_type_collisions(db_path)
+    after = {t: _rowcount(db_path, t) for t in ("entities", "entity_aliases")}
+
+    assert before == after
+
+
+# ============================================================
+# CLI: twins --with-aliases
+# ============================================================
+
+def test_twins_cli_json_carries_alias_collisions(db_path, capsys):
+    org = _insert_entity(db_path, "org", "Wynn Casino Las Vegas")
+    _insert_alias(db_path, org, "WYNN Дубай")
+    project = _insert_entity(db_path, "project", "WYNN Дубай")
+
+    entity_dedup.main(["--db", db_path, "twins", "--with-aliases", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, dict) and "with_aliases" in payload
+    ids = {payload["with_aliases"][0]["keep"]["id"],
+           payload["with_aliases"][0]["merge"][0]["id"]}
+    assert ids == {org, project}
+
+
+def test_twins_cli_without_flag_is_byte_identical(db_path, capsys):
+    org = _insert_entity(db_path, "org", "Wynn Casino Las Vegas")
+    _insert_alias(db_path, org, "WYNN Дубай")
+    _insert_entity(db_path, "project", "WYNN Дубай")
+    keep = _insert_entity(db_path, "project", "Acmecorp")
+    gone = _insert_entity(db_path, "org", "AcmeCorp")
+    _insert_meeting_entity(db_path, _insert_transcription(db_path, source_name="c.mp3"), keep)
+
+    entity_dedup.main(["--db", db_path, "twins", "--json"])
+    without_flag = capsys.readouterr().out
+
+    assert json.loads(without_flag) == entity_dedup.find_cross_type_twins(db_path)
 
 
 def test_fold_key_decides_max_the_same_way_the_finder_groups(db_path):
@@ -1410,3 +1539,205 @@ def test_handle_without_at_sign_is_still_a_handle(db_path):
         _insert_transcription(db_path, transcript_text="це питання до jbondarenko сьогодні")
 
     assert entity_dedup.find_junk_aliases(db_path) == []
+
+
+# ============================================================
+# Блокери морфології — read-only звіт (entity-graph-tg-02)
+# ============================================================
+
+def test_blockers_finds_generic_canonical(db_path):
+    """«Фонд» — родова канонічна назва, аліасом не знімається."""
+    eid = _insert_entity(db_path, "org", "Фонд")
+    _insert_alias(db_path, eid, "Фонд")
+    for _ in range(6):
+        _insert_transcription(db_path, transcript_text="кошти надійшли від фонд партнерів")
+
+    found = entity_dedup.find_morph_blockers(db_path)
+
+    assert len(found) == 1
+    assert found[0]["entity_id"] == eid
+    assert found[0]["reason"] == "generic_canonical"
+    assert found[0]["disputed"] is False
+
+
+def test_blockers_finds_case_form_entity(db_path):
+    """project «Україні» — відмінок, звʼязки здебільшого від точного TG-збігу."""
+    from app.services import tg_entities
+
+    eid = _insert_entity(db_path, "project", "Україні")
+    for _ in range(2):
+        tid = _insert_transcription(db_path)
+        _insert_meeting_entity(db_path, tid, eid, source=tg_entities.SOURCE)
+    tid = _insert_transcription(db_path)
+    _insert_meeting_entity(db_path, tid, eid, source=None)
+
+    found = entity_dedup.find_morph_blockers(db_path)
+
+    assert len(found) == 1
+    assert found[0]["entity_id"] == eid
+    assert found[0]["reason"] == "case_form"
+    assert found[0]["links_total"] == 3
+    assert found[0]["links_thread_match"] == 2
+    assert found[0]["disputed"] is False
+
+
+def test_blockers_ignores_case_form_when_links_are_mostly_from_enrichment(db_path):
+    """Та сама словоформа, але звʼязки в основному від Клода — не блокер."""
+    from app.services import tg_entities
+
+    eid = _insert_entity(db_path, "project", "Україні")
+    for _ in range(2):
+        tid = _insert_transcription(db_path)
+        _insert_meeting_entity(db_path, tid, eid, source=None)
+    tid2 = _insert_transcription(db_path)
+    _insert_meeting_entity(db_path, tid2, eid, source=tg_entities.SOURCE)
+
+    assert entity_dedup.find_morph_blockers(db_path) == []
+
+
+def test_blockers_ignores_short_and_multi_word_names(db_path):
+    """Коротке (<MIN_NAME_LEN) і багатослівне імʼя морфо-згортач не чіпає."""
+    from app.services import tg_entities
+
+    short = _insert_entity(db_path, "project", "Кий")           # 3 літери, суфікс не зрізається через довжину
+    multi = _insert_entity(db_path, "project", "Дім Данс Ігор")  # словосполука
+    for eid in (short, multi):
+        tid = _insert_transcription(db_path)
+        _insert_meeting_entity(db_path, tid, eid, source=tg_entities.SOURCE)
+
+    assert entity_dedup.find_morph_blockers(db_path) == []
+
+
+def test_blockers_does_not_double_report_same_entity(db_path):
+    """Родова канонічна назва, що є ще й відмінком — рахується один раз, першим проходом."""
+    from app.services import tg_entities
+
+    eid = _insert_entity(db_path, "org", "Сенсу")
+    _insert_alias(db_path, eid, "Сенсу")
+    for _ in range(6):
+        _insert_transcription(db_path, transcript_text="ми поговорили про сенсу цього рішення")
+    for _ in range(3):
+        tid = _insert_transcription(db_path)
+        _insert_meeting_entity(db_path, tid, eid, source=tg_entities.SOURCE)
+
+    found = entity_dedup.find_morph_blockers(db_path)
+
+    matches = [r for r in found if r["entity_id"] == eid]
+    assert len(matches) == 1
+    assert matches[0]["reason"] == "generic_canonical"
+
+
+def test_blockers_marks_known_disputed_names(db_path):
+    """«Місто» — з явного списку історії, лишається пропозицією лише з позначкою."""
+    from app.services import tg_entities
+
+    eid = _insert_entity(db_path, "project", "Місто")
+    for _ in range(3):
+        tid = _insert_transcription(db_path)
+        _insert_meeting_entity(db_path, tid, eid, source=tg_entities.SOURCE)
+
+    found = entity_dedup.find_morph_blockers(db_path)
+
+    assert found and found[0]["entity_id"] == eid
+    assert found[0]["disputed"] is True
+
+
+def test_blockers_cli_json(db_path, capsys):
+    eid = _insert_entity(db_path, "org", "Фонд")
+    _insert_alias(db_path, eid, "Фонд")
+    for _ in range(6):
+        _insert_transcription(db_path, transcript_text="кошти надійшли від фонд партнерів")
+
+    entity_dedup.main(["--db", db_path, "blockers", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == entity_dedup.find_morph_blockers(db_path)
+
+
+# ============================================================
+# rename — перейменування канонічної назви (entity-graph-tg-02)
+# ============================================================
+
+def test_rename_dry_run_does_not_write(db_path):
+    eid = _insert_entity(db_path, "org", "Фонд")
+
+    res = entity_dedup.rename_entity(db_path, eid, "Фонд Розвитку")
+
+    assert res == {"status": "ok", "dry_run": True, "changed": True,
+                   "entity": {"id": eid, "type": "org",
+                              "old_name": "Фонд", "new_name": "Фонд Розвитку"}}
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
+                           (eid,)).fetchone()
+    assert row["canonical_name"] == "Фонд"
+
+
+def test_rename_apply_writes_and_leaves_old_name_sticky(db_path):
+    eid = _insert_entity(db_path, "org", "Фонд")
+
+    res = entity_dedup.rename_entity(db_path, eid, "Фонд Розвитку", dry_run=False)
+
+    assert res["status"] == "ok" and res["changed"] is True
+    with get_db_connection(db_path) as conn:
+        ent = conn.execute("SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
+        alias = conn.execute("SELECT entity_id FROM entity_aliases WHERE normalized_alias = ?",
+                             (_normalize("Фонд"),)).fetchone()
+    assert ent["canonical_name"] == "Фонд Розвитку"
+    assert ent["normalized_name"] == _normalize("Фонд Розвитку")
+    assert alias is not None and alias["entity_id"] == eid
+    meta = json.loads(ent["metadata_json"])
+    assert meta["renamed_from"] == [{"old_name": "Фонд", "new_name": "Фонд Розвитку",
+                                     "at": meta["renamed_from"][0]["at"]}]
+
+
+def test_rename_is_idempotent(db_path):
+    eid = _insert_entity(db_path, "org", "Фонд")
+    entity_dedup.rename_entity(db_path, eid, "Фонд Розвитку", dry_run=False)
+
+    res = entity_dedup.rename_entity(db_path, eid, "Фонд Розвитку", dry_run=False)
+
+    assert res == {"status": "ok", "dry_run": False, "changed": False,
+                   "entity": {"id": eid, "type": "org",
+                              "old_name": "Фонд Розвитку", "new_name": "Фонд Розвитку"}}
+    with get_db_connection(db_path) as conn:
+        ent = conn.execute("SELECT metadata_json FROM entities WHERE id = ?",
+                           (eid,)).fetchone()
+    meta = json.loads(ent["metadata_json"])
+    assert len(meta["renamed_from"]) == 1, "повторний виклик не мав нічого дописати"
+
+
+def test_rename_refuses_unique_collision(db_path):
+    rival = _insert_entity(db_path, "org", "Акмеед")
+    eid = _insert_entity(db_path, "org", "Фонд")
+
+    res = entity_dedup.rename_entity(db_path, eid, "Акмеед", dry_run=False)
+
+    assert res["status"] == "error"
+    assert res["rival"] == {"id": rival, "name": "Акмеед"}
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
+                           (eid,)).fetchone()
+    assert row["canonical_name"] == "Фонд", "колізія не мала нічого записати"
+
+
+def test_rename_not_found(db_path):
+    assert entity_dedup.rename_entity(db_path, 999999, "Щось") == \
+        {"status": "not_found", "entity_id": 999999}
+
+
+def test_rename_cli_apply_flag_gates_the_write(db_path, capsys):
+    eid = _insert_entity(db_path, "org", "Фонд")
+
+    entity_dedup.main(["--db", db_path, "rename", str(eid), "Фонд Розвитку"])
+    capsys.readouterr()
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
+                           (eid,)).fetchone()
+    assert row["canonical_name"] == "Фонд", "без --apply CLI не мав нічого писати"
+
+    entity_dedup.main(["--db", db_path, "rename", str(eid), "Фонд Розвитку", "--apply"])
+    capsys.readouterr()
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
+                           (eid,)).fetchone()
+    assert row["canonical_name"] == "Фонд Розвитку"

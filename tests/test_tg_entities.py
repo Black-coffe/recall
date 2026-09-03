@@ -325,3 +325,172 @@ def test_names_cache_is_reused_and_resettable(db):
     assert tg_entities.names_for(db) is first          # нова сутність ще не видна
     tg_entities.reset_names_cache()
     assert "барселона" in tg_entities.names_for(db)
+
+
+# ============================================================
+# Морфологічний матчер (історія 03) — вимкнений за замовчуванням
+# ============================================================
+
+@pytest.fixture
+def morph_on(monkeypatch):
+    """Явно вмикає прапорець на час тесту."""
+    monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
+
+
+@pytest.fixture
+def morph_off(monkeypatch):
+    """Явно ВИМИКАЄ прапорець. Потрібен явно, а не «за замовчуванням»: з
+    21.08.2026 `TG_ENTITIES_MORPH_ENABLED=1` стоїть у бойовому `.env`, і будь-який
+    тест у наборі, що підтягує config/dotenv, лишає його в `os.environ` — тест
+    про вимкнену гілку мусить володіти своїм середовищем, а не позичати його."""
+    monkeypatch.delenv("TG_ENTITIES_MORPH_ENABLED", raising=False)
+
+
+def test_morph_disabled_by_default_leaves_inflected_form_unlinked(db, morph_off):
+    """Без прапорця «Юлією» не звʼязується — рівно поточна поведінка."""
+    _entity(db, "Юлія")
+    names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("домовились із Юлією про дзвінок", names) == set()
+
+
+def test_morph_enabled_links_inflected_forms(db, morph_on):
+    """Замір 14.08: «Юлією», «Тетяни», «Промприладом» — форми, які точний
+    матчер пропускає."""
+    julia = _entity(db, "Юлія")
+    tetiana = _entity(db, "Тетяна")
+    promprylad = _entity(db, "Промприлад", etype="org")
+    names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("домовились із Юлією про дзвінок", names) == {julia}
+    assert tg_entities.find_mentions("питання від Тетяни ще відкрите", names) == {tetiana}
+    assert tg_entities.find_mentions("рахунок за Промприладом не пройшов", names) == {promprylad}
+
+
+def test_morph_guard1_exact_wordform_wins_on_its_position(db, morph_on):
+    """Гард 1: токен, спожитий точним збігом (тут — багатослівним), закритий
+    для морфо-гілки — навіть коли основа ОДНОЗНАЧНО (без допомоги гарда 2)
+    вказує на ІНШУ сутність. Пара навмисно без спільної основи з "Дім Данс":
+    якщо прибрати гард 1, гард 2 цей випадок не зловить, і тест почервоніє."""
+    dim_dans = _entity(db, "Дім Данс", etype="project")  # точний ключ "дім данс"
+    dansy = _entity(db, "Дансі", etype="org")             # основа "данс" — та сама, що в токені "Данс"
+    names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("команда Дім Данс перемогла", names) == {dim_dans}
+
+
+def test_morph_multiword_exact_closes_all_its_tokens():
+    """Відтворення з ревʼю: `exact_word_positions.add(i)` стояв лише під
+    `size == 1`, тож слово ВСЕРЕДИНІ багатослівного точного збігу лишалось
+    відкритим для морфо-гілки і зараховувалось ДРУГІЙ сутності. Одне
+    написання не можна зараховувати двом."""
+    names = {"дім данс": 1, "данси": 2}
+    stems = tg_entities._build_stems(names)
+    assert tg_entities._mentions_core(
+        "команда Дім Данс перемогла", names, stems) == {1: tg_entities.SOURCE}
+
+
+def test_morph_guard2_ambiguous_stem_is_rejected(db, morph_on):
+    """«Русланою» → і Руслан, і Руслана: основа неоднозначна, зв'язку нема.
+    Одну згадку не можна зарахувати двом (entity-merge-moves-names-to-aliases)."""
+    _entity(db, "Руслан")
+    _entity(db, "Руслана")
+    names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("зустрілись з Русланою учора", names) == set()
+
+
+def test_morph_guard3_all_caps_is_not_proof(db, morph_on):
+    """Гард 3: морфо-збіг проходить той самий `written_as_proper_noun` —
+    ALL-CAPS шапка не доказ, навіть коли основа однозначна."""
+    _entity(db, "Тетяна")
+    names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("ЗУСТРІЧ ЩОДО ТЕТЯНИ ЗАВТРА ВРАНЦІ", names) == set()
+
+
+def test_morph_link_message_writes_separate_source(db, morph_on):
+    """`SOURCE_MORPH` пишеться окремо від `SOURCE` в meeting_entities.source."""
+    julia = _entity(db, "Юлія")
+    tid = _msg(db, "домовились із Юлією про дзвінок")
+    res = tg_entities.link_message(db, tid)
+    assert res["status"] == "ok" and res["written"] == 1
+    row = _links(db)[0]
+    assert row["entity_id"] == julia
+    assert row["source"] == tg_entities.SOURCE_MORPH
+    assert tg_entities.SOURCE_MORPH != tg_entities.SOURCE
+
+
+def test_morph_relink_replaces_only_its_own_rows(db, morph_on):
+    """Повторний прохід видаляє лише свої `thread_morph`-рядки: чужі (NULL) і
+    `thread_match` лишаються недоторканими."""
+    julia = _entity(db, "Юлія")
+    other = _entity(db, "Барселона", etype="org")
+    tid = _msg(db, "домовились із Юлією про дзвінок")
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meeting_entities (transcription_id, entity_id, source) "
+                 "VALUES (?, ?, NULL)", (tid, other))
+    conn.commit()
+    conn.close()
+
+    tg_entities.link_message(db, tid)
+    tg_entities.link_message(db, tid)     # ідемпотентно, свій рядок переписується
+
+    links = _links(db)
+    assert len(links) == 2
+    morph_rows = [l for l in links if l["source"] == tg_entities.SOURCE_MORPH]
+    foreign_rows = [l for l in links if l["source"] is None]
+    assert [l["entity_id"] for l in morph_rows] == [julia]
+    assert [l["entity_id"] for l in foreign_rows] == [other]
+
+
+def test_morph_link_threads_does_not_touch_exact_match_rows(db, morph_on):
+    """Точний і морфологічний звʼязок на різних повідомленнях однієї нитки
+    не заважають одне одному при повторному проході."""
+    exact = _entity(db, "Ковальчука", etype="project")
+    julia = _entity(db, "Юлія")
+    _msg(db, "по Ковальчука домовились", thread_id=1)
+    _msg(db, "уточнила Юлією питання", thread_id=1)
+
+    tg_entities.link_threads(db, dry_run=False)
+    tg_entities.link_threads(db, dry_run=False)   # ідемпотентно
+
+    links = _links(db)
+    assert len(links) == 2
+    by_source = {l["source"]: l["entity_id"] for l in links}
+    assert by_source[tg_entities.SOURCE] == exact
+    assert by_source[tg_entities.SOURCE_MORPH] == julia
+
+
+def test_morph_stats_reports_new_source(db, morph_on):
+    """`stats()` показує розріз за новим значенням `source` без окремої правки —
+    групування за фактичними значеннями в БД."""
+    _entity(db, "Юлія")
+    tid = _msg(db, "домовились із Юлією про дзвінок")
+    tg_entities.link_message(db, tid)
+    got = tg_entities.stats(db)
+    assert got["links_by_source"].get(tg_entities.SOURCE_MORPH) == 1
+
+
+def test_morph_stems_cache_is_reset_with_names_cache(db, morph_on):
+    """Основи кешуються разом із назвами (`stems_for`) і скидаються тим самим
+    `reset_names_cache()`."""
+    _entity(db, "Юлія")
+    first = tg_entities.stems_for(db)
+    _entity(db, "Роман")
+    assert tg_entities.stems_for(db) is first           # нова основа ще не видна
+    tg_entities.reset_names_cache()
+    assert "роман" in tg_entities.stems_for(db)
+
+
+def test_morph_stems_cache_recomputes_after_flag_flip(db, monkeypatch):
+    """Кеш, прогрітий, поки прапорець вимкнений, лишає слот основ `{}` — і
+    без перевірки стану прапорця цей порожній слот віддавався б і після
+    вмикання: `link_message` тоді видаляє свої `SOURCE_MORPH`-рядки і не має
+    чим їх переписати (стемс порожній, хоч прапорець уже ON)."""
+    julia = _entity(db, "Юлія")
+    tg_entities.names_for(db)                          # прогрів кешу під OFF
+    monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
+    tid = _msg(db, "домовились із Юлією про дзвінок")
+
+    res = tg_entities.link_message(db, tid)
+
+    assert res["written"] == 1
+    row = _links(db)[0]
+    assert row["entity_id"] == julia
+    assert row["source"] == tg_entities.SOURCE_MORPH

@@ -17,10 +17,11 @@
 ## Unmapped territory
 - tests/ (структуру описує pytest.ini + CLAUDE.md; окремої карти нема)
 - scripts/mirror/ (санітизоване дзеркало — README у теці, у публічний репо не їде)
+- evals/ (RAG recall@k + `graph_links.py` — read-only замір графа на знімку БД; описано в [services](map/services.md))
 
 ## Wiki domains
 <!-- load-bearing domain notes in docs/wiki/ -->
-- (none yet)
+- [entity-graph-provenance](../docs/wiki/entity-graph-provenance.md) — one mention/one owner, `thread_match` vs `thread_morph` provenance never interchangeable, morph matcher opt-in only
 
 ## Verification
 - build: none — інтерпретований Python + vanilla JS

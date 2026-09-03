@@ -52,12 +52,17 @@ def test_classify_error_priority_sign_in_before_unavailable():
 # ============================================================
 
 class FakeStream:
-    def __init__(self, mime_type="audio/mp4", abr="128kbps", filesize=2048):
+    def __init__(self, mime_type="audio/mp4", abr="128kbps", filesize=2048, is_sabr=False):
         self.mime_type = mime_type
         self.abr = abr
         self.filesize = filesize
+        # SABR-потоки качаються лише через ServerAbrStream і потребують сесійного
+        # PO-token — код їх свідомо оминає, тож фейк мусить нести цей прапор.
+        self.is_sabr = is_sabr
+        self.downloaded = False
 
     def download(self, output_path, filename):
+        self.downloaded = True
         p = os.path.join(output_path, filename + ".mp4")
         with open(p, "wb") as f:
             f.write(b"fake-audio-bytes")
@@ -65,8 +70,8 @@ class FakeStream:
 
 
 class FakeStreamsQuery:
-    def __init__(self, stream):
-        self._stream = stream
+    def __init__(self, *streams):
+        self._streams = list(streams)
 
     def filter(self, only_audio=True):
         return self
@@ -77,16 +82,23 @@ class FakeStreamsQuery:
     def desc(self):
         return self
 
+    def __iter__(self):
+        return iter(self._streams)
+
     def first(self):
-        return self._stream
+        return self._streams[0] if self._streams else None
 
 
 class FakeYouTube:
     """Замінює pytubefix.YouTube — жодного мережевого виклику."""
     last_kwargs = None
 
-    def __init__(self, url, on_progress_callback=None, on_complete_callback=None):
-        FakeYouTube.last_kwargs = dict(url=url)
+    def __init__(self, url, client=None, on_progress_callback=None,
+                 on_complete_callback=None, **kwargs):
+        # ``client`` і ``**kwargs`` обовʼязкові: open_youtube перебирає клієнтів
+        # pytubefix, і фейк без цього параметра «падає» на кожному з них, а виклик
+        # виглядає як мережева помилка, а не як дрейф сигнатури фейка.
+        FakeYouTube.last_kwargs = dict(url=url, client=client)
         self.title = "Test Video"
         self.author = "Test Author"
         self.length = 120
@@ -101,7 +113,8 @@ class FakeYouTubeRaises:
     def __init__(self, message):
         self._message = message
 
-    def __call__(self, url, on_progress_callback=None, on_complete_callback=None):
+    def __call__(self, url, client=None, on_progress_callback=None,
+                 on_complete_callback=None, **kwargs):
         raise Exception(self._message)
 
 
@@ -405,3 +418,148 @@ def test_download_trim_failure_falls_back_to_full_file(monkeypatch, tmp_path: Pa
     assert not final["file_path"].endswith("_trimmed.mp3")  # fallback на повний файл
     trim_warns = [l for l in logs if l["stage"] == "trim" and l["status"] == "warning"]
     assert trim_warns
+
+
+# --- open_youtube: перебір клієнтів -----------------------------------------
+#
+# YouTube віддає videoDetails частини роликів лише клієнтам із PO-token
+# (WEB-сімейство), а дефолтному ANDROID_VR кидає BotDetection. Перебір існує
+# саме заради цього — тести стежать, щоб він не виродився в один клієнт.
+
+
+class _ClientAwareFakeYouTube:
+    """Фейк, що «відкривається» лише для дозволених клієнтів."""
+
+    def __init__(self, ok_clients):
+        self.ok_clients = set(ok_clients)
+        self.tried = []
+
+    def __call__(self, url, client=None, **kwargs):
+        self.tried.append(client)
+        if client not in self.ok_clients:
+            raise RuntimeError(f"{client} detected as a bot")
+        yt = FakeYouTube(url, client=client, **kwargs)
+        return yt
+
+
+def test_open_youtube_falls_back_to_next_client(monkeypatch):
+    fake = _ClientAwareFakeYouTube({"WEB"})
+    monkeypatch.setattr("pytubefix.YouTube", fake)
+
+    yt = yp.open_youtube("https://youtube.com/watch?v=abc123XYZ")
+
+    assert yt.title == "Test Video"
+    assert fake.tried[0] == yp.YOUTUBE_CLIENTS[0]  # дефолтний пробуємо першим
+    assert fake.tried[-1] == "WEB"
+
+
+def test_open_youtube_raises_last_error_when_no_client_works(monkeypatch):
+    fake = _ClientAwareFakeYouTube(set())
+    monkeypatch.setattr("pytubefix.YouTube", fake)
+
+    with pytest.raises(RuntimeError):
+        yp.open_youtube("https://youtube.com/watch?v=abc123XYZ")
+
+    assert fake.tried == list(yp.YOUTUBE_CLIENTS)  # перебрані всі, жоден не мовчки
+
+
+def test_classify_error_names_bot_detection():
+    msg = "This request was detected as a bot. DO NOT OPEN AN ISSUE!"
+    assert "bot detection" in yp._classify_error(msg).lower()
+    assert yp._classify_error("щось інше", default="Своя помилка") == "Своя помилка"
+
+
+def test_download_skips_sabr_stream_in_favour_of_plain_url(monkeypatch, tmp_path: Path, callbacks):
+    """SABR-потік не качається без сесійного PO-token — беремо звичайний, хай і гірший."""
+    progress_updates, logs, dl_set, add_log = callbacks
+    sabr = FakeStream(mime_type="audio/webm", abr="160kbps", is_sabr=True)
+    plain = FakeStream(mime_type="audio/mp4", abr="128kbps", is_sabr=False)
+
+    class _SabrFirstYouTube(FakeYouTube):
+        def __init__(self, url, client=None, **kwargs):
+            super().__init__(url, client=client, **kwargs)
+            self.streams = FakeStreamsQuery(sabr, plain)
+
+    monkeypatch.setattr("pytubefix.YouTube", _SabrFirstYouTube)
+    monkeypatch.setattr(yp.subprocess, "run", _fake_ffmpeg_run_factory([]))
+
+    yp.download_youtube_audio(
+        "https://youtube.com/watch?v=abc123XYZ", "dl_sabr",
+        save_to_library=False, quality="best",
+        youtube_folder=str(tmp_path),
+        download_progress_set=dl_set, add_log=add_log,
+        get_db_conn=_noop_get_db_conn,
+    )
+
+    assert progress_updates[-1]["status"] == "completed"
+    assert plain.downloaded and not sabr.downloaded
+
+
+def test_download_falls_back_to_ytdlp_when_pytubefix_fails(monkeypatch, tmp_path: Path, callbacks):
+    """YouTube ріже частину відео без PO-token — тоді качає yt-dlp, а не «помилка»."""
+    progress_updates, logs, dl_set, add_log = callbacks
+
+    class _FailingStream(FakeStream):
+        def download(self, output_path, filename):
+            raise Exception("HTTP Error 403: Forbidden")
+
+    class _FailingYouTube(FakeYouTube):
+        def __init__(self, url, client=None, **kwargs):
+            super().__init__(url, client=client, **kwargs)
+            self.streams = FakeStreamsQuery(_FailingStream())
+
+    called = {}
+
+    def fake_ytdlp(url, output_path, filename, on_progress=None):
+        called["url"] = url
+        path = os.path.join(output_path, filename + ".webm")
+        with open(path, "wb") as f:
+            f.write(b"fake-audio-bytes")
+        if on_progress:
+            on_progress(16, 16)
+        return path
+
+    monkeypatch.setattr("pytubefix.YouTube", _FailingYouTube)
+    monkeypatch.setattr(yp, "download_audio_via_ytdlp", fake_ytdlp)
+    monkeypatch.setattr(yp.subprocess, "run", _fake_ffmpeg_run_factory([]))
+
+    yp.download_youtube_audio(
+        "https://youtube.com/watch?v=abc123XYZ", "dl_ytdlp",
+        save_to_library=False, quality="best",
+        youtube_folder=str(tmp_path),
+        download_progress_set=dl_set, add_log=add_log,
+        get_db_conn=_noop_get_db_conn,
+    )
+
+    assert called["url"] == "https://youtube.com/watch?v=abc123XYZ"
+    assert progress_updates[-1]["status"] == "completed"
+
+
+def test_download_reports_error_when_ytdlp_also_fails(monkeypatch, tmp_path: Path, callbacks):
+    """Фолбек не має ховати провал: якщо впали обидва — це помилка, а не тиша."""
+    progress_updates, logs, dl_set, add_log = callbacks
+
+    class _FailingStream(FakeStream):
+        def download(self, output_path, filename):
+            raise Exception("HTTP Error 403: Forbidden")
+
+    class _FailingYouTube(FakeYouTube):
+        def __init__(self, url, client=None, **kwargs):
+            super().__init__(url, client=client, **kwargs)
+            self.streams = FakeStreamsQuery(_FailingStream())
+
+    def boom(*a, **k):
+        raise RuntimeError("yt-dlp завершився без файлу")
+
+    monkeypatch.setattr("pytubefix.YouTube", _FailingYouTube)
+    monkeypatch.setattr(yp, "download_audio_via_ytdlp", boom)
+
+    yp.download_youtube_audio(
+        "https://youtube.com/watch?v=abc123XYZ", "dl_both_fail",
+        save_to_library=False, quality="best",
+        youtube_folder=str(tmp_path),
+        download_progress_set=dl_set, add_log=add_log,
+        get_db_conn=_noop_get_db_conn,
+    )
+
+    assert progress_updates[-1]["status"] == "error"

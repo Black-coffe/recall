@@ -146,8 +146,15 @@ tests/screenshots/
 model_update_state.json
 
 # evals: локальний golden-set і результати прогонів (реальні дані архіву — не комітити)
-evals/golden_set.local.json
 evals/*_rerank.json
+
+# eval-gate: JSONL golden-set із реальних запитів/задач, базові лінії, знімки БД
+evals/*.local.jsonl
+evals/snapshots/
+
+# eval-gate: --json-out гейта (реальні питання/transcription_id архіву) — конвенція
+# приватності *.local.* у назві, яку сам gate.py вимагає (exit 2 без неї)
+evals/*.local.json
 
 # Робочі документи з конкретикою особистого архіву (гриль-брифи, плани треків):
 # імена людей, назви проєктів, цифри використання. Лишаються локально.

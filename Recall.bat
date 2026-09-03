@@ -6,8 +6,11 @@ title Recall
 cd /d "%~dp0"
 rem Auto-cleanup: kill stale Recall instances (app.py / listener) before launch,
 rem so a leftover process never holds port 5050 with old code ("Recall stopped").
+rem pythonw.exe matters too: the autostart copy runs windowless, and while the filter
+rem only looked at python.exe it survived every relaunch - two instances then shared
+rem port 5050 (Windows allows it via SO_REUSEADDR) and the older code kept answering.
 echo Cleaning up stale Recall instances if any...
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and ($_.CommandLine -like '*app.py*' -or $_.CommandLine -like '*telegram_listener.py*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and ($_.CommandLine -like '*app.py*' -or $_.CommandLine -like '*telegram_listener.py*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 1 >nul
 echo ============================================================
 echo.

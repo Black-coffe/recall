@@ -29,7 +29,8 @@ flask-cors==4.0.0
 werkzeug==3.0.1
 numpy
 python-dotenv>=1.0.0
-pytubefix>=6.0.0  # YouTube downloads
+pytubefix>=10.11.0  # YouTube downloads (WEB-клієнт + botGuard PO-token)
+yt-dlp>=2026.8.19  # запасний завантажувач для відео, які YouTube ріже без PO-token
 yt-dlp>=2023.12.30
 psutil>=5.9.0  # Для мониторинга системных ресурсов
 pydub>=0.25.1  # Для работы с аудио (разбивка на чанки)

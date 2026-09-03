@@ -327,3 +327,55 @@ def test_stats_shape(db, mock_embeddings):
     s = comments.stats(db)
     assert s["total"] == 2 and s["indexed"] == 2 and s["pending"] == 0
     assert s["by_kind"]["correction"] == 1
+
+
+# ------------------------------ граф: інваріант відносно морфо-прапорця TG
+
+def _add_entity(path, etype, name):
+    conn = sqlite3.connect(path)
+    cur = conn.execute(
+        "INSERT INTO entities (type, canonical_name, normalized_name) VALUES (?, ?, ?)",
+        (etype, name, name.casefold()))
+    eid = cur.lastrowid
+    conn.commit(); conn.close()
+    return eid
+
+
+def _entity_links(path, tid):
+    conn = sqlite3.connect(path)
+    rows = {r[0] for r in conn.execute(
+        "SELECT entity_id FROM meeting_entities WHERE transcription_id = ? AND source = ?",
+        (tid, comments.ENTITY_SOURCE))}
+    conn.close()
+    return rows
+
+
+def test_link_entities_ignores_tg_morph_flag(db, monkeypatch):
+    """`comments.link_entities` лишається на точному матчері незалежно від
+    `TG_ENTITIES_MORPH_ENABLED` — прапорець належить інжесту TG (history 04),
+    замір коментарів його не бачив і вимикання прапорця не знімає вже
+    записані звʼязки. Тому ON і OFF мають писати однакові звʼязки — навіть на
+    словоформі («Юлією»), яку морфо-гілка TG-інжесту саме ловить."""
+    from app.services import tg_entities
+    tid = _add_tx(db, text="текст")
+    _add_entity(db, "person", "Юлія")
+    comments.create(db, "transcription", tid, "домовились із Юлією про дзвінок")
+
+    # Контроль: цю саму словоформу морфо-матчер TG-інжесту (`find_mentions`)
+    # ловить, коли прапорець увімкнений — інакше тест нічого не доводить.
+    monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
+    live_names = tg_entities.load_names(db)
+    assert tg_entities.find_mentions("домовились із Юлією про дзвінок", live_names)
+
+    monkeypatch.delenv("TG_ENTITIES_MORPH_ENABLED", raising=False)
+    tg_entities.reset_names_cache()
+    off = comments.link_entities(db, tid)
+    off_links = _entity_links(db, tid)
+
+    monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
+    tg_entities.reset_names_cache()
+    on = comments.link_entities(db, tid)
+    on_links = _entity_links(db, tid)
+
+    assert off_links == on_links == set()
+    assert off["mentions"] == on["mentions"] == 0

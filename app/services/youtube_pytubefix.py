@@ -19,6 +19,7 @@ import subprocess
 import time
 from typing import Any, Callable, Optional
 
+from app.services.youtube_ytdlp import download_audio_via_ytdlp
 from app.utils.audio import trim_audio_file
 from app.utils.proc import NO_WINDOW
 
@@ -32,9 +33,49 @@ _QUALITY_BITRATE = {
 }
 
 
-def _classify_error(error_msg: str) -> str:
+# Порядок клієнтів pytubefix. Дефолтний ANDROID_VR не потребує Node.js і бере
+# більшість відео; для частини роликів YouTube віддає videoDetails лише клієнтам
+# із PO-token (WEB-сімейство — токен генерує botGuard, для нього потрібен Node.js),
+# інакше падає BotDetection. Перебираємо по черзі: перший, що відкрився, — той і йде далі.
+#
+# MWEB стоїть перед WEB не за красою: WEB на тих самих відео віддає SABR-потоки,
+# а вони качаються лише через ServerAbrStream із сесійним PO-token. botGuard дає
+# токен, привʼязаний до video_id, тож SABR помирає на «PoToken PENDING» — метадані
+# при цьому вже отримані, і користувач бачить картку відео та помилку завантаження.
+# MWEB на тому ж відео віддає звичайні URL-потоки тієї ж бітності.
+YOUTUBE_CLIENTS = ('ANDROID_VR', 'MWEB', 'WEB', 'WEB_SAFARI')
+
+
+def open_youtube(url: str, **kwargs: Any):
+    """Створює pytubefix.YouTube, перебираючи клієнтів до першого робочого.
+
+    Звернення до `yt.title` тригерить check_availability — саме там pytubefix
+    кидає BotDetection/VideoUnavailable, тож клієнт вважається робочим лише
+    після нього. Якщо не пройшов жоден — піднімаємо помилку останнього.
+    """
+    from pytubefix import YouTube  # lazy
+
+    last_exc: Optional[BaseException] = None
+    for client in YOUTUBE_CLIENTS:
+        try:
+            yt = YouTube(url, client=client, **kwargs)
+            _ = yt.title
+        except Exception as exc:
+            logger.warning(f"[YouTube] Клієнт {client} не відкрив {url}: {type(exc).__name__}: {exc}")
+            last_exc = exc
+            continue
+        if client != YOUTUBE_CLIENTS[0]:
+            logger.info(f"[YouTube] Відкрито клієнтом {client} (дефолтний не пройшов)")
+        return yt
+
+    raise last_exc if last_exc else RuntimeError("Не вдалося відкрити відео")
+
+
+def _classify_error(error_msg: str, default: str = "Помилка завантаження відео") -> str:
     """Перетворює технічне повідомлення pytubefix на зрозуміле користувачу."""
     low = error_msg.lower()
+    if "detected as a bot" in low or "bot detection" in low:
+        return "YouTube заблокував запит як автоматичний (bot detection)"
     if "sign in" in low:
         return "YouTube вимагає авторизації"
     if "unavailable" in low:
@@ -43,7 +84,7 @@ def _classify_error(error_msg: str) -> str:
         return "Приватне відео"
     if "copyright" in low:
         return "Відео заблоковано через авторські права"
-    return "Помилка завантаження відео"
+    return default
 
 
 def download_youtube_audio(
@@ -78,8 +119,6 @@ def download_youtube_audio(
         add_log:              callback для логування процесу.
         get_db_conn:          context manager-factory для БД.
     """
-    from pytubefix import YouTube  # lazy
-
     logger.info(f"[YouTube] Початок завантаження: {url} (save_to_library={save_to_library})")
 
     # Параметри обрізки
@@ -113,7 +152,7 @@ def download_youtube_audio(
     add_log(download_id, "download", "Початок завантаження відео з YouTube...", 5, "processing")
 
     try:
-        yt = YouTube(
+        yt = open_youtube(
             url,
             on_progress_callback=progress_callback,
             on_complete_callback=complete_callback,
@@ -127,19 +166,54 @@ def download_youtube_audio(
 
         logger.info(f"[YouTube] Інформація отримана: {title}")
 
-        audio_stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
+        audio_streams = yt.streams.filter(only_audio=True).order_by('abr').desc()
+        # SABR-потік качається лише через ServerAbrStream і потребує сесійного
+        # PO-token, якого botGuard не дає — тому беремо звичайний, навіть якщо він
+        # трохи гірший за бітністю. SABR лишається останнім шансом, а не першим.
+        audio_stream = next(
+            (s for s in audio_streams if not getattr(s, 'is_sabr', False)),
+            None,
+        ) or audio_streams.first()
         if not audio_stream:
             raise Exception("Не вдалося знайти аудіо потік")
 
+        if getattr(audio_stream, 'is_sabr', False):
+            logger.warning("[YouTube] Усі аудіо-потоки SABR — завантаження може впасти на PO-token")
         logger.info(f"[YouTube] Обраний потік: {audio_stream.mime_type} - {audio_stream.abr}")
 
         temp_filename = f"{safe_filename}_{title[:50]}"
         temp_filename = "".join(c for c in temp_filename if c.isalnum() or c in ('_', '-', ' '))
 
-        downloaded_file = audio_stream.download(
-            output_path=youtube_folder,
-            filename=temp_filename,
-        )
+        try:
+            downloaded_file = audio_stream.download(
+                output_path=youtube_folder,
+                filename=temp_filename,
+            )
+        except Exception as exc:
+            # Частину відео YouTube віддає лише клієнтам із валідним PO-token:
+            # пускає перші ~768 КБ файлу і далі 403 — хоч би яким був клієнт,
+            # розмір шматка чи свіжість URL. Такі ролики бере yt-dlp.
+            logger.warning(
+                f"[YouTube] pytubefix не завантажив ({type(exc).__name__}: {exc}) — пробуємо yt-dlp"
+            )
+            add_log(download_id, "download",
+                    "YouTube не віддав потік напряму — пробуємо запасний завантажувач...",
+                    10, "processing")
+
+            def ytdlp_progress(done: int, total: int) -> None:
+                percent = (done / total) * 100 if total else 0
+                download_progress_set(download_id, {
+                    "status": "downloading",
+                    "percent": round(percent, 2),
+                    "speed": "N/A",
+                    "eta": "N/A",
+                })
+
+            downloaded_file = download_audio_via_ytdlp(
+                url, youtube_folder, temp_filename, on_progress=ytdlp_progress,
+            )
+            complete_callback(audio_stream, downloaded_file)
+
         logger.info(f"[YouTube] Файл завантажено: {downloaded_file}")
 
         # Конвертація в MP3

@@ -10,7 +10,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
-from app.services.youtube_pytubefix import download_youtube_audio
+from app.services.youtube_pytubefix import _classify_error, download_youtube_audio, open_youtube
 from app.utils.youtube_id import extract_youtube_id
 
 
@@ -32,8 +32,7 @@ def get_youtube_info():
         return jsonify({"success": False, "error": "Невірний YouTube URL"}), 400
 
     try:
-        from pytubefix import YouTube
-        yt = YouTube(url)
+        yt = open_youtube(url)
         title = yt.title or 'Невідоме відео'
         author = yt.author or 'Невідомий автор'
         duration = yt.length or 0
@@ -52,8 +51,8 @@ def get_youtube_info():
             "description": description,
         })
     except Exception as e:
-        logger.error(f"YouTube info error for {url}: {e}")
-        return jsonify({"success": False, "error": "Помилка отримання інформації про відео"}), 500
+        logger.error(f"YouTube info error for {url}: {type(e).__name__}: {e}")
+        return jsonify({"success": False, "error": _classify_error(str(e), default="Помилка отримання інформації про відео")}), 500
 
 
 def _download_youtube_core(url, download_id, save_to_library=False, quality='best',

@@ -146,6 +146,78 @@ def find_cross_type_twins(db_path: str, *, include_person: bool = False) -> list
     return out
 
 
+def find_alias_cross_type_collisions(db_path: str, *, include_person: bool = False) -> list[dict]:
+    """Аліас однієї сутності, що написанням збігається з канонічною назвою
+    сутності ІНШОГО типу — клас дублів, який `find_cross_type_twins` не бачить,
+    бо той читає лише `canonical_name`. Приклад: «WYNN Дубай» — аліас org
+    «Wynn Casino Las Vegas» (#670) і водночас канонічна назва project #2301.
+
+    Написання, що фолдиться (`_fold_name`, той самий ключ, що й у `twins` —
+    SQLite `LOWER` кирилицю не згортає) в трьох і більше РІЗНИХ сутностей,
+    повертається окремо з `"ambiguous": true` і НЕ пропонується до злиття:
+    одне написання не можна зарахувати двом (пряма заборона з памʼяті —
+    «Русланою» не сплутати з «Руслан»/«Руслана»).
+
+    Read-only, нічого не пише в БД. Само злиття — наявний `merge_entities(...,
+    allow_cross_type=True)`, тут лише детект + `evidence`.
+    """
+    with get_db_connection(db_path) as conn:
+        entities = conn.execute("SELECT id, type, canonical_name FROM entities").fetchall()
+        aliases = conn.execute("SELECT entity_id, alias FROM entity_aliases").fetchall()
+        links = {r["id"]: r["n"] for r in conn.execute(
+            "SELECT me.entity_id id, COUNT(DISTINCT me.transcription_id) n "
+            "FROM meeting_entities me JOIN transcriptions t ON t.id = me.transcription_id "
+            "WHERE t.deleted_at IS NULL GROUP BY me.entity_id")}
+
+    entities_by_id = {r["id"]: r for r in entities}
+
+    canon_by_key: dict[str, list] = {}
+    for r in entities:
+        k = _fold_name(r["canonical_name"])
+        if k:
+            canon_by_key.setdefault(k, []).append(r["id"])
+
+    alias_by_key: dict[str, list] = {}
+    for a in aliases:
+        k = _fold_name(a["alias"])
+        if k:
+            alias_by_key.setdefault(k, []).append((a["entity_id"], a["alias"]))
+
+    def _rec(entity_id: int) -> dict:
+        r = entities_by_id[entity_id]
+        return {"id": entity_id, "type": r["type"], "name": r["canonical_name"],
+                "links": links.get(entity_id, 0)}
+
+    out: list[dict] = []
+    for k, alist in alias_by_key.items():
+        canon_ids = canon_by_key.get(k, [])
+        if not canon_ids:
+            continue  # немає канонічного зіткнення — не наш клас (аліас сам на себе)
+        involved = set(canon_ids) | {eid for eid, _alias in alist}
+        if not include_person:
+            involved = {eid for eid in involved if entities_by_id[eid]["type"] != "person"}
+        if len(involved) < 2:
+            continue
+        types = {entities_by_id[eid]["type"] for eid in involved}
+        if len(types) < 2:
+            continue  # усі учасники того самого типу — не кросс-типовий клас
+        ev_owner, ev_alias = next(((eid, al) for eid, al in alist if eid in involved), alist[0])
+        group: dict = {"key": k, "evidence": {"alias_of": ev_owner, "alias": ev_alias}}
+        if len(involved) > 2:
+            group["ambiguous"] = True
+            group["members"] = [_rec(eid) for eid in sorted(involved)]
+            out.append(group)
+            continue
+        ordered = sorted((_rec(eid) for eid in involved),
+                          key=lambda r: (_TYPE_RANK.get(r["type"], 9), -r["links"]))
+        group["keep"] = ordered[0]
+        group["merge"] = ordered[1:]
+        out.append(group)
+
+    out.sort(key=lambda g: -g["keep"]["links"] if "keep" in g else 0)
+    return out
+
+
 def find_merge_candidates(
     db_path: str,
     etype: Optional[str] = None,
@@ -1095,6 +1167,194 @@ def find_junk_aliases(db_path: str, *, min_lower: int = 5,
 
 
 # ============================================================
+# 5. Блокери морфології — read-only звіт + rename (S2, blocked_by S1)
+# ============================================================
+
+# Написання, які власник явно попросив не пропонувати до змін без ручної
+# перевірки (Goal/Non-goals цієї історії): «Місто» — реальна назва кафе,
+# «BehindBars» і «Акмеет» — уже перевірені раніше. Той самий ключ згортання,
+# що й скрізь у модулі.
+_DISPUTED_NAMES = {_fold_name(n) for n in ("Місто", "BehindBars", "Акмеет")}
+
+
+def _link_stats(conn) -> dict[int, tuple[int, int]]:
+    """entity_id -> (звʼязків усього, з них `tg_entities.SOURCE`/thread_match).
+
+    Той самий підрахунок звʼязків, що й у решті модуля (`COUNT(DISTINCT
+    transcription_id)`, м'яко видалені зустрічі не рахуються), плюс друга
+    колонка — скільки з них прийшли від точного підрядкового збігу тексту, а
+    не від Клода на збагаченні (`source IS NULL`).
+    """
+    from app.services import tg_entities
+
+    rows = conn.execute(
+        "SELECT me.entity_id id, "
+        "COUNT(DISTINCT me.transcription_id) total, "
+        "COUNT(DISTINCT CASE WHEN me.source = ? THEN me.transcription_id END) tm "
+        "FROM meeting_entities me JOIN transcriptions t ON t.id = me.transcription_id "
+        "WHERE t.deleted_at IS NULL GROUP BY me.entity_id",
+        (tg_entities.SOURCE,),
+    ).fetchall()
+    return {r["id"]: (r["total"], r["tm"]) for r in rows}
+
+
+def find_morph_blockers(db_path: str, *, min_lower: int = 5,
+                        max_caps_share: float = 0.2) -> list[dict]:
+    """Сутності, що отруять морфологічний матчер (S3), бо проблемне написання
+    стоїть у `canonical_name`, а не в аліасі — аліасом (`split ... --drop`)
+    такий випадок не знімається, потрібне перейменування (`rename`) або
+    злиття з наявним написанням (`merge`). Нічого не змінює.
+
+    Дві причини (`reason`), обидві складені з наявних примітивів модуля, а не
+    нової евристики (Non-goals цієї історії):
+
+    * `generic_canonical` — те саме правило, яким `find_junk_aliases` уже
+      судить написання за регістром у корпусі («з малої — не власна назва»),
+      узяте лише для рядків, де це написання ще й КАНОНІЧНЕ імʼя сутності
+      (`is_canonical`): «Фонд», «Сенс», «Make» — аліас можна було б просто
+      зняти, канонічне ім'я — ні.
+    * `case_form` — однослівна назва, з якої суфіксний згортач морфо-матчера
+      (`tg_entities._stem`, той самий, що й S3) зрізає відмінковий суфікс, і
+      більшість її звʼязків прийшли від точного підрядкового збігу тексту
+      (`thread_match`): рядок ЛІТЕРАЛЬНО побачив цю словоформу в переписці й
+      завів сутність під нею, а не отримав осмислену назву від Клода —
+      приклад з брифу: project «Україні» #3785, 29 із 30 звʼязків з TG.
+
+    Спірні написання зі списку історії позначаються `disputed`, а не
+    відкидаються — рішення про них лишається за людиною, як і сказано в
+    Non-goals.
+    """
+    from app.services import tg_entities
+
+    with get_db_connection(db_path) as conn:
+        link_stats = _link_stats(conn)
+        ph = ",".join("?" * len(tg_entities.LINKABLE_TYPES))
+        rows = conn.execute(
+            f"SELECT id, type, canonical_name FROM entities WHERE type IN ({ph})",
+            tg_entities.LINKABLE_TYPES).fetchall()
+
+    out: list[dict] = []
+    seen_ids: set[int] = set()
+
+    for r in find_junk_aliases(db_path, min_lower=min_lower, max_caps_share=max_caps_share):
+        if not r["is_canonical"] or r["entity_id"] in seen_ids:
+            continue
+        seen_ids.add(r["entity_id"])
+        total, tm = link_stats.get(r["entity_id"], (0, 0))
+        out.append({
+            "entity_id": r["entity_id"], "type": r["type"], "name": r["entity"],
+            "reason": "generic_canonical",
+            "links_total": total, "links_thread_match": tm,
+            "disputed": _fold_name(r["entity"]) in _DISPUTED_NAMES,
+        })
+
+    for r in rows:
+        if r["id"] in seen_ids:
+            continue
+        name = r["canonical_name"] or ""
+        if " " in name.strip():
+            continue                          # морфо-згортач словосполук не чіпає
+        key = tg_entities._key(name)
+        if len(key) < tg_entities.MIN_NAME_LEN:
+            continue
+        stem = tg_entities._stem(key)
+        if stem == key:
+            continue                          # немає відмінкового суфікса — не наш клас
+        total, tm = link_stats.get(r["id"], (0, 0))
+        if total == 0 or tm / total < 0.5:
+            continue                          # здебільшого не від точного тексту TG
+        seen_ids.add(r["id"])
+        out.append({
+            "entity_id": r["id"], "type": r["type"], "name": name,
+            "reason": "case_form",
+            "links_total": total, "links_thread_match": tm,
+            "disputed": _fold_name(name) in _DISPUTED_NAMES,
+        })
+
+    out.sort(key=lambda d: (-d["links_total"], d["entity_id"]))
+    return out
+
+
+def rename_entity(db_path: str, entity_id: int, new_name: str, *,
+                  dry_run: bool = True) -> dict:
+    """Перейменувати канонічну назву сутності — адресат для `blockers`, де
+    проблемне написання лежить у `canonical_name`. Аліас тут не адресат
+    (написання не чуже, а власне і єдине), `split` теж (нема чужого написання,
+    яке відчепити).
+
+    Стара назва лишається сутності аліасом (INSERT OR IGNORE — глобальний
+    UNIQUE лишає її на місці, якщо вже зайнята чужим рядком): той самий
+    принцип «липкості», що й у merge/split, інакше наступне збагачення,
+    побачивши стару словоформу знову, заведе під нею нову сутність.
+
+    Ідемпотентно: повторний виклик із тим самим `new_name` нічого не пише
+    (`changed=False`) — `normalized_name`/`canonical_name` вже такі.
+
+    `normalized_name` рахується в Python (`enrichment._normalize`), тим самим
+    шляхом, що й на записі — не SQLite-функцією (кирилицю `LOWER` не згортає).
+
+    Returns {"status": "ok", "dry_run":, "changed":, "entity": {...}} або
+    {"status": "error", "error": ..., "rival": {...}} при колізії
+    `UNIQUE(type, normalized_name)`, або {"status": "not_found", ...}.
+    """
+    with get_db_connection(db_path) as conn:
+        c = conn.cursor()
+        ent = c.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        if not ent:
+            return {"status": "not_found", "entity_id": entity_id}
+
+        canonical = (new_name or "").strip()
+        norm = _normalize(canonical)
+        if not norm:
+            return {"status": "error", "error": "new_name порожній після нормалізації"}
+
+        if norm == ent["normalized_name"] and canonical == ent["canonical_name"]:
+            return {"status": "ok", "dry_run": dry_run, "changed": False,
+                    "entity": {"id": entity_id, "type": ent["type"],
+                               "old_name": ent["canonical_name"], "new_name": canonical}}
+
+        rival = c.execute(
+            "SELECT id, canonical_name FROM entities WHERE type = ? AND normalized_name = ? "
+            "AND id <> ?", (ent["type"], norm, entity_id)).fetchone()
+        if rival:
+            return {"status": "error",
+                    "error": (f"[{ent['type']}] '{canonical}' вже існує "
+                              f"(#{rival['id']} '{rival['canonical_name']}') — "
+                              f"тут потрібен merge, а не rename"),
+                    "rival": {"id": rival["id"], "name": rival["canonical_name"]}}
+
+        report = {"status": "ok", "dry_run": dry_run, "changed": True,
+                  "entity": {"id": entity_id, "type": ent["type"],
+                             "old_name": ent["canonical_name"], "new_name": canonical}}
+        if dry_run:
+            return report
+
+        now = datetime.now().isoformat(timespec="seconds")
+        old_name, old_norm = ent["canonical_name"], ent["normalized_name"]
+        c.execute(
+            "UPDATE entities SET canonical_name = ?, normalized_name = ?, updated_at = ? "
+            "WHERE id = ?", (canonical, norm, now, entity_id))
+        c.execute(
+            "INSERT OR IGNORE INTO entity_aliases (entity_id, alias, normalized_alias) "
+            "VALUES (?, ?, ?)", (entity_id, old_name, old_norm))
+
+        try:
+            meta = json.loads(ent["metadata_json"]) if ent["metadata_json"] else {}
+            if not isinstance(meta, dict):
+                meta = {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        meta.setdefault("renamed_from", []).append(
+            {"old_name": old_name, "new_name": canonical, "at": now})
+        c.execute("UPDATE entities SET metadata_json = ? WHERE id = ?",
+                  (json.dumps(meta, ensure_ascii=False), entity_id))
+        conn.commit()
+
+    logger.info("[entity_dedup] rename #%s '%s' -> '%s'", entity_id, old_name, canonical)
+    return report
+
+
+# ============================================================
 # CLI
 # ============================================================
 
@@ -1125,21 +1385,44 @@ def _cmd_junk_aliases(args: argparse.Namespace) -> int:
 
 def _cmd_twins(args: argparse.Namespace) -> int:
     groups = find_cross_type_twins(args.db, include_person=args.include_person)
+    with_aliases = getattr(args, "with_aliases", False)
+    alias_groups = (
+        find_alias_cross_type_collisions(args.db, include_person=args.include_person)
+        if with_aliases else None
+    )
     if args.json:
-        print(json.dumps(groups, ensure_ascii=False, indent=2))
+        payload = groups if not with_aliases else {"twins": groups, "with_aliases": alias_groups}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     if not groups:
         print("Точних тезок у різних типах не знайдено.")
-        return 0
-    print(f"Знайдено {len(groups)} груп "
-          f"(рядків зникне: {sum(len(g['merge']) for g in groups)}):\n")
-    for g in groups:
-        k = g["keep"]
-        print(f"  keep [{k['type']}] #{k['id']} '{k['name']}' ({k['links']} звʼязків)")
-        for m in g["merge"]:
-            print(f"     ← [{m['type']}] #{m['id']} '{m['name']}' ({m['links']} звʼязків)")
-    print("\nЩоб злити пару: python -m app.services.entity_dedup merge "
-          "<keep_id> <merge_id> --allow-cross-type")
+    else:
+        print(f"Знайдено {len(groups)} груп "
+              f"(рядків зникне: {sum(len(g['merge']) for g in groups)}):\n")
+        for g in groups:
+            k = g["keep"]
+            print(f"  keep [{k['type']}] #{k['id']} '{k['name']}' ({k['links']} звʼязків)")
+            for m in g["merge"]:
+                print(f"     ← [{m['type']}] #{m['id']} '{m['name']}' ({m['links']} звʼязків)")
+        print("\nЩоб злити пару: python -m app.services.entity_dedup merge "
+              "<keep_id> <merge_id> --allow-cross-type")
+    if with_aliases:
+        mergeable = [g for g in alias_groups if not g.get("ambiguous")]
+        ambiguous = [g for g in alias_groups if g.get("ambiguous")]
+        print(f"\nАліас = канонічна назва іншого типу: {len(mergeable)} груп "
+              f"({len(ambiguous)} неоднозначних, пропущено):\n")
+        for g in mergeable:
+            k, ev = g["keep"], g["evidence"]
+            print(f"  keep [{k['type']}] #{k['id']} '{k['name']}' ({k['links']} звʼязків)"
+                  f" — аліас «{ev['alias']}» сутності #{ev['alias_of']}")
+            for m in g["merge"]:
+                print(f"     ← [{m['type']}] #{m['id']} '{m['name']}' ({m['links']} звʼязків)")
+        for g in ambiguous:
+            names = ", ".join(f"[{m['type']}] #{m['id']} '{m['name']}'" for m in g["members"])
+            print(f"  ⚠ неоднозначно: написання «{g['key']}» — {names}")
+        if mergeable:
+            print("\nЩоб злити пару: python -m app.services.entity_dedup merge "
+                  "<keep_id> <merge_id> --allow-cross-type")
     return 0
 
 
@@ -1253,6 +1536,39 @@ def _cmd_split(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_blockers(args: argparse.Namespace) -> int:
+    found = find_morph_blockers(args.db)
+    if args.limit:
+        found = found[:args.limit]
+    if args.json:
+        print(json.dumps(found, ensure_ascii=False, indent=2))
+        return 0
+    if not found:
+        print("Блокерів морфології не знайдено.")
+        return 0
+    print(f"Знайдено {len(found)} блокерів морфології:\n")
+    for r in found:
+        mark = " ⚠ СПІРНО — не пропонувати без перевірки очима" if r["disputed"] else ""
+        print(f"  [{r['type']}] #{r['entity_id']} '{r['name']}' — {r['reason']}{mark}")
+        print(f"      звʼязків усього {r['links_total']}, "
+              f"з них thread_match {r['links_thread_match']}")
+    print("\nПерейменувати: python -m app.services.entity_dedup rename "
+          "<entity_id> '<нова назва>' --apply")
+    print("Або злити з наявним написанням: python -m app.services.entity_dedup merge "
+          "<keep_id> <merge_id>")
+    return 0
+
+
+def _cmd_rename(args: argparse.Namespace) -> int:
+    res = rename_entity(args.db, args.entity_id, args.new_name, dry_run=not args.apply)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    if res.get("status") != "ok":
+        return 1
+    if res.get("dry_run"):
+        print("\nЦе була ПРИКИДКА (нічого не змінено). Додай --apply, щоб виконати.")
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     from config import Config
     default_db = str(Config.BASE_DIR / Config.DATABASE)
@@ -1275,6 +1591,10 @@ def main(argv: Optional[list] = None) -> int:
     p_twins.add_argument("--include-person", action="store_true",
                          help="Показати й пари «людина + не-людина» (merge бере їх "
                               "лише з --allow-person, після перевірки очима)")
+    p_twins.add_argument("--with-aliases", action="store_true",
+                         help="Додати колізії «аліас = канонічна назва іншого типу» "
+                              "(find_alias_cross_type_collisions); без прапорця вивід "
+                              "не змінюється")
     p_twins.add_argument("--json", action="store_true", help="Вивід як JSON")
     p_twins.set_defaults(func=_cmd_twins)
 
@@ -1331,6 +1651,19 @@ def main(argv: Optional[list] = None) -> int:
     p_split.add_argument("--apply", action="store_true",
                          help="Виконати (без прапорця — лише прикидка)")
     p_split.set_defaults(func=_cmd_split)
+
+    p_block = sub.add_parser(
+        "blockers", help="Сутності, що отруять морфологічний матчер (read-only)")
+    p_block.add_argument("--limit", type=int, default=None)
+    p_block.add_argument("--json", action="store_true", help="Вивід як JSON")
+    p_block.set_defaults(func=_cmd_blockers)
+
+    p_rename = sub.add_parser("rename", help="Перейменувати канонічну назву сутності")
+    p_rename.add_argument("entity_id", type=int)
+    p_rename.add_argument("new_name")
+    p_rename.add_argument("--apply", action="store_true",
+                          help="Без нього — прикидка (нічого не змінюється)")
+    p_rename.set_defaults(func=_cmd_rename)
 
     args = parser.parse_args(argv)
     return args.func(args)

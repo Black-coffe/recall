@@ -735,8 +735,13 @@ def link_entities(db_path: str, transcription_id: int) -> dict:
 
     Локально і безкоштовно: використовує той самий словник назв і те саме
     правило «написано як власна назва», що й інжест Telegram
-    (`tg_entities.find_mentions`). Спільне правило тут обовʼязкове — розійшовшись,
-    два шари почали б давати різні звʼязки з однакового тексту.
+    (`tg_entities.find_exact_mentions`). Спільне правило тут обовʼязкове —
+    розійшовшись, два шари почали б давати різні звʼязки з однакового тексту.
+
+    Свідомо точний матчер, а не `find_mentions`: замір історії 04 бачив лише
+    точні збіги, і `TG_ENTITIES_MORPH_ENABLED` — прапорець інжесту TG, він не
+    має тихо міняти те, що пише коментарний шар (вимкнути прапорець і зняти
+    вже записані морфо-звʼязки коментарів тут нічим).
     """
     from app.services import tg_entities
 
@@ -752,7 +757,7 @@ def link_entities(db_path: str, transcription_id: int) -> dict:
 
         hits: set[int] = set()
         for body in bodies:
-            hits |= tg_entities.find_mentions(body, names)
+            hits |= tg_entities.find_exact_mentions(body, names)
 
         conn.execute(
             "DELETE FROM meeting_entities WHERE source = ? AND transcription_id = ?",
