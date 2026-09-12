@@ -153,6 +153,26 @@ def _enabled_chat_ids(db_path: str) -> set[int]:
 # Маршрутизація повідомлення → payload для Flask
 # ============================================================
 
+# tg-media-policy-03: відео, надіслане «файлом» (document), Telegram часто
+# лишає без mime_type або зі стертим/невідповідним — DocumentAttributeVideo
+# ловить стиснене відео й кружки, але не цей випадок. Розширення з
+# DocumentAttributeFilename — останній сигнал перед тим, як документ мовчки
+# піде у повне завантаження.
+_VIDEO_EXTENSIONS = (
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".3gp", ".mpeg", ".mpg",
+)
+
+
+def _doc_filename(doc) -> str:
+    """Ім'я файлу документа. Telethon кладе його в attributes
+    (DocumentAttributeFilename), не в плаский атрибут документа."""
+    for attr in getattr(doc, "attributes", None) or []:
+        name = getattr(attr, "file_name", None)
+        if name:
+            return name
+    return ""
+
+
 def _detect_kind(msg) -> str | None:
     """Тип повідомлення для ingest. None = пропустити (стікер/службове)."""
     if getattr(msg, "voice", None):
@@ -174,6 +194,8 @@ def _detect_kind(msg) -> str | None:
             return "video"
         if mime.startswith("audio/"):
             return "audio"
+        if _doc_filename(doc).lower().endswith(_VIDEO_EXTENSIONS):
+            return "video"
         return "document"
     if (msg.message or "").strip():
         return "text"
@@ -345,6 +367,11 @@ async def _ingest_message(chat, msg, cfg) -> str | None:
     text_body = (msg.message or "").strip()
     if kind == "text":
         payload["text"] = text_body
+    elif kind == "video":
+        # Рішення власника (tg-media-policy-01): відео НІКОЛИ не скачується —
+        # ні на диск слухача, ні далі. file_path у payload не ставимо взагалі;
+        # ingest сам лишає рядок-заглушку з посиланням (app/blueprints/telegram.py).
+        payload["caption"] = text_body
     else:
         payload["caption"] = text_body
         # Скачуємо медіа на диск; Flask читає по локальному шляху (та сама машина).

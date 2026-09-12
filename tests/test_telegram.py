@@ -72,6 +72,35 @@ class TestDetectKind:
         doc = _msg(mime_type="audio/ogg")
         assert L._detect_kind(_msg(document=doc, message="")) == "audio"
 
+    def test_document_video_mime_is_video(self):
+        doc = _msg(mime_type="video/mp4")
+        assert L._detect_kind(_msg(document=doc, message="")) == "video"
+
+    def test_document_no_mime_video_extension_is_video(self):
+        """tg-media-policy-03: відео файлом без mime — той самий mkv/mov,
+        якому Telethon не дав video/*, не має тихо провалюватись у 'document'."""
+        from telethon.tl.types import DocumentAttributeFilename
+        doc = _msg(mime_type=None, attributes=[DocumentAttributeFilename(file_name="запис.mkv")])
+        assert L._detect_kind(_msg(document=doc, message="")) == "video"
+
+    def test_document_stripped_mime_video_extension_is_video(self):
+        """mime зрізаний до generic octet-stream, розширення лишається сигналом."""
+        from telethon.tl.types import DocumentAttributeFilename
+        doc = _msg(mime_type="application/octet-stream",
+                   attributes=[DocumentAttributeFilename(file_name="clip.MOV")])
+        assert L._detect_kind(_msg(document=doc, message="")) == "video"
+
+    def test_document_no_mime_non_video_extension_is_document(self):
+        """Розширення, якого нема у списку відео — звичайний документ, як і раніше."""
+        from telethon.tl.types import DocumentAttributeFilename
+        doc = _msg(mime_type=None, attributes=[DocumentAttributeFilename(file_name="звіт.pdf")])
+        assert L._detect_kind(_msg(document=doc, message="")) == "document"
+
+    def test_document_no_mime_no_filename_is_document(self):
+        """Нема ні mime, ні filename — деградує до document, як і раніше."""
+        doc = _msg(mime_type=None, attributes=[])
+        assert L._detect_kind(_msg(document=doc, message="")) == "document"
+
 
 # ============================================================
 # Listener: лінки / імена / типи
@@ -578,6 +607,357 @@ class TestMediaPlaceholder:
                                 file_path=None, doc_type=None, segments_json=None,
                                 model_used=None, processing_time=0.0)
         assert again == first, "гонка не має ні дублювати рядок, ні валити job"
+
+
+class TestVideoNeverDownloaded:
+    """tg-media-policy-01: відео не завантажується НІКОЛИ — жодного порогу за
+    розміром чи віком (рішення власника). Лишається рядок-заглушка з посиланням."""
+
+    @staticmethod
+    def _boom_download():
+        async def _boom(*a, **k):
+            raise AssertionError("download_media не мав викликатись для відео")
+        return _boom
+
+    def test_listener_skips_download_for_video(self, monkeypatch):
+        msg = _msg(id=1, video=object(), message="запис зустрічі українською", date=None, chat_id=-100)
+        msg.download_media = self._boom_download()
+        chat = _msg(title="Рада директорів", username=None)
+        captured = {}
+        monkeypatch.setattr(
+            L, "_post_ingest_reliable",
+            lambda url, payload, deadletter: (captured.update(payload) or True))
+        kind = asyncio.run(L._ingest_message(
+            chat, msg, {"media_dir": ".", "ingest_url": "x", "deadletter": "d.jsonl"}))
+        assert kind == "video"
+        assert "file_path" not in captured
+        assert captured["caption"] == "запис зустрічі українською"
+
+    def test_listener_skips_download_for_video_note(self, monkeypatch):
+        msg = _msg(id=2, video_note=object(), video=None, message="", date=None, chat_id=-100)
+        msg.download_media = self._boom_download()
+        chat = _msg(title="Чат", username=None)
+        monkeypatch.setattr(L, "_post_ingest_reliable", lambda *a, **k: True)
+        kind = asyncio.run(L._ingest_message(
+            chat, msg, {"media_dir": ".", "ingest_url": "x", "deadletter": "d.jsonl"}))
+        assert kind == "video"
+
+    def test_listener_skips_download_for_gif(self, monkeypatch):
+        msg = _msg(id=3, gif=object(), video=None, message="", date=None, chat_id=-100)
+        msg.download_media = self._boom_download()
+        chat = _msg(title="Чат", username=None)
+        monkeypatch.setattr(L, "_post_ingest_reliable", lambda *a, **k: True)
+        kind = asyncio.run(L._ingest_message(
+            chat, msg, {"media_dir": ".", "ingest_url": "x", "deadletter": "d.jsonl"}))
+        assert kind == "video"
+
+    def test_listener_skips_download_for_video_mime_document(self, monkeypatch):
+        doc = _msg(mime_type="video/mp4")
+        msg = _msg(id=4, document=doc, video=None, message="", date=None, chat_id=-100)
+        msg.download_media = self._boom_download()
+        chat = _msg(title="Чат", username=None)
+        monkeypatch.setattr(L, "_post_ingest_reliable", lambda *a, **k: True)
+        kind = asyncio.run(L._ingest_message(
+            chat, msg, {"media_dir": ".", "ingest_url": "x", "deadletter": "d.jsonl"}))
+        assert kind == "video"
+
+    def test_listener_skips_download_for_video_extension_no_mime_document(self, monkeypatch):
+        """tg-media-policy-03: відео файлом без mime (або зі стертим) — гейт
+        мав пропускати завантаження, а не тільки за mime video/*."""
+        from telethon.tl.types import DocumentAttributeFilename
+        doc = _msg(mime_type=None, attributes=[DocumentAttributeFilename(file_name="запис.mkv")])
+        msg = _msg(id=5, document=doc, video=None, message="", date=None, chat_id=-100)
+        msg.download_media = self._boom_download()
+        chat = _msg(title="Чат", username=None)
+        monkeypatch.setattr(L, "_post_ingest_reliable", lambda *a, **k: True)
+        kind = asyncio.run(L._ingest_message(
+            chat, msg, {"media_dir": ".", "ingest_url": "x", "deadletter": "d.jsonl"}))
+        assert kind == "video"
+
+    def test_ingest_endpoint_persists_placeholder_without_download(self, tg_app, monkeypatch):
+        submitted = []
+        fake_queue = types.SimpleNamespace(submit=lambda *a, **k: submitted.append((a, k)))
+        monkeypatch.setattr(tg.state, "job_queue", fake_queue)
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+
+        def _boom_whisper(*a, **k):
+            raise AssertionError("whisper не мав викликатись для відео")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            types.SimpleNamespace(transcribe_with_progress=_boom_whisper))
+
+        r = tg_app.test_client().post(
+            "/api/telegram/ingest",
+            json={"kind": "video", "caption": "запис зустрічі українською",
+                  "chat_id": -100, "message_id": 77, "chat_title": "Рада директорів",
+                  "link": "https://t.me/c/100/77", "date": "2026-06-01T10:00:00+00:00"},
+            headers={"X-Telegram-Token": "testtoken"}).get_json()
+        assert r["success"] and r.get("skipped") == "video_not_downloaded"
+        assert submitted == [], "жоден фоновий whisper-job не мав ставитись"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute(
+                "SELECT transcript_text, file_path, tg_link, doc_type FROM transcriptions WHERE id = ?",
+                (r["transcription_id"],)).fetchone()
+        assert row["file_path"] is None
+        assert row["transcript_text"] == "запис зустрічі українською"
+        assert row["tg_link"] == "https://t.me/c/100/77"
+        # tg-media-policy-03: з підписом рядок мав виглядати звичайним текстовим
+        # повідомленням (doc_type=None) — тепер видно, що це пропущене відео.
+        assert row["doc_type"] == "video"
+
+    def test_ingest_endpoint_placeholder_text_without_caption(self, tg_app, monkeypatch):
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        r = tg_app.test_client().post(
+            "/api/telegram/ingest",
+            json={"kind": "video", "chat_id": -100, "message_id": 78,
+                  "link": "https://t.me/c/100/78"},
+            headers={"X-Telegram-Token": "testtoken"}).get_json()
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text, doc_type FROM transcriptions WHERE id = ?",
+                              (r["transcription_id"],)).fetchone()
+        assert "відео" in row["transcript_text"]
+        assert "посилання" in row["transcript_text"]
+        # tg-media-policy-03: і без підпису рядок мав бути впізнаваним як відео
+        # тим самим каналом (doc_type), яким бібліотека малює мітки.
+        assert row["doc_type"] == "video"
+
+    def test_ingest_endpoint_dedups_video_placeholder(self, tg_app, monkeypatch):
+        """Дедуп і watermark догонки мають бачити цей рядок так само, як звичайні —
+        рядок без file_path не має лишатись невидимим і перезаписуватись щоразу."""
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        c = tg_app.test_client()
+        body = {"kind": "video", "chat_id": -100, "message_id": 79,
+                "caption": "друге відео", "link": "https://t.me/c/100/79",
+                "date": "2026-06-01T10:00:00+00:00"}
+        hdr = {"X-Telegram-Token": "testtoken"}
+        first = c.post("/api/telegram/ingest", json=body, headers=hdr).get_json()
+        second = c.post("/api/telegram/ingest", json=body, headers=hdr).get_json()
+        assert second.get("duplicate") is True
+        assert second["transcription_id"] == first["transcription_id"]
+        marks = L._watermarks(tg_app.config["DATABASE"], {-100})
+        assert marks[-100]["msg_id"] == 79, "watermark догонки бачить рядок-заглушку"
+
+    def test_ingest_endpoint_never_calls_extract_audio(self, tg_app, monkeypatch):
+        """Навіть якщо file_path випадково прилетить у payload (старий слухач,
+        точковий ремонт) — extract_audio_from_video для відео не мав викликатись."""
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        called = {"hit": False}
+
+        def _boom(*a, **k):
+            called["hit"] = True
+            raise AssertionError("extract_audio_from_video не мав викликатись")
+        import app.utils.audio as audio_mod
+        monkeypatch.setattr(audio_mod, "extract_audio_from_video", _boom)
+        fake_video = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "leaked.mp4")
+        open(fake_video, "wb").close()
+        r = tg_app.test_client().post(
+            "/api/telegram/ingest",
+            json={"kind": "video", "file_path": fake_video, "chat_id": -100, "message_id": 80},
+            headers={"X-Telegram-Token": "testtoken"}).get_json()
+        assert r["success"] and r.get("skipped") == "video_not_downloaded"
+        assert not called["hit"]
+
+
+class TestOriginalCleanup:
+    """tg-media-policy-02: оригінал важчий за поріг зникає з диска одразу після
+    успішного видобутку тексту; дрібний лишається; невдалий видобуток нічого
+    не видаляє (нема тексту — нема права викидати джерело)."""
+
+    @staticmethod
+    def _fake_whisper(result):
+        return types.SimpleNamespace(transcribe_with_progress=lambda **kw: result)
+
+    @staticmethod
+    def _persist_placeholder(tg_app, message_id, kind="voice"):
+        prov = {"chat_id": -100, "message_id": message_id, "chat_title": "Fund",
+                "date": "2026-06-01T10:00:00+00:00"}
+        with tg_app.app_context():
+            tid = tg._persist(tg_app.config["DATABASE"], kind=kind, text="[очікує]", prov=prov,
+                              category_id=None, file_path=None, doc_type=None,
+                              segments_json=None, model_used=None, processing_time=0.0)
+        return tid, prov
+
+    def test_heavy_original_deleted_after_successful_extraction(self, tg_app, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "0")  # будь-який ненульовий файл — «важкий»
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "розпізнаний українською", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "heavy.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 200)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert not os.path.isfile(voice), "важкий оригінал мав зникнути з диска"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text FROM transcriptions WHERE id = ?",
+                              (tid,)).fetchone()
+        assert row["transcript_text"] == "розпізнаний українською", "текст лишається на місці"
+
+    def test_small_original_stays_on_disk(self, tg_app, monkeypatch):
+        # дефолтний поріг (100 МБ) — файл у кілька байтів явно дрібніший.
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "коротке голосове", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "small.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 201)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "дрібний оригінал лишається на диску"
+
+    def test_failed_extraction_keeps_original_even_if_heavy(self, tg_app, monkeypatch):
+        """Нема тексту — нема права викидати джерело, навіть за нульового порогу."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "0")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"error": "модель недоступна"}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "failed.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 202)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "видобуток не вдався — оригінал не видаляється"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text FROM transcriptions WHERE id = ?",
+                              (tid,)).fetchone()
+        assert "без розпізнаного тексту" in row["transcript_text"]
+
+    def test_intermediate_extracted_audio_never_left_orphaned(self, tg_app, monkeypatch):
+        """Дефектна гілка kind=='video' (мертва після tg-media-policy-01, ніхто
+        сюди не маршрутизує) усе одно не має лишати `_audio.mp3` сиротою, якщо
+        колись викликається напряму (точковий ремонт/старі job'и в черзі)."""
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "з відео", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        video = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "clip.mp4")
+        open(video, "wb").close()
+        extracted_path = os.path.splitext(video)[0] + "_audio.mp3"
+
+        def _fake_extract(src, dst, add_log=None):
+            with open(dst, "wb") as f:
+                f.write(b"\x00" * 16)
+            return True
+        import app.utils.audio as audio_mod
+        monkeypatch.setattr(audio_mod, "extract_audio_from_video", _fake_extract)
+        tid, prov = self._persist_placeholder(tg_app, 203, kind="video")
+        tg._transcribe_and_finalize(tid, video, "video", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert not os.path.isfile(extracted_path), "проміжний _audio.mp3 не має лишатись сиротою"
+
+    def test_intermediate_extracted_audio_removed_even_on_failed_extraction(self, tg_app, monkeypatch):
+        """tg-media-policy-03: ffmpeg може встигнути частково дописати
+        _audio.mp3 і повернути неуспіх — раніше провал скидав шлях у None,
+        і той частковий файл лишався сиротою назавжди."""
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        video = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "broken.mp4")
+        open(video, "wb").close()
+        extracted_path = os.path.splitext(video)[0] + "_audio.mp3"
+
+        def _fake_extract_fails_but_writes_partial(src, dst, add_log=None):
+            with open(dst, "wb") as f:
+                f.write(b"\x00" * 4)  # частковий запис перед провалом ffmpeg
+            return False
+        import app.utils.audio as audio_mod
+        monkeypatch.setattr(audio_mod, "extract_audio_from_video",
+                            _fake_extract_fails_but_writes_partial)
+        tid, prov = self._persist_placeholder(tg_app, 204, kind="video")
+        tg._transcribe_and_finalize(tid, video, "video", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert not os.path.isfile(extracted_path), \
+            "частковий _audio.mp3 після провалу витягу не має лишатись сиротою"
+
+    def test_empty_whisper_text_keeps_original(self, tg_app, monkeypatch):
+        """Критична 1: whisper на глухому/битому аудіо повертає {"text": ""}
+        без ключа error — це НЕ успіх, оригінал не видаляється."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "0")  # будь-який ненульовий файл — «важкий»
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "silent.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 205)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "порожній текст без error — не успіх, оригінал лишається"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text FROM transcriptions WHERE id = ?",
+                              (tid,)).fetchone()
+        assert "без розпізнаного тексту" in row["transcript_text"]
+
+    def test_whitespace_only_whisper_text_keeps_original(self, tg_app, monkeypatch):
+        """Той самий випадок, коли whisper повертає лише пробіли/переноси."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "0")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "   \n  ", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "blank.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 206)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "самі пробіли — не текст, оригінал лишається"
+
+    def test_blank_threshold_env_does_not_crash_job(self, tg_app, monkeypatch):
+        """Критична 2: порожнє значення в .env не мало валити job ValueError'ом
+        посеред фонового потоку без ретраю."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "текст доїхав", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "blank_env.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 207)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "хибний поріг не дає права видаляти"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text FROM transcriptions WHERE id = ?",
+                              (tid,)).fetchone()
+        assert row["transcript_text"] == "текст доїхав", "текст мав доїхати, а не впасти job'ом"
+
+    def test_garbage_threshold_env_does_not_crash_job(self, tg_app, monkeypatch):
+        """Нечислове значення в .env — та сама поведінка, що й порожнє."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "не число")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "текст доїхав", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "garbage_env.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 208)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "нечислове значення не дає права видаляти"
+        from app.db.connection import get_db_connection
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT transcript_text FROM transcriptions WHERE id = ?",
+                              (tid,)).fetchone()
+        assert row["transcript_text"] == "текст доїхав"
+
+    def test_negative_threshold_env_does_not_delete_everything(self, tg_app, monkeypatch):
+        """Відʼємне значення раніше приймалось мовчки і видаляло ВСІ оригінали."""
+        monkeypatch.setenv("TELEGRAM_ORIGINAL_MAX_MB", "-1")
+        monkeypatch.setattr(tg.state, "whisper_manager",
+                            self._fake_whisper({"text": "текст доїхав", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "negative_env.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 1024)
+        tid, prov = self._persist_placeholder(tg_app, 209)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov,
+                                    tg_app.config["DATABASE"], "large-v3-turbo", "uk")
+        assert os.path.isfile(voice), "відʼємний поріг не має видаляти оригінали взагалі"
 
 
 class TestCatchupWatermark:

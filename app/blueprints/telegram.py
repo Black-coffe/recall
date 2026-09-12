@@ -13,7 +13,10 @@ POST /api/telegram/ingest  (тільки з localhost)
   Маршрутизація за kind:
     text                 → transcript_text = text                  (sync)
     photo | document     → document_parser.parse_document (OCR/parse) (sync)
-    voice | audio | video→ фоновий job: whisper → persist → enrich   (queued)
+    voice | audio        → фоновий job: whisper → persist → enrich   (queued)
+    video                → НЕ завантажується (рішення власника, tg-media-policy-01):
+                            рядок-заглушка з посиланням на повідомлення, без
+                            file_path, без whisper (sync)
   Усі записи: source_type='telegram', tg_* провенанс, дедуп (chat_id,message_id),
   category_id успадковується з tg_monitored_chats. Далі — той самий enrichment
   (chunk+embed + Claude-картка), що й для аудіо/документів → запис одразу
@@ -38,6 +41,7 @@ from datetime import datetime
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core import settings as _settings
 from app.utils.paths import safe_path_within
 from telegram_common import CONTROL_TOKEN_HEADER, control_token
 
@@ -50,8 +54,10 @@ _KIND_LABEL = {
     "text": "повідомлення", "photo": "фото", "voice": "голосове",
     "audio": "аудіо", "video": "відео", "document": "документ",
 }
-_MEDIA_KINDS = {"voice", "audio", "video"}      # потребують whisper (фоновий job)
+_MEDIA_KINDS = {"voice", "audio"}               # потребують whisper (фоновий job)
 _PARSE_KINDS = {"photo", "document"}            # document_parser (sync)
+# "video" сюди свідомо НЕ входить (tg-media-policy-01): відео не завантажується
+# ніколи (жодного порогу за розміром/віком) — див. окрему гілку в ingest().
 
 
 def _db_path() -> str:
@@ -360,6 +366,29 @@ def ingest():
 
     category_id = _resolve_category(db_path, chat_id)
 
+    # --- Відео НІКОЛИ не завантажується (рішення власника, tg-media-policy-01:
+    # жодного порогу за розміром чи віком) — лишаємо рядок-заглушку з
+    # посиланням, щоб «у цьому чаті було відео» лишалось знахідним. file_path
+    # від слухача сюди й не приходить (telegram_listener.py не скачує його),
+    # але навіть якби прийшов — свідомо ігноруємо, whisper і
+    # extract_audio_from_video для відео не викликаються ніде в цьому шляху.
+    if kind == "video":
+        text = (caption or "").strip() or "[відео — не завантажено, лише посилання]"
+        # tg-media-policy-03: doc_type=kind (наявна конвенція деградованого
+        # шляху, telegram.py _parse_media) — інакше з підписом рядок виглядає
+        # звичайним текстовим повідомленням, бібліотека малює мітку саме з
+        # doc_type (static/js/recall/views/library.js).
+        tid = _persist(db_path, kind=kind, text=text, prov=prov, category_id=category_id,
+                       file_path=None, doc_type=kind, segments_json=None,
+                       model_used=None, processing_time=0.0)
+        try:
+            state.metrics.inc("whisper_telegram_total", kind=kind)
+        except Exception as e:
+            logger.debug("[tg] метрика whisper_telegram_total не інкрементована: %s", e)
+        enrich = _finish(db_path, tid, prov)
+        return jsonify({"success": True, "transcription_id": tid, "kind": kind,
+                        "skipped": "video_not_downloaded", "enrichment": {"status": enrich}})
+
     # --- Медіа з whisper → фоновий job (не блокуємо слухач) ---
     if kind in _MEDIA_KINDS:
         file_path = _safe_media_path(file_path)
@@ -428,6 +457,55 @@ def ingest():
                     "enrichment": {"status": enrich}})
 
 
+def _delete_intermediate(path: str | None) -> None:
+    """Прибрати проміжний артефакт (напр. `_audio.mp3`, витягнутий з відео) —
+    він ніколи не потрібен сам по собі, на відміну від оригіналу. М'яка
+    деградація: файла вже нема / нема прав — лог, job не валимо."""
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError as e:
+        logger.warning("[tg] не вдалось видалити проміжний файл %s: %s", path, e)
+
+
+def _delete_if_heavy(path: str | None, threshold_bytes: int, *, label: str) -> None:
+    """tg-media-policy-02: видалити `path`, якщо він важчий за `threshold_bytes`.
+    Дрібні оригінали лишаються на диску (рішення власника). Безпечно за
+    `get_original_file` (mcp_server.py) — деградує в original_available=False,
+    відсутній файл там не помилка."""
+    if not path:
+        return
+    try:
+        if not os.path.isfile(path):
+            return
+        size = os.path.getsize(path)
+        if size > threshold_bytes:
+            os.remove(path)
+            logger.info("[tg] %s видалено (%.1f МБ > поріг): %s",
+                        label, size / 1_048_576, path)
+    except OSError as e:
+        logger.warning("[tg] не вдалось видалити %s %s: %s", label, path, e)
+
+
+def _original_max_mb() -> int | None:
+    """Безпечне читання TELEGRAM_ORIGINAL_MAX_MB (tg-media-policy-03): хибне
+    (порожнє/нечислове) чи відʼємне значення НЕ валить job і НЕ видаляє
+    оригінал — просто пропускаємо видалення в цьому прогоні. `env_int`
+    (app/core/settings.py) — голий `int(env(name))`, і одне погане значення
+    в .env раніше кидало ValueError посеред фонового job без ретраю."""
+    try:
+        threshold = _settings.env_int("TELEGRAM_ORIGINAL_MAX_MB")
+    except (ValueError, TypeError) as e:
+        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB не число — оригінал не видаляю: %s", e)
+        return None
+    if threshold < 0:
+        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB=%d < 0 — оригінал не видаляю", threshold)
+        return None
+    return threshold
+
+
 def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, prov: dict,
                              db_path: str, model: str, language: str) -> dict:
     """Фоновий job: (video→витяг аудіо) → whisper → дописати рядок → enrich.
@@ -437,18 +515,24 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
     caption = (caption or "").strip()
 
     audio_fp = file_path
+    # tg-media-policy-03: `extracted` тримає намічений шлях _audio.mp3 НЕЗАЛЕЖНО
+    # від успіху витягу — ffmpeg може встигнути частково дописати файл навіть
+    # при провалі, і саме за цим шляхом _delete_intermediate прибирає сироту
+    # нижче. Раніше провал скидав `extracted = None`, і той частковий файл
+    # лишався на диску назавжди.
     extracted = None
     if kind == "video":
         from app.utils.audio import extract_audio_from_video
         extracted = os.path.splitext(file_path)[0] + "_audio.mp3"
         if not extract_audio_from_video(file_path, extracted, add_log=None):
             logger.warning("[tg] не вдалось витягти аудіо з відео %s", file_path)
-            extracted = None
+            audio_fp = None
         else:
             audio_fp = extracted
 
     text = ""
     segments_json = None
+    extraction_ok = False
     t0 = time.time()
     if audio_fp and os.path.isfile(audio_fp):
         try:
@@ -458,6 +542,12 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
                 logger.warning("[tg] whisper error на %s: %s", audio_fp, result["error"])
             else:
                 text = (result.get("text") or "").strip()
+                # tg-media-policy-03: успіх — це непорожній текст, а не «нема
+                # ключа error». Whisper на глухому/битому аудіо повертає
+                # {"text": ""} без помилки; extraction_ok=True в цій гілці
+                # раніше давало право видаляти оригінал за самою заглушкою.
+                if text:
+                    extraction_ok = True
                 segs = result.get("segments")
                 if segs:
                     segments_json = json.dumps(segs, ensure_ascii=False)
@@ -474,6 +564,17 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
     _finalize_media(db_path, tid, kind=kind, text=text, prov=prov,
                     segments_json=segments_json, model_used=model,
                     processing_time=processing_time)
+
+    # tg-media-policy-02: проміжний _audio.mp3 (video→audio) — завжди сирота
+    # після витягу, незалежно від того, вдався whisper чи ні.
+    _delete_intermediate(extracted)
+    # Оригінал — лише якщо текст видобуто (нема тексту, нема права викидати
+    # джерело) і лише важчий за поріг (дрібні лишаються, рішення власника).
+    if extraction_ok:
+        threshold_mb = _original_max_mb()
+        if threshold_mb is not None:
+            _delete_if_heavy(file_path, threshold_mb * 1_048_576, label="оригінал TG-медіа")
+
     try:
         state.metrics.inc("whisper_telegram_total", kind=kind)
     except Exception:
