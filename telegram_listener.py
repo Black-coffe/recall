@@ -609,7 +609,7 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
     """
     from telethon.errors import FloodWaitError
 
-    stats = {"chats": 0, "skipped_debounce": 0, "ingested": 0, "failed": 0}
+    stats = {"chats": 0, "skipped_debounce": 0, "ingested": 0, "failed": 0, "failed_chats": []}
     if not cfg["catchup_enabled"]:
         logger.info("[catchup] вимкнено (TELEGRAM_CATCHUP=0)")
         return stats
@@ -632,65 +632,78 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
         return stats
 
     delay = cfg.get("backfill_delay", 0.5)
-    for chat_id, entity in entities.items():
-        last_run = state.get(str(chat_id))
-        if last_run:
+    try:
+        for chat_id, entity in entities.items():
             try:
-                if now - datetime.fromisoformat(last_run) < debounce:
-                    stats["skipped_debounce"] += 1
+                last_run = state.get(str(chat_id))
+                if last_run:
+                    try:
+                        if now - datetime.fromisoformat(last_run) < debounce:
+                            stats["skipped_debounce"] += 1
+                            continue
+                    except ValueError:
+                        pass
+
+                mark = marks.get(chat_id)
+                if not mark:
+                    # Чат без жодного запису — це первинна догрузка історії, свідоме
+                    # рішення власника (обсяг невідомий), а не автоматичний ремонт.
+                    state[str(chat_id)] = now.isoformat()
                     continue
-            except ValueError:
-                pass
+                try:
+                    since = datetime.fromisoformat(mark["date"])
+                except (ValueError, TypeError):
+                    continue
+                known_id = mark.get("msg_id")
 
-        mark = marks.get(chat_id)
-        if not mark:
-            # Чат без жодного запису — це первинна догрузка історії, свідоме
-            # рішення власника (обсяг невідомий), а не автоматичний ремонт.
-            state[str(chat_id)] = now.isoformat()
-            continue
-        try:
-            since = datetime.fromisoformat(mark["date"])
-        except (ValueError, TypeError):
-            continue
-        known_id = mark.get("msg_id")
+                got = 0
+                it = client.iter_messages(entity, offset_date=since, reverse=True).__aiter__()
+                while True:
+                    try:
+                        msg = await it.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except FloodWaitError as e:
+                        logger.warning("[catchup] flood-wait %ss — чекаю", e.seconds)
+                        await asyncio.sleep(e.seconds + 1)
+                        continue
+                    except Exception as e:
+                        logger.warning("[catchup] вибірка для %s обірвалась: %s", chat_id, e)
+                        break
 
-        got = 0
-        it = client.iter_messages(entity, offset_date=since, reverse=True).__aiter__()
-        while True:
-            try:
-                msg = await it.__anext__()
-            except StopAsyncIteration:
-                break
-            except FloodWaitError as e:
-                logger.warning("[catchup] flood-wait %ss — чекаю", e.seconds)
-                await asyncio.sleep(e.seconds + 1)
-                continue
+                    # offset_date включний → перше повідомлення і є наш watermark.
+                    # Пропускаємо ДО завантаження медіа, інакше кожен старт створює
+                    # ще одну копію того самого файлу в telegram_media.
+                    if known_id is not None and getattr(msg, "id", None) == known_id:
+                        continue
+
+                    try:
+                        if await _ingest_message(entity, msg, cfg):
+                            got += 1
+                    except Exception as e:
+                        logger.error("[catchup] msg %s помилка: %s", getattr(msg, "id", "?"), e)
+                        stats["failed"] += 1
+                    await asyncio.sleep(delay)
+
+                state[str(chat_id)] = now.isoformat()
+                stats["chats"] += 1
+                stats["ingested"] += got
+                if got:
+                    logger.info("[catchup] «%s»: догружено %d з %s",
+                                _chat_title(entity, chat_id), got, mark["date"][:16])
             except Exception as e:
-                logger.warning("[catchup] вибірка для %s обірвалась: %s", chat_id, e)
-                break
+                # Межа одного чату: збій тут коштує рівно цього чату — решта
+                # чатів і збереження стану мають відбутись попри цю помилку.
+                stats["failed_chats"].append(chat_id)
+                try:
+                    title = _chat_title(entity, chat_id)
+                except Exception:
+                    title = str(chat_id)
+                logger.error("[catchup] «%s» (id=%s) обвалив чат: %s",
+                             title, chat_id, e, exc_info=True)
+    finally:
+        _catchup_state_save(cfg["catchup_state"], state)
 
-            # offset_date включний → перше повідомлення і є наш watermark.
-            # Пропускаємо ДО завантаження медіа, інакше кожен старт створює
-            # ще одну копію того самого файлу в telegram_media.
-            if known_id is not None and getattr(msg, "id", None) == known_id:
-                continue
-
-            try:
-                if await _ingest_message(entity, msg, cfg):
-                    got += 1
-            except Exception as e:
-                logger.error("[catchup] msg %s помилка: %s", getattr(msg, "id", "?"), e)
-                stats["failed"] += 1
-            await asyncio.sleep(delay)
-
-        state[str(chat_id)] = now.isoformat()
-        stats["chats"] += 1
-        stats["ingested"] += got
-        if got:
-            logger.info("[catchup] «%s»: догружено %d з %s",
-                        _chat_title(entity, chat_id), got, mark[:16])
-
-    _catchup_state_save(cfg["catchup_state"], state)
     logger.info("[catchup] завершено: %s", stats)
     return stats
 

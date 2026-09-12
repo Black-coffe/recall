@@ -737,6 +737,147 @@ class TestRepair:
         assert r["deleted"] == 2, "видалене автором відокремлене від втраченого слухачем"
 
 
+class TestCatchup:
+    """Регрес: `mark[:16]` у лозі — `mark` це словник {"date", "msg_id"},
+    зріз без ["date"] трактується як ключ і кидає KeyError (телеграм-catchup-crash-01)."""
+
+    def test_survives_log_line_when_something_was_backfilled(self, tg_app, monkeypatch, tmp_path, caplog):
+        chat_id = -100111
+        TestCoverage._seed(tg_app, chat_id, msgs=[(5, "2026-06-01T10:00:00+00:00")])
+
+        entity = types.SimpleNamespace(title="Чат", username=None)
+        dialog = types.SimpleNamespace(id=chat_id, entity=entity)
+        new_msg = _msg(id=6, message="нове", date=None)
+
+        class _DialogIter:
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not hasattr(self, "_done"):
+                    self._done = True
+                    return dialog
+                raise StopAsyncIteration
+
+        class _MsgIter:
+            def __init__(self):
+                self.left = [new_msg]
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self.left:
+                    raise StopAsyncIteration
+                return self.left.pop(0)
+
+        class _Client:
+            def iter_dialogs(self, limit=None):
+                return _DialogIter()
+            def iter_messages(self, chat, **kw):
+                return _MsgIter()
+
+        saved = []
+
+        async def _ok(*a, **k):
+            return "text"
+
+        monkeypatch.setattr(L, "_ingest_message", _ok)
+        monkeypatch.setattr(L.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(L, "_catchup_state_save",
+                             lambda path, state: saved.append((path, dict(state))))
+
+        cfg = {
+            "catchup_enabled": True,
+            "dialog_limit": 200,
+            "catchup_debounce_min": 0,
+            "catchup_state": str(tmp_path / "catchup.json"),
+            "db_path": tg_app.config["DATABASE"],
+            "backfill_delay": 0,
+        }
+
+        with caplog.at_level("INFO", logger=L.logger.name):
+            stats = asyncio.run(L._catchup(_Client(), cfg, {chat_id}))
+
+        assert stats["ingested"] == 1
+        assert saved, "_catchup_state_save має бути викликано після проходу"
+        # Доводимо через стан проходу, а не міркуванням: жоден чат не збійний,
+        # і в лозі лежить скорочена мітка часу водяного знаку, а не помилка.
+        assert stats.get("failed_chats") == [], "чат не мав впасти на форматуванні лог-рядка"
+        watermark_lines = [r.message for r in caplog.records if "догружено" in r.message]
+        assert watermark_lines, "рядок про догрузку мав потрапити в лог"
+        assert "2026-06-01" in watermark_lines[0], "лог мусить нести скорочену мітку часу, не slice()"
+
+    def test_one_chat_crash_does_not_skip_the_rest(self, tg_app, monkeypatch, tmp_path):
+        """Виняток у тілі циклу для середнього чату не має виходити з _catchup:
+        третій чат все одно догружається, і стан зберігається (телеграм-catchup-crash-02)."""
+        chat_a, chat_b, chat_c = -100301, -100302, -100303
+        for cid in (chat_a, chat_b, chat_c):
+            TestCoverage._seed(tg_app, cid, msgs=[(5, "2026-06-01T10:00:00+00:00")])
+
+        entity_a = types.SimpleNamespace(title="Чат A", username=None)
+        entity_b = types.SimpleNamespace(title="Чат B", username=None)
+        entity_c = types.SimpleNamespace(title="Чат C", username=None)
+        dialogs = [
+            types.SimpleNamespace(id=chat_a, entity=entity_a),
+            types.SimpleNamespace(id=chat_b, entity=entity_b),
+            types.SimpleNamespace(id=chat_c, entity=entity_c),
+        ]
+
+        class _DialogIter:
+            def __init__(self, items):
+                self._items = list(items)
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self._items:
+                    raise StopAsyncIteration
+                return self._items.pop(0)
+
+        class _MsgIter:
+            def __init__(self, msgs):
+                self.left = list(msgs)
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self.left:
+                    raise StopAsyncIteration
+                return self.left.pop(0)
+
+        class _Client:
+            def iter_dialogs(self, limit=None):
+                return _DialogIter(dialogs)
+            def iter_messages(self, chat, **kw):
+                if chat is entity_b:
+                    raise RuntimeError("boom")
+                return _MsgIter([_msg(id=6, message="нове", date=None)])
+
+        saved = []
+        ingested = []
+
+        async def _ok(entity, msg, cfg):
+            ingested.append(entity)
+            return "text"
+
+        monkeypatch.setattr(L, "_ingest_message", _ok)
+        monkeypatch.setattr(L.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(L, "_catchup_state_save",
+                             lambda path, state: saved.append((path, dict(state))))
+
+        cfg = {
+            "catchup_enabled": True,
+            "dialog_limit": 200,
+            "catchup_debounce_min": 0,
+            "catchup_state": str(tmp_path / "catchup.json"),
+            "db_path": tg_app.config["DATABASE"],
+            "backfill_delay": 0,
+        }
+
+        stats = asyncio.run(L._catchup(_Client(), cfg, {chat_a, chat_b, chat_c}))
+
+        assert entity_c in ingested, "третій чат мав догрузитись попри збій другого"
+        assert entity_a in ingested
+        assert chat_b in stats.get("failed_chats", []), "збійний чат мусить бути позначений у stats"
+        assert saved, "_catchup_state_save має бути викликано навіть при збої одного чату"
+
+
 class TestMeetingDate:
     """Дата події = день повідомлення, а не день інжесту.
 
