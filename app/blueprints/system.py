@@ -13,8 +13,10 @@ import io
 import json
 import logging
 import os
+import pathlib
 import platform
 import re
+import sqlite3
 import subprocess
 import zipfile
 from datetime import datetime, timezone
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 system_bp = Blueprint('system', __name__)
 
 # Спільне з /api/health — одна версія на весь blueprint (T8.1).
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.0"
 
 
 @system_bp.route('/', defaults={'_path': ''}, methods=['GET'])
@@ -48,6 +50,8 @@ def app_shell(_path):
     JSON-404, а не HTML-shell (інакше fetch-споживачі мовчки ламаються)."""
     if _path.startswith('api/'):
         abort(404)
+    if current_app.config.get('HEADLESS'):
+        return jsonify(error="headless", hint="API-only profile"), 404
     return render_template('shell.html')
 
 
@@ -68,6 +72,8 @@ def service_worker():
     Якщо віддавати з /static/sw.js — scope обмежується '/static/*'.
     Альтернатива: header Service-Worker-Allowed: /, але прямий маршрут чистіший.
     """
+    if current_app.config.get('HEADLESS'):
+        return jsonify(error="headless", hint="API-only profile"), 404
     from flask import send_from_directory
     resp = send_from_directory(
         os.path.join(current_app.root_path, 'static'),
@@ -90,16 +96,91 @@ def health_check():
         "gpu_available": torch.cuda.is_available(),
         "database": "ok",
     }
-    try:
-        from app.db.connection import get_db_connection
-        with get_db_connection(current_app.config['DATABASE']) as conn:
-            conn.execute('SELECT 1')
-    except Exception:
+    if _check_database_ready(current_app.config.get('DATABASE')) != "ok":
         health["database"] = "error"
         health["status"] = "degraded"
     if not state.ffmpeg_available:
         health["status"] = "degraded"
     return jsonify(health)
+
+
+def _check_database_ready(db_path):
+    """Робота-перевірка без побічного створення файлу БД.
+
+    На відміну від старого шляху через `get_db_connection` (автостворює
+    порожній файл на `sqlite3.connect` за замовчуванням), тут відкриваємо
+    ІСНУЮЧИЙ файл у режимі `mode=rw` — інакше стан 'error' був би недосяжний
+    на першому запиті до автостворенної порожньої БД (звіт S3, знахідка 7).
+
+    Придатною вважається лише БД, де є таблиця `schema_versions` і
+    `MAX(version) >= 1` (звіт S3, знахідка 7 — порожній файл без схеми раніше
+    теж давав 'ok'). `/api/health` викликає той самий хелпер (Round 3, історія 03).
+    Повертає 'ok'/'error'; причина лише в лог (T7.4), клієнту не витікає.
+    """
+    if not db_path or db_path == ':memory:':
+        logger.warning("/api/ready: DATABASE config відсутній або ':memory:'")
+        return "error"
+    try:
+        uri = pathlib.Path(db_path).absolute().as_uri() + '?mode=rw'
+        conn = sqlite3.connect(uri, uri=True)
+    except Exception as e:
+        # T7.4: лог з причиною, клієнту йде лише узагальнений статус (без str(exc)).
+        logger.warning(f"/api/ready: перевірка БД не пройшла ({db_path}): {e}")
+        return "error"
+    try:
+        row = conn.execute('SELECT MAX(version) FROM schema_versions').fetchone()
+        version = row[0] if row and row[0] is not None else 0
+        if version < 1:
+            logger.warning(f"/api/ready: БД без схеми ({db_path})")
+            return "error"
+        return "ok"
+    except Exception as e:
+        logger.warning(f"/api/ready: перевірка схеми БД не пройшла ({db_path}): {e}")
+        return "error"
+    finally:
+        conn.close()
+
+
+@system_bp.route('/api/ready', methods=['GET'])
+def ready_check():
+    """Готовність до обслуговування трафіку (T03 config-registry-profiles).
+
+    На відміну від /api/health (статичний "ок, живий"), тут перевіряється
+    фактична готовність компонентів за станом `state.робота` (пишеться
+    в app.py по фазах старту) + живий SELECT 1 на кожен виклик — цей шматок
+    перекриває поле checks.database, решта полів беруться зі знімку стану.
+
+    `migrations` навмисно не входить у контракт (робота-contract-03):
+    станом 'error' цей ключ ніколи не буває — виняток з `app/db/migrations.py`
+    вбиває boot раніше, ніж робота встигає прочитати результат.
+    """
+    робота = getattr(state, 'робота', None)
+    if робота is None:
+        return jsonify({
+            "ready": False,
+            "profile": current_app.config.get('PROFILE', 'desktop'),
+            "version": APP_VERSION,
+            "checks": {},
+            "error": "робота not initialised",
+        }), 503
+
+    checks = dict(робота)
+    checks["database"] = _check_database_ready(current_app.config.get('DATABASE'))
+
+    job_queue = checks.get("job_queue") or {}
+    whisper = checks.get("whisper") or {}
+    ready = (
+        checks.get("database") == "ok"
+        and bool(job_queue.get("bound"))
+        and whisper.get("preload") in ("ready", "disabled")
+        and bool(checks.get("boot_finished"))
+    )
+    return jsonify({
+        "ready": ready,
+        "profile": current_app.config.get('PROFILE', 'desktop'),
+        "version": APP_VERSION,
+        "checks": checks,
+    }), (200 if ready else 503)
 
 
 @system_bp.route('/api/models', methods=['GET'])

@@ -65,13 +65,16 @@ def client(fake_service):
     # Підмінюємо state singletons
     original_service = state.recording_service
     original_broker = state.sse_broker
+    original_live_worker = state.live_transcribe_worker
     state.recording_service = fake_service
     state.sse_broker = MagicMock()
+    state.live_transcribe_worker = None
 
     yield app.test_client()
 
     state.recording_service = original_service
     state.sse_broker = original_broker
+    state.live_transcribe_worker = original_live_worker
 
 
 # ---------------------------------------------------------------- /devices
@@ -239,6 +242,144 @@ def test_get_state_404(client, fake_service):
     fake_service.get_state.side_effect = SessionNotFoundError("nope")
     r = client.get('/api/recording/rec_unknown/state')
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------- /live-transcript
+
+def test_live_transcript_worker_disabled(client, fake_service):
+    """state.live_transcribe_worker is None → available:false, не 500."""
+    state.live_transcribe_worker = None
+    r = client.get('/api/recording/rec_test123/live-transcript')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['available'] is False
+    assert body['reason']
+    assert body['segments'] == []
+
+
+def test_live_transcript_404_unknown_session(client, fake_service):
+    from app.services.recording.service import SessionNotFoundError
+    fake_service.get_state.side_effect = SessionNotFoundError("nope")
+    r = client.get('/api/recording/rec_unknown/live-transcript')
+    assert r.status_code == 404
+    assert r.get_json()['error_code'] == 'NOT_FOUND'
+
+
+def test_live_transcript_finalized_session(client, fake_service):
+    fake_service.get_state.return_value = {
+        'session_id': 'rec_test123', 'status': 'finalized', 'is_active': False,
+        'elapsed_seconds': 0.0,
+    }
+    worker = MagicMock()
+    worker.is_active.return_value = False
+    state.live_transcribe_worker = worker
+    r = client.get('/api/recording/rec_test123/live-transcript')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['available'] is False
+    assert 'транскрипт' in body['reason']
+
+
+def test_live_transcript_returns_segments(client, fake_service):
+    worker = MagicMock()
+    worker.is_active.return_value = True
+    worker.get_preview.return_value = [
+        {'start': 1.0, 'end': 2.0, 'text': 'привіт', 'speaker': 'self', 'stream': 'mic', 'seq': 1},
+        {'start': 3.5, 'end': 4.0, 'text': 'ок', 'speaker': 'other', 'stream': 'system', 'seq': 2},
+    ]
+    state.live_transcribe_worker = worker
+    r = client.get('/api/recording/rec_test123/live-transcript')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['available'] is True
+    assert body['reason'] is None
+    assert body['count'] == 2
+    assert body['last_sec'] == 3.5
+    assert body['next_seq'] == 2
+    assert body['truncated'] is False
+    assert body['segments'][0] == {
+        'start': 1.0, 'end': 2.0, 'text': 'привіт', 'speaker_label': 'self', 'stream': 'mic',
+        'seq': 1,
+    }
+
+
+def test_live_transcript_since_sec_filters(client, fake_service):
+    worker = MagicMock()
+    worker.is_active.return_value = True
+    worker.get_preview.return_value = [
+        {'start': 1.0, 'end': 2.0, 'text': 'старе', 'speaker': 'self', 'stream': 'mic'},
+        {'start': 5.0, 'end': 6.0, 'text': 'нове', 'speaker': 'self', 'stream': 'mic'},
+    ]
+    state.live_transcribe_worker = worker
+    r = client.get('/api/recording/rec_test123/live-transcript?since_sec=3')
+    body = r.get_json()
+    assert body['count'] == 1
+    assert body['segments'][0]['text'] == 'нове'
+    assert body['last_sec'] == 5.0
+
+
+def test_live_transcript_truncates_at_limit(client, fake_service):
+    worker = MagicMock()
+    worker.is_active.return_value = True
+    worker.get_preview.return_value = [
+        {'start': float(i), 'end': float(i) + 1, 'text': f't{i}', 'speaker': 'self', 'stream': 'mic'}
+        for i in range(410)
+    ]
+    state.live_transcribe_worker = worker
+    r = client.get('/api/recording/rec_test123/live-transcript')
+    body = r.get_json()
+    assert body['count'] == 400
+    assert body['truncated'] is True
+
+
+def test_live_transcript_seq_cursor_survives_stream_race(client, fake_service):
+    """Story 06: system-доріжка транскрибується повільніше за mic і її
+    сегмент з'являється ПІЗНІШЕ, хоч його `start` МЕНШИЙ за вже відданий
+    mic-сегмент. Курсор по `seq` (порядок append'у) зобов'язаний його
+    повернути; курсор по `start`/`since_sec` — загубив би назавжди.
+    """
+    worker = MagicMock()
+    worker.is_active.return_value = True
+
+    # Крок 1: у RAM лежить лише mic-сегмент (start=105, доданий першим).
+    worker.get_preview.return_value = [
+        {'start': 105.0, 'end': 106.0, 'text': 'mic перший', 'speaker': 'self',
+         'stream': 'mic', 'seq': 1},
+    ]
+    state.live_transcribe_worker = worker
+    r1 = client.get('/api/recording/rec_test123/live-transcript')
+    body1 = r1.get_json()
+    assert body1['count'] == 1
+    assert body1['next_seq'] == 1
+
+    # Крок 2: system-доріжка нарешті домальовує свій пасс — її сегмент має
+    # МЕНШИЙ start (100 < 105), але доданий ПІЗНІШЕ (seq=2).
+    worker.get_preview.return_value = worker.get_preview.return_value + [
+        {'start': 100.0, 'end': 101.0, 'text': 'system пізніше', 'speaker': 'other',
+         'stream': 'system', 'seq': 2},
+    ]
+
+    # Опит курсором по seq — system-сегмент приходить, не губиться.
+    r2 = client.get(f'/api/recording/rec_test123/live-transcript?since_seq={body1["next_seq"]}')
+    body2 = r2.get_json()
+    assert body2['count'] == 1
+    assert body2['segments'][0]['text'] == 'system пізніше'
+    assert body2['next_seq'] == 2
+
+    # Контроль на "не приходить двічі": ще один опит тим самим курсором — порожньо.
+    r3 = client.get(f'/api/recording/rec_test123/live-transcript?since_seq={body2["next_seq"]}')
+    body3 = r3.get_json()
+    assert body3['count'] == 0
+    assert body3['segments'] == []
+    assert body3['next_seq'] == body2['next_seq']
+
+    # Контроль на бажаний контраст: той самий опит старим курсором по часу
+    # (since_sec = start вже відданого mic-сегмента) губить system-сегмент,
+    # бо його start=100 не перевищує 105 — саме той баг, який чинить ця історія.
+    r_broken = client.get('/api/recording/rec_test123/live-transcript?since_sec=105')
+    body_broken = r_broken.get_json()
+    assert body_broken['count'] == 0
 
 
 # ---------------------------------------------------------------- /active

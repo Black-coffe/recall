@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Optional
 
+from app.core import settings as _settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,12 @@ DEFAULT_PRELOAD_MODEL = 'large-v3-turbo'
 
 
 def preload_enabled() -> bool:
-    return os.environ.get('RECALL_PRELOAD_WHISPER', '1').strip().lower() not in ('0', 'false', 'no')
+    """config-registry-fix-r3-01: читання переведено на `settings.env_bool`
+    (реєстр — єдине джерело парсингу). Це задокументоване перевертання
+    поведінки на сміттєвих значеннях: старий парсер (`not in ('0','false','no')`)
+    трактував будь-яке нерозпізнане значення (напр. 'ага') як True (увімкнено);
+    `env_bool` трактує як False (truthy-набір: '1'/'true'/'yes'/'on')."""
+    return _settings.env_bool('RECALL_PRELOAD_WHISPER')
 
 
 def resolve_preload_model() -> str:
@@ -89,3 +96,54 @@ def start_background_preload(
     )
     t.start()
     return t
+
+
+def start_tracked_preload(whisper_manager, робота: dict) -> Optional[threading.Thread]:
+    """Запускає прогрів і водночас веде `робота['whisper']` через увесь
+    цикл станів (`loading` → `ready`|`failed`|`disabled`) — раніше цей код
+    жив інлайном у `app.py:613-658` (config-registry-fix-r3-01).
+
+    Порядок станів той самий, що був у app.py: `'loading'` виставляється ДО
+    старту фонового потоку прогріву, `'ready'`/`'failed'` — лише після
+    `.join()` за критерієм членства в кеші моделей (`_m in
+    whisper_manager._models`, знахідка 8 попереднього раунду — НЕ
+    `current_model_name`, бо це "останній використаний" покажчик, який
+    рухає будь-яка паралельна транскрипція з іншою моделлю).
+
+    Повертає потік-спостерігач (`.join()` на ньому чекає завершення і
+    прогріву, і оновлення робота) або ``None``, якщо прогрів не
+    запускався (вимкнено / немає менеджера / виняток на старті).
+    """
+    try:
+        if not preload_enabled() or not whisper_manager:
+            робота['whisper'] = {'preload': 'disabled', 'model': None}
+            return None
+
+        model_name = resolve_preload_model()
+        робота['whisper'] = {'preload': 'loading', 'model': model_name}
+        preload_thread = start_background_preload(whisper_manager, model_name)
+        if preload_thread is None:
+            робота['whisper'] = {'preload': 'disabled', 'model': None}
+            return None
+
+        def _watch(_t=preload_thread, _m=model_name):
+            _t.join()
+            ok = _m in getattr(whisper_manager, '_models', {})
+            робота['whisper'] = {
+                'preload': 'ready' if ok else 'failed',
+                'model': _m if ok else None,
+            }
+
+        watcher = threading.Thread(
+            target=_watch, name='whisper-preload-watch', daemon=True,
+        )
+        watcher.start()
+        return watcher
+    except Exception as e:
+        # T7.4: не голий except — логуємо перед тим, як звести робота до
+        # 'failed'; /api/transcribe все одно довантажить модель лінивo.
+        logger.warning(
+            "Whisper preload: не вдалося запустити відстеження прогріву: %s", e, exc_info=True,
+        )
+        робота['whisper'] = {'preload': 'failed', 'model': None}
+        return None

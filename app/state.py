@@ -37,6 +37,25 @@ limiter: Any = None
 ffmpeg_available: bool = False
 cfg: Any = None
 
+# config-registry-profiles S2/S3: фази boot-у app.py пишуть сюди по мірі
+# готовності; story 03 (`GET /api/ready`) лише читає. Дефолти — «ще не готово»/
+# «вимкнено», щоб /api/ready віддавав 503 до завершення відповідної фази,
+# навіть якщо запит прилетів у крихітне вікно між `import app` і кінцем boot-у.
+#
+# `migrations` навмисно відсутній у контракті (робота-contract-03, знахідка
+# 9 звіту S3): шлях до 'error' недосяжний — `app/db/migrations.py` перекидає
+# виняток, а `app.py` його не ловить, тож процес падає до робота ще до
+# першого запиту. Поле, у якого немає жодного реального стану, не входить
+# у контракт.
+робота: dict = {
+    "database": "pending",  # 'ok' | 'error' | 'pending'
+    "job_queue": {"bound": False, "recovered": 0},
+    "whisper": {"preload": "disabled", "model": None},  # preload: disabled|loading|ready|failed
+    "embeddings": {"loaded": False},  # інформаційне — e5 вантажиться ліниво, готовність не блокує
+    "telegram": "disabled",  # 'disabled' | 'starting' | 'running' | 'absent'
+    "boot_finished": False,  # True лише після завершення всіх фаз boot-у; входить в `ready`.
+}
+
 # Phase 9: System audio recording
 recording_service: Any = None  # RecordingService instance
 # Phase 9.10: список session_id які були recovery'ні при старті.

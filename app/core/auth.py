@@ -50,6 +50,8 @@ import os
 
 from flask import Flask, jsonify, request
 
+from app.core import settings
+
 logger = logging.getLogger(__name__)
 
 # Заголовок за зразком telegram_common.CONTROL_TOKEN_HEADER ("X-Telegram-Token").
@@ -59,14 +61,20 @@ _LOCALHOST_ADDRS = {"127.0.0.1", "::1"}
 
 # Шляхи /api/*, які лишаються відкритими без ключа (health-check для
 # моніторингу — не повинен вимагати авторизацію, інакше зовнішні
-# health-check'и/аптайм-монітори теж треба буде авторизовувати).
-_EXEMPT_API_PATHS = {"/api/health"}
+# health-check'и/аптайм-монітори теж треба буде авторизовувати). /api/ready
+# (config-registry-profiles S3, ще не існує на момент S2) — той самий клас:
+# без auth, як /api/health.
+_EXEMPT_API_PATHS = {"/api/health", "/api/ready"}
 
 
 def _local_trusted_enabled() -> bool:
-    """RECALL_LOCAL_TRUSTED, дефолт увімкнено (зберігає поточний UX)."""
-    val = os.environ.get("RECALL_LOCAL_TRUSTED", "1").strip().lower()
-    return val not in ("0", "false", "no")
+    """RECALL_LOCAL_TRUSTED; профіле-залежний дефолт живе в реєстрі
+    (`app/core/settings.py::Setting.default_headless`, config-registry-fix-01):
+    desktop — "1" (як і було, застосунок працює на своїй машині без пароля);
+    headless — "0" (fail-closed — headless типово слухає ширше за одну машину,
+    localhost більше не мається на увазі довіреним). Явне значення змінної
+    середовища завжди має пріоритет над дефолтом профілю (settings.env)."""
+    return settings.env_bool("RECALL_LOCAL_TRUSTED")
 
 
 def _configured_api_key() -> str | None:
@@ -120,6 +128,13 @@ def _is_authorized() -> bool:
 
 def register(app: Flask) -> None:
     """Реєструє єдиний before_request-гейт на весь застосунок."""
+
+    if settings.profile() == "headless" and not _configured_api_key():
+        logger.warning(
+            "Auth gate: profile=headless без RECALL_API_KEY — non-localhost "
+            "доступ буде відхилено (fail-closed), доки не задано ключ або "
+            "явно не увімкнено RECALL_LOCAL_TRUSTED=1."
+        )
 
     @app.before_request
     def _recall_auth_gate():  # noqa: ANN202 — Flask hook, без анотації повернення

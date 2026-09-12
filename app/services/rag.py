@@ -126,9 +126,25 @@ def order_citables(chunks: list[dict],
     Підшиті коментарі теж потрапляють у список: вони пронумеровані в
     контексті, отже клієнт мусить уміти їх відкрити (у них є
     `transcription_id`).
+
+    `why` на кожному елементі. Знайдені `chunks` уже несуть `why` від
+    `retrieval.search` (контракт C2). Підшиті коментарі — інший шлях: вони
+    прийшли з `attach_comments` (SQL-запит на pinned/correction по картках
+    видачі), який ніколи не звертався до `retrieval.search`, тож `why` у них
+    нема органічно. Мовчазна відсутність ключа ловить `KeyError` у
+    споживача — ставимо явний маркер провенансу замість скорингу.
+    Маркер несе ТОЙ САМИЙ обовʼязковий набір ключів C2 (`src`, `rrf`, `rec`,
+    `by`, `top`), з нульовими внесками (`rrf`/`rec` = 0.0, `by` = []) і
+    пʼятим легальним значенням `top` — `"attached"` (план D2): ключ, який
+    іноді є, а іноді нема, — той самий `KeyError` з відстрочкою. Перелік
+    ключів не переписується літералом тут — береться з
+    `retrieval.build_placeholder_why` (одне джерело істини, історія 13, план D3).
     """
     comment_chunks = [c for c in chunks if c.get("source_type") == "comment"]
-    attached = [dict(ac, source_type="comment", attached=True)
+    attached = [dict(ac, source_type="comment", attached=True,
+                     why=ac.get("why") or retrieval.build_placeholder_why(
+                         "comment", "attached",
+                         note="підшито без пошуку (pinned/correction)"))
                 for ac in (attached_comments or [])]
     rest = [c for c in chunks if c.get("source_type") != "comment"]
     return comment_chunks + attached + rest
@@ -260,8 +276,11 @@ def answer_question(
     timeout: float = 180.0,
     category_id: Optional[int] = None,
     project: Optional[str] = None,
+    explain: bool = False,
 ) -> dict:
     """Відповісти на питання по архіву з цитатами. category_id — обмежити напрямком.
+    explain — Історія 05: прокидається у `retrieval.search`, `why` кожного
+    чанка виживає до `sources` крізь `order_citables`/`attach_thread_context`.
 
     Returns {"answer", "sources": [chunks], "model", "found", token usage}.
     """
@@ -272,7 +291,8 @@ def answer_question(
     scope_tids = _resolve_project(db_path, project)
     res = retrieval.search(db_path, question, top_k=top_k, category_id=category_id,
                            scope_tids=scope_tids,
-                           rerank=_RERANK_ENABLED)
+                           rerank=_RERANK_ENABLED,
+                           explain=explain)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     if not chunks:
         return {
@@ -325,8 +345,11 @@ def answer_question_stream(
     timeout: float = 180.0,
     category_id: Optional[int] = None,
     project: Optional[str] = None,
+    explain: bool = False,
 ) -> Iterator[str]:
-    """Стрім-версія answer_question. category_id — обмежити напрямком. Yields SSE-кадри:
+    """Стрім-версія answer_question. category_id — обмежити напрямком. explain —
+    Історія 05, те саме, що в answer_question (не міняє формат SSE-подій).
+    Yields SSE-кадри:
       event: sources — {sources, found, vector_available} (одразу після retrieval)
       event: delta   — {text} (токени відповіді по мірі надходження)
       event: done    — {model, *_tokens}
@@ -340,7 +363,8 @@ def answer_question_stream(
     scope_tids = _resolve_project(db_path, project)
     res = retrieval.search(db_path, question, top_k=top_k, category_id=category_id,
                            scope_tids=scope_tids,
-                           rerank=_RERANK_ENABLED)
+                           rerank=_RERANK_ENABLED,
+                           explain=explain)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     attached = retrieval.attach_comments(db_path, chunks)
     # Той самий порядок, що й у контексті: клієнт резолвить [n] як sources[n-1],

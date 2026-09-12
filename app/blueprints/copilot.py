@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from typing import Any, Optional
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app import state
 from app.db.connection import get_db_connection
-from app.services import local_llm
+from app.services import live_ask, local_llm
 from app.services.copilot import export as cp_export
 
 
@@ -65,6 +67,109 @@ def availability():
         except Exception:
             payload['feedback'] = None
     return jsonify(payload)
+
+
+_LIVE_ASK_SCOPES = {'call', 'archive', 'both'}
+
+# top_k із тіла запиту — верхня межа проти неконтрольованого пошуку по архіву
+# (дзеркалить _MAX_TOP_K у live_ask.py, другий рубіж там же).
+_MAX_TOP_K = 20
+
+# Мітки спікера для промпта — той самий словник, що й `speaker_label` у
+# `live_transcribe.py` ('mic' → 'self', 'system' → 'other').
+_SPEAKER_LABELS = {'self': 'Оператор', 'other': 'Співрозмовник'}
+
+
+def _live_transcript_text(session_id: Optional[str]) -> Optional[str]:
+    """Живий транскрипт сесії текстом (для `scope='call'/'both'`).
+
+    Кожен рядок позначений спікером (`[Оператор]`/`[Співрозмовник]`) — без
+    цього модель не може відповісти на «що сказав клієнт» (C3/приймання).
+
+    None — немає сесії, живий воркер вимкнений в інстансі, або сесія без
+    активного live-прев'ю (finalized/ще не стартувала). `live_ask.ask_local`
+    перетворює це у зрозумілий `reason`, а не падає.
+    """
+    if not session_id or state.live_transcribe_worker is None:
+        return None
+    if not state.live_transcribe_worker.is_active(session_id):
+        return None
+    segments = state.live_transcribe_worker.get_preview(session_id)
+    lines = []
+    for s in segments:
+        text = (s.get('text') or '').strip()
+        if not text:
+            continue
+        label = _SPEAKER_LABELS.get(s.get('speaker'), '?')
+        lines.append(f"[{label}] {text}")
+    return "\n".join(lines).strip() or None
+
+
+def _parse_top_k(raw: Any) -> tuple[Optional[int], Optional[str]]:
+    """``top_k`` з тіла запиту → (1.._MAX_TOP_K, дефолт 6) або (None, помилка).
+
+    `int()` на `float('inf')` (Flask/JSON приймає ``Infinity``) кидає
+    `OverflowError` → без цієї перевірки запит падав у 500 замість 400.
+    """
+    if raw is None:
+        return 6, None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None, "top_k має бути числом"
+    if not math.isfinite(raw):
+        return None, "top_k має бути скінченним числом"
+    if raw <= 0:
+        return None, "top_k має бути додатним"
+    return min(int(raw), _MAX_TOP_K), None
+
+
+@copilot_bp.route('/api/copilot/live-ask', methods=['POST'])
+def live_ask_endpoint():
+    """C2 (`docs/specs/mcp-live-call/plan.md`): питання агента → локальна
+    модель (Ollama, $0) → відповідь з живого транскрипту і/або архіву.
+
+    Body: ``{question: str, session_id: str|null, scope: 'call'|'archive'|'both',
+    top_k: int=6}``. ``session_id=null`` → береться активна сесія запису.
+
+    ЧОМУ БЕЗ `_require_service()`: це не крок ко-пілот-сесії (COPILOT_ENABLED),
+    а окремий read-only шлях уточнень агента — працює навіть якщо ко-пілот
+    вимкнено, доки доступні Ollama і/або архів (A2/non-goals цієї історії).
+    Нічого не пише в БД, в сесію запису чи у віджет оператора.
+
+    Завжди 200 (крім порожнього питання) — недоступність Ollama чи відсутність
+    контексту це `available: false` + `reason`, не помилка сервера.
+    """
+    data = request.get_json(silent=True) or {}
+    question = (data.get('question') or '').strip()
+    if not question:
+        return jsonify({'success': False, 'error': 'Порожнє питання',
+                        'error_code': 'EMPTY_QUESTION'}), 400
+
+    scope = data.get('scope') if data.get('scope') in _LIVE_ASK_SCOPES else 'both'
+    top_k, top_k_err = _parse_top_k(data.get('top_k'))
+    if top_k_err:
+        return jsonify({'success': False, 'error': top_k_err,
+                        'error_code': 'INVALID_TOP_K'}), 400
+
+    # Історія 08: режим (raw під час запису / generated поза ним) визначається
+    # ЛИШЕ наявністю активної сесії запису на сервері, а не тілом запиту —
+    # агент не отримує параметра, яким міг би форсувати генерацію (non-goals).
+    recording_active = bool(
+        state.recording_service is not None
+        and state.recording_service.active_session_id
+    )
+
+    session_id = data.get('session_id') or None
+    if not session_id and state.recording_service is not None:
+        session_id = state.recording_service.active_session_id
+
+    transcript_text = None
+    if scope in ('call', 'both'):
+        transcript_text = _live_transcript_text(session_id)
+
+    db_path = current_app.config['DATABASE']
+    result = live_ask.ask_local(db_path, question, transcript_text=transcript_text,
+                                scope=scope, top_k=top_k, recording_active=recording_active)
+    return jsonify({'success': True, 'session_id': session_id, **result})
 
 
 @copilot_bp.route('/api/copilot/start', methods=['POST'])

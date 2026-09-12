@@ -10,7 +10,7 @@ Recall — це **монолітний Flask-сервер** + **2 окремі �
    `app.py` через `subprocess.Popen` (якщо `TELEGRAM_ENABLED` + є `telegram.session`).
    Контрол-API на localhost:5051; шле повідомлення назад у Flask `/api/telegram/ingest`.
 3. **`mcp_server.py`** — окремий MCP-сервер: **read-first** міст до Recall для
-   Claude Code/Desktop (30 read-only тулзів; write-поверхня прибрана у Волні 1). Stdio-конектор (**default**) спавнить сам клієнт
+   Claude Code/Desktop (32 read-only тулзів; write-поверхня прибрана у Волні 1). Stdio-конектор (**default**) спавнить сам клієнт
    (`claude mcp add`, user-scope) — окремо піднімати не треба; http+ключ — опційно.
    Гібрид: читає SQLite напряму, а записи/live/AI-дії проксіює на запущений `app.py`.
 

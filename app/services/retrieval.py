@@ -468,6 +468,84 @@ def _comment_entry(key: int, row, meta: dict) -> dict:
     }
 
 
+def _why_top(cid: int, meta: dict, rerank_moved: set[int],
+            rec_w: float, com_w: float) -> str:
+    """Яка стадія РЕАЛЬНО зрушила позицію результату (Історія 09, план D1).
+
+    Було: фіксований ланцюжок пріоритетів, що називав стадію, яка МОГЛА
+    спрацювати (recency повертався щойно `_recency_factor` дав щось додатне,
+    навіть при `rec_w=0`, коли множник = 1.0 і нічого не змінив). Тепер —
+    порівнюємо ФАКТИЧНІ внески: rerank важить найбільше, коли справді
+    переставив цього кандидата (позиційна зміна, не множник — порівнювати її
+    магнітудою з recency/comment нема сенсу); інакше — множник з більшим
+    фактичним внеском (`rec_w * recency` проти `comment_delta`); якщо жоден
+    не зрушив нічого — `rrf`."""
+    if cid in rerank_moved:
+        return "rerank"
+    rec_delta = rec_w * meta.get("recency", 0.0)
+    com_delta = meta.get("comment_delta", 0.0)
+    if rec_delta <= 0.0 and com_delta <= 0.0:
+        return "rrf"
+    return "comment_boost" if com_delta > rec_delta else "recency"
+
+
+# Обовʼязкові ключі `why` (контракт C2) — ОДНЕ джерело істини. Обидва
+# виробники (`_build_why` нижче і маркер приєднаного коментаря в
+# `rag.order_citables`, через `build_placeholder_why`) беруть перелік
+# звідси, а не переписують його літералом — рівно той дефект, який
+# ремонтували двічі (NEW-2, NEW-7) і полагодили в корені історією 13
+# (план D3). Порядок значень при використанні `dict(zip(...))` мусить
+# лишатись src/rrf/rec/by/top.
+WHY_REQUIRED_KEYS: tuple[str, ...] = ("src", "rrf", "rec", "by", "top")
+
+
+def build_placeholder_why(source_type: str, top: str, note: Optional[str] = None) -> dict:
+    """`why` для елементів, що не пройшли через `search()` (напр. підшиті
+    коментарі в `rag.order_citables`) — нульові внески, той самий
+    обовʼязковий набір ключів `WHY_REQUIRED_KEYS`. Додатковий `note`
+    (дозволений контрактом C2) пояснює словами, чому внески нульові."""
+    why: dict = dict(zip(WHY_REQUIRED_KEYS, (source_type, 0.0, 0.0, [], top)))
+    if note:
+        why["note"] = note
+    return why
+
+
+def _build_why(cid: int, meta: dict, source_type: str, matched_by: list[str],
+               rerank_scores: dict[int, float], rerank_moved: set[int],
+               stage_maps: dict[str, dict[int, tuple[int, float]]],
+               explain: bool, rec_w: float, com_w: float,
+               capped: dict[str, bool]) -> dict:
+    """Контракт C2 (`docs/specs/grep-explainability/plan.md`): компактний `why`
+    на кожному результаті, `stages` — лише коли `explain=True`. Не змінює
+    ранжування — лише читає вже пораховані `meta`/`rerank_scores`."""
+    why: dict = dict(zip(WHY_REQUIRED_KEYS, (
+        source_type,
+        round(meta["score"], 5),
+        round(meta.get("recency", 0.0), 5),
+        matched_by,
+        _why_top(cid, meta, rerank_moved, rec_w, com_w),
+    )))
+    if cid in rerank_scores:
+        why["rr"] = round(rerank_scores[cid], 5)
+    if explain:
+        stages: dict = {}
+        for label, smap in stage_maps.items():
+            hit = smap.get(cid)
+            if hit is None:
+                continue
+            pos, raw = hit
+            field = "sim" if label in ("vector", "comment_vector") else "bm25"
+            stages[label] = {"pos": pos, field: raw}
+        why["stages"] = stages
+        why["weights"] = {"recency": rec_w, "comment": com_w}
+        why["final_raw"] = meta["final"]
+        # Прапорець на ВЕСЬ пошук (однаковий на кожному результаті), не на
+        # цього кандидата — знахідка 12/09: назва мусить це відбивати, щоб
+        # "capped" не читалось як "цей результат зачепило".
+        why["search_capped"] = dict(capped)
+    return why
+
+
 def _rrf(result_lists: list[list[tuple[int, float]]],
          labels: Optional[list[str]] = None) -> dict[int, dict]:
     """Reciprocal Rank Fusion. Returns {chunk_id: {"score", "modes"}}.
@@ -582,7 +660,8 @@ def search(db_path: str, query: str, top_k: int = 8,
            scope_tids: Optional[list[int]] = None,
            include_comments: bool = True,
            comment_weight: Optional[float] = None,
-           comment_share: Optional[float] = None) -> dict:
+           comment_share: Optional[float] = None,
+           explain: bool = False) -> dict:
     """Гібридний пошук. category_id — обмежити одним напрямком (None = усі).
     scope_tids — звузити до конкретних записів (другий шар скоупу поверх
     категорії); список рахує `app.services.scope.scope_filter_ids`.
@@ -593,6 +672,10 @@ def search(db_path: str, query: str, top_k: int = 8,
     include_comments — домішувати коментарі власника (Волна 2) з бустом за
     типом; comment_weight — override дефолту (для тестів/тюнінгу);
     comment_share — стеля на частку коментарів у топі (Волна 2.5).
+    explain — Історія 02 (`docs/specs/grep-explainability`): False (дефолт) —
+    компактний `why` на кожному результаті, True — додає `why["stages"]` з
+    позицією і сирим скором на кожній стадії, де кандидат зустрівся. Не
+    впливає на ранжування чи порядок видачі.
     Returns {"query", "chunks": [...], "vector_available": bool}."""
     query = (query or "").strip()
     if not query:
@@ -622,6 +705,13 @@ def search(db_path: str, query: str, top_k: int = 8,
             logger.debug("[retrieval] індекс коментарів недоступний: %s", exc)
             lists = lists[:2]
             labels = labels[:2]
+
+    # explain=True: позиція+сирий скор кожного кандидата в кожному вхідному
+    # списку (до RRF) — саме те, чого рангу самого по собі бракує (C2).
+    stage_maps: dict[str, dict[int, tuple[int, float]]] = {
+        lbl: {cid: (pos, raw) for pos, (cid, raw) in enumerate(lst)}
+        for lbl, lst in zip(labels, lists)
+    }
 
     fused = _rrf(lists, labels)
     if not fused:
@@ -665,6 +755,9 @@ def search(db_path: str, query: str, top_k: int = 8,
             kw = comments_svc.kind_weight(cr["kind"], cr["weight"])
             rec = _recency_factor(cr["comment_date"], now)
             meta["recency"] = rec
+            # Фактичний внесок множника коментаря — потрібен _why_top, щоб
+            # порівнювати РЕАЛЬНІ внески, а не саму наявність ключа коментаря.
+            meta["comment_delta"] = com_w * kw
             meta["final"] = meta["score"] * (1.0 + rec_w * rec) * (1.0 + com_w * kw)
             continue
         r = by_id.get(cid)
@@ -681,16 +774,28 @@ def search(db_path: str, query: str, top_k: int = 8,
         key=lambda kv: kv[1]["final"], reverse=True)]
 
     rerank_scores: dict[int, float] = {}
+    rerank_moved: set[int] = set()
     if rerank:
         pool = _RERANK_POOL_SIZE if rerank_pool_size is None else rerank_pool_size
         text_of = {k: (comment_rows[k] if _is_comment_key(k) else by_id[k])
                    for k in ranked_ids}
+        pre_pool_ids = ranked_ids[:pool]
         ranked_ids, rerank_scores = _apply_rerank(query, ranked_ids, text_of, pool)
+        post_pool_ids = ranked_ids[:pool]
+        # Хто зі стадії rerank справді змінив позицію — не «хто в пулі»
+        # (_why_top мусить казати "rerank" лише коли позицію дійсно зрушено).
+        rerank_moved = {cid for i, cid in enumerate(post_pool_ids)
+                        if i >= len(pre_pool_ids) or pre_pool_ids[i] != cid}
 
     # Стеля на частку коментарів у топі — ДО диверсифікації, бо саме вона
     # вирішує, хто взагалі бореться за слоти. Замір показав, що без неї
     # коментарі забирають майже все (див. _COMMENT_MAX_SHARE).
+    _pre_cap_ids = ranked_ids
     ranked_ids = _cap_comments(ranked_ids, top_k, comment_share)
+    # explain: чи стеля коментарів взагалі щось змінила в цьому виклику
+    # (глобальний прапорець на весь пошук, не per-кандидат — сам _cap_comments
+    # не позначає, ЯКІ саме кандидати посунуті).
+    _comment_share_capped = ranked_ids != _pre_cap_ids
 
     # Кожен коментар — власна група диверсифікації. Кеп «не більше N з одного
     # джерела» існує проти багатослівного дзвінка, що зʼїдає всі слоти; у
@@ -700,7 +805,12 @@ def search(db_path: str, query: str, top_k: int = 8,
     tid_of = {cid: (("cm", comment_rows[cid]["comment_id"]) if _is_comment_key(cid)
                     else _group_key(by_id[cid]))
               for cid in ranked_ids}
+    _naive_top = ranked_ids[:top_k]
     chosen = _diversify(ranked_ids, tid_of, top_k, cap)
+    # explain: чи диверсифікація змінила наївний зріз топ-k (той самий підхід,
+    # що й вище для коментарів — прапорець на весь пошук).
+    _diversity_capped = chosen != _naive_top
+    _capped = {"comment_share": _comment_share_capped, "diversity": _diversity_capped}
 
     out = []
     for cid in chosen:
@@ -709,6 +819,8 @@ def search(db_path: str, query: str, top_k: int = 8,
             entry = _comment_entry(cid, comment_rows[cid], meta)
             if cid in rerank_scores:
                 entry["rerank_score"] = round(rerank_scores[cid], 5)
+            entry["why"] = _build_why(cid, meta, entry["source_type"], entry["matched_by"],
+                                      rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w, _capped)
             out.append(entry)
             continue
         r = by_id[cid]
@@ -744,6 +856,8 @@ def search(db_path: str, query: str, top_k: int = 8,
             })
         if cid in rerank_scores:
             entry["rerank_score"] = round(rerank_scores[cid], 5)
+        entry["why"] = _build_why(cid, meta, entry["source_type"], entry["matched_by"],
+                                  rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w, _capped)
         out.append(entry)
     return {"query": query, "chunks": out, "vector_available": embeddings.is_available()}
 

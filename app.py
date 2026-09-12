@@ -59,6 +59,7 @@ from app.utils.audio import (
 )
 from app.services.youtube_pytubefix import download_youtube_audio as _download_youtube_audio_service
 from app import state as _state
+from app.core import settings as _settings
 from app.blueprints.system import system_bp as _system_bp
 from app.blueprints.youtube import youtube_bp as _youtube_bp
 from app.blueprints.audio_library import audio_bp as _audio_bp
@@ -232,9 +233,16 @@ class _RequestIdLogFilter(logging.Filter):
         return True
 
 
-_log_formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - [req:%(request_id)s] - %(message)s'
-)
+# config-registry-profiles S2: RECALL_LOG_FORMAT=json перемикає обидва
+# хендлери (file+stream) на однорядковий JSON (app/core/logger.JsonFormatter);
+# дефолт 'text' лишає попередній людинозчитний формат без змін.
+if _settings.env('RECALL_LOG_FORMAT').strip().lower() == 'json':
+    from app.core.logger import JsonFormatter
+    _log_formatter = JsonFormatter()
+else:
+    _log_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [req:%(request_id)s] - %(message)s'
+    )
 
 _file_handler = RotatingFileHandler(
     getattr(cfg, 'LOG_FILE', 'whisper_app.log'),
@@ -308,10 +316,14 @@ def _add_request_id_header(response):
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 
-# T1.5 (Волна 1): перевірка SECRET_KEY тепер ЄДИНА і виконується як hard-fail
-# у config.py (модульний рівень, одразу при `import config` — ще до створення
-# Flask-застосунку), а не тут як warning, що не блокував старт. Дивись
-# config.py біля `current_config = ...` для деталей. Тут дублювання прибрано.
+# T1.5 (Волна 1), уточнено config-registry-fix S4 (знахідка 14): перевірка
+# SECRET_KEY тепер ЄДИНА і виконується як hard-fail у config.py — ЛІНИВО,
+# всередині `_finalize_secret_key()`, яку викликає `get_config()` при
+# ПЕРШОМУ зверненні (тут — `cfg = get_config()` вище по файлу), НЕ в момент
+# `import config`. Раніше (T1.5) це справді був модульний рівень;
+# config-registry-profiles S3 переніс побічні ефекти в ліниву ініціалізацію.
+# Дивись config.py біля `_finalize_secret_key`/`_initialize_dynamic_config`
+# для деталей. Тут (у app.py) дублювання самої перевірки прибрано.
 
 # Phase 6: rate limiting.
 # Один Limiter, завжди увімкнений. Лімити підібрані так, щоб single-user
@@ -566,6 +578,14 @@ atexit.register(cleanup)
 # Ініціалізація бази даних при запуску
 init_database()
 logger.info("База даних ініціалізована")
+# config-registry-profiles S2: init_database() і мігрує, і перевіряє з'єднання
+# (SELECT-и в app.db.migrations) — не впав, отже крок 'ok'. Виняток тут
+# не ловимо: падіння init_database() мало валити старт і раніше, /api/ready
+# (story 03) просто не побачить boot_finished=True.
+# `migrations` навмисно НЕ пишемо в робота (робота-contract-03, знахідка
+# 9): ключ вилучений з контракту в app/state.py — стану 'error' у нього
+# ніколи не буває, бо виняток з app/db/migrations.py вбиває процес раніше.
+_state.робота['database'] = 'ok'
 
 # T6.6: моніторинг масштабу vector search при старті — дешевий COUNT(*)
 # embedded-чанків (БЕЗ завантаження BLOB'ів), WARNING у лог, якщо перевищено
@@ -595,11 +615,15 @@ except Exception as _e:
 # розумним таймаутом ретраять — типове джерело дублів транскрипції (див.
 # anti-dup guard у app/blueprints/transcription.py transcribe()). Фоновий
 # daemon-потік, не блокує boot; RECALL_PRELOAD_WHISPER=0 — вимкнути.
-try:
-    from app.services.whisper_preload import start_background_preload
-    start_background_preload(whisper_manager)
-except Exception as _e:
-    logger.warning("Не вдалося запустити прогрів whisper-моделі: %s", _e)
+#
+# config-registry-fix-r3-01: цикл станів (loading → ready|failed|disabled)
+# і критерій "прогріта модель досі в кеші" (не current_model_name, знахідка
+# 8) винесені у whisper_preload.start_tracked_preload() — юніт-тест з
+# фейковим менеджером доводить порядок станів, замість полінгу дочірнього
+# процесу. Винятки на старті логуються (T7.4) і зводять робота до
+# 'failed' УСЕРЕДИНІ самої функції.
+from app.services.whisper_preload import start_tracked_preload
+start_tracked_preload(whisper_manager, _state.робота)
 
 # Авточистка старих файлів (Phase 6.3): тільки якщо AUTO_CLEANUP_ENABLED=true в env.
 # По дефолту вимкнено — щоб локальний користувач випадково не втратив файли.
@@ -844,7 +868,13 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
 else:
     recording_service = None
     recording_recovery_log = []
-    logger.info("Recording: вимкнено (RECORDING_ENABLED=False)")
+    if cfg.HEADLESS:
+        # config-registry-profiles S2: cfg.RECORDING_ENABLED уже форсовано False
+        # у get_config() (config.py, Assumption 3) без спроби import pyaudiowpatch —
+        # цей лог лише називає причину явно для headless-оператора.
+        logger.info("profile=headless: recorder off")
+    else:
+        logger.info("Recording: вимкнено (RECORDING_ENABLED=False)")
 
 # T2.1 (REMEDIATION_PLAN Волна 1): JobQueue persistence — той самий паттерн
 # recovery, що й вище для recording (SessionStore.recover_orphaned): job'и
@@ -859,6 +889,7 @@ if _crashed_jobs:
         "JobQueue recovery: %d задач(і) з попереднього запуску позначено crashed: %s",
         len(_crashed_jobs), _crashed_jobs,
     )
+_state.робота['job_queue'] = {'bound': True, 'recovered': len(_crashed_jobs)}
 
 # T4.6 (REMEDIATION_PLAN Волна 2): purge прострочених soft-deleted записів
 # (grace-період RECALL_SOFTDELETE_GRACE_DAYS, дефолт 7д) — той самий
@@ -1092,19 +1123,24 @@ def _maybe_launch_telegram_listener():
     stdout/stderr успадковуються → логи слухача в тій самій консолі."""
     if not getattr(cfg, 'TELEGRAM_ENABLED', False):
         logger.info("Telegram: вимкнено (немає ключів або telethon) — слухача не запускаю")
+        _state.робота['telegram'] = 'disabled'
         return
     session_file = str(getattr(cfg, 'TELEGRAM_SESSION', 'telegram')) + '.session'
     if not os.path.exists(session_file):
         logger.warning("Telegram: немає сесії (%s). Спершу одноразово виконайте: "
                        "python telegram_login.py", session_file)
+        _state.робота['telegram'] = 'absent'
         return
+    _state.робота['telegram'] = 'starting'
     try:
         proc = subprocess.Popen([sys.executable, 'telegram_listener.py'],
                                 cwd=str(getattr(cfg, 'BASE_DIR', '.')))
     except Exception as e:
         logger.error("Telegram: не вдалось запустити слухача: %s", e)
+        _state.робота['telegram'] = 'absent'
         return
     logger.info("Telegram: слухач запущено як дочірній процес (pid=%s)", proc.pid)
+    _state.робота['telegram'] = 'running'
 
     def _stop_listener():
         if proc.poll() is None:
@@ -1115,6 +1151,15 @@ def _maybe_launch_telegram_listener():
                 proc.kill()
     atexit.register(_stop_listener)
 
+
+# config-registry-profiles S2: boot-послідовність модульного рівня завершена
+# (БД/міграції/JobQueue/recorder-гейт/лічильники/blueprints/auth/error-handler
+# усі вище). Telegram-слухач запускається нижче лише під `__main__` (reloader-
+# гейт, коментар _maybe_launch_telegram_listener) — робота['telegram']
+# оновлюється тим викликом незалежно від цього прапорця. /api/ready (story 03)
+# читає boot_finished як «модуль app.py повністю зібрано», а не «усі опційні
+# дочірні процеси вже стартували».
+_state.робота['boot_finished'] = True
 
 if __name__ == '__main__':
     logger.info("Whisper UI запущено!")
@@ -1127,7 +1172,7 @@ if __name__ == '__main__':
     # Bind-адреса: безпечний дефолт 127.0.0.1 (тільки локальна машина). Вихід
     # на весь LAN — лише явним opt-in (RECALL_BIND_ALL=1 або FLASK_HOST=0.0.0.0),
     # бо застосунок поки без аутентифікації (див. docs/REMEDIATION_PLAN.md T1.2).
-    bind_all = os.environ.get('RECALL_BIND_ALL', '').strip() in ('1', 'true', 'True')
+    bind_all = _settings.env_bool('RECALL_BIND_ALL')
     host = '0.0.0.0' if (bind_all or cfg.HOST == '0.0.0.0') else cfg.HOST
     if host == '0.0.0.0':
         logger.warning(

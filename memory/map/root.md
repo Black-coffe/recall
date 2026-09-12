@@ -1,6 +1,6 @@
 # root — кореневі entry points
 
-## app.py (1134)
+## app.py (1190)
 **Призначення:** головний Flask-сервер. Boot, реєстрація blueprints, фонові сервіси,
 глобальні singleton-и, HTTP-lifecycle.
 **Entry points:** `get_db_connection()`, `init_database()`, `add_process_log(pid,stage,msg,progress,status)`,
@@ -12,15 +12,46 @@
 **Gotchas:** telegram_listener спавниться **один раз** (gate `WERKZEUG_RUN_MAIN`, інакше reloader дублює).
 SSE-публікація поза локом. `_recording_finalize_callback` кладе finalize в job_queue (non-blocking) → 'finalized' через SSE.
 CSP тільки на HTML.
+**Профіль/headless (спек `config-registry-profiles`, S2):** при `cfg.HEADLESS` blueprint recorder
+не піднімається — `RecordingService`/`LiveTranscribeWorker`/`CopilotWorker`-гілки взагалі не
+торкаються `app.services.recording.*` (лог `"profile=headless: recorder off"`), бо `cfg.RECORDING_ENABLED`
+форсовано `False` ще у `config.py` (нижче), без спроби `import pyaudiowpatch`. Кожна фаза boot-у
+пише в `app.state.робота` (dict з ключами `database/job_queue/whisper/embeddings/telegram/boot_finished`
+— `migrations` НЕ входить у контракт, `app/state.py:45-49` пояснює чому: виняток із
+`app/db/migrations.py` вбиває процес до робота, тож стан 'error' для нього недосяжний):
+`database` одразу після `init_database()`, `job_queue` після `recover_crashed()`,
+`whisper.preload` через фоновий watcher-потік, що `join()`-ить
+`whisper_preload.start_tracked_preload()` (app.py:625-626, логіка прогріву винесена в
+`app/services/whisper_preload.py`, стани `disabled|loading|ready|failed`),
+`telegram` — всередині `_maybe_launch_telegram_listener()` (лишається живим і в headless — це і є
+headless-інжест, не вимикається), `boot_finished=True` в самому кінці боту (app.py:1162).
+`RECALL_LOG_FORMAT=json` (дефолт `text`) перемикає обидва
+логер-хендлери (file+stream) на `JsonFormatter` (`app/core/logger.py`) до їх створення. Це читає
+`GET /api/ready` (blueprint `system`, див. `memory/map/blueprints.md`) — 200 коли
+`database=='ok' ∧ job_queue.bound ∧ whisper.preload in ('ready','disabled') ∧ boot_finished`, інакше 503.
 
-## config.py (437)
-**Призначення:** ієрархія конфігів Development/Production/Testing; `.env` читається **на етапі
-визначення класу** (критично для Telegram-ключів).
+## config.py (537)
+**Призначення:** ієрархія конфігів Development/Production/Testing; `.env`-побічні ефекти
+виконуються ліниво при першому `get_config()` (деталі — Gotchas нижче, вже НЕ на етапі
+визначення класу).
 **Entry points:** `get_config()`, `update_config(**kw)`, `init_directories()`.
 **Ключові прапори:** `WHISPER_BACKEND` (faster>openai), `WHISPER_MAX_PARALLEL=1`, `WHISPER_BATCH_SIZE=8`,
 `FORCE_CPU`, `RECORDING_ENABLED` (auto-detect pyaudiowpatch), `TELEGRAM_*`, `COPILOT_ENABLED`,
 `LOCAL_LLM_URL`/`LOCAL_LLM_MODEL` (Ollama, напр. qwen2.5:14b-instruct-q5_K_M), `MAX_CONTENT_LENGTH=20GB`.
-**Gotchas:** `_detect_recording_enabled()`/`_detect_telegram_enabled()` мають **сайд-ефекти на імпорті**.
+`cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
+`RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
+**Реєстр (`app/core/settings.py`, спек `config-registry-profiles` S1):** єдине джерело істини для
+132 env-флагів (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
+`env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI
+`python -m app.core.settings env-example` генерує `.env.example`). Модуль без важких залежностей
+(не імпортує `app.*`/`flask`/`torch`/`config` — памʼятка `mcp-stdio-no-heavy-models`); `config.py`
+бере скалярні дефолти звідти замість дубльованих літералів (три свідомі винятки на прямому
+`os.environ.get`: `TELEGRAM_SESSION`, `TELEGRAM_API_ID`, `_detect_telegram_enabled` — див.
+`## Implementation notes` story 01).
+**Gotchas:** `_detect_recording_enabled()`/`_detect_telegram_enabled()` і перевірка `SECRET_KEY`
+(hard-fail/автоген/запис у `.env`) **більше не на імпорті** — перенесені у `_initialize_dynamic_config()`,
+що виконується лінивo один раз при **першому** `get_config()` (прапорець `_config_initialized`).
+`import config` сам по собі більше не імпортує `pyaudiowpatch`/`telethon` і не кидає/не пише `.env`.
 `WHISPER_MAX_PARALLEL=1` бо `WhisperModel.transcribe()` НЕ тред-сейф на спільному handle (>1 → краш 0xC0000409).
 
 ## whisper_manager_new.py (867)
@@ -56,14 +87,19 @@ Telethon-сесію не відкрити двома клієнтами — Flas
 
 ## mcp_server.py (785)
 **Призначення:** окремий MCP-сервер — **read-first** міст до Recall для Claude Code/Desktop.
-**30 read-only тулзів**, жодного create/update/delete (стратегічне рішення власника 02.07.2026;
+**32 read-only тулзів**, жодного create/update/delete (стратегічне рішення власника 02.07.2026;
 38 write-тулзів фізично видалено у Волні 1 — карта до цього стверджувала «~80 tools, CRUD-міст»).
-**Гібрид:** 11 тулзів читають SQLite напряму (працюють БЕЗ запущеного app.py), 16 — httpx-проксі
-на `app.py` (`RECALL_API_URL`, default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути
-torch/e5 у stdio-процес.
+Число тулзів у `about()` рахується з реєстру FastMCP (`_registered_tool_names()`), а не хардкодиться.
+**Гібрид:** 15 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, працюють БЕЗ запущеного app.py,
+серед них `grep_archive`), 17 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
+default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути torch/e5 у stdio-процес.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
 **Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини.
+**Grep (grep-explainability, S2):** `grep_archive(pattern, regex=, ignore_case=, context=, limit=,
+source_type=, transcription_id=, days=)` — буквальний/regex-пошук ТОЧНОГО РЯДКА по `chunks`
+(без ембеддингів, без ранжування) поверх `app.services.archive_grep.grep()`; для ID/сум/@ніків,
+які FTS5-токенізація й reranker ховають.
 **Транспорти:** stdio (**default**, клієнт сам спавнить) або http (`--transport http`, Bearer).
 **Resources:** `recall://about` (огляд+статистика+карта тулзів), `recall://transcript/{id}`,
 `recall://entity/{id}`.

@@ -2,6 +2,7 @@
 Настройка логирования для приложения
 """
 
+import json
 import logging
 import logging.handlers
 import os
@@ -9,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 from config import get_config
+from app.core import settings as _settings
 
 
 def setup_logger(
@@ -49,7 +51,9 @@ def setup_logger(
     # процесса на Windows (WinError 32 — файл занят: app.py пишет своим basicConfig,
     # listener — своим, каждый stdio-mcp_server открывал ещё по копии). Включить
     # обратно для конкретного процесса можно через RECALL_LOG_TO_FILE=1.
-    _file_logging = os.environ.get("RECALL_LOG_TO_FILE", "0").strip().lower() in ("1", "true", "yes")
+    # config-registry-fix-r3-01: читання переведено на settings.env_bool —
+    # truthy-набір розширився з ('1','true','yes') до ('1','true','yes','on').
+    _file_logging = _settings.env_bool("RECALL_LOG_TO_FILE")
     if _file_logging and (log_file or hasattr(config, 'LOG_FILE')):
         log_path = log_file or config.LOG_FILE
         
@@ -72,6 +76,34 @@ def setup_logger(
     return logger
 
 
+class JsonFormatter(logging.Formatter):
+    """config-registry-profiles S2: `RECALL_LOG_FORMAT=json` — один рядок JSON
+    на запис замість тексту (`app.py:219-275` підключає це до file+stream
+    хендлерів, коли увімкнено). Поля навмисно ті самі, що в text-форматі
+    (`_RequestIdLogFilter` в app.py проставляє `record.request_id`) — жодних
+    зайвих полів не додаємо (план, Contracts §Логи)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        # config-registry-fix S4 (знахідка 16): мілісекунди — text-режим у
+        # app.py несе їх у `%(asctime)s` за замовчуванням (Formatter без
+        # datefmt додає ",%03d"), тут `formatTime` з явним datefmt їх
+        # губив. Дописуємо тим самим форматом, що й стандартний logging.
+        payload = {
+            "ts": f"{self.formatTime(record, '%Y-%m-%d %H:%M:%S')},{int(record.msecs):03d}",
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "request_id": getattr(record, "request_id", "-"),
+        }
+        if record.exc_info:
+            # exc_info — поле поза початковим контрактом Contracts (§Логи мали
+            # ті самі поля, що text-формат); лишаємо, бо без нього
+            # __format__ ковтав би трейсбеки на ERROR-записах. Зафіксувати
+            # як свідоме відхилення — в Contracts S3 (історія 06).
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
 def get_logger(name: str) -> logging.Logger:
     """
     Получает настроенный логгер
@@ -79,8 +111,14 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-# Создаем основной логгер приложения
-app_logger = setup_logger("whisper_ui")
+# config-registry-fix S4 (знахідка 5): раніше тут стояло
+# `app_logger = setup_logger("whisper_ui")` — виконувалось при БУДЬ-якому
+# імпорті цього модуля (навіть заради `JsonFormatter`), додавало
+# StreamHandler і, при `RECALL_LOG_TO_FILE=1`, ДРУГИЙ `RotatingFileHandler`
+# на той самий `whisper_ui.log`, за який уже конкурує `app.py`-хендлер —
+# та сама WinError 32 гонитва за файлом, заради усунення якої існує прапорець.
+# Нічого в кодовій базі не читає `app_logger` (перевірено грепом), тож
+# прибираємо побічний ефект імпорту, а не переписуємо `setup_logger`.
 
 
 class LoggerMixin:

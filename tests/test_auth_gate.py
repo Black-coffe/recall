@@ -41,6 +41,14 @@ def app_module():
     def models():
         return jsonify([])
 
+    @app.route("/api/history")
+    def history():
+        return jsonify([])
+
+    @app.route("/api/ready")
+    def ready():
+        return jsonify({"ready": True})
+
     @app.route("/")
     def shell():
         return "shell"
@@ -140,3 +148,57 @@ class TestAuthGate:
             environ_overrides={"REMOTE_ADDR": _NON_LOCAL_ADDR},
         )
         assert r.status_code != 401
+
+
+class TestAuthGateProfileDefaults:
+    """config-registry-profiles S2: дефолт RECALL_LOCAL_TRUSTED залежить від
+    RECALL_PROFILE, доки оператор не задав RECALL_LOCAL_TRUSTED явно."""
+
+    def test_headless_without_key_is_401_even_from_localhost(self, client, monkeypatch):
+        """headless без RECALL_API_KEY і без явного RECALL_LOCAL_TRUSTED → дефолт
+        local-trusted "0" (fail-closed), тож навіть localhost отримує 401."""
+        monkeypatch.setenv("RECALL_PROFILE", "headless")
+        monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        r = client.get("/api/history")  # test_client за замовчуванням шле з 127.0.0.1
+        assert r.status_code == 401
+
+    def test_headless_with_explicit_local_trusted_passes(self, client, monkeypatch):
+        """Явний RECALL_LOCAL_TRUSTED=1 у headless — свідомий override, поважається
+        (Assumption 1 плану) — localhost знову працює без ключа."""
+        monkeypatch.setenv("RECALL_PROFILE", "headless")
+        monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "1")
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        r = client.get("/api/history")
+        assert r.status_code == 200
+
+    def test_desktop_default_still_local_trusted(self, client, monkeypatch):
+        """desktop (профіль не задано або 'desktop') зберігає попередній UX —
+        дефолт local-trusted лишається "1"."""
+        monkeypatch.delenv("RECALL_PROFILE", raising=False)
+        monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        r = client.get("/api/history")
+        assert r.status_code == 200
+
+    def test_ready_open_in_headless_without_key(self, client, monkeypatch):
+        """/api/ready лишається без auth у headless (той самий клас, що /api/health)."""
+        monkeypatch.setenv("RECALL_PROFILE", "headless")
+        monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        r = client.get(
+            "/api/ready",
+            environ_overrides={"REMOTE_ADDR": _NON_LOCAL_ADDR},
+        )
+        assert r.status_code == 200
+
+    def test_ready_open_in_desktop_without_key(self, client, monkeypatch):
+        """/api/ready лишається без auth і у desktop-профілі при LOCAL_TRUSTED=0."""
+        monkeypatch.delenv("RECALL_PROFILE", raising=False)
+        monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        r = client.get(
+            "/api/ready",
+            environ_overrides={"REMOTE_ADDR": _NON_LOCAL_ADDR},
+        )
+        assert r.status_code == 200

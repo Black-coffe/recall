@@ -1,11 +1,12 @@
 """Recall MCP server — read-first міст до Recall по MCP.
 
 Окремий процес (за зразком telegram_listener.py). Віддає Claude (Code / Desktop)
-read-first ядро з 30 read-only інструментів: пошук/читання архіву, граф сутностей,
-задачі, статистика, ask-archive/research та status-only знімки live-підсистем
-(recording/copilot/telegram/jobs). **Гібрид:** 14 тулзів читають персистентні дані
-напряму з SQLite (`get_db_connection`/`app.services.research`, працюють БЕЗ
-запущеного app.py); решта 16 (пошук/RAG/статуси) — httpx-проксі на запущений
+read-first ядро read-only інструментів (точна кількість — жива, з реєстру FastMCP,
+див. ресурс `recall://about`): пошук/читання архіву, граф сутностей, задачі,
+статистика, ask-archive/research та status-only знімки live-підсистем
+(recording/copilot/telegram/jobs). **Гібрид:** частина тулзів читає персистентні
+дані напряму з SQLite (`get_db_connection`/`app.services.research`, працюють БЕЗ
+запущеного app.py); решта (пошук/RAG/статуси) — httpx-проксі на запущений
 app.py (реюз готових ендпоінтів, нуль дублювання, і щоб не вантажити важкі
 e5/torch у stdio-процес) — цим потрібен запущений app.py. Повний розподіл —
 у ресурсі `recall://about` і docs/MCP_SETUP.md. **Стратегічне рішення власника
@@ -30,6 +31,7 @@ docs/MCP_SETUP.md.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -448,7 +450,7 @@ def list_comments(target_type: Optional[str] = None, target_id: Optional[str] = 
 
 @mcp.tool
 def search_archive(query: str, top_k: int = 8,
-                   category_id: Optional[int] = None) -> dict:
+                   category_id: Optional[int] = None, explain: bool = False) -> dict:
     """Гібридний (вектор e5 + FTS5 BM25) пошук по ВСЬОМУ архіву дзвінків/документів/
     Telegram. Повертає чанки з провенансом (джерело, дата, спікер, таймкод/сторінка,
     transcription_id, chunk_id) і релевантністю. category_id — звузити до напрямку.
@@ -458,7 +460,8 @@ def search_archive(query: str, top_k: int = 8,
     про запис (уточнення/виправлення/акценти), а не репліки з розмови. Вони мають
     ВИЩИЙ пріоритет за транскрипт: при суперечності правильний коментар, і
     `comment_kind='correction'` прямо скасовує відповідне місце запису. Поле
-    `target_label` каже, до чого саме написано коментар."""
+    `target_label` каже, до чого саме написано коментар. explain=True — додати
+    розбір релевантності (bm25/dense/rrf/recency/rerank, джерело) до кожного чанка."""
     # Проксі на app.py (тепла e5 вже в його пам'яті) — НЕ вантажити torch/e5 у stdio-
     # процес MCP-сервера: важка нативна ініціалізація в stdio псує JSON-RPC (запис у
     # stdout) і конкурує за GPU з app.py (faster-whisper/Qwen) → зависання назавжди.
@@ -466,6 +469,8 @@ def search_archive(query: str, top_k: int = 8,
     params: dict = {"q": query, "k": int(top_k)}
     if category_id is not None:
         params["category_id"] = int(category_id)
+    if explain:
+        params["explain"] = True
     res = _api("GET", "/api/memory/search", params=params)
     chunks = res.get("chunks") or []
     return {
@@ -581,6 +586,45 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
     sql += " ORDER BY id DESC LIMIT ?"; params.append(min(int(limit), 200))
     with get_db_connection(DB_PATH) as conn:
         return [_row(r) for r in conn.execute(sql, params)]
+
+
+@mcp.tool
+def grep_archive(pattern: str, regex: bool = False, ignore_case: bool = True,
+                 context: int = 1, limit: int = 20, source_type: Optional[str] = None,
+                 transcription_id: Optional[int] = None, days: Optional[int] = None) -> dict:
+    """Буквальний або regex-пошук ТОЧНОГО РЯДКА по чанках архіву, з ±context сусідніми
+    чанками. Обирай ЦЕЙ інструмент, а не `search_archive`, коли треба знайти РІВНО
+    ЦЕЙ РЯДОК: ID запису, суму («1 200 000»), @нік, номер договору, точну назву —
+    усе, що FTS5-токенізація і семантичний ембединг розбивають на частини або
+    ховають за близьким за змістом, але неточним збігом. `search_archive` —
+    навпаки, коли треба знайти ЗА ЗМІСТОМ, а не за точним написанням.
+
+    Порядок видачі — за датою зустрічі, НЕ за релевантністю (тут немає ні
+    вектора, ні BM25, ні reranker); рядки без дати — останні. `truncated=True`
+    має три різні причини (`truncated_reason`), і рецепт різний:
+    - `"limit"` — весь архів переглянуто, збігів більше, ніж `limit`
+      (`match_total` каже скільки саме); підніми `limit` або звузь фільтрами
+      (`source_type`/`transcription_id`/`days`), щоб побачити решту.
+    - `"max_scan"` або `"deadline"` — скан зупинився ДОСТРОКОВО, не дійшовши
+      кінця таблиці; підняти `limit` НІЧОГО не дасть, бо збіги за межею
+      переглянутого просто не переглядались. `match_total` тоді — кількість
+      серед переглянутого, не в усьому архіві. Відповідь несе
+      `arbitrary_scan_caveat`: без `ORDER BY` у SQL переглянутий префікс —
+      ДОВІЛЬНИЙ щодо дати, а не гарантовано найновіші записи. Дієва порада тут
+      не `limit` (у тулзи немає параметра `max_scan`, аби розширити скан) —
+      звузь `days`/`source_type`/`transcription_id`, щоб переглянутий префікс
+      покривав менший, точніший зріз архіву.
+    Обмеження: пошук іде по `chunks`, не по повному тексту транскрипції —
+    рядок, розрізаний швом чанкування навпіл, не знайдеться
+    (`chunk_boundary_caveat` у відповіді).
+    Автономний: працює без запущеного app.py (пряме читання SQLite)."""
+    from app.services.archive_grep import grep
+    try:
+        return grep(DB_PATH, pattern, regex=regex, ignore_case=ignore_case,
+                    context=context, limit=limit, source_type=source_type,
+                    transcription_id=transcription_id, days=days)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @mcp.tool
@@ -852,7 +896,8 @@ def research_export(terms: str, category_id: Optional[int] = None) -> str:
 
 @mcp.tool
 def ask_archive(question: str, k: int = 12, category_id: Optional[int] = None,
-                project: Optional[str] = None, model: Optional[str] = None) -> dict:
+                project: Optional[str] = None, model: Optional[str] = None,
+                explain: bool = False) -> dict:
     """RAG «Запитай архів»: питання → відповідь Claude ТІЛЬКИ з архіву + цитати [n].
 
     k — скільки чанків у контекст (1–20; дефолт 12 за замірами eval-харнеса:
@@ -866,11 +911,14 @@ def ask_archive(question: str, k: int = 12, category_id: Optional[int] = None,
         обнуляє пошук, а просто не звужує.
 
     Для природномовних питань («що ми вирішили по X?»); для точкового пошуку
-    фрагментів бери search_archive. Нічого не змінює (працює і в read-only)."""
-    return _api("POST", "/api/memory/ask",
-                body={"question": question, "k": int(k), "category_id": category_id,
-                      "project": project, "model": model},
-                write=False, timeout=180.0)
+    фрагментів бери search_archive. Нічого не змінює (працює і в read-only).
+    explain=True — додати розбір релевантності (bm25/dense/rrf/recency/rerank,
+    джерело) до цитованих чанків."""
+    body = {"question": question, "k": int(k), "category_id": category_id,
+            "project": project, "model": model}
+    if explain:
+        body["explain"] = True
+    return _api("POST", "/api/memory/ask", body=body, write=False, timeout=180.0)
 
 
 @mcp.tool
@@ -1034,8 +1082,271 @@ def get_job_status(job_id: str) -> dict:
 
 @mcp.tool
 def get_active_recording() -> dict:
-    """Поточна активна сесія запису (для re-attach), або порожньо."""
-    return _api("GET", "/api/recordings/active")
+    """Поточна активна сесія запису (для re-attach) + за що чіплятись, щоб
+    дивитись у дзвінок наживо (mcp-live-call-03): `copilot_session_id`
+    (None, якщо ко-пілот для цього запису не стартував), `copilot_active`
+    (сесія ко-пілота ще 'active', не 'ended'), `live_transcript_available`
+    (те саме поле `available`, що віддає `get_live_transcript` — не
+    передивляємось сюди по `state.is_active`: доступність live-прев'ю
+    вирішує live-воркер, а не статус сесії запису, знахідка історії 01)."""
+    data = _api("GET", "/api/recordings/active")
+    if not isinstance(data, dict) or not data.get("active"):
+        return data
+    sid = data.get("session_id")
+    data["copilot_session_id"] = None
+    data["copilot_active"] = False
+    data["live_transcript_available"] = None
+    if sid:
+        row = None
+        try:
+            with get_db_connection(DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT id, status FROM copilot_sessions WHERE recording_session_id = ? "
+                    "ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+        except sqlite3.Error as e:
+            # Деградуємо, як і решта тулзи: БД заблокована довше busy_timeout —
+            # не причина обвалити відповідь про активний запис, який app.py
+            # вже підтвердив.
+            logger.debug("[mcp] get_active_recording: copilot_sessions недоступна: %s", e)
+        if row:
+            data["copilot_session_id"] = row["id"]
+            data["copilot_active"] = (row["status"] == "active")
+        lt = get_live_transcript(session_id=sid)
+        if isinstance(lt, dict) and "available" in lt:
+            data["live_transcript_available"] = lt["available"]
+    return data
+
+
+# Потолок подій копілота за один виклик тулзи (окремий від _LIVE_TRANSCRIPT_LIMIT=400
+# у app/blueprints/recording.py — обидва існують по контракту C4, plan.md, значення
+# НЕ збігаються: події копілота важчі за сегмент транскрипту).
+_LIVE_COPILOT_LIMIT = 200
+
+# Види подій copilot_events — коментар колонки kind у app/db/migrations.py (v19).
+# Джерело для валідації kinds=... і для повного тесту (жоден вид не пропущений).
+_COPILOT_EVENT_KINDS = frozenset({
+    "topic_shift", "topic_return", "retrieval", "insight_local", "insight_verified",
+    "escalation", "operator_action", "usage", "safety_sweep",
+})
+
+
+def _operator_saw(kind: str, payload: dict, event_id: int, verdict_by_ref: dict) -> Optional[bool]:
+    """Виведений (а не сирий) ознака «оператор реально побачив цю картку».
+
+    `payload.get("shown")` сам по собі бреше у режимі verified_only
+    (app/services/copilot/config.py): там `insight_local` персистується з
+    `shown=False` ДО вердикту Claude, а показана картка йде лише в SSE
+    (`_publish("copilot_insight", ...)` у app/services/copilot/worker.py) —
+    подія в БД так і лишається з `shown=False`, хоча оператор її бачив.
+
+    Ланцюжок `ref_event_id`/вердикт закриває це: якщо для `insight_local` є
+    пізніша подія `insight_verified` з `payload.ref_event_id == id` і
+    `verdict == "real"`, картку таки показали (з верифікованим текстом).
+
+    `insight_verified` сама по собі буває ДВОХ форм з тим самим kind:
+    - запис вердикту ескалації (`ref_event_id` у payload, БЕЗ `shown`) — це
+      метадані про іншу подію, не картка сама по собі → None, не False;
+    - картка safety-sweep (`_emit_insight` з kind_event="insight_verified") —
+      несе власний `shown`, як insight_local.
+    """
+    if kind == "insight_local":
+        if verdict_by_ref.get(event_id) == "real":
+            return True
+        shown = payload.get("shown")
+        return bool(shown) if shown is not None else None
+    if kind == "insight_verified" and "ref_event_id" in payload:
+        return None
+    return payload.get("shown")
+
+
+@mcp.tool
+def get_live_transcript(session_id: Optional[str] = None, since_seq: Optional[int] = None) -> dict:
+    """Прокси на C1 (`GET /api/recording/<sid>/live-transcript`) — снапшот
+    live-прев'ю сегментів запису, що триває (RAM-only, зникає після finalize —
+    тоді бери `get_transcript`). `session_id=None` → активна сесія запису.
+
+    `since_seq` — **єдиний спосіб опитування**: поверне лише сегменти з
+    `seq > since_seq` (номер спільний для обох доріжок mic/system, росте в
+    порядку фактичного append'у — це гарантує, що жодна доріжка не
+    загубиться). Бери `next_seq` з відповіді ДОСЛІВНО і передавай його як
+    `since_seq` наступного виклику — не рахуй максимум сам за вже отриманими
+    сегментами: порожній опит навмисно лишає `next_seq` незмінним, щоб
+    усічені (`truncated`) сегменти не пропали.
+
+    Фільтру по часу (`since_sec`) тут навмисно немає: доріжки транскрибуються
+    незалежно, і опитування по часу губить сегменти повільнішої доріжки.
+    Потребує запущеного app.py."""
+    if not session_id:
+        active = _api("GET", "/api/recordings/active")
+        if not isinstance(active, dict) or not active.get("active"):
+            return {
+                "success": True, "session_id": None, "available": False,
+                "reason": (active.get("error") if isinstance(active, dict) else None)
+                          or "немає активної сесії запису",
+                "is_active": False, "status": None, "elapsed_seconds": 0.0,
+                "segments": [], "count": 0, "last_sec": None, "next_seq": None,
+                "truncated": False,
+            }
+        session_id = active.get("session_id")
+    params: dict = {}
+    if since_seq is not None:
+        params["since_seq"] = int(since_seq)
+    return _api("GET", f"/api/recording/{session_id}/live-transcript", params=params or None)
+
+
+@mcp.tool
+def get_live_copilot(session_id: Optional[str] = None, since_event_id: Optional[int] = None,
+                      kinds: Optional[str] = None) -> dict:
+    """Direct-DB, ПОВНИЙ потік подій ко-пілота живого дзвінка — включно з
+    притишеними бюджетом уваги і неверифікованими `insight_local` (нічого не
+    фільтрується тут: рішення, що показувати, лишається за агентом, non-goal
+    цієї історії — не звужувати на боці тулзи).
+
+    `session_id` — id сесії ЗАПИСУ (`rec_...`, як у `get_live_transcript`), НЕ
+    `copilot_session_id`. `None` → та сама активна сесія запису, що й у
+    `get_live_transcript` (через `/api/recordings/active`, коли app.py живий —
+    'active': false там означає ЩО НЕМАЄ активного запису, а не «шукай щось
+    старе в БД»). Якщо app.py недоступний, тулза лишається direct-DB: фолбек
+    на найновішу `copilot_sessions` зі статусом 'active' у БД — і тоді
+    зависла сесія впалого процесу МОЖЕ трапитись, про що каже поле
+    `session_resolution` у відповіді.
+    `since_event_id` — лише події з `id >` заданого (інкрементальний опит).
+    `kinds` — опційний CSV-фільтр (`"insight_local,escalation"`); порожньо —
+    усі види. Невідомий вид — явна відмова з переліком `known_kinds`, а не
+    тиха порожня видача.
+
+    Кожна подія несе розгорнутий `payload` + два top-level поля:
+    - `shown` — СИРЕ значення `payload.shown` на момент запису в БД
+      (`None` для видів, де показ картки не застосовний: topic_shift,
+      topic_return, retrieval, usage, operator_action, escalation, і для
+      `insight_verified`-запису вердикту, див. нижче). У режимі verified_only
+      (типовий, `app/services/copilot/config.py`) це поле БРЕШЕ для
+      `insight_local`: подія персистується з `shown=False` ДО вердикту
+      Claude, а показана картка йде лише в SSE — БД цей момент не оновлює.
+    - `operator_saw` — ВИВЕДЕНИЙ, правдивий показник «оператор це бачив»,
+      побудований по ланцюжку `ref_event_id`/`verdict`: якщо для
+      `insight_local` пізніше зʼявилась `insight_verified` з
+      `ref_event_id == id` і `verdict == 'real'`, картку таки показали
+      (з верифікованим текстом) — `operator_saw=True` навіть якщо `shown`
+      каже `False`. Значення двох форм `insight_verified` різні: запис
+      вердикту ескалації (є `ref_event_id`, немає `shown`) сам по собі не
+      картка → `None`; картка safety-sweep (є `shown`, немає `ref_event_id`)
+      — як `insight_local`. Ланцюжок рахується в межах ОДНОГО виклику: якщо
+      верифікація прийшла вже ПІСЛЯ обрізки/курсора цієї сторінки, значення
+      лишається таким, яким було на момент виклику — best-effort, не гарантія.
+
+    Потолок 200 подій за виклик (SQL `LIMIT`, без розбору зайвого в Python),
+    при обрізці `truncated: true` — гортай далі через `since_event_id` = id
+    останньої отриманої події.
+
+    Працює БЕЗ запущеного app.py для явного `session_id`; для `session_id=None`
+    йде необовʼязковий виклик `/api/recordings/active` — його відсутність не
+    валить тулзу, лише вимикає точне розв'язання на користь фолбека з БД."""
+    session_resolution = None
+    if not session_id:
+        active = _api("GET", "/api/recordings/active")
+        if isinstance(active, dict) and "error" not in active:
+            if not active.get("active"):
+                return {
+                    "success": True, "available": False,
+                    "reason": "немає активної сесії запису",
+                    "session_id": None, "copilot_session_id": None,
+                    "events": [], "count": 0, "truncated": False,
+                }
+            session_id = active.get("session_id")
+        else:
+            session_resolution = (
+                "app.py недоступний — сесію взято фолбеком з БД (найновіша "
+                "copilot_sessions зі статусом 'active'), могла лишитись від "
+                "впалого процесу")
+
+    with get_db_connection(DB_PATH) as conn:
+        if session_id:
+            csess = conn.execute(
+                "SELECT * FROM copilot_sessions WHERE recording_session_id = ? "
+                "ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+        else:
+            csess = conn.execute(
+                "SELECT * FROM copilot_sessions WHERE status = 'active' "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+        if csess is None:
+            return {
+                "success": True, "available": False,
+                "reason": (f"ко-пілот для сесії {session_id} не запускався" if session_id
+                           else "активної сесії ко-пілота не знайдено"),
+                "session_id": session_id, "copilot_session_id": None,
+                "events": [], "count": 0, "truncated": False,
+            }
+        csess = _row(csess)
+        cs_id = csess["id"]
+        kind_list = [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
+        if kind_list:
+            unknown = sorted(set(kind_list) - _COPILOT_EVENT_KINDS)
+            if unknown:
+                return {
+                    "success": False,
+                    "error": f"невідомі kinds: {', '.join(unknown)}",
+                    "known_kinds": sorted(_COPILOT_EVENT_KINDS),
+                }
+        query = ("SELECT id, ts_wall, ts_offset_sec, kind, topic_id, source, confidence, "
+                 "payload_json, tokens_in, tokens_out, operator_action FROM copilot_events "
+                 "WHERE copilot_session_id = ?")
+        params: list = [cs_id]
+        if since_event_id is not None:
+            query += " AND id > ?"
+            params.append(int(since_event_id))
+        if kind_list:
+            query += f" AND kind IN ({','.join('?' * len(kind_list))})"
+            params.extend(kind_list)
+        query += " ORDER BY id LIMIT ?"
+        params.append(_LIVE_COPILOT_LIMIT + 1)
+        rows = conn.execute(query, params).fetchall()
+
+    truncated = len(rows) > _LIVE_COPILOT_LIMIT
+    if truncated:
+        rows = rows[:_LIVE_COPILOT_LIMIT]
+
+    events = []
+    verdict_by_ref: dict = {}
+    for r in rows:
+        e = _row(r)
+        raw = e.pop("payload_json")
+        try:
+            payload = json.loads(raw) if raw else {}
+        except (ValueError, TypeError):
+            payload = {}
+        e["payload"] = payload
+        e["shown"] = payload.get("shown")
+        events.append(e)
+        if e["kind"] == "insight_verified" and "ref_event_id" in payload:
+            verdict_by_ref[payload["ref_event_id"]] = payload.get("verdict")
+    for e in events:
+        e["operator_saw"] = _operator_saw(e["kind"], e["payload"], e["id"], verdict_by_ref)
+
+    result = {
+        "success": True, "available": True, "reason": None,
+        "session_id": csess.get("recording_session_id"),
+        "copilot_session_id": cs_id,
+        "events": events, "count": len(events), "truncated": truncated,
+    }
+    if session_resolution:
+        result["session_resolution"] = session_resolution
+    return result
+
+
+@mcp.tool
+def ask_live(question: str, scope: str = "both", session_id: Optional[str] = None) -> dict:
+    """Прокси на C2 (`POST /api/copilot/live-ask`) — питання агента → локальна
+    модель (Ollama, $0, без Claude) → відповідь із живого транскрипту і/або
+    архіву. Семантично читання: нічого не пише в БД, у сесію запису чи у
+    віджет оператора (A2, plan.md).
+
+    `scope`: `'call'` — лише живий транскрипт | `'archive'` — лише архів |
+    `'both'` (за замовч.) — обидва. `session_id=None` → активна сесія запису
+    (розв'язується на боці app.py). Недоступність Ollama — `available: false`
+    + `reason` у відповіді, не HTTP-помилка. Потребує запущеного app.py."""
+    return _api("POST", "/api/copilot/live-ask",
+                body={"question": question, "session_id": session_id, "scope": scope})
 
 
 @mcp.tool
@@ -1111,6 +1422,31 @@ def get_chat_context(chat_id: int) -> dict:
 
 
 # ============================== RESOURCES =====================================
+# Поділ на direct-DB/проксі — довідковий текст для людини; він НЕ визначає, що
+# зареєстровано. Джерело істини — реєстр FastMCP (`_registered_tool_names`);
+# тест ловить розбіжність, якщо ці два бакети розійдуться з реєстром.
+_ABOUT_DIRECT_DB = (
+    "get_transcript", "get_original_file", "list_recent", "list_categories",
+    "list_entities", "get_entity", "list_action_items", "list_dropped_commitments",
+    "list_stale_topics", "weekly_digest", "list_open_questions", "research_export",
+    "get_chat_context", "list_comments", "grep_archive", "get_live_copilot",
+)
+_ABOUT_PROXY = (
+    "search_archive", "ask_archive", "suggest_category", "research_preview",
+    "research_summary", "search_history", "get_archive_stats", "list_speakers",
+    "get_speaker_stats", "get_speaker_timeline", "list_bookmarks", "list_saved_searches",
+    "get_job_status", "get_active_recording", "copilot_availability", "telegram_status",
+    "telegram_coverage", "get_live_transcript", "ask_live",
+)
+
+
+def _registered_tool_names() -> list[str]:
+    """Імена тулзів, реально зареєстрованих у FastMCP — не хардкод, а реєстр:
+    підкладена нова тулза зміниться тут сама, без правки `about()`."""
+    tools = asyncio.run(mcp.list_tools())
+    return sorted(t.name for t in tools)
+
+
 @mcp.resource("recall://about")
 def about() -> str:
     """Огляд системи + жива статистика архіву (щоб Claude розумів, що під рукою)."""
@@ -1120,8 +1456,9 @@ def about() -> str:
         by_src = {r["source_type"]: r["c"] for r in conn.execute(
             "SELECT source_type, COUNT(*) c FROM transcriptions GROUP BY source_type")}
         cats = [r["name"] for r in conn.execute("SELECT name FROM categories ORDER BY sort_order")]
+    n_tools = len(_registered_tool_names())
     return (
-        "# Recall — локальний RAG-архів дзвінків (MCP: read-first ядро, 30 тулзів)\n\n"
+        f"# Recall — локальний RAG-архів дзвінків (MCP: read-first ядро, {n_tools} тулзів)\n\n"
         "Flask-додаток, дані локально. Джерела: записи дзвінків (діаризація), YouTube, "
         "документи (PDF/DOCX/…), Telegram. Пошук: e5-ембеддинги (1024-dim) + FTS5, "
         "гібрид RRF з recency/diversity.\n\n"
@@ -1141,17 +1478,18 @@ def about() -> str:
         "5. `list_categories`/`list_speakers`/`list_bookmarks`/`list_saved_searches`/`get_archive_stats`;\n"
         "6. `ask_archive(question)` — RAG-відповідь з цитатами; `suggest_category` — k-NN підказка (без застосування);\n"
         "7. **Live/фонові статуси:** `get_job_status`, `get_active_recording`, `copilot_availability`, "
-        "`telegram_status`.\n\n"
+        "`telegram_status`; `list_comments` — власні уточнення й виправлення поверх записів;\n"
+        "8. **Живий дзвінок:** `get_live_transcript`/`ask_live` — прев'ю транскрипту й питання до нього, "
+        "поки дзвінок триває; `get_live_copilot` — повний потік подій ко-пілота (включно з притишеними "
+        "бюджетом і неверифікованими), фільтрація — на боці агента.\n\n"
         "## Автономність (працює без запущеного app.py?)\n"
-        "**Direct-DB, автономні (14):** `get_transcript`, `get_original_file`, `list_recent`, `list_categories`, "
-        "`list_entities`, `get_entity`, `list_action_items`, `list_dropped_commitments`, `list_stale_topics`, "
-        "`weekly_digest`, `list_open_questions`, `research_export`, `research_summary`, `get_chat_context` — "
-        "читають SQLite напряму, app.py НЕ потрібен.\n"
-        "**HTTP-проксі на app.py (16):** `search_archive`, `ask_archive`, `suggest_category`, `research_preview`, "
-        "`search_history`, `get_archive_stats`, `list_speakers`, `get_speaker_stats`, "
-        "`get_speaker_timeline`, `list_bookmarks`, `list_saved_searches`, `get_job_status`, `get_active_recording`, "
-        "`copilot_availability`, `telegram_status`, `telegram_coverage` — потребують запущеного "
-        "`.venv/Scripts/python.exe app.py` (інакше повертають зрозумілу помилку замість падіння).\n\n"
+        f"**Direct-DB, автономні ({len(_ABOUT_DIRECT_DB)}):** "
+        + ", ".join(f"`{n}`" for n in _ABOUT_DIRECT_DB) +
+        " — читають SQLite напряму, app.py НЕ потрібен.\n"
+        f"**HTTP-проксі на app.py ({len(_ABOUT_PROXY)}):** "
+        + ", ".join(f"`{n}`" for n in _ABOUT_PROXY) +
+        " — потребують запущеного `.venv/Scripts/python.exe app.py` "
+        "(інакше повертають зрозумілу помилку замість падіння).\n\n"
         "**Стратегічне рішення власника: MCP — read-first.** Створення/зміна/видалення записів, керування "
         "залізом (запис мікрофона, копілот, Telegram-чати) і платні/довгі Claude-виклики "
         "(enrich/polish/summarize/transcribe/ingest/backfill) через MCP недоступні — ці дії робить UI Recall.\n"

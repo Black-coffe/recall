@@ -98,7 +98,9 @@ def _load_cfg():
     return {
         "api_id": api_id,
         "api_hash": api_hash,
-        "session": os.environ.get("TELEGRAM_SESSION", str(getattr(cfg, "TELEGRAM_SESSION", "telegram"))),
+        # BASE_DIR-абсолютний шлях, cwd-незалежний; явний env і так врахований
+        # у config.py:269 — окремий os.environ.get тут дублював/обходив його.
+        "session": str(cfg.TELEGRAM_SESSION),
         "media_dir": str(getattr(cfg, "TELEGRAM_MEDIA_DIR", "telegram_media")),
         "db_path": os.path.abspath(str(getattr(cfg, "DATABASE", "whisper_history.db"))),
         "ingest_url": f"{api_base}/api/telegram/ingest",

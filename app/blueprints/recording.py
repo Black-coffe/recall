@@ -13,6 +13,7 @@ Endpoints:
 - ``POST   /api/recording/<sid>/stop``    — стоп + push finalize у фон.
 - ``POST   /api/recording/<sid>/discard`` — скасувати без finalize.
 - ``GET    /api/recording/<sid>/state``   — snapshot.
+- ``GET    /api/recording/<sid>/live-transcript`` — снапшот live-preview сегментів (RAM).
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
 - ``GET    /api/recordings/active``       — поточна active session (для reattach).
 
@@ -598,6 +599,114 @@ def get_state_endpoint(session_id: str):
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
     return jsonify({'success': True, 'state': snapshot})
+
+
+# --------------------------------------------------------- live-transcript
+
+# Потолок сегментів за один виклик (замір Трека 3: ~72 інсайти за дзвінок,
+# з запасом на транскрипт). Contracts C1 (plan.md).
+_LIVE_TRANSCRIPT_LIMIT = 400
+
+
+@recording_bp.route('/api/recording/<session_id>/live-transcript', methods=['GET'])
+def get_live_transcript(session_id: str):
+    """Снапшот preview-сегментів `LiveTranscribeWorker` (RAM-only).
+
+    Query:
+    - ``since_seq`` (int, опц.) — **рекомендований курсор** для
+      інкрементального опитування (MCP): повернути лише сегменти з
+      ``seq > since_seq``. Номер спільний для обох доріжок (mic/system) і
+      росте в порядку фактичного append'у, тому не губить сегменти
+      повільнішої доріжки (Story 06). Бери ``next_seq`` з відповіді як
+      ``since_seq`` наступного опиту.
+    - ``since_sec`` (float, опц.) — фільтр по часу початку сегмента
+      (``start > since_sec``). НЕ курсор для опитування: доріжки
+      транскрибуються незалежно у своєму темпі, тому сегмент з меншим
+      ``start`` може прийти ПІЗНІШЕ за вже відданий і буде втрачений при
+      опитуванні по часу.
+    """
+    err = _require_service()
+    if err:
+        return err
+    try:
+        snapshot = state.recording_service.get_state(session_id)
+    except SessionNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
+
+    status = snapshot.get('status')
+    is_active = snapshot.get('is_active', False)
+    elapsed_seconds = snapshot.get('elapsed_seconds', 0.0)
+
+    def _unavailable(reason: str):
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'available': False,
+            'reason': reason,
+            'is_active': is_active,
+            'status': status,
+            'elapsed_seconds': elapsed_seconds,
+            'segments': [],
+            'count': 0,
+            'last_sec': None,
+            'next_seq': None,
+            'truncated': False,
+        })
+
+    if state.live_transcribe_worker is None:
+        return _unavailable('live-транскрипція вимкнена в цьому інстансі')
+
+    if not state.live_transcribe_worker.is_active(session_id):
+        if status == STATUS_FINALIZED:
+            return _unavailable(
+                'сесія завершена — повний текст доступний через транскрипт запису'
+            )
+        return _unavailable('live-прев\'ю для цієї сесії недоступне')
+
+    since_sec = request.args.get('since_sec', type=float)
+    since_seq = request.args.get('since_seq', type=int)
+    # order_by='seq' — курсор рахує порядок append'у, не start (Story 06).
+    segments = state.live_transcribe_worker.get_preview(session_id, order_by='seq')
+    if since_seq is not None:
+        segments = [s for s in segments if s.get('seq', 0) > since_seq]
+    if since_sec is not None:
+        segments = [s for s in segments if s.get('start', 0) > since_sec]
+
+    truncated = len(segments) > _LIVE_TRANSCRIPT_LIMIT
+    if truncated:
+        segments = segments[:_LIVE_TRANSCRIPT_LIMIT]
+
+    out_segments = [{
+        'start': s.get('start'),
+        'end': s.get('end'),
+        'text': s.get('text'),
+        'speaker_label': s.get('speaker'),
+        'stream': s.get('stream'),
+        'seq': s.get('seq'),
+    } for s in segments]
+    last_sec = max((s['start'] for s in out_segments), default=None)
+    # next_seq — курсор для наступного опиту. Якщо нових сегментів немає,
+    # лишаємо since_seq незмінним (а не max по всій сесії) — інакше усічені
+    # `truncated`-сегменти "проскочать" повз клієнта назавжди.
+    if out_segments:
+        next_seq = out_segments[-1]['seq']
+    else:
+        next_seq = since_seq if since_seq is not None else 0
+
+    return jsonify({
+        'success': True,
+        'session_id': session_id,
+        'available': True,
+        'reason': None,
+        'is_active': is_active,
+        'status': status,
+        'elapsed_seconds': elapsed_seconds,
+        'segments': out_segments,
+        'count': len(out_segments),
+        'last_sec': last_sec,
+        'next_seq': next_seq,
+        'truncated': truncated,
+    })
 
 
 @recording_bp.route('/api/recordings/recovered', methods=['GET'])

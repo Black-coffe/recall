@@ -82,6 +82,16 @@ def _parse_category(raw) -> "int | str | None":
     return int(s) if s.isdigit() else None
 
 
+def _parse_explain(raw) -> bool:
+    """Історія 05 (grep-explainability): query-параметр (`?explain=1`) чи поле
+    JSON-body (`{"explain": true}`) → bool. Невідоме значення ('', '0',
+    'false', None) читаємо як False, а не як помилку — дефолт скрізь
+    компактний `why`, не його відсутність."""
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in ("1", "true", "yes")
+
+
 # ============================================================
 # Напрямки / категорії (Phase 14)
 # ============================================================
@@ -388,7 +398,8 @@ def search():
         k = 8
     from app.services import retrieval
     res = retrieval.search(current_app.config['DATABASE'], q, top_k=k,
-                           category_id=_parse_category(request.args.get('category_id')))
+                           category_id=_parse_category(request.args.get('category_id')),
+                           explain=_parse_explain(request.args.get('explain')))
     return jsonify({"success": True, **res})
 
 
@@ -415,7 +426,8 @@ def ask():
         res = rag.answer_question(current_app.config['DATABASE'], q, top_k=k,
                                   model=data.get("model"),
                                   category_id=_parse_category(data.get("category_id")),
-                                  project=(data.get("project") or None))
+                                  project=(data.get("project") or None),
+                                  explain=_parse_explain(data.get("explain")))
     except Exception as e:
         logger.error("[memory] ask failed: %s", e, exc_info=True)
         return jsonify({"success": False, "error": "Помилка RAG. Перевірте логи."}), 500
@@ -445,12 +457,14 @@ def ask_stream():
     # Трек 2: зріз за проєктом/людиною. Читаємо ТУТ, а не в генераторі — той
     # виконується поза request-контекстом (та сама причина, що й для решти полів).
     project = (data.get("project") or None)
+    explain = _parse_explain(data.get("explain"))
     db_path = current_app.config['DATABASE']
 
     def generate():
         try:
             yield from rag.answer_question_stream(db_path, q, top_k=k, model=model,
-                                                  category_id=category_id, project=project)
+                                                  category_id=category_id, project=project,
+                                                  explain=explain)
         except Exception as e:
             logger.error("[memory] ask_stream generator failed: %s", e, exc_info=True)
             yield rag._sse("error", {"error": "Помилка RAG."})

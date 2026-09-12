@@ -4,11 +4,19 @@
 маршруті. Усі читають singleton-и через `from app import state as _state`. Помилки —
 JSON `{success,error}` + HTTP-код (400/401/403/404/409/500/503).
 
-## system.py (~192) — `/`, `/api/health`, `/api/models/*`, `/api/system_*`, `/api/polish/*`, `/api/metrics`
-Health, каталог/завантаження Whisper-моделей, системні метрики, shell-роутинг.
+## system.py (~390) — `/`, `/api/health`, `/api/ready`, `/api/models/*`, `/api/system_*`, `/api/polish/*`, `/api/metrics`
+Health/робота, каталог/завантаження Whisper-моделей, системні метрики, shell-роутинг.
 `GET /` — SPA-shell (catch-all, після /api/*). `GET /sw.js` (no-cache). `GET /api/health`,
 `/api/models`, `POST /api/download_model`, `/api/models/{update-status,check-updates}`,
 `/api/system_info`, `/api/system_stats`, `/api/polish/availability` (тіри Claude), `/api/metrics` (Prometheus).
+`APP_VERSION = "4.0.1"` (system.py:37) — джерело для `version` у health/ready/system_info.
+`GET /api/ready` (system.py:138-177, config-registry-profiles T03) — читає `app.state.робота`
+(див. `memory/map/root.md`) + живий `_check_database_ready()` (106-136): відкриває ІСНУЮЧИЙ файл
+БД (`mode=rw`, не автостворює) і вимагає таблицю `schema_versions` з `MAX(version) >= 1`.
+200 коли `database=='ok' ∧ job_queue.bound ∧ whisper.preload in ('ready','disabled') ∧ boot_finished`,
+інакше 503. `migrations` НЕ входить у формулу (недосяжний стан, `app/state.py:45-49`).
+`GET /api/health` тепер кличе той самий `_check_database_ready()` (Round 3, історія 03) — не
+створює БД як побічний ефект, як робив старий шлях через `get_db_connection`.
 
 ## transcription.py (~1600 — найбільший) — `/api/transcribe`, `/api/history/*`, `/api/transcription/<id>/*`, `/api/export/*`
 Ядро: транскрипція file/youtube, історія, пост-обробка. `POST /api/transcribe`, `/api/transcribe/active`,
@@ -20,6 +28,9 @@ Health, каталог/завантаження Whisper-моделей, сист
 Граф памʼяті + RAG. Категорії (CRUD/merge), `<id>/category`, `suggest-category` (k-NN), `bulk-category`,
 `<id>/enrich`, `backfill`(+status, SSE-канал "backfill"), `import`, `GET search` (hybrid), `POST ask` + `ask/stream` (SSE),
 `entities`(+`<id>`), `action-items`(+`<id>` PATCH), `stats`. Залежить: enrichment, retrieval, rag, embeddings.
+`GET search`/`POST ask`/`POST ask/stream` усі приймають `explain` (query `?explain=1` або JSON
+`{"explain": true}`, парситься `_parse_explain()`) — прокидається в `retrieval.search`/`rag.answer_question[_stream]`,
+`why` виживає в `sources` кожного результату (T2, S2).
 **Gotchas:** entity `min_meetings=2` (шумофільтр) якщо нема `q`; category casefold-уніка per-lang; action-items period по meeting_date.
 Фільтр `owner` — ТОЧНИЙ збіг (значення приходить із чипа фасета) по канонічному імені АБО по аліасах графа; сире
 `owner_name` звʼязаної задачі свідомо не фільтрує, інакше список стає довшим за число на чипі. Ключ аліаса рахує

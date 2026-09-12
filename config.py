@@ -9,7 +9,10 @@
 import logging
 import os
 import secrets
+import threading
 from pathlib import Path
+
+from app.core import settings
 
 _logger = logging.getLogger(__name__)
 
@@ -124,17 +127,25 @@ class Config:
         'file_access_retries': 10,
     }
 
-    # Настройки сервера
-    DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    HOST = os.environ.get('FLASK_HOST', '127.0.0.1')
-    PORT = int(os.environ.get('FLASK_PORT', 5050))
+    # Настройки сервера (дефолти з реєстру app/core/settings.py)
+    DEBUG = settings.env_bool('FLASK_DEBUG')
+    HOST = settings.env('FLASK_HOST')
+    PORT = settings.env_int('FLASK_PORT')
 
     # Безопасность. Дефолт лишається як fallback для DEBUG=True (dev). Єдина
     # перевірка «дефолт неприпустимий у production-подібному режимі» — hard-fail
-    # нижче в модулі (T1.5), біля вибору current_config. НЕ дублювати цю
+    # ЛІНИВО при першому get_config() (config-registry-profiles S3; раніше — тут
+    # же в модулі, T1.5), біля вибору current_config. НЕ дублювати цю
     # перевірку деінде (раніше було 2 незалежні механізми — ProductionConfig
     # RuntimeError-property + app.py warning — які тригерились по-різному).
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+    SECRET_KEY = settings.env('SECRET_KEY')
+
+    # Профіль (config-registry-profiles S3): 'desktop' (дефолт) або 'headless'.
+    # Реальне значення виставляється лінивo у get_config() (RECALL_PROFILE
+    # читається лише там, разом з рештою side effects) — тут лише безпечний
+    # плейсхолдер, щоб атрибут існував одразу після `import config`.
+    PROFILE = 'desktop'
+    HEADLESS = False
 
     # Лимиты
     RATE_LIMIT_YOUTUBE = 10  # Максимум YouTube загрузок в час  # TODO: not yet implemented
@@ -145,21 +156,21 @@ class Config:
     AUTO_CLEANUP_ENABLED = True  # TODO: not yet implemented
 
     # GPU настройки
-    FORCE_CPU = os.environ.get('FORCE_CPU', 'False').lower() == 'true'
+    FORCE_CPU = settings.env_bool('FORCE_CPU')
     GPU_BATCH_SIZE = 16  # Размер батча для GPU  # TODO: not yet implemented
 
     # Whisper backend (Phase 1 v4.0 roadmap)
     # 'faster' — faster-whisper (CTranslate2), 3-5x быстрее на GPU. Default.
     # 'openai' — референсный openai-whisper, fallback.
-    WHISPER_BACKEND = os.environ.get('WHISPER_BACKEND', 'faster').lower()
+    WHISPER_BACKEND = settings.env('WHISPER_BACKEND').lower()
     # Параллельные транскрипции через семафор. На RTX 3090 (24GB):
     # tiny/base/small=4, medium=2, large=1.
-    WHISPER_MAX_PARALLEL = int(os.environ.get('WHISPER_MAX_PARALLEL', '2'))
+    WHISPER_MAX_PARALLEL = settings.env_int('WHISPER_MAX_PARALLEL')
     # batch_size для BatchedInferencePipeline на длинных файлах (faster backend)
-    WHISPER_BATCH_SIZE = int(os.environ.get('WHISPER_BATCH_SIZE', '8'))
+    WHISPER_BATCH_SIZE = settings.env_int('WHISPER_BATCH_SIZE')
 
     # Логирование
-    LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+    LOG_LEVEL = settings.env('LOG_LEVEL')
     LOG_FILE = 'whisper_ui.log'
     LOG_MAX_SIZE = 10 * 1024 * 1024  # 10MB
     LOG_BACKUP_COUNT = 5
@@ -170,10 +181,19 @@ class Config:
     # на стопі або при recovery після креша.
     #
     # RECORDING_ENABLED autodetect'иться через імпорт pyaudiowpatch.
-    # Можна форсово вимкнути через env var RECORDING_ENABLED=0.
+    # Можна форсово вимкнути явним значенням env var RECORDING_ENABLED
+    # (будь-яким falsy для settings.env_bool — '0'/'false'/'no'/'off'/...).
+    #
+    # Викликається ЛІНИВО з get_config() (config-registry-profiles S3), НЕ при
+    # визначенні класу — імпорт pyaudiowpatch більше не побічний ефект `import
+    # config`. У headless-профілі не викликається взагалі (RECORDING_ENABLED
+    # форсовано False без спроби імпорту, Assumption 3).
     @staticmethod
     def _detect_recording_enabled():
-        if os.environ.get('RECORDING_ENABLED', '').strip() in ('0', 'false', 'False'):
+        # Дефолт реєстру — порожній рядок (autodetect). Явне значення (будь-яке,
+        # не лише falsy) перекриває autodetect і читається ЧЕРЕЗ
+        # settings.env_bool (config-registry-fix-01) — без власного парсера.
+        if settings.env('RECORDING_ENABLED').strip() and not settings.env_bool('RECORDING_ENABLED'):
             return False
         try:
             import pyaudiowpatch  # noqa: F401
@@ -181,45 +201,48 @@ class Config:
         except ImportError:
             return False
 
-    RECORDING_ENABLED = _detect_recording_enabled.__func__()
+    # Плейсхолдер до першого get_config() (лінива ініціалізація нижче в модулі).
+    RECORDING_ENABLED = False
     RECORDING_DIR = BASE_DIR / 'recordings' / 'sessions'
-    RECORDING_CHUNK_SECONDS = int(os.environ.get('RECORDING_CHUNK_SECONDS', '5'))
-    RECORDING_SAMPLE_RATE = int(os.environ.get('RECORDING_SAMPLE_RATE', '48000'))
-    RECORDING_CHANNELS = int(os.environ.get('RECORDING_CHANNELS', '2'))
-    RECORDING_MP3_BITRATE = os.environ.get('RECORDING_MP3_BITRATE', '192k')
-    RECORDING_KEEP_PCM = os.environ.get('RECORDING_KEEP_PCM', 'False').lower() == 'true'
+    RECORDING_CHUNK_SECONDS = settings.env_int('RECORDING_CHUNK_SECONDS')
+    RECORDING_SAMPLE_RATE = settings.env_int('RECORDING_SAMPLE_RATE')
+    RECORDING_CHANNELS = settings.env_int('RECORDING_CHANNELS')
+    RECORDING_MP3_BITRATE = settings.env('RECORDING_MP3_BITRATE')
+    RECORDING_KEEP_PCM = settings.env_bool('RECORDING_KEEP_PCM')
     # Проміжні mic.wav/system.wav — лише крок зведення у final.mp3, нічого їх
     # після finalize не читає. За замовчуванням видаляємо (інакше ~1 ГБ/сесію
     # мертвого місця). RECORDING_KEEP_WAV=true — лишати роздільні доріжки.
-    RECORDING_KEEP_WAV = os.environ.get('RECORDING_KEEP_WAV', 'False').lower() == 'true'
-    RECORDING_MIN_DISK_MB = int(os.environ.get('RECORDING_MIN_DISK_MB', '500'))
+    RECORDING_KEEP_WAV = settings.env_bool('RECORDING_KEEP_WAV')
+    RECORDING_MIN_DISK_MB = settings.env_int('RECORDING_MIN_DISK_MB')
 
     # Phase 22: Screen video capture (ddagrab → NVENC, isolated subsystem).
     # Вимкніть через RECORDING_VIDEO_ENABLED=False якщо немає NVIDIA GPU.
-    RECORDING_VIDEO_ENABLED = os.environ.get('RECORDING_VIDEO_ENABLED', 'True').lower() == 'true'
-    RECORDING_FFMPEG_PATH = os.environ.get('RECORDING_FFMPEG_PATH', r'C:\ffmpeg\bin\ffmpeg.exe')
-    RECORDING_VIDEO_FPS = int(os.environ.get('RECORDING_VIDEO_FPS', '30'))
-    RECORDING_VIDEO_CODEC = os.environ.get('RECORDING_VIDEO_CODEC', 'h264_nvenc')
-    RECORDING_VIDEO_QUALITY = os.environ.get('RECORDING_VIDEO_QUALITY', 'p5')   # nvenc -preset
-    RECORDING_VIDEO_CQ = int(os.environ.get('RECORDING_VIDEO_CQ', '23'))
-    RECORDING_VIDEO_MAX_TRACKS = int(os.environ.get('RECORDING_VIDEO_MAX_TRACKS', '3'))
-    RECORDING_VIDEO_STOP_TIMEOUT_SEC = float(os.environ.get('RECORDING_VIDEO_STOP_TIMEOUT_SEC', '8'))
-    RECORDING_BUILD_MASTER_MP4 = os.environ.get('RECORDING_BUILD_MASTER_MP4', 'False').lower() == 'true'
-    RECORDING_REGION_OVERLAY = os.environ.get('RECORDING_REGION_OVERLAY', 'True').lower() == 'true'
-    RECORDING_REGION_OVERLAY_COLOR = os.environ.get('RECORDING_REGION_OVERLAY_COLOR', '#e5484d')
+    # У headless форсується False у get_config() (Assumption 3) — тут дефолт
+    # для desktop-профілю.
+    RECORDING_VIDEO_ENABLED = settings.env_bool('RECORDING_VIDEO_ENABLED')
+    RECORDING_FFMPEG_PATH = settings.env('RECORDING_FFMPEG_PATH')
+    RECORDING_VIDEO_FPS = settings.env_int('RECORDING_VIDEO_FPS')
+    RECORDING_VIDEO_CODEC = settings.env('RECORDING_VIDEO_CODEC')
+    RECORDING_VIDEO_QUALITY = settings.env('RECORDING_VIDEO_QUALITY')   # nvenc -preset
+    RECORDING_VIDEO_CQ = settings.env_int('RECORDING_VIDEO_CQ')
+    RECORDING_VIDEO_MAX_TRACKS = settings.env_int('RECORDING_VIDEO_MAX_TRACKS')
+    RECORDING_VIDEO_STOP_TIMEOUT_SEC = settings.env_float('RECORDING_VIDEO_STOP_TIMEOUT_SEC')
+    RECORDING_BUILD_MASTER_MP4 = settings.env_bool('RECORDING_BUILD_MASTER_MP4')
+    RECORDING_REGION_OVERLAY = settings.env_bool('RECORDING_REGION_OVERLAY')
+    RECORDING_REGION_OVERLAY_COLOR = settings.env('RECORDING_REGION_OVERLAY_COLOR')
     # Phase 23B-A: Video understanding — scene-keyframe OCR → RAG ingestion.
-    RECORDING_VIDEO_SCENE_THRESHOLD = float(os.environ.get('RECORDING_VIDEO_SCENE_THRESHOLD', '0.4'))
-    RECORDING_VIDEO_ANALYSIS_MAX_FRAMES = int(os.environ.get('RECORDING_VIDEO_ANALYSIS_MAX_FRAMES', '120'))
+    RECORDING_VIDEO_SCENE_THRESHOLD = settings.env_float('RECORDING_VIDEO_SCENE_THRESHOLD')
+    RECORDING_VIDEO_ANALYSIS_MAX_FRAMES = settings.env_int('RECORDING_VIDEO_ANALYSIS_MAX_FRAMES')
     # Phase 23B: Vision-опис кадрів («що показано на екрані») → у RAG поряд з OCR.
     # Бекенд: 'local' (Ollama VL-модель, $0/офлайн, default), 'claude' (Anthropic
     # vision API, платно, точніше), 'off'. Усе деградує: нема моделі/ключа →
     # опис порожній, кадри+OCR працюють як раніше. Ці константи дублює
     # video_vision.py (читає env напряму), щоб лишатись standalone-тестованим.
-    VIDEO_VISION_BACKEND = os.environ.get('VIDEO_VISION_BACKEND', 'local').strip().lower()
-    VIDEO_VISION_MODEL_LOCAL = os.environ.get('VIDEO_VISION_MODEL_LOCAL', 'qwen2.5vl:7b')
-    VIDEO_VISION_MODEL_CLAUDE = os.environ.get('VIDEO_VISION_MODEL_CLAUDE', 'claude-haiku-4-5')
-    VIDEO_VISION_MAX_FRAMES = int(os.environ.get('VIDEO_VISION_MAX_FRAMES', '120'))
-    VIDEO_VISION_TIMEOUT = float(os.environ.get('VIDEO_VISION_TIMEOUT', '90'))
+    VIDEO_VISION_BACKEND = settings.env('VIDEO_VISION_BACKEND').strip().lower()
+    VIDEO_VISION_MODEL_LOCAL = settings.env('VIDEO_VISION_MODEL_LOCAL')
+    VIDEO_VISION_MODEL_CLAUDE = settings.env('VIDEO_VISION_MODEL_CLAUDE')
+    VIDEO_VISION_MAX_FRAMES = settings.env_int('VIDEO_VISION_MAX_FRAMES')
+    VIDEO_VISION_TIMEOUT = settings.env_float('VIDEO_VISION_TIMEOUT')
 
     # Phase 17: Telegram ingestion — слухання реального TG-АКАУНТА (MTProto/Telethon).
     # api_id/api_hash беруться з my.telegram.org → .env (СЕКРЕТИ, не в коді).
@@ -227,23 +250,41 @@ class Config:
     # (SQLite-файл telegram.session не можна відкрити двома клієнтами), а Flask
     # спілкується з ним по localhost control-API. TELEGRAM_ENABLED autodetect:
     # потрібні і ключі, і встановлений telethon — інакше feature м'яко вимкнена.
-    TELEGRAM_API_ID = int(os.environ.get('TELEGRAM_API_ID', '0') or '0')
-    TELEGRAM_API_HASH = os.environ.get('TELEGRAM_API_HASH', '')
+    # int(... or '0'): TELEGRAM_API_ID= (порожньо) у .env — окремий випадок від
+    # "змінної немає" (settings.env усе одно поверне дефолт лише за відсутності
+    # ключа), тож зберігаємо явний or-фолбек.
+    TELEGRAM_API_ID = int(settings.env('TELEGRAM_API_ID') or '0')
+    TELEGRAM_API_HASH = settings.env('TELEGRAM_API_HASH')
     # Шлях до файлу сесії Telethon (без розширення Telethon додасть .session).
-    TELEGRAM_SESSION = os.environ.get('TELEGRAM_SESSION', str(BASE_DIR / 'telegram'))
+    # config-registry-fix-01: раніше цей рядок читав os.environ напряму з
+    # ДРУГИМ, незалежно хардкодженим дефолтом str(BASE_DIR / 'telegram') —
+    # реєстровий Setting.default ('telegram') ігнорувався повністю, .env.example
+    # друкував значення, яке код і не думав використовувати. Тепер єдине
+    # джерело рядка-імені — реєстр (settings.env); BASE_DIR-приєднання
+    # лишається (абсолютний шлях, незалежний від CWD — на цьому свідомо
+    # будується tests/test_headless_boot.py::config-registry-fix-02, не чіпати
+    # цю властивість). Якщо TELEGRAM_SESSION заданий АБСОЛЮТНИМ шляхом,
+    # приєднання BASE_DIR його не змінює (pathlib: правий абсолютний операнд
+    # заміняє лівий повністю).
+    TELEGRAM_SESSION = str(BASE_DIR / settings.env('TELEGRAM_SESSION'))
     # Куди слухач зберігає завантажені медіа (фото/відео/голос/документи) перед
     # маршрутизацією у пайплайн. Не комітиться (.gitignore telegram_media/).
     TELEGRAM_MEDIA_DIR = BASE_DIR / 'telegram_media'
     # localhost control-API слухача (Flask проксирує сюди list-dialogs/status/backfill).
-    TELEGRAM_CONTROL_HOST = os.environ.get('TELEGRAM_CONTROL_HOST', '127.0.0.1')
-    TELEGRAM_CONTROL_PORT = int(os.environ.get('TELEGRAM_CONTROL_PORT', '5051'))
+    TELEGRAM_CONTROL_HOST = settings.env('TELEGRAM_CONTROL_HOST')
+    TELEGRAM_CONTROL_PORT = settings.env_int('TELEGRAM_CONTROL_PORT')
     # Транскрипція голосових/аудіо/відео з TG. large-v3-turbo — мультимовна, ~4x
     # швидша за large-v3, точність на рівні; кращий дефолт за medium на RTX 3090.
     # Голосові зазвичай короткі. Мова: 'uk' за замовч., для UA/RU-чатів можна
     # 'auto' (автовизначення) або конкретну мову.
-    TELEGRAM_WHISPER_MODEL = os.environ.get('TELEGRAM_WHISPER_MODEL', 'large-v3-turbo')
-    TELEGRAM_WHISPER_LANG = os.environ.get('TELEGRAM_WHISPER_LANG', 'uk')
+    TELEGRAM_WHISPER_MODEL = settings.env('TELEGRAM_WHISPER_MODEL')
+    TELEGRAM_WHISPER_LANG = settings.env('TELEGRAM_WHISPER_LANG')
 
+    # Викликається ЛІНИВО з get_config() (config-registry-profiles S3), НЕ при
+    # визначенні класу — імпорт telethon більше не побічний ефект `import config`.
+    # os.environ.get(...) напряму (не settings.env): перевіряємо ВІДСУТНІСТЬ
+    # ключа (None), а не значення-за-дефолтом — settings.env повернув би
+    # непорожній рядок-дефолт навіть коли змінної немає.
     @staticmethod
     def _detect_telegram_enabled():
         if not (os.environ.get('TELEGRAM_API_ID') and os.environ.get('TELEGRAM_API_HASH')):
@@ -254,7 +295,8 @@ class Config:
         except ImportError:
             return False
 
-    TELEGRAM_ENABLED = _detect_telegram_enabled.__func__()
+    # Плейсхолдер до першого get_config() (лінива ініціалізація нижче в модулі).
+    TELEGRAM_ENABLED = False
 
     # Phase 19 (Co-pilot, Крок 0): локальний LLM-диспетчер для живого ко-пілота.
     # Ollama — ОКРЕМИЙ системний сервіс (localhost HTTP), як telegram_listener
@@ -265,12 +307,15 @@ class Config:
     # бо доступність залежить від зовнішнього процесу. Ці константи дублює
     # local_llm.py (читає ті самі env напряму), щоб сервіс лишався standalone-
     # тестованим без Flask-контексту (як embeddings.py з EMBED_MODEL).
-    COPILOT_ENABLED = os.environ.get('COPILOT_ENABLED', '1').strip() not in ('0', 'false', 'False')
-    LOCAL_LLM_URL = os.environ.get('LOCAL_LLM_URL', 'http://localhost:11434')
-    LOCAL_LLM_MODEL = os.environ.get('LOCAL_LLM_MODEL', 'qwen2.5:14b-instruct-q5_K_M')
-    LOCAL_LLM_KEEPALIVE = os.environ.get('LOCAL_LLM_KEEPALIVE', '30m')
-    LOCAL_LLM_NUM_CTX = int(os.environ.get('LOCAL_LLM_NUM_CTX', '8192'))
-    LOCAL_LLM_TIMEOUT = float(os.environ.get('LOCAL_LLM_TIMEOUT', '60'))
+    # Дефолт-true виражений у реєстрі (default="1"), не інверсною falsy-
+    # перевіркою на місці виклику (config-registry-fix-01) — settings.env_bool
+    # єдиний булевий парсер.
+    COPILOT_ENABLED = settings.env_bool('COPILOT_ENABLED')
+    LOCAL_LLM_URL = settings.env('LOCAL_LLM_URL')
+    LOCAL_LLM_MODEL = settings.env('LOCAL_LLM_MODEL')
+    LOCAL_LLM_KEEPALIVE = settings.env('LOCAL_LLM_KEEPALIVE')
+    LOCAL_LLM_NUM_CTX = settings.env_int('LOCAL_LLM_NUM_CTX')
+    LOCAL_LLM_TIMEOUT = settings.env_float('LOCAL_LLM_TIMEOUT')
 
     # T6.4 (Волна 4): опційний локальний cross-encoder rerank (bge-reranker-v2-m3)
     # над top-кандидатами retrieval.search(). За замовчуванням OFF — вмикається
@@ -278,7 +323,7 @@ class Config:
     # categorize/MCP. Значення тут — довідкове/для видимості в конфізі; сам
     # rag.py читає env НАПРЯМУ (той самий патерн, що COPILOT_ENABLED/
     # embeddings.py — standalone-тестований без Flask-контексту).
-    RECALL_RERANK_ENABLED = os.environ.get('RECALL_RERANK_ENABLED', '0').strip() in ('1', 'true', 'True')
+    RECALL_RERANK_ENABLED = settings.env_bool('RECALL_RERANK_ENABLED')
 
 
 class DevelopmentConfig(Config):
@@ -358,8 +403,9 @@ _INSECURE_SECRET_KEYS = {
 #   - локальний режим + небезпечний ключ → авто-генерувати випадковий ключ і
 #     (best-effort) зберегти в .env, щоб він пережив рестарт. DEBUG=True — дефолт ок.
 def _network_exposed() -> bool:
-    """Чи слухатиме застосунок не тільки localhost (дзеркалить логіку app.py)."""
-    if os.environ.get('RECALL_BIND_ALL', '').strip() in ('1', 'true', 'True'):
+    """Чи слухатиме застосунок не тільки localhost (`RECALL_BIND_ALL` через
+    єдиний парсер `settings.env_bool`, як і `app.py`)."""
+    if settings.env_bool('RECALL_BIND_ALL'):
         return True
     return current_config.HOST == '0.0.0.0'
 
@@ -388,7 +434,21 @@ def _persist_secret_key(key: str) -> bool:
         return False
 
 
-if not current_config.DEBUG and current_config.SECRET_KEY in _INSECURE_SECRET_KEYS:
+def _finalize_secret_key() -> None:
+    """T1.5: hard-fail/автоген SECRET_KEY. Викликається ЛІНИВО з get_config()
+    (config-registry-profiles S3) — раніше це був код на рівні модуля, тож
+    спрацьовувало вже при `import config`.
+
+    config-registry-fix-01 (знахідка 2): мережевий bind hard-fail перевіряється
+    ПЕРШИМ, незалежно від DEBUG. Раніше умова `not current_config.DEBUG` стояла
+    зовні й повністю пропускала hard-fail, коли DEBUG=True — а розширений
+    truthy-набір settings.env_bool ('1'/'true'/'yes'/'on') робить
+    FLASK_DEBUG=1 (раніше давав DEBUG=False через .lower()=='true') тепер
+    DEBUG=True. Семантика рішення власника не змінюється (локально —
+    автоген, лише мережевий bind — hard-fail); фіксується сам bug, де
+    DEBUG=True міг обійти hard-fail і при мережевому доступі."""
+    if current_config.SECRET_KEY not in _INSECURE_SECRET_KEYS:
+        return
     if _network_exposed():
         raise RuntimeError(
             "Небезпечний SECRET_KEY при мережевому доступі: RECALL_BIND_ALL або "
@@ -397,6 +457,9 @@ if not current_config.DEBUG and current_config.SECRET_KEY in _INSECURE_SECRET_KE
             '  python -c "import secrets; print(secrets.token_hex(32))"\n'
             "і додайте SECRET_KEY=<результат> у .env."
         )
+    if current_config.DEBUG:
+        # Локальний dev-запуск, не мережевий — дефолтний ключ прийнятний.
+        return
     _generated_key = secrets.token_hex(32)
     current_config.SECRET_KEY = _generated_key
     _saved = _persist_secret_key(_generated_key)
@@ -407,8 +470,47 @@ if not current_config.DEBUG and current_config.SECRET_KEY in _INSECURE_SECRET_KE
     )
 
 
+_config_initialized = False
+_config_lock = threading.Lock()
+
+
+def _initialize_dynamic_config() -> None:
+    """Побічні ефекти, що раніше виконувались при `import config` (важкі
+    імпорти pyaudiowpatch/telethon, SECRET_KEY hard-fail/автоген) —
+    config-registry-profiles S3 переносить їх сюди, у ЛІНИВУ ініціалізацію
+    при першому виклику get_config()."""
+    profile_name = settings.profile()
+    current_config.PROFILE = profile_name
+    current_config.HEADLESS = profile_name == 'headless'
+
+    if current_config.HEADLESS:
+        # headless: не піднімаємо recorder — і НЕ намагаємось імпортувати
+        # pyaudiowpatch взагалі (Assumption 3, config-registry-profiles).
+        current_config.RECORDING_ENABLED = False
+        current_config.RECORDING_VIDEO_ENABLED = False
+    else:
+        current_config.RECORDING_ENABLED = Config._detect_recording_enabled()
+
+    current_config.TELEGRAM_ENABLED = Config._detect_telegram_enabled()
+
+    _finalize_secret_key()
+
+
 def get_config():
-    """Получить текущую конфигурацию"""
+    """Получить текущую конфигурацию.
+
+    Побічні ефекти (autodetect recorder/telegram, SECRET_KEY hard-fail/
+    автоген, профіль) виконуються ЛІНИВО тут, при першому виклику — НЕ при
+    `import config` (config-registry-profiles S3). Захищено `_config_lock`
+    (config-registry-fix-01, знахідка 15): без замка два потоки, що
+    змагаються за перший виклик, могли б обидва виконати
+    `_initialize_dynamic_config()` і обидва дописати `.env`."""
+    global _config_initialized
+    if not _config_initialized:
+        with _config_lock:
+            if not _config_initialized:
+                _initialize_dynamic_config()
+                _config_initialized = True
     return current_config
 
 

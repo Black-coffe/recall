@@ -29,6 +29,21 @@
   retrieval навмисно не знає про граф сутностей),
   recency-boost (half-life ~180д), per-meeting cap (≤3 чанки/зустріч), опційний `rerank=` (T6.4, OFF за
   замовчуванням) — cross-encoder переранжовує топ-пул (~24) ПЕРЕД diversity cap. *>100k чанків → треба sqlite-vec.*
+  *grep-explainability (S2): `explain: bool = False` — кожен результат несе `why`-словник
+  (`WHY_REQUIRED_KEYS = src,rrf,rec,by,top`; `build_placeholder_why()` — те саме для коментарів/
+  фолбеків); `explain=True` додає `why["stages"]` (позиція+сирий `sim`/`bm25` на кожній стадії),
+  `weights`, `final_raw`, `search_capped`. Не впливає на ранжування чи порядок видачі.*
+- **archive_grep.py** (grep-explainability, S2) — `grep(db_path, pattern, regex=, ignore_case=,
+  context=, limit=, source_type=, transcription_id=, days=, max_scan=, deadline_seconds=)`:
+  буквальний/regex пошук ТОЧНОГО РЯДКА по `chunks` з ±context сусідніми чанками — без ембеддингів
+  і без ранжування, для ID/сум/@ніків, які FTS5-токенізація й reranker ховають за неточним збігом.
+  Сортування видачі — `meeting_date DESC, chunk_index`, НЕ релевантність. *Казфолд ВИКЛЮЧНО в Python
+  (`str.casefold`) — SQLite `lower()` згортає лише ASCII; без `ORDER BY` у SQL (інакше SQLite
+  прогнав би весь джойн до LIMIT), `max_scan` рахує переглянуті рядки, дедлайн стінного часу
+  перевіряється МІЖ рядками (захист stdio-MCP від катастрофічного бектрекінгу regex). Пошук по
+  `chunks`, не по `transcriptions.transcript_text` — рядок, розрізаний швом чанкування, не
+  знайдеться (`chunk_boundary_caveat`). Не імпортує torch/numpy/`retrieval` — вантажиться у
+  stdio-MCP. MCP-тулза: `grep_archive`.*
 - **reranker.py** (T6.4) — `rerank()`: локальний cross-encoder `BAAI/bge-reranker-v2-m3` (той самий
   sentence-transformers стек, що e5). *Lazy singleton як embeddings.py; OFF за замовчуванням
   (`RECALL_RERANK_ENABLED`), вмикається ЛИШЕ для RAG-чату з `rag.py`; graceful degradation → вихідний

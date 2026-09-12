@@ -95,10 +95,28 @@ class LiveTranscribeWorker:
         # Key = "session_id:stream_name" — кожен stream має свій worker thread
         self._streams: dict[str, _StreamState] = {}
         self._lock = threading.RLock()
+        # Story 06: монотонний лічильник додавання сегментів, спільний для
+        # ВСІХ доріжок сесії (session_id -> останній виданий номер). Кожна
+        # доріжка транскрибується своїм thread'ом у своєму темпі, тому 'start'
+        # не годиться як курсор опитування — system-сегмент з меншим 'start'
+        # може бути доданий ПІЗНІШЕ за вже відданий mic-сегмент.
+        self._next_seq: dict[str, int] = {}
 
     @staticmethod
     def _key(session_id: str, stream_name: str) -> str:
         return f"{session_id}:{stream_name}"
+
+    def _alloc_seq(self, session_id: str) -> int:
+        """Виділити наступний номер додавання (Story 06).
+
+        Серіалізовано через ``self._lock`` — той самий лок, що і stream-стан —
+        тому порядок видачі = порядок фактичного append'у в ``get_preview``,
+        незалежно від того, який stream (mic/system) його отримав.
+        """
+        with self._lock:
+            seq = self._next_seq.get(session_id, 0) + 1
+            self._next_seq[session_id] = seq
+            return seq
 
     def start(
         self,
@@ -158,6 +176,7 @@ class LiveTranscribeWorker:
                 all_segments.extend(st.segments)
                 if st.thread:
                     threads.append(st.thread)
+            self._next_seq.pop(session_id, None)
         if not keys_to_pop:
             return None
         if wait:
@@ -165,14 +184,21 @@ class LiveTranscribeWorker:
                 t.join(timeout=10.0)
         return all_segments
 
-    def get_preview(self, session_id: str) -> list[dict]:
-        """Snapshot всіх preview-segments сесії (з усіх streams), sorted by start."""
+    def get_preview(self, session_id: str, order_by: str = 'start') -> list[dict]:
+        """Snapshot всіх preview-segments сесії (з усіх streams).
+
+        ``order_by='start'`` (default) — хронологічний порядок, як і раніше
+        (використовує UI/copilot). ``order_by='seq'`` — порядок фактичного
+        додавання (Story 06): потрібен інкрементальному курсору, бо 'start'
+        системної доріжки може бути МЕНШИЙ за вже відданий mic-сегмент.
+        """
         with self._lock:
             segments = []
             for k, st in self._streams.items():
                 if k.startswith(f"{session_id}:"):
                     segments.extend(st.segments)
-        return sorted(segments, key=lambda s: s.get('start', 0))
+        key = (lambda s: s.get('seq', 0)) if order_by == 'seq' else (lambda s: s.get('start', 0))
+        return sorted(segments, key=key)
 
     def is_active(self, session_id: str) -> bool:
         prefix = f"{session_id}:"
@@ -260,6 +286,7 @@ class LiveTranscribeWorker:
                 'stream': state.stream_name,
             }
             if seg_obj['text']:
+                seg_obj['seq'] = self._alloc_seq(state.session_id)
                 state.segments.append(seg_obj)
                 new_segments.append(seg_obj)
 
