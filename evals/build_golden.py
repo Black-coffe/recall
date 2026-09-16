@@ -17,6 +17,11 @@ CLI:
     python -m evals.build_golden --db evals/snapshots/x.db
     python -m evals.build_golden --db evals/snapshots/x.db --merge
     python -m evals.build_golden --db evals/snapshots/x.db --stats
+    python -m evals.build_golden --db evals/snapshots/x.db --from-ask-log --stats
+
+`--from-ask-log` додає друге джерело питань — таблицю `ask_log` (міграція v41,
+UI + MCP): там є оцінка власника 👍/👎, тож 👎-питання стають кандидатами
+першими, а кандидатами джерел ідуть ті записи, які модель реально процитувала.
 """
 from __future__ import annotations
 
@@ -26,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 from collections import Counter
@@ -85,6 +91,89 @@ def _category_id_from_args(argstr: str) -> Optional[int]:
     parsed = _parse_args_json(argstr)
     cid = parsed.get("category_id") if parsed else None
     return int(cid) if isinstance(cid, int) else None
+
+
+def mine_ask_log(db_path: str) -> list[dict]:
+    """Питання з таблиці `ask_log` знімка (міграція v41) — 👎 ПЕРШИМИ.
+
+    Лог MCP знає лише текст питання (та й той обрізаний до 600 символів); тут
+    є канал, скоуп, процитовані джерела і — головне — вердикт власника. Порядок
+    не косметичний: власник розмічає десяток питань на тиждень, і перші в черзі
+    мають бути ті, де система вже виміряно помилилась (👎), а не випадкові.
+
+    Дедуп нормалізовано, як у `mine_queries`; у межах однакового питання
+    виграє перша поява в цьому порядку.
+    """
+    out: list[dict] = []
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT question, scope_json, source_ids_json, rating, note FROM ask_log "
+                # -1 → 0, решта → 1: 👎 попереду, далі 👍 і неоцінені за часом
+                "ORDER BY CASE WHEN rating = -1 THEN 0 ELSE 1 END, id"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            # знімок старший за міграцію v41 — це не помилка виклику, просто
+            # звідти нічого міняти (без --from-ask-log ми б сюди й не зайшли).
+            print(f"[build_golden] ask_log недоступний у {db_path}: {exc}", file=sys.stderr)
+            return out
+    finally:
+        conn.close()
+
+    seen: set[str] = set()
+    for row in rows:
+        question = (row["question"] or "").strip()
+        key = _norm_query(question)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        scope = {}
+        with contextlib.suppress(ValueError, TypeError):
+            scope = json.loads(row["scope_json"] or "{}") or {}
+        source_ids = []
+        with contextlib.suppress(ValueError, TypeError):
+            source_ids = json.loads(row["source_ids_json"] or "[]") or []
+        cid = scope.get("category_id")
+        notes = []
+        if row["rating"] in (1, -1):
+            notes.append("👎 власника" if row["rating"] == -1 else "👍 власника")
+        if (row["note"] or "").strip():
+            notes.append((row["note"] or "").strip())
+        out.append({"question": question, "tool": "ask_archive",
+                    "category_id": cid if isinstance(cid, int) else None,
+                    "source": "ask_log",
+                    "source_ids": [i for i in source_ids if isinstance(i, int)],
+                    "notes": " · ".join(notes)})
+    return out
+
+
+def candidates_from_ids(db_path: str, source_ids: list[int]) -> tuple[list[dict], str]:
+    """Кандидати з процитованих джерел рядка `ask_log` (без `retrieval.search`).
+
+    Це та сама ПІДКАЗКА, що й топ-5 пошуку: те, що модель процитувала, не
+    доводить правильності — доводить лише людина, переводячи пункт у `labeled`.
+    Але підказка сильніша: ці джерела вже пройшли крізь відповідь."""
+    if not source_ids:
+        return [], "calls"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" * len(source_ids))
+        rows = conn.execute(
+            f"SELECT id, source_name, source_type FROM transcriptions WHERE id IN ({placeholders})",
+            source_ids).fetchall()
+    finally:
+        conn.close()
+    by_id = {r["id"]: r for r in rows}
+    chunks = []
+    for tid in source_ids:
+        r = by_id.get(tid)
+        chunks.append({"transcription_id": tid,
+                       "source_name": r["source_name"] if r else None,
+                       "source_type": r["source_type"] if r else None})
+    return chunks, _slice_for_chunks(chunks)
 
 
 def _norm_query(q: str) -> str:
@@ -219,8 +308,8 @@ def _make_item(idx: int, q: dict, candidates: list[dict], slice_: str) -> dict:
         "expected_transcription_ids": [],
         "expected_source_name_contains": [],
         "expected_facts": [],
-        "notes": "",
-        "source": "mcp_log",
+        "notes": q.get("notes") or "",
+        "source": q.get("source") or "mcp_log",
         "status": "unlabeled",
         "candidates": candidates,
     }
@@ -258,6 +347,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Свідомо дозволити перезапис --out без --merge, коли в ньому вже є "
                               "розмічені (labeled/negative) пункти. Без --merge і без цього прапорця "
                               "такий --out НЕ перезаписується — ручна розмітка незамінна.")
+    parser.add_argument("--from-ask-log", action="store_true",
+                         help="Додати питання з таблиці ask_log знімка (UI+MCP, з оцінкою "
+                              "власника): 👎 першими, кандидати — процитовані джерела")
     parser.add_argument("--stats", action="store_true", help="Надрукувати таблицю slice×status і дефіцит до цілі")
     parser.add_argument("--top-k", type=int, default=5, help="Скільки кандидатів на запит (default: 5)")
     parser.add_argument("--yes-live", action="store_true",
@@ -299,6 +391,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                       file=sys.stderr)
 
     mined = mine_queries(args.mcp_log)
+    if args.from_ask_log:
+        # Читаємо теж із КОПІЇ знімка: `sqlite3.connect` на WAL-файл лишає по
+        # собі -wal/-shm, а знімок має лишитись байт-у-байт (ADR-003).
+        with _scratch_copy(args.db) as scratch:
+            mined += mine_ask_log(scratch)
 
     known = {_norm_query(it.get("question", "")) for it in existing}
     seen_new: set[str] = set()
@@ -315,7 +412,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         with _scratch_copy(args.db) as scratch:
             next_idx = _next_start_idx(existing)
             for q in new_queries:
-                candidates, slice_ = candidates_for(scratch, q["question"], top_k=args.top_k)
+                if q.get("source") == "ask_log":
+                    # джерела вже процитовані у відповіді — другий пошук по тому
+                    # самому питанню нічого не додає, лише платить часом
+                    candidates, slice_ = candidates_from_ids(scratch, q.get("source_ids") or [])
+                else:
+                    candidates, slice_ = candidates_for(scratch, q["question"], top_k=args.top_k)
                 new_items.append(_make_item(next_idx, q, candidates, slice_))
                 next_idx += 1
 

@@ -22,10 +22,10 @@
 | Route | View | Екран |
 |---|---|---|
 | `/` | home | Дашборд: плитки stats, ask-box, останні записи |
-| `/library` | library | Історія: пошук + фасети (джерело/категорія/період), пагінація, bulk-категорія/видалення. **Рядок рендериться ПО ТИПУ джерела** (`rowParts()`): TG — чат+відправник у підписі й повідомлення в тілі; дзвінок — тривалість/спікери/задачі; документ — файл/сторінки |
+| `/library` | library | Історія: пошук + фасети (джерело/категорія/період), пагінація, bulk-категорія/видалення. **Рядок рендериться ПО ТИПУ джерела** (`rowParts()`): TG — чат+відправник у підписі й повідомлення в тілі; дзвінок — тривалість/спікери/задачі; документ — файл/сторінки. Дубль (Хвиля A) несе бейдж «дубль #N» (`t.duplicate_of`) |
 | `/audio` | audio | Аудіотека (YouTube+записи): play/explore/transcribe/delete, бейдж активної транскрипції, фільтр **«Без транскрипта»** (`?transcribed=0`) |
 | `/transcript/:slug` | transcript | Запис: 3 view (plain/segments/polished), плеєр+seek по сегменту, закладки, категорія, **таймлайн ко-пілота**, word cloud |
-| `/ask` | ask | RAG-чат: `api.askStream()` (fetch+SSE), цитати-посилання |
+| `/ask` | ask | RAG-чат: `api.askStream()` (fetch+SSE), цитати-посилання, 👍/👎+замітка під відповіддю (`R.api.rateAsk(askId, rating, note)` → `POST /api/memory/ask/<id>/rate`, Хвиля A 16.09.2026 — розмітка golden-set, не «лайк») |
 | `/research` | research | Дослідження бренду: preview → originals(.md) / AI-summary |
 | `/entities`, `/entities/:id` | entities | Граф: значущі сутності (≥2 згадки) + картка (co-mentions, timeline, export) |
 | `/tasks` | tasks | Звід зобовʼязань: **відра терміновості** (протерміновано / найближчі 7 днів / пізніше / без дати — по запиту на відро, лічильники з `windows`) + фасет власника + статус (вкл. `stale`) + період + категорія |
@@ -38,7 +38,7 @@
 | `/record` | record | Рекордер: SSE level+сегменти (fetch), setup→active→stop-name→transcribe, мега-панель ко-пілота |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v58`.** Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v63`.** Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas

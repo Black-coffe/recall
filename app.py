@@ -244,22 +244,34 @@ else:
         '%(asctime)s - %(name)s - %(levelname)s - [req:%(request_id)s] - %(message)s'
     )
 
-_file_handler = RotatingFileHandler(
-    getattr(cfg, 'LOG_FILE', 'whisper_app.log'),
-    maxBytes=getattr(cfg, 'LOG_MAX_SIZE', 10 * 1024 * 1024),  # 10MB
-    backupCount=getattr(cfg, 'LOG_BACKUP_COUNT', 5),
-    encoding='utf-8'
-)
-_file_handler.setFormatter(_log_formatter)
-_file_handler.addFilter(_RequestIdLogFilter())
+_log_handlers = []
+
+# test-log-isolation-03: під pytest не відкриваємо бойовий LOG_FILE на
+# імпорті (повний прогін тягне app.py через test_endpoints_smoke, ще на
+# стадії collection) — той самий "pytest" not in sys.modules, що і в
+# telegram_listener.py/app/services/commitments.py. PYTEST_CURRENT_TEST тут
+# не годиться: pytest виставляє її лише на фазу виконання тесту, а не на
+# collection, коли цей модуль уже імпортовано. Консольний хендлер лишається
+# і під pytest.
+if "pytest" not in sys.modules:
+    _file_handler = RotatingFileHandler(
+        getattr(cfg, 'LOG_FILE', 'whisper_app.log'),
+        maxBytes=getattr(cfg, 'LOG_MAX_SIZE', 10 * 1024 * 1024),  # 10MB
+        backupCount=getattr(cfg, 'LOG_BACKUP_COUNT', 5),
+        encoding='utf-8'
+    )
+    _file_handler.setFormatter(_log_formatter)
+    _file_handler.addFilter(_RequestIdLogFilter())
+    _log_handlers.append(_file_handler)
 
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_log_formatter)
 _stream_handler.addFilter(_RequestIdLogFilter())
+_log_handlers.append(_stream_handler)
 
 logging.basicConfig(
     level=getattr(logging, getattr(cfg, 'LOG_LEVEL', 'INFO'), logging.INFO),
-    handlers=[_file_handler, _stream_handler]
+    handlers=_log_handlers
 )
 logger = logging.getLogger(__name__)
 

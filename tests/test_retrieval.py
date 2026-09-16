@@ -449,3 +449,143 @@ def test_thread_context_skips_single_message_thread(db):
                "text": "одне повідомлення"}]
     retrieval.attach_thread_context(db, chunks)
     assert "thread" not in chunks[0]
+
+
+def test_thread_context_truncates_long_neighbor_message(db):
+    """Сусід довше RAG_THREAD_MSG_CHARS ріжеться із суфіксом, коротший — ні."""
+    long_neighbor = "а" * 3000
+    _seed_thread(db, [(1, "Юля", long_neighbor), (2, "Настя", "коротка відповідь")])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 2,
+               "text": "коротка відповідь"}]
+    retrieval.attach_thread_context(db, chunks)
+    msgs = {m["tg_message_id"]: m for m in chunks[0]["thread"]["messages"]}
+    assert msgs[1].get("truncated") is True
+    assert "…[обрізано, ще" in msgs[1]["text"]
+    assert len(msgs[1]["text"]) <= 1500
+    assert "truncated" not in msgs[2]
+
+
+def test_thread_context_caps_total_chars_of_stitching(db):
+    """Сума len(text) усіх повідомлень нитки не перевищує RAG_THREAD_CHARS."""
+    huge_hit = "б" * 156000
+    _seed_thread(db, [(1, "Юля", "звичайне повідомлення"), (2, "Настя", huge_hit),
+                      (3, "Юля", "ще одне звичайне")])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 2,
+               "text": huge_hit}]
+    retrieval.attach_thread_context(db, chunks)
+    thread = chunks[0]["thread"]
+    total_kept = sum(len(m["text"]) for m in thread["messages"])
+    assert total_kept <= 8000
+    assert thread["chars_kept"] <= 8000
+    assert thread["chars_total"] > 8000
+    hit = next(m for m in thread["messages"] if m["is_hit"])
+    assert hit["tg_message_id"] == 2
+    assert hit.get("truncated") is True
+    assert "…[обрізано, ще" in hit["text"]
+
+
+def test_thread_context_hit_budget_never_smaller_than_neighbours(db):
+    """Хіт із довгим текстом за дефолтів отримує 4000, сусіди — не більше 1500."""
+    huge = "в" * 156000
+    _seed_thread(db, [(1, "Юля", huge), (2, "Настя", huge), (3, "Юля", huge)])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 2,
+               "text": huge}]
+    retrieval.attach_thread_context(db, chunks)
+    msgs = chunks[0]["thread"]["messages"]
+    hit = next(m for m in msgs if m["is_hit"])
+    neighbours = [m for m in msgs if not m["is_hit"]]
+    assert len(hit["text"]) == 4000
+    for n in neighbours:
+        assert len(n["text"]) <= 1500
+    assert len(hit["text"]) >= max((len(n["text"]) for n in neighbours), default=0)
+
+
+@pytest.mark.parametrize("stitch", [2, 6, 8])
+@pytest.mark.parametrize("msg_chars", [300, 1500])
+@pytest.mark.parametrize("thread_chars", [1000, 8000])
+def test_thread_context_window_sum_never_exceeds_ceiling(db, monkeypatch, stitch,
+                                                          msg_chars, thread_chars):
+    """Для будь-якої комбінації STITCH/MSG/THREAD сума вікна <= THREAD."""
+    monkeypatch.setenv("RAG_THREAD_MSG_CHARS", str(msg_chars))
+    monkeypatch.setenv("RAG_THREAD_CHARS", str(thread_chars))
+    huge = "г" * 156000
+    _seed_thread(db, [(i, "A", huge) for i in range(1, 10)])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 5,
+               "text": huge}]
+    retrieval.attach_thread_context(db, chunks, max_msgs=stitch)
+    thread = chunks[0]["thread"]
+    total_kept = sum(len(m["text"]) for m in thread["messages"])
+    assert thread["chars_kept"] == total_kept
+    assert total_kept <= thread_chars
+    hit = next(m for m in thread["messages"] if m["is_hit"])
+    reserve = len(f"…[обрізано, ще {156000} симв.]")
+    assert len(hit["text"]) > reserve or len(hit["text"]) == 156000
+
+
+def test_thread_context_stitch_eight_partial_neighbour_and_dropped(db):
+    """STITCH=8 за дефолтів: хіт 4000, найближчі сусіди по 1500, далі частковий і dropped."""
+    huge = "д" * 156000
+    _seed_thread(db, [(i, "A", huge) for i in range(1, 10)])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 5,
+               "text": huge}]
+    retrieval.attach_thread_context(db, chunks, max_msgs=8)
+    thread = chunks[0]["thread"]
+    total_kept = sum(len(m["text"]) for m in thread["messages"])
+    assert thread["chars_kept"] == total_kept <= 8000
+    hit = next(m for m in thread["messages"] if m["is_hit"])
+    assert len(hit["text"]) == 4000
+    assert thread["dropped"] >= 1
+
+
+def test_thread_context_short_messages_untouched_by_repair(db):
+    """Коротке вікно вміщується цілком — без обрізки і без dropped."""
+    _seed_thread(db, [(1, "Юля", "коротке"), (2, "Настя", "теж коротке")])
+    chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 1,
+               "text": "коротке"}]
+    retrieval.attach_thread_context(db, chunks)
+    thread = chunks[0]["thread"]
+    assert thread["dropped"] == 0
+    for m in thread["messages"]:
+        assert m.get("truncated") is not True
+    ids = [m["tg_message_id"] for m in thread["messages"]]
+    assert ids == [1, 2]
+
+
+# ============================================================
+# Дублі аудіо: duplicate_of виключає запис із видачі (Хвиля A)
+# ============================================================
+
+def _mark_duplicate(path, tid, original_id):
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE transcriptions SET duplicate_of = ? WHERE id = ?",
+                 (original_id, tid))
+    conn.commit()
+    conn.close()
+
+
+def test_duplicate_excluded_from_vector_branch(db, mock_embeddings):
+    """Копія з duplicate_of не спливає у видачі — лишається лише оригінал."""
+    orig = _add_tx(db, "Дзвінок")
+    copy = _add_tx(db, "Дзвінок (перезалив)")
+    q = [1.0, 0, 0, 0]
+    _add_chunk(db, orig, 0, "alpha beta", q)
+    _add_chunk(db, copy, 0, "alpha beta", q)
+
+    before = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
+    assert {c["transcription_id"] for c in before["chunks"]} == {orig, copy}
+
+    _mark_duplicate(db, copy, orig)
+    after = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
+    assert [c["transcription_id"] for c in after["chunks"]] == [orig]
+
+
+def test_duplicate_excluded_from_fts_branch(db, mock_embeddings):
+    """Те саме для лексичної гілки: слово з тексту дубля нічого не витягує."""
+    orig = _add_tx(db, "Дзвінок")
+    copy = _add_tx(db, "Дзвінок (перезалив)")
+    _add_chunk(db, orig, 0, "барселона бюджет", None)
+    _add_chunk(db, copy, 0, "барселона бюджет", None)
+    _mark_duplicate(db, copy, orig)
+
+    res = retrieval.search(db, "барселона", top_k=5, recency_weight=0)
+    assert [c["transcription_id"] for c in res["chunks"]] == [orig]

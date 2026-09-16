@@ -59,16 +59,31 @@ _tg_log_formatter = logging.Formatter(fmt=_TG_LOG_FORMAT, datefmt="%H:%M:%S")
 _tg_stream_handler = logging.StreamHandler()
 _tg_stream_handler.setFormatter(_tg_log_formatter)
 _tg_handlers = [_tg_stream_handler]
-try:
-    _tg_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_listener.log")
-    _tg_file_handler = logging.handlers.RotatingFileHandler(
-        _tg_log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True,
-    )
-    _tg_file_handler.setFormatter(_tg_log_formatter)
-    _tg_handlers.append(_tg_file_handler)
-except OSError:
-    # Не валимо слухача, якщо файл лога недоступний — консольний лог лишається.
-    pass
+
+# Під pytest цей модуль лише імпортується (tests/test_telegram.py, на рівні
+# модуля — тобто ще на стадії collection) — він не є бойовим слухачем, і
+# файловий хендлер тут писав би в telegram_listener.log власника поряд із
+# реальними записами (звідси й був баг: рядок від тесту видали за завершення
+# бойового catchup). Реєстр налаштувань уже знає PYTEST_CURRENT_TEST як
+# зовнішню змінну (app/core/settings.py IGNORED_ENV_NAMES), але саме ця
+# змінна pytest виставляє лише на фазу виконання тесту (setup/call/teardown),
+# а не на collection — на момент цього імпорту вона ще None. "pytest" у
+# sys.modules pytest кладе одразу при старті, до збору тестів, тож саме він
+# і є надійним індикатором тут. Консольний хендлер лишається і під pytest,
+# але pytest уже повісив на root свої хендлери, тож цей basicConfig() —
+# no-op і StreamHandler не чіпляється зовсім (виміряно); `capsys` рядків
+# слухача тому не бачить, `caplog` бачить — через propagation на root.
+if "pytest" not in sys.modules:
+    try:
+        _tg_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_listener.log")
+        _tg_file_handler = logging.handlers.RotatingFileHandler(
+            _tg_log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True,
+        )
+        _tg_file_handler.setFormatter(_tg_log_formatter)
+        _tg_handlers.append(_tg_file_handler)
+    except OSError:
+        # Не валимо слухача, якщо файл лога недоступний — консольний лог лишається.
+        pass
 
 logging.basicConfig(level=logging.INFO, handlers=_tg_handlers)
 logger = logging.getLogger("tg_listener")
@@ -213,7 +228,19 @@ def _sender_name(sender) -> str | None:
         f"@{sender.username}" if getattr(sender, "username", None) else None)
 
 
-def _chat_link(chat, chat_id: int, msg_id: int) -> str | None:
+def _chat_link(chat, chat_id: int | None, msg_id: int) -> str | None:
+    if chat_id is None:
+        # Telethon віддає None, коли в peer_id немає жодного з полів
+        # (рідкісний, але наявний випадок) — раніше це давало посилання чи
+        # None через порівняння з int, тепер поводимось так само явно.
+        return None
+    if chat_id > 0:
+        # Особистий чат (позитивний chat_id = User): навіть якщо в юзернейма
+        # співрозмовника є username, https://t.me/<username>/<msg_id> — це
+        # посилання на пост у публічній групі/каналі, а не на повідомлення в
+        # особистому листуванні. Формату посилання на таке повідомлення нема
+        # (core.telegram.org/api/links).
+        return None
     uname = getattr(chat, "username", None)
     if uname:
         return f"https://t.me/{uname}/{msg_id}"

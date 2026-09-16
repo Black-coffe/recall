@@ -32,6 +32,7 @@ from typing import Optional
 
 import numpy as np
 
+from app.core import settings as _settings
 from app.db.connection import get_db_connection
 from app.services import embeddings, reranker
 
@@ -215,7 +216,8 @@ def _vector_search(db_path: str, query: str, candidate_k: int,
     # T4.6: soft-deleted транскрипти НЕ мають спливати у RAG/пошуку — фільтр
     # завжди активний, незалежно від category_id (не лише в category-гілках).
     sql = ("SELECT ch.id, ch.embedding FROM chunks ch WHERE ch.embedding IS NOT NULL "
-           "AND ch.transcription_id IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL)")
+           "AND ch.transcription_id IN (SELECT id FROM transcriptions "
+           "WHERE deleted_at IS NULL AND duplicate_of IS NULL)")
     params: list = []
     if category_id == 'none':
         sql += " AND ch.transcription_id IN (SELECT id FROM transcriptions WHERE category_id IS NULL)"
@@ -259,7 +261,8 @@ def _fts_search(db_path: str, query: str, candidate_k: int,
     # коли задано category_id.
     sql = ("SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ? "
            "AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
-           "(SELECT id FROM transcriptions WHERE deleted_at IS NULL))")
+           "(SELECT id FROM transcriptions WHERE deleted_at IS NULL "
+           "AND duplicate_of IS NULL))")
     params: list = [fts_q]
     if category_id == 'none':
         sql += (" AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
@@ -734,7 +737,8 @@ def search(db_path: str, query: str, top_k: int = 8,
                 f"t.tg_thread_id, "
                 f"COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
                 f"FROM chunks ch JOIN transcriptions t ON t.id = ch.transcription_id "
-                f"WHERE ch.id IN ({placeholders}) AND t.deleted_at IS NULL",
+                f"WHERE ch.id IN ({placeholders}) AND t.deleted_at IS NULL "
+                f"AND t.duplicate_of IS NULL",
                 candidate_ids,
             ).fetchall()
     by_id = {r["id"]: r for r in rows}
@@ -946,6 +950,22 @@ def attach_comments(db_path: str, chunks: list[dict],
 _THREAD_STITCH = int(os.environ.get("RAG_THREAD_STITCH", "6"))
 
 
+def _truncate_chars(text: str, limit: int) -> tuple[str, bool]:
+    """Обрізає ``text`` до ``limit`` символів включно з суфіксом обрізки.
+
+    Суфікс розмірюється по верхній межі (к-сть цифр у довжині всього тексту —
+    точна к-сть обрізаних символів не більша за неї), тому результат гарантовано
+    вкладається в ``limit`` без ітеративного підбору."""
+    n = len(text)
+    if n <= limit:
+        return text, False
+    reserve = len(f"…[обрізано, ще {n} симв.]")
+    kept = max(limit - reserve, 0)
+    omitted = n - kept
+    suffix = f"…[обрізано, ще {omitted} симв.]"
+    return text[:kept] + suffix, True
+
+
 def attach_thread_context(db_path: str, chunks: list[dict],
                           max_msgs: int = _THREAD_STITCH) -> list[dict]:
     """Підшити до TG-знахідок сусідів їхньої нитки (Волна 4.5).
@@ -980,6 +1000,11 @@ def attach_thread_context(db_path: str, chunks: list[dict],
     for r in rows:
         by_thread.setdefault(r["tg_thread_id"], []).append(r)
 
+    # Стелі читаються функцією (не константою модуля) — перемикаються без
+    # рестарту процесу, як і решта env-налаштувань у settings.py.
+    msg_limit = _settings.env_int("RAG_THREAD_MSG_CHARS")
+    thread_limit = _settings.env_int("RAG_THREAD_CHARS")
+
     for ch in chunks:
         tid = ch.get("tg_thread_id")
         msgs = by_thread.get(tid) if tid else None
@@ -992,15 +1017,72 @@ def attach_thread_context(db_path: str, chunks: list[dict],
         half = max_msgs // 2
         start = max(0, hit - half)
         window = msgs[start:start + max_msgs]
+
+        chars_total = sum(len(m["transcript_text"] or "") for m in window)
+
+        hit_pos = hit - start  # позиція знахідки всередині window
+        hit_row = window[hit_pos]
+
+        # Хіт отримує бюджет, який ніколи не менший за бюджет сусіда: не
+        # менше msg_limit, але не більше половини стелі нитки (щоб лишити
+        # місце бодай на одного сусіда), і в жодному разі не більше стелі.
+        hit_budget = min(thread_limit, max(msg_limit, thread_limit // 2))
+        hit_text, hit_truncated = _truncate_chars(hit_row["transcript_text"] or "", hit_budget)
+        remaining = thread_limit - len(hit_text)
+
+        included: dict[int, dict] = {
+            hit_row["tg_message_id"]: {
+                "tg_message_id": hit_row["tg_message_id"], "date": hit_row["tg_date"],
+                "sender": hit_row["tg_sender"], "text": hit_text, "is_hit": True,
+            }
+        }
+        if hit_truncated:
+            included[hit_row["tg_message_id"]]["truncated"] = True
+
+        # Сусіди в порядку близькості до хіта (найближчий за tg_date першим,
+        # з обох боків по черзі) — не в хронологічному порядку вікна.
+        neighbour_order = []
+        dist = 1
+        while hit_pos - dist >= 0 or hit_pos + dist < len(window):
+            if hit_pos - dist >= 0:
+                neighbour_order.append(window[hit_pos - dist])
+            if hit_pos + dist < len(window):
+                neighbour_order.append(window[hit_pos + dist])
+            dist += 1
+
+        dropped = 0
+        for idx, m in enumerate(neighbour_order):
+            budget = min(msg_limit, remaining)
+            raw = m["transcript_text"] or ""
+            n = len(raw)
+            if n > budget:
+                reserve = len(f"…[обрізано, ще {n} симв.]")
+                kept = max(budget - reserve, 0)
+                if kept <= 0:
+                    # Залишок не вміщує нічого крім суфікса — сусід і всі
+                    # дальші (у порядку близькості) відкидаються.
+                    dropped = len(neighbour_order) - idx
+                    break
+            text, truncated = _truncate_chars(raw, max(budget, 0))
+            remaining -= len(text)
+            msg = {"tg_message_id": m["tg_message_id"], "date": m["tg_date"],
+                   "sender": m["tg_sender"], "text": text, "is_hit": False}
+            if truncated:
+                msg["truncated"] = True
+            included[m["tg_message_id"]] = msg
+
+        # Порядок messages лишається хронологічним (порядком вікна).
+        messages = [included[m["tg_message_id"]] for m in window
+                    if m["tg_message_id"] in included]
+
+        chars_kept = sum(len(m["text"]) for m in messages)
         ch["thread"] = {
             "thread_id": tid,
             "label": labels.get(tid),
             "total_messages": len(msgs),
-            "messages": [
-                {"tg_message_id": m["tg_message_id"], "date": m["tg_date"],
-                 "sender": m["tg_sender"], "text": m["transcript_text"],
-                 "is_hit": m["tg_message_id"] == ch.get("tg_message_id")}
-                for m in window
-            ],
+            "chars_total": chars_total,
+            "chars_kept": chars_kept,
+            "dropped": dropped,
+            "messages": messages,
         }
     return chunks

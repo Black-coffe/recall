@@ -57,25 +57,36 @@ logging.raiseExceptions = False
 # на Windows (WinError 32). КРИТИЧНО: жодного handler'а на stdout — stdio-транспорт
 # MCP використовує stdout для JSON-RPC, будь-який лог туди ламає протокол. Пишемо
 # лише у файл (stderr теж не займаємо, щоб не заважати клієнтському парсингу).
-try:
-    _MCP_LOG_PATH = Path(__file__).resolve().parent / "mcp_server.log"
-    _mcp_file_handler = logging.handlers.RotatingFileHandler(
-        _MCP_LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True,
-    )
-    _mcp_file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s [mcp_server pid=%(process)d] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    logging.getLogger().addHandler(_mcp_file_handler)
-    logging.getLogger().setLevel(logging.INFO)
-    # Приглушуємо галасливі сторонні логери (той самий список, що app.py) —
-    # інакше httpx-проксі-виклики роздують mcp_server.log per-request.
-    for _noisy in ("httpx", "httpcore", "urllib3", "anthropic", "huggingface_hub", "filelock"):
-        logging.getLogger(_noisy).setLevel(logging.WARNING)
-except OSError:
-    # Не валимо stdio-сервер, якщо файл лога недоступний — MCP-протокол
-    # важливіший за діагностику.
-    pass
+# Під pytest цей модуль лише імпортується (test_mcp_about.py, test_tool_count_docs.py
+# та інші — на рівні модуля, тобто ще на стадії collection), а хендлер вішається
+# на РУТ-логер: будь-який logging.error/exception з будь-якого іншого тесту в
+# тому ж прогоні (включно з фейковими YouTube-помилками test_youtube_pytubefix.py)
+# після цього піде в mcp_server.log живого сервера власника (так там і опинилися).
+# Реєстр налаштувань уже знає PYTEST_CURRENT_TEST як зовнішню змінну
+# (app/core/settings.py IGNORED_ENV_NAMES), але саме ця змінна pytest виставляє
+# лише на фазу виконання тесту (setup/call/teardown), а не на collection — на
+# момент цього імпорту вона ще None. "pytest" у sys.modules pytest кладе одразу
+# при старті, до збору тестів, тож саме він і є надійним індикатором тут.
+if "pytest" not in sys.modules:
+    try:
+        _MCP_LOG_PATH = Path(__file__).resolve().parent / "mcp_server.log"
+        _mcp_file_handler = logging.handlers.RotatingFileHandler(
+            _MCP_LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True,
+        )
+        _mcp_file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s [mcp_server pid=%(process)d] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logging.getLogger().addHandler(_mcp_file_handler)
+        logging.getLogger().setLevel(logging.INFO)
+        # Приглушуємо галасливі сторонні логери (той самий список, що app.py) —
+        # інакше httpx-проксі-виклики роздують mcp_server.log per-request.
+        for _noisy in ("httpx", "httpcore", "urllib3", "anthropic", "huggingface_hub", "filelock"):
+            logging.getLogger(_noisy).setLevel(logging.WARNING)
+    except OSError:
+        # Не валимо stdio-сервер, якщо файл лога недоступний — MCP-протокол
+        # важливіший за діагностику.
+        pass
 
 logger = logging.getLogger("mcp_server")
 
@@ -913,9 +924,12 @@ def ask_archive(question: str, k: int = 12, category_id: Optional[int] = None,
     Для природномовних питань («що ми вирішили по X?»); для точкового пошуку
     фрагментів бери search_archive. Нічого не змінює (працює і в read-only).
     explain=True — додати розбір релевантності (bm25/dense/rrf/recency/rerank,
-    джерело) до цитованих чанків."""
+    джерело) до цитованих чанків.
+
+    Питання з відповіддю осідає в `ask_log` (channel="mcp") — сировина
+    golden-set; оцінку 👍/👎 власник ставить у веб-чаті, тулзи для неї нема."""
     body = {"question": question, "k": int(k), "category_id": category_id,
-            "project": project, "model": model}
+            "project": project, "model": model, "channel": "mcp"}
     if explain:
         body["explain"] = True
     return _api("POST", "/api/memory/ask", body=body, write=False, timeout=180.0)

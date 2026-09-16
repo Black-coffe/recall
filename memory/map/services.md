@@ -14,6 +14,25 @@
 - **live_transcribe.py** — `LiveTranscribeWorker`: читає PCM-хвіст активної сесії, транскрибує
   small-моделлю, шле сегменти по SSE. *interval ~8s; mic-only MVP; у памʼяті, не БД; фінал усе одно потрібен.*
 
+## Дедуп аудіо/YouTube/записів (Хвиля A production-RAG, 16.09.2026)
+- **dedup_audio.py** — `hash_for(source_type, text)` (sha256 нормалізованого тексту, лише
+  `file|youtube|recording` — Telegram і document мають свій дедуп), `find_original(conn,
+  content_hash_value, exclude_id=None)` (найстаріший живий НЕ-дубль з тим самим хешем),
+  `mark_duplicates(db_path, dry_run=False)` (офлайн-прохід по вже накопиченому архіву,
+  дефолт пише в БД — `--dry-run` вмикає сухий режим). CLI: `python -m app.services.dedup_audio
+  mark --dry-run`. *Дубль НЕ видаляється: `transcriptions.duplicate_of` (migration v40) вказує
+  на оригінал, чанки/ембеддинги для дубля не будуються, інжест (`transcription.py`) виставляє
+  `duplicate_of` до INSERT і статус збагачення `skipped_duplicate`. `retrieval.search` (vector
+  і FTS) фільтрує `duplicate_of IS NULL` поруч із `deleted_at IS NULL`. `enrichment.py`
+  (`list_unenriched_ids`, `backfill --force`, `enrich_transcription`) пропускає
+  `duplicate_of IS NOT NULL` записи раннім виходом.*
+- **telegram_link_repair.py** (test-log-isolation-02) — `clear_bogus_private_links(db_path,
+  dry_run=False)`: одноразовий ремонт `tg_link`, вигаданого старим `_chat_link` для особистих
+  чатів (`tg_chat_id > 0`) як `t.me/<username>/<msg_id>` — такого посилання на конкретне
+  повідомлення в особистому листуванні не існує. Чистить лише поле, рядки лишає. CLI:
+  `python -m app.services.telegram_link_repair clear-bogus-links --dry-run`. `_chat_link` у
+  `telegram_listener.py` більше не вигадує посилань для приватних чатів.
+
 ## RAG (пошук + чат)
 - **embeddings.py** — локальні e5-large (1024-dim): `embed_text()` (query:/passage: префікси),
   три чанкери: `_chunk_from_segments()` (аудіо), `_chunk_from_blocks()` (документи, page/section),
@@ -29,6 +48,17 @@
   retrieval навмисно не знає про граф сутностей),
   recency-boost (half-life ~180д), per-meeting cap (≤3 чанки/зустріч), опційний `rerank=` (T6.4, OFF за
   замовчуванням) — cross-encoder переранжовує топ-пул (~24) ПЕРЕД diversity cap. *>100k чанків → треба sqlite-vec.*
+  *Хвиля A: обидві гілки (vector і FTS) фільтрують `duplicate_of IS NULL` поруч із
+  `deleted_at IS NULL` — дубль лишається в Бібліотеці, але не в пошуку.*
+  `attach_thread_context(db_path, chunks, max_msgs=6)` — стеля символів на TG-нитку в контексті
+  (раніше без ліміту, до 353k вхідних токенів на одне питання): env `RAG_THREAD_MSG_CHARS`
+  (дефолт 1500, сусіди) і `RAG_THREAD_CHARS` (дефолт 8000, уся підшита нитка), обидва в реєстрі
+  `app/core/settings.py`. Бюджет хіта `hit_budget = min(thread_limit, max(msg_limit, thread_limit
+  // 2))` — ніколи не менший за бюджет сусіда. Сусіди беруться в порядку близькості до хіта (не
+  хронологічно), кожен ≤ `min(msg_limit, remaining)`; сусід, якому не лишилось місця навіть під
+  суфікс обрізки, і всі дальші (у порядку близькості) відкидаються — рахунок у `thread["dropped"]`.
+  Обрізаний текст несе `truncated: true` і суфікс `…[обрізано, ще {K} симв.]`. Підсумковий
+  `messages` завжди хронологічний (порядок вікна), `thread` несе `chars_total`/`chars_kept`/`dropped`.
   *grep-explainability (S2): `explain: bool = False` — кожен результат несе `why`-словник
   (`WHY_REQUIRED_KEYS = src,rrf,rec,by,top`; `build_placeholder_why()` — те саме для коментарів/
   фолбеків); `explain=True` додає `why["stages"]` (позиція+сирий `sim`/`bm25` на кожній стадії),
@@ -48,12 +78,24 @@
   sentence-transformers стек, що e5). *Lazy singleton як embeddings.py; OFF за замовчуванням
   (`RECALL_RERANK_ENABLED`), вмикається ЛИШЕ для RAG-чату з `rag.py`; graceful degradation → вихідний
   порядок без rerank.*
-- **rag.py** — «Ask Archive»: `query_stream()`/`query()`. Контекст із чанків, відповідь ТІЛЬКИ з них + цитати [n].
+- **rag.py** — «Ask Archive»: `answer_question()`/`answer_question_stream()` (сигнатури — колишні
+  `query()`/`query_stream()`). Контекст із чанків, відповідь ТІЛЬКИ з них + цитати [n].
   *Дефолт k — `_DEFAULT_TOP_K`=12 (env `RAG_TOP_K`), єдина точка правди для `/api/memory/ask*` і MCP
   `ask_archive`: на k=8 правильне джерело часто стоїть одразу за зрізом (recall@8 67.9% vs recall@12 82.1%).*
   `project=` (Трек 2) звужує до проєкту/людини; невідома назва НЕ обнуляє пошук — краще ширша
   відповідь, ніж мовчання через друкарську помилку.
   *Prompt caching; модель з CLAUDE_MODEL; T6.4 rerank точково через `retrieval.search(rerank=_RERANK_ENABLED)`.*
+  *Хвиля A production-RAG (16.09.2026): `order_citables(chunks, attached_comments)` — єдина
+  функція для нумерації [n] і для `sources`, коментарі власника першими, решта — хронологічно за
+  `meeting_date` зростанням (system prompt: «пізніша версія веде», рання показується як «було»),
+  тай-брейк при однаковій даті — `(ранг першої появи transcription_id у порядку ретривалу,
+  chunk_index)`, тож чанки одного запису йдуть підряд. `answer_question[_stream](..., channel:
+  str = "ui")` — обидва канали (UI і MCP) логуються в таблицю `ask_log` (migration v41) через
+  `_log_ask()`; вартість — `_ask_cost()` поверх `app.services.pricing.estimate_cost` (єдине
+  джерело тарифів, НЕ окрема таблиця в rag.py). Пишуться лише успішні відповіді — збій Claude
+  не лишає рядка. `ASK_CHANNELS = ("ui", "mcp")`; невідомий канал falls back на `"ui"`.
+  `rate_ask(db_path, ask_id, rating, note=None)` — оцінка власника (1/-1) + замітка, `False`
+  якщо рядка нема. Відповідь і SSE-подія `done` несуть `ask_id`.*
 - **categorize.py** — `suggest_category()`: k-NN голосування по ембеддингах сусідів. *Мін 2 розмічені
   категорії (cold-start), dim має збігатись (1024).*
 

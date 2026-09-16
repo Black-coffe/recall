@@ -4,3 +4,6 @@
 *.py text eol=lf
 scripts/git-hooks/* text eol=lf
 .claude/hooks/* text eol=lf
+
+# --- VULYK: the Workflow driver must check out with LF (added by install.sh) ---
+.claude/workflows/*.js text eol=lf

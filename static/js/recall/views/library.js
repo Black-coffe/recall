@@ -320,6 +320,10 @@
         // сигнал «Claude ще не розбирав», а не декоративний бейдж на всьому.
         const raw = (src !== 'telegram' && !t.enriched_at)
             ? `<span class="rc-rec__warn">не збагачено</span>` : '';
+        // Дубль лишається в списку (свої коментарі/файл/задачі), але його текст
+        // уже представлений оригіналом — і в пошуку бере участь саме оригінал.
+        const dup = t.duplicate_of
+            ? `<span class="rc-rec__warn">дубль #${t.duplicate_of}</span>` : '';
 
         if (src === 'telegram') {
             return {
@@ -327,7 +331,7 @@
                     t.tg_sender ? `<span class="sep">·</span><span class="rc-rec__who">${U.esc(t.tg_sender)}</span>` : ''}`,
                 titleClass: 'rc-rec__title rc-rec__title--label',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
-                            `<span>${U.fmtDate(t.created_at)}</span>`, tasks]),
+                            `<span>${U.fmtDate(t.created_at)}</span>`, tasks, dup]),
                 bodyLead: true,      // тіло — головний текст, а не хвіст картки
             };
         }
@@ -337,7 +341,7 @@
                 titleClass: 'rc-rec__title',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
                             t.page_count ? `<span>${t.page_count} ${U.plural(t.page_count, ['стор.', 'стор.', 'стор.'])}</span>` : '',
-                            tasks, raw, `<span>${U.fmtDate(t.created_at)}</span>`]),
+                            tasks, raw, dup, `<span>${U.fmtDate(t.created_at)}</span>`]),
             };
         }
         const dur = t.youtube_duration;
@@ -348,7 +352,7 @@
                 UI.srcBadge(src),
                 dur ? `<span class="rc-rec__sig">${U.fmtDuration(dur)}</span>` : '',
                 t.speaker_count > 0 ? `<span>${t.speaker_count} ${U.plural(t.speaker_count, ['спікер', 'спікери', 'спікерів'])}</span>` : '',
-                tasks, raw,
+                tasks, raw, dup,
                 t.youtube_author ? `<span>${U.esc(t.youtube_author)}</span>` : '',
                 `<span>${U.fmtDate(t.created_at)}</span>`,
             ]),

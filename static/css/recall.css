@@ -973,6 +973,18 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     background: var(--rc-surface);
 }
 .rc-ask__bar textarea:focus { outline: none; border-color: var(--rc-accent); box-shadow: 0 0 0 3px var(--rc-accent-ring); }
+/* 👍/👎 під відповіддю — розмітка golden-set, а не «лайк» */
+.rc-ask__rate { display: flex; align-items: center; gap: var(--rc-2); margin-top: var(--rc-2); flex-wrap: wrap; }
+.rc-ask__rate-lede { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-ask__rate-note {
+    flex: 1; min-width: 180px;
+    padding: var(--rc-2) var(--rc-3);
+    border: 1px solid var(--rc-hairline-2); border-radius: var(--rc-r-2);
+    font: inherit; font-size: var(--rc-t-xs); color: var(--rc-ink);
+    background: var(--rc-surface);
+}
+.rc-ask__rate-note:focus { outline: none; border-color: var(--rc-accent); }
+.rc-ask__rate-state { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
 
 /* ----------------------------------------------------------------------------
    Stat tiles (home)

@@ -57,6 +57,7 @@
         const sources = [];
 
         out.innerHTML = `<div class="rc-ask__answer" id="rcAnswer"><span class="rc-mono" style="color:var(--rc-ink-3)"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю в архіві…</span></div>
+            <div id="rcAskRate"></div>
             <div id="rcAskSources" style="margin-top:16px"></div>`;
         const answerEl = out.querySelector('#rcAnswer');
         let text = '';
@@ -77,6 +78,7 @@
                 } else if (event === 'done') {
                     if (!text) answerEl.textContent = 'Порожня відповідь.';
                     renderCitations(ctx, answerEl, text, sources);
+                    renderRating(ctx, data.ask_id);
                 }
             }, myCtl.signal, { idleTimeoutMs: 30000 });
         } catch (err) {
@@ -105,6 +107,40 @@
             el.addEventListener('click', () => {
                 const src = sources[parseInt(el.dataset.i, 10)];
                 if (src && src.transcription_id) R.router.navigate('/transcript/' + U.slug(src.transcription_id, src.source_name));
+            });
+        });
+    }
+
+    // 👍/👎 + замітка під відповіддю. Це не «лайк», а розмітка golden-set:
+    // раз на тиждень власник переносить звідси десяток питань у набір, і 👎
+    // йдуть туди першими. Без ask_id (лог не записався) блок не показуємо —
+    // кнопка, що нікуди не веде, гірша за її відсутність.
+    function renderRating(ctx, askId) {
+        const box = ctx.mount.querySelector('#rcAskRate');
+        if (!box || !askId) return;
+        box.innerHTML = `<div class="rc-ask__rate">
+                <span class="rc-ask__rate-lede">Відповідь корисна?</span>
+                <button class="rc-btn rc-btn--ghost" data-rating="1" title="Корисна">👍</button>
+                <button class="rc-btn rc-btn--ghost" data-rating="-1" title="Погана">👎</button>
+                <input type="text" class="rc-ask__rate-note" placeholder="Замітка (необовʼязково)">
+                <span class="rc-ask__rate-state"></span>
+            </div>`;
+        const stateEl = box.querySelector('.rc-ask__rate-state');
+        const noteEl = box.querySelector('.rc-ask__rate-note');
+        box.querySelectorAll('button[data-rating]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const rating = parseInt(btn.dataset.rating, 10);
+                box.querySelectorAll('button[data-rating]').forEach(b => b.disabled = true);
+                try {
+                    await R.api.rateAsk(askId, rating, noteEl.value.trim());
+                    box.querySelectorAll('button[data-rating]').forEach(b =>
+                        b.classList.toggle('rc-btn--primary', b === btn));
+                    stateEl.textContent = 'оцінено';
+                } catch (err) {
+                    stateEl.textContent = (err && err.message) || 'не вдалося зберегти';
+                } finally {
+                    box.querySelectorAll('button[data-rating]').forEach(b => b.disabled = false);
+                }
             });
         });
     }

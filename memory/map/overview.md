@@ -59,8 +59,10 @@ Recall — це **монолітний Flask-сервер** + **2 окремі �
 document/telegram/copilot/meeting_archive), `audio_downloads` (Аудіотека), `segments`/
 speaker-map, `chunks`+embeddings (RAG), `categories`/`entities`/`meeting_entities`/
 `action_items`/`entity_aliases` (граф памʼяті), `segment_bookmarks`, `saved_searches`,
-`tg_monitored_chats`, `copilot_sessions`/`topics`/`events`. Доступ — контекст-менеджер
-`get_db_connection()`. Міграції — `app/db/migrations.py` (поточна **v29**: action_items.due_date/due_precision/stale_at/dup_of — нормалізовані дедлайни, Трек 1).
+`tg_monitored_chats`, `copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань
+UI+MCP). Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
+(поточна **v41**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
+питання/канал/скоуп/джерела/токени/вартість/оцінка власника, Хвиля A production-RAG 16.09.2026).
 
 ## Windows-специфіка
 

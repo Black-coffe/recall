@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,19 @@ def test_about_text_reports_derived_count(db):
     n = len(m._registered_tool_names())
     assert f"{n} тулзів" in text
     assert "30 тулзів" not in text or n == 30
+
+
+def test_no_file_handler_attached_under_pytest():
+    """mcp_server вішає свій RotatingFileHandler на РУТ-логер при імпорті —
+    цей модуль тут (і в кількох інших test_mcp_*.py) імпортується на рівні
+    файлу, тобто ще на стадії collection. Якщо хендлер причепиться, будь-яка
+    logging.error/exception з будь-якого тесту в тому ж прогоні піде в
+    mcp_server.log живого сервера власника (звідти там і взялися фейкові
+    YouTube-помилки test_youtube_pytubefix.py)."""
+    assert not any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        for h in logging.getLogger().handlers
+    )
 
 
 def test_about_adding_a_tool_changes_the_reported_count(db, monkeypatch):

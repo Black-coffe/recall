@@ -181,6 +181,115 @@ def test_build_context_multiple_chunks_numbered_and_joined():
 
 
 # ============================================================
+# order_citables — хронологія (історія 03)
+# ============================================================
+
+def test_order_citables_sorts_rest_by_date_ascending_regardless_of_retrieval_order():
+    """Дві версії однієї домовленості з різними датами: контекст показує їх у
+    хронології (рання перша, пізня друга), НЕЗАЛЕЖНО від того, в якому порядку
+    їх віддав ретривал — тут навмисно пізніша йде в chunks першою."""
+    later = {"source_type": "meeting", "source_name": "Дзвінок 2",
+              "meeting_date": "2026-06-10", "text": "Бюджет — 50000 грн (нова версія)."}
+    earlier = {"source_type": "meeting", "source_name": "Дзвінок 1",
+               "meeting_date": "2026-05-12", "text": "Бюджет — 40000 грн (стара версія)."}
+    sources = rag.order_citables([later, earlier])
+    assert [s["source_name"] for s in sources] == ["Дзвінок 1", "Дзвінок 2"]
+
+    ctx = rag._build_context([later, earlier])
+    assert ctx.index("Дзвінок 1") < ctx.index("Дзвінок 2")
+
+
+def test_order_citables_owner_comment_before_both_dated_versions():
+    later = {"source_type": "meeting", "source_name": "Дзвінок 2",
+              "meeting_date": "2026-06-10", "text": "нова версія"}
+    earlier = {"source_type": "meeting", "source_name": "Дзвінок 1",
+               "meeting_date": "2026-05-12", "text": "стара версія"}
+    attached = [{"kind": "correction", "target_label": "Дзвінок 1",
+                 "date": "2026-06-15", "text": "виправлення власника"}]
+    sources = rag.order_citables([later, earlier], attached)
+    assert sources[0]["source_type"] == "comment"
+    assert [s.get("source_name") for s in sources[1:]] == ["Дзвінок 1", "Дзвінок 2"]
+
+
+def test_order_citables_chunk_without_date_goes_last():
+    dated = {"source_type": "meeting", "source_name": "З датою",
+              "meeting_date": "2026-05-12", "text": "x"}
+    undated = {"source_type": "document", "source_name": "Без дати", "text": "y"}
+    sources = rag.order_citables([undated, dated])
+    assert [s["source_name"] for s in sources] == ["З датою", "Без дати"]
+
+
+def test_order_citables_same_date_keeps_retrieval_position():
+    a = {"source_type": "meeting", "source_name": "A", "meeting_date": "2026-05-12", "text": "a"}
+    b = {"source_type": "meeting", "source_name": "B", "meeting_date": "2026-05-12", "text": "b"}
+    assert [s["source_name"] for s in rag.order_citables([a, b])] == ["A", "B"]
+    assert [s["source_name"] for s in rag.order_citables([b, a])] == ["B", "A"]
+
+
+def test_system_prompt_states_later_version_wins():
+    assert "ПІЗНІША версія" in rag._RAG_SYSTEM_PROMPT
+    assert "«було" in rag._RAG_SYSTEM_PROMPT
+    assert "ХРОНОЛОГІЧНОМУ" in rag._RAG_SYSTEM_PROMPT
+
+
+# ============================================================
+# order_citables — чанки однієї записи за chunk_index (історія 09)
+# ============================================================
+
+def test_order_citables_chunks_of_one_record_sorted_by_chunk_index_regardless_of_retrieval():
+    """Ретривал [A#7, B#1, A#2] (A і B — різні дати, A раніша) -> [A#2, A#7, B#1];
+    той самий результат при [B#1, A#7, A#2]."""
+    a7 = {"source_type": "meeting", "source_name": "A#7", "transcription_id": 1,
+          "meeting_date": "2026-05-12", "chunk_index": 7, "text": "a7"}
+    a2 = {"source_type": "meeting", "source_name": "A#2", "transcription_id": 1,
+          "meeting_date": "2026-05-12", "chunk_index": 2, "text": "a2"}
+    b1 = {"source_type": "meeting", "source_name": "B#1", "transcription_id": 2,
+          "meeting_date": "2026-06-10", "chunk_index": 1, "text": "b1"}
+    expected = ["A#2", "A#7", "B#1"]
+    assert [s["source_name"] for s in rag.order_citables([a7, b1, a2])] == expected
+    assert [s["source_name"] for s in rag.order_citables([b1, a7, a2])] == expected
+
+
+def test_order_citables_same_date_records_dont_interleave():
+    """Дві записи з однаковою датою: між ними — порядок ретривалу (перша поява),
+    всередині кожної — chunk_index, без перемежування."""
+    a3 = {"source_type": "meeting", "source_name": "A#3", "transcription_id": 1,
+          "meeting_date": "2026-05-12", "chunk_index": 3, "text": "a3"}
+    a1 = {"source_type": "meeting", "source_name": "A#1", "transcription_id": 1,
+          "meeting_date": "2026-05-12", "chunk_index": 1, "text": "a1"}
+    b4 = {"source_type": "meeting", "source_name": "B#4", "transcription_id": 2,
+          "meeting_date": "2026-05-12", "chunk_index": 4, "text": "b4"}
+    b0 = {"source_type": "meeting", "source_name": "B#0", "transcription_id": 2,
+          "meeting_date": "2026-05-12", "chunk_index": 0, "text": "b0"}
+    # A з'явилась першою в ретривалі (a3) -> A цілком перед B, всередині за chunk_index
+    sources = rag.order_citables([a3, b4, a1, b0])
+    assert [s["source_name"] for s in sources] == ["A#1", "A#3", "B#0", "B#4"]
+
+
+def test_order_citables_undated_record_chunks_sorted_by_chunk_index_at_end():
+    r5 = {"source_type": "document", "source_name": "R#5", "transcription_id": 9,
+          "chunk_index": 5, "text": "r5"}
+    r3 = {"source_type": "document", "source_name": "R#3", "transcription_id": 9,
+          "chunk_index": 3, "text": "r3"}
+    dated = {"source_type": "meeting", "source_name": "Dated", "transcription_id": 1,
+              "meeting_date": "2026-05-12", "chunk_index": 1, "text": "d"}
+    sources = rag.order_citables([r5, dated, r3])
+    assert [s["source_name"] for s in sources] == ["Dated", "R#3", "R#5"]
+
+
+def test_order_citables_chunk_without_chunk_index_does_not_crash():
+    a = {"source_type": "meeting", "source_name": "A", "transcription_id": 1,
+         "meeting_date": "2026-05-12", "text": "a-no-index"}
+    b = {"source_type": "meeting", "source_name": "B", "transcription_id": 1,
+         "meeting_date": "2026-05-12", "chunk_index": 2, "text": "b"}
+    attached = [{"kind": "correction", "target_label": "A", "date": "2026-06-15",
+                 "text": "виправлення"}]
+    sources = rag.order_citables([a, b], attached)
+    assert sources[0]["source_type"] == "comment"
+    assert {s.get("source_name") for s in sources[1:]} == {"A", "B"}
+
+
+# ============================================================
 # _build_request_kwargs
 # ============================================================
 

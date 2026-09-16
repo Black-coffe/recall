@@ -92,6 +92,22 @@ def _parse_explain(raw) -> bool:
     return str(raw or "").strip().lower() in ("1", "true", "yes")
 
 
+def _parse_channel(raw) -> tuple:
+    """Канал питання для `ask_log` → (channel, error_response|None).
+
+    Порожньо → `ui` (веб-чат нічого не передає). Невідоме значення — 400, а
+    НЕ тихий дефолт: канал у логу є вхідним фільтром golden-set, і мовчазне
+    «щось незнайоме = ui» зіпсувало б вибірку, яку потім розмічає людина."""
+    from app.services import rag
+    if raw is None or raw == "":
+        return "ui", None
+    channel = str(raw).strip().lower()
+    if channel not in rag.ASK_CHANNELS:
+        return None, (jsonify({"success": False,
+                               "error": f"Невідомий channel: {'/'.join(rag.ASK_CHANNELS)}"}), 400)
+    return channel, None
+
+
 # ============================================================
 # Напрямки / категорії (Phase 14)
 # ============================================================
@@ -407,15 +423,19 @@ def search():
 def ask():
     """RAG «Запитай архів»: питання → відповідь з цитатами.
 
-    Body: {question, k, model, category_id, project}. `project` (Трек 2) звужує
-    пошук до записів, де згадано цей проєкт/людину — категорії недостатньо,
-    бо «Робота» покриває більша частина корпусу."""
+    Body: {question, k, model, category_id, project, channel}. `project` (Трек 2)
+    звужує пошук до записів, де згадано цей проєкт/людину — категорії недостатньо,
+    бо «Робота» покриває більша частина корпусу. `channel` (`ui`|`mcp`) лише
+    позначає походження питання в `ask_log`."""
     if not enrichment.is_available():
         return jsonify({"success": False, "error": "ANTHROPIC_API_KEY не налаштовано"}), 400
     data = request.get_json(silent=True) or {}
     q = (data.get("question") or "").strip()
     if not q:
         return jsonify({"success": False, "error": "Порожнє питання"}), 400
+    channel, err = _parse_channel(data.get("channel"))
+    if err:
+        return err
     from app.services import rag
     # Дефолт k живе в rag._DEFAULT_TOP_K (одна точка правди, env RAG_TOP_K).
     try:
@@ -427,7 +447,8 @@ def ask():
                                   model=data.get("model"),
                                   category_id=_parse_category(data.get("category_id")),
                                   project=(data.get("project") or None),
-                                  explain=_parse_explain(data.get("explain")))
+                                  explain=_parse_explain(data.get("explain")),
+                                  channel=channel)
     except Exception as e:
         logger.error("[memory] ask failed: %s", e, exc_info=True)
         return jsonify({"success": False, "error": "Помилка RAG. Перевірте логи."}), 500
@@ -447,6 +468,9 @@ def ask_stream():
     q = (data.get("question") or "").strip()
     if not q:
         return jsonify({"success": False, "error": "Порожнє питання"}), 400
+    channel, err = _parse_channel(data.get("channel"))
+    if err:
+        return err
     from app.services import rag
     try:
         k = min(max(int(data.get("k", rag._DEFAULT_TOP_K)), 1), 20)
@@ -464,13 +488,33 @@ def ask_stream():
         try:
             yield from rag.answer_question_stream(db_path, q, top_k=k, model=model,
                                                   category_id=category_id, project=project,
-                                                  explain=explain)
+                                                  explain=explain, channel=channel)
         except Exception as e:
             logger.error("[memory] ask_stream generator failed: %s", e, exc_info=True)
             yield rag._sse("error", {"error": "Помилка RAG."})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@memory_bp.route('/api/memory/ask/<int:ask_id>/rate', methods=['POST'])
+def rate_ask(ask_id: int):
+    """Оцінка відповіді власником: body {rating: 1|-1, note?} → `ask_log`.
+
+    Це сировина golden-set (A17): раз на тиждень власник розмічає десяток
+    питань із логу, 👎 йдуть у набір першими."""
+    data = request.get_json(silent=True) or {}
+    try:
+        rating = int(data.get("rating"))
+    except (TypeError, ValueError):
+        rating = 0
+    if rating not in (1, -1):
+        return jsonify({"success": False, "error": "rating має бути 1 або -1"}), 400
+    from app.services import rag
+    if not rag.rate_ask(current_app.config['DATABASE'], ask_id, rating,
+                        data.get("note")):
+        return jsonify({"success": False, "error": "Питання не знайдено"}), 404
+    return jsonify({"success": True, "ask_id": ask_id})
 
 
 # ============================================================

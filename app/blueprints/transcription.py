@@ -24,7 +24,7 @@ from werkzeug.utils import secure_filename
 
 from app import state
 from app.repositories import transcriptions as tx_repo
-from app.services import text_polishing
+from app.services import dedup_audio, text_polishing
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
 from app.utils.fts import sanitize_fts_query
@@ -388,12 +388,23 @@ def transcribe():
 
         with _get_db() as conn:
             c = conn.cursor()
+            # Дедуп аудіо (Хвиля A): той самий текст, залитий удруге, лишається
+            # записом (свої коментарі/файл/задачі), але позначається
+            # duplicate_of → id оригіналу і НЕ індексується — інакше обидві
+            # копії конкурують за слоти видачі однаковим вмістом.
+            text_hash = dedup_audio.hash_for(source_type, result['text'])
+            original = dedup_audio.find_original(conn, text_hash)
+            duplicate_of = original['id'] if original else None
+            if duplicate_of:
+                logger.info("Дубль аудіо: текст збігається з #%s «%s» — запис "
+                            "зберігаю, але не індексую", duplicate_of,
+                            original.get('source_name'))
             c.execute('''INSERT INTO transcriptions
                          (source_type, source_name, source_url, youtube_id, youtube_title,
                           youtube_author, youtube_duration, youtube_thumbnail, file_path,
                           transcript_text, language, model_used, processing_time, segments,
-                          category_id)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+                          category_id, content_hash, duplicate_of)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
                 source_type, source_name,
                 youtube_info.get('original_url') if source_type == 'youtube' else None,
                 youtube_info.get('video_id') if source_type == 'youtube' else None,
@@ -403,10 +414,12 @@ def transcribe():
                 youtube_info.get('thumbnail') if source_type == 'youtube' else None,
                 filepath, result['text'], result['language'], model_name,
                 processing_time, json.dumps(result['segments']),
-                category_id,
+                category_id, text_hash, duplicate_of,
             ))
             transcription_id = c.lastrowid
             result['transcription_id'] = transcription_id
+            if duplicate_of:
+                result['duplicate_of'] = duplicate_of
 
             # Phase 10.3: створити transcription_speaker_map записи для виявлених
             # лейблів. 'self' автоматично мапиться на seeded speaker is_self=1 ('Ви'),
@@ -494,9 +507,13 @@ def transcribe():
         # відповідь. Витягує сутності (люди/проєкти/орг), summary, action items
         # одним Claude-викликом і наповнює наскрізний граф для RAG-пошуку.
         # Авто-вимикається якщо немає ANTHROPIC_API_KEY (enrichment.is_available()).
+        # Дубль не збагачуємо і не чанкуємо: чанки оригіналу вже є, а копія
+        # лише дублювала б їх у видачі (і платила б за Claude-картку вдруге).
         try:
             from app.services import enrichment
-            if enrichment.any_available() and state.job_queue is not None:
+            if duplicate_of:
+                result['enrichment'] = {"status": "skipped_duplicate"}
+            elif enrichment.any_available() and state.job_queue is not None:
                 _db_path = current_app.config['DATABASE']
                 _enrich_ch = f"enrich_{transcription_id}"
 
@@ -686,6 +703,7 @@ def get_history():
                        t.tg_chat_title, t.tg_sender, t.tg_link,
                        t.youtube_duration, t.youtube_author,
                        t.page_count, t.original_filename, t.meeting_date, t.enriched_at,
+                       t.duplicate_of,
                        (SELECT COUNT(*) FROM action_items ai
                          WHERE ai.transcription_id = t.id
                            AND ai.status = 'open' AND ai.dup_of IS NULL) AS open_tasks,

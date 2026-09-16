@@ -540,3 +540,67 @@ def test_list_unenriched_ids_excludes_soft_deleted(db_path):
     tid = _insert_transcription(db_path, deleted_at=1234567890.0)
     ids = enrichment.list_unenriched_ids(db_path)
     assert tid not in ids
+
+
+# ============================================================
+# Ремонт 3 (review #3): duplicate_of не збагачується/не бекфіляється
+# ============================================================
+
+def test_list_unenriched_ids_excludes_duplicate(db_path):
+    original = _insert_transcription(db_path)
+    dup = _insert_transcription(db_path, duplicate_of=original)
+    ids = enrichment.list_unenriched_ids(db_path)
+    assert original in ids
+    assert dup not in ids
+
+
+def test_backfill_force_excludes_duplicate(db_path, monkeypatch):
+    original = _insert_transcription(db_path)
+    dup = _insert_transcription(db_path, duplicate_of=original)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "is_available", lambda: True)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(1) or _sample_card())
+    monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: False)
+
+    enrichment.backfill(db_path, force=True)
+
+    assert calls == [1], "Claude мав викликатись рівно раз (для оригіналу), не для дубля"
+    with get_db_connection(db_path) as conn:
+        dup_row = conn.execute(
+            "SELECT enriched_at FROM transcriptions WHERE id=?", (dup,)).fetchone()
+    assert dup_row["enriched_at"] is None
+
+
+def test_enrich_transcription_skips_duplicate(db_path, monkeypatch):
+    original = _insert_transcription(db_path)
+    dup = _insert_transcription(db_path, duplicate_of=original)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "is_available", lambda: True)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(1) or _sample_card())
+    monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: True)
+    embed_calls = []
+    monkeypatch.setattr(
+        enrichment.embeddings, "chunk_and_embed_transcription",
+        lambda db_path_, transcription_id, force=False: embed_calls.append(transcription_id)
+        or {"status": "embedded", "transcription_id": transcription_id, "chunks": 1},
+    )
+
+    res = enrichment.enrich_transcription(db_path, dup)
+
+    assert res["status"] == "skipped_duplicate"
+    assert not calls, "Claude не мав викликатись на дублі"
+    assert not embed_calls, "чанки/ембеддинги не мали будуватись для дубля"
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT enriched_at FROM transcriptions WHERE id=?", (dup,)).fetchone()
+        chunks = conn.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE transcription_id=?", (dup,)).fetchone()
+    assert row["enriched_at"] is None
+    assert chunks["n"] == 0
+
+    # Оригінал того самого тексту збагачується як і раніше.
+    res_orig = enrichment.enrich_transcription(db_path, original)
+    assert res_orig["card"]["status"] == "enriched"
+    assert calls == [1]

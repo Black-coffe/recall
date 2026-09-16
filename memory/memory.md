@@ -22,6 +22,7 @@
 ## Wiki domains
 <!-- load-bearing domain notes in docs/wiki/ -->
 - [entity-graph-provenance](../docs/wiki/entity-graph-provenance.md) — one mention/one owner, `thread_match` vs `thread_morph` provenance never interchangeable, morph matcher opt-in only
+- [rag-context-integrity](../docs/wiki/rag-context-integrity.md) — duplicate_of excludes from search only, thread stitching char ceilings (hit ≥ neighbour), chronological order_citables, ask_log logs every successful answer from both channels
 
 ## Verification
 - build: none — інтерпретований Python + vanilla JS

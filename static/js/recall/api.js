@@ -398,6 +398,9 @@
     //   (saves paid Claude tokens), matching the researchSummary pattern. —
     A.askStream = (payload, onEvent, signal, opts) => postSseStream('/api/memory/ask/stream', payload, onEvent, signal, opts);
 
+    // — Оцінка відповіді 👍/👎 (+ замітка) → рядок ask_log; сировина golden-set —
+    A.rateAsk = (askId, rating, note) => A.post('/api/memory/ask/' + askId + '/rate', { rating, note });
+
     // — Research / big export (зібрати всі згадки бренду з усіх джерел) —
     A.researchPreview = (params) => getJSON('/api/research/preview' + qs(params));
     A.researchOriginals = (body) => A.post('/api/research/originals', body);

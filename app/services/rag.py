@@ -59,6 +59,13 @@ _RAG_SYSTEM_PROMPT = """Ти — асистент по архіву робочи
 - Посилайся на коментарі так само, як на фрагменти — за їхнім номером [n].
 - Не вигадуй коментарів і не приписуй власнику того, чого він не писав.
 
+ФРАГМЕНТИ подаються тобі в ХРОНОЛОГІЧНОМУ порядку за датою джерела (коментарі
+власника — завжди першими, далі решта від найранішої дати до найпізнішої).
+Якщо кілька фрагментів описують ОДНУ Й ТУ Ж домовленість, суму чи рішення, але
+з різними датами — веде ПІЗНІША версія (вищий номер [n] серед звичайних
+фрагментів), а ранішу згадуй як «було: …», не як актуальний факт. Коментар
+власника, якщо він є, усе одно вищий за обидві версії — правило вище.
+
 Правила:
 - Відповідай мовою питання (зазвичай українською).
 - Використовуй ТІЛЬКИ інформацію з фрагментів. НЕ вигадуй, не додавай знань ззовні.
@@ -139,6 +146,26 @@ def order_citables(chunks: list[dict],
     іноді є, а іноді нема, — той самий `KeyError` з відстрочкою. Перелік
     ключів не переписується літералом тут — береться з
     `retrieval.build_placeholder_why` (одне джерело істини, історія 13, план D3).
+
+    ХРОНОЛОГІЯ (історія 03). Решта (не-коментарі) йде за датою джерела за
+    зростанням — модель читає «було» РАНІШЕ за «стало» так само, як людина
+    читала б архів по порядку, і system prompt спирається саме на це («пізніша
+    версія веде», нижче). Дата — `meeting_date` (для мітингу/документа — дата
+    запису/файлу, для telegram — та сама колонка, заповнена `tg_date`
+    повідомлення; `retrieval.search` кладе її в усі три типи однаково через
+    `COALESCE(t.meeting_date, substr(t.created_at,1,10))`). Чанків без дати
+    очікувати не мали б, але якщо трапиться — вони йдуть в кінець, а не в
+    довільне місце.
+
+    ЧАНКИ ОДНІЄЇ ЗАПИСИ (історія 09, ремонт 5). Тай-брейк при однаковій даті —
+    НЕ «порядок ретривалу як є», а `(ранг_запису, chunk_index)`: `ранг_запису` —
+    позиція ПЕРШОЇ появи цього `transcription_id` серед `rest` (у порядку, в
+    якому чанки прийшли з ретривалу), `chunk_index` — поле, яке `retrieval.search`
+    вже кладе в кожен гідрований рядок. Так два чанки однієї зустрічі йдуть
+    підряд за `chunk_index` (а не впереміш «як знайшлись»), а порядок ретривалу
+    лишається тай-брейком лише МІЖ записами. Чанк без `chunk_index` (коментар-
+    подібні шари серед `rest`) не падає — рангу запису достатньо, тримає своє
+    місце в порядку ретривалу.
     """
     comment_chunks = [c for c in chunks if c.get("source_type") == "comment"]
     attached = [dict(ac, source_type="comment", attached=True,
@@ -147,6 +174,17 @@ def order_citables(chunks: list[dict],
                          note="підшито без пошуку (pinned/correction)"))
                 for ac in (attached_comments or [])]
     rest = [c for c in chunks if c.get("source_type") != "comment"]
+    record_rank: dict = {}
+    for i, c in enumerate(rest):
+        tid = c.get("transcription_id")
+        if tid not in record_rank:
+            record_rank[tid] = i
+    rest.sort(key=lambda c: (
+        c.get("meeting_date") is None,
+        c.get("meeting_date") or "",
+        record_rank[c.get("transcription_id")],
+        c.get("chunk_index") if c.get("chunk_index") is not None else 0,
+    ))
     return comment_chunks + attached + rest
 
 
@@ -277,6 +315,7 @@ def answer_question(
     category_id: Optional[int] = None,
     project: Optional[str] = None,
     explain: bool = False,
+    channel: str = "ui",
 ) -> dict:
     """Відповісти на питання по архіву з цитатами. category_id — обмежити напрямком.
     explain — Історія 05: прокидається у `retrieval.search`, `why` кожного
@@ -320,16 +359,94 @@ def answer_question(
 
     answer = "".join(b.text for b in result.content if b.type == "text").strip()
     usage = result.usage
+    input_tokens = getattr(usage, "input_tokens", 0) or 0
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+    ask_id = _log_ask(db_path, channel=channel, question=question, top_k=top_k,
+                      model=result.model, sources=sources, answer=answer,
+                      category_id=category_id, project=project,
+                      input_tokens=input_tokens, output_tokens=output_tokens,
+                      cache_read_tokens=cache_read_tokens)
     return {
         "answer": answer,
         "sources": sources,
         "found": len(sources),
         "model": result.model,
         "vector_available": res.get("vector_available", False),
-        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
-        "output_tokens": getattr(usage, "output_tokens", 0) or 0,
-        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "ask_id": ask_id,
     }
+
+
+#: Допустимі канали питання (контракт `ask_log.channel`).
+ASK_CHANNELS = ("ui", "mcp")
+
+
+def _ask_cost(model: str, input_tokens: int, output_tokens: int,
+              cache_read_tokens: int) -> Optional[float]:
+    """$ за питання або None для моделі поза таблицею тарифів.
+
+    Таблиця живе в `app/services/pricing.py` (єдина точка правди — саме її
+    відсутність колись давала мовчазну оцінку за ціною ЧУЖОЇ моделі, T6.2).
+    Тут лише додано явне None замість фолбеку на дефолтний тариф: у логу
+    краще порожня вартість, ніж правдоподібна неправда.
+    """
+    from app.services import pricing
+    if not model or model not in pricing.MODEL_PRICES:
+        return None
+    return pricing.estimate_cost(model, input_tokens, output_tokens, cache_read_tokens)
+
+
+def _log_ask(db_path: str, *, channel: str, question: str, top_k: int,
+             model: str, sources: list[dict], answer: str,
+             category_id: Optional[int], project: Optional[str],
+             input_tokens: int, output_tokens: int, cache_read_tokens: int) -> Optional[int]:
+    """Записати успішну відповідь у `ask_log` → id рядка (`ask_id`) або None.
+
+    Best-effort: лог питань не має права зламати саму відповідь, за яку вже
+    заплачено (і не має права падати на БД без міграції v41 — офлайн-тести
+    ганяють `answer_question` на `:memory:`). Збій пишемо в лог, не назовні.
+    """
+    from app.db.connection import get_db_connection
+    try:
+        scope = {"category_id": category_id, "project": project}
+        source_ids = []
+        for s in sources:
+            tid = s.get("transcription_id")
+            if tid is not None and tid not in source_ids:
+                source_ids.append(tid)
+        cost = _ask_cost(model, input_tokens, output_tokens, cache_read_tokens)
+        with get_db_connection(db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO ask_log (channel, question, scope_json, k, model, "
+                "source_ids_json, input_tokens, output_tokens, cache_read_tokens, "
+                "cost_usd, answer) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (channel if channel in ASK_CHANNELS else "ui", question,
+                 json.dumps(scope, ensure_ascii=False), top_k, model,
+                 json.dumps(source_ids), input_tokens, output_tokens,
+                 cache_read_tokens, cost, answer))
+            conn.commit()
+            return cur.lastrowid
+    except Exception as exc:
+        logger.warning("[rag] ask_log: не вдалося записати питання: %s", exc)
+        return None
+
+
+def rate_ask(db_path: str, ask_id: int, rating: int, note: Optional[str] = None) -> bool:
+    """Оцінка власника на рядок `ask_log` (1 / -1) + замітка. False — немає такого id.
+
+    Оцінка перезаписується: власник має право передумати, історія оцінок
+    нікому не потрібна — потрібен останній вердикт для golden-set.
+    """
+    from app.db.connection import get_db_connection
+    with get_db_connection(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE ask_log SET rating = ?, note = ?, rated_at = CURRENT_TIMESTAMP "
+            "WHERE id = ?", (int(rating), (note or "").strip() or None, int(ask_id)))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def _sse(event: str, data: dict) -> str:
@@ -346,6 +463,7 @@ def answer_question_stream(
     category_id: Optional[int] = None,
     project: Optional[str] = None,
     explain: bool = False,
+    channel: str = "ui",
 ) -> Iterator[str]:
     """Стрім-версія answer_question. category_id — обмежити напрямком. explain —
     Історія 05, те саме, що в answer_question (не міняє формат SSE-подій).
@@ -418,12 +536,24 @@ def answer_question_stream(
                 attempt += 1
 
         usage = final.usage
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+        # Текст беремо з фінального повідомлення, а не з накопичених delta —
+        # це той самий рядок, але без ризику розійтися з ним на retry.
+        answer = "".join(b.text for b in (final.content or []) if b.type == "text").strip()
+        ask_id = _log_ask(db_path, channel=channel, question=question, top_k=top_k,
+                          model=final.model, sources=sources, answer=answer,
+                          category_id=category_id, project=project,
+                          input_tokens=input_tokens, output_tokens=output_tokens,
+                          cache_read_tokens=cache_read_tokens)
         yield _sse("done", {
             "model": final.model,
             "found": len(chunks),
-            "input_tokens": getattr(usage, "input_tokens", 0) or 0,
-            "output_tokens": getattr(usage, "output_tokens", 0) or 0,
-            "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "ask_id": ask_id,
         })
     except Exception as e:
         logger.error("[rag] ask-stream failed: %s", e, exc_info=True)

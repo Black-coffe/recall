@@ -95,7 +95,10 @@ Telethon-сесію не відкрити двома клієнтами — Flas
 default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути torch/e5 у stdio-процес.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
-**Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини.
+**Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини. `ask_archive` шле
+`channel="mcp"` у `/api/memory/ask` (Хвиля A production-RAG, 16.09.2026) — питання з MCP і
+UI осідають в одній таблиці `ask_log` (сировина для golden-set, `evals/build_golden.py
+--from-ask-log`); оцінка (👍/👎) з MCP не збирається, нових write-тулзів для цього не додано.
 **Grep (grep-explainability, S2):** `grep_archive(pattern, regex=, ignore_case=, context=, limit=,
 source_type=, transcription_id=, days=)` — буквальний/regex-пошук ТОЧНОГО РЯДКА по `chunks`
 (без ембеддингів, без ранжування) поверх `app.services.archive_grep.grep()`; для ID/сум/@ніків,

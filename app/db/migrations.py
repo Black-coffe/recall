@@ -1555,5 +1555,70 @@ def init_database(db_path: str):
                   "rec_<hex>): коментар під час дзвінка, коли транскрипту ще немає')")
         logger.info("Міграція v39: comments.target_key створено")
 
+    # === v40: transcriptions.duplicate_of — дублі аудіо/YouTube =============
+    # Той самий дзвінок, завантажений двічі (перезалив файлу, відео-повтор,
+    # повторна транскрипція запису), давав два повноцінні записи з однаковим
+    # текстом — і обидва лізли у видачу RAG, з'їдаючи слоти per-meeting cap
+    # тим самим вмістом.
+    #
+    # Запис НЕ видаляється і не отримує deleted_at: дубль лишається в
+    # Бібліотеці (у нього можуть бути свої коментарі, файл, задачі), але
+    # позначений `duplicate_of` → id оригіналу (найменший id групи) і
+    # виключений з пошуку нарівні з soft-deleted.
+    if current_version < 40:
+        c.execute("PRAGMA table_info(transcriptions)")
+        tcols = {row[1] for row in c.fetchall()}
+        if tcols and "duplicate_of" not in tcols:
+            c.execute("ALTER TABLE transcriptions ADD COLUMN duplicate_of INTEGER")
+        if tcols:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_transcriptions_duplicate_of "
+                      "ON transcriptions(duplicate_of)")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(40, 'transcriptions.duplicate_of — дублі аудіо/YouTube: запис "
+                  "лишається, але не індексується і не бере участі в пошуку')")
+        logger.info("Міграція v40: transcriptions.duplicate_of створено")
+
+    # === v41: ask_log — лог питань до архіву з оцінкою власника ==============
+    # Golden-set наповнювався з `logs/mcp_calls.log` — а це лише MCP-канал,
+    # лише текст питання (обрізаний до 600 символів) і жодного сигналу про
+    # якість відповіді. Тут лежить сам факт відповіді: що спитали, яким
+    # каналом (`ui`/`mcp`), у якому скоупі, які джерела процитовано, скільки
+    # коштувало і — головне — 👍/👎 власника. `evals/build_golden.py
+    # --from-ask-log` мінить звідси кандидатів, 👎 першими.
+    #
+    # Пишуться ЛИШЕ успішні відповіді (збій Claude рядка не створює): у
+    # golden-set не потрібні питання, на які система впала з мережевої
+    # причини. `rating`/`note`/`rated_at` — NULL до оцінки; `cost_usd` NULL,
+    # якщо модель поза таблицею тарифів (краще порожньо, ніж ціна не тієї
+    # моделі — та сама помилка, що лікував T6.2 у pricing.py).
+    if current_version < 41:
+        c.execute('''CREATE TABLE IF NOT EXISTS ask_log
+                     (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                         channel TEXT NOT NULL DEFAULT 'ui',
+                         question TEXT NOT NULL,
+                         scope_json TEXT,
+                         k INTEGER,
+                         model TEXT,
+                         source_ids_json TEXT,
+                         input_tokens INTEGER,
+                         output_tokens INTEGER,
+                         cache_read_tokens INTEGER,
+                         cost_usd REAL,
+                         answer TEXT,
+                         rating INTEGER,
+                         note TEXT,
+                         rated_at TIMESTAMP
+                     )''')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ask_log_created ON ask_log(created_at)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ask_log_rating ON ask_log(rating)")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(41, 'ask_log — лог питань UI+MCP з відповіддю, джерелами, токенами, "
+                  "вартістю і оцінкою власника (сировина для golden-set)')")
+        logger.info("Міграція v41: ask_log створено")
+
     conn.commit()
     conn.close()

@@ -18,7 +18,9 @@ from flask import Flask
 import telegram_common
 import telegram_listener as L
 from app.blueprints import telegram as tg
+from app.db.connection import get_db_connection
 from app.db.migrations import init_database
+from app.services import telegram_link_repair as link_repair
 
 
 def _msg(**kw):
@@ -108,8 +110,9 @@ class TestDetectKind:
 
 class TestChatHelpers:
     def test_link_public_username(self):
-        chat = _msg(username="durov")
-        assert L._chat_link(chat, 123, 7) == "https://t.me/durov/7"
+        """Публічний канал/супергрупа (негативний chat_id) з юзернеймом — лінк на username."""
+        chat = _msg(username="kyivnews")
+        assert L._chat_link(chat, -1009876543210, 7) == "https://t.me/kyivnews/7"
 
     def test_link_private_channel(self):
         chat = _msg(username=None)
@@ -118,6 +121,18 @@ class TestChatHelpers:
     def test_link_user_none(self):
         chat = _msg(username=None)
         assert L._chat_link(chat, 12345, 1) is None
+
+    def test_link_chat_id_none_does_not_raise(self):
+        """Telethon повертає None, якщо в peer_id немає жодного з полів —
+        `chat_id > 0` на None валив би TypeError і гасив _build_payload."""
+        chat = _msg(username=None)
+        assert L._chat_link(chat, None, 1) is None
+
+    def test_link_private_chat_with_username_is_none(self):
+        """Особистий чат (позитивний chat_id) з юзернеймом співрозмовника —
+        не має посилання на повідомлення, навіть якщо username заповнено."""
+        chat = _msg(username="andriy_petrenko", first_name="Андрій", last_name="Петренко")
+        assert L._chat_link(chat, 250264900, 515482) is None
 
     def test_sender_name_first_last(self):
         assert L._sender_name(_msg(first_name="Іван", last_name="Петренко")) == "Іван Петренко"
@@ -1312,3 +1327,83 @@ class TestSafeMediaPath:
             assert tg._safe_media_path(os.path.join(media, "..", "secret.db")) is None
             assert tg._safe_media_path(media + "_evil/x") is None   # префікс-трюк
             assert tg._safe_media_path(None) is None
+
+
+# ============================================================
+# Ізоляція логів: імпорт під pytest не чіпляє файловий хендлер
+# ============================================================
+
+class TestLogIsolation:
+    def test_no_file_handler_attached_under_pytest(self):
+        """telegram_listener імпортується цим-таки файлом на рівні модуля
+        (`import telegram_listener as L` вище) — якщо файловий хендлер тут
+        причепився б, кожен тестовий прогін дописував би у бойовий
+        telegram_listener.log власника (саме так туди й потрапив рядок
+        catchup з тестовими chat_id -100111/-100301)."""
+        import logging
+
+        assert len(L._tg_handlers) == 1
+        assert isinstance(L._tg_handlers[0], logging.StreamHandler)
+        assert not any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in L._tg_handlers
+        )
+        assert not any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in L.logger.handlers
+        )
+
+
+# ============================================================
+# telegram_link_repair CLI: --dry-run у будь-якому місці рядка
+# (test-log-isolation-03 — ревʼю виміряло, що до підкоманди він мовчки
+# гасне через колізію dest у _SubParsersAction)
+# ============================================================
+
+class TestLinkRepairDryRun:
+    def _seed(self, db_path):
+        with get_db_connection(db_path) as conn:
+            conn.execute(
+                "INSERT INTO transcriptions (source_type, source_name, tg_chat_id, tg_link) "
+                "VALUES ('telegram', 'Андрій', 250264900, ?)",
+                ("https://t.me/andriy_petrenko/515482",))
+            conn.execute(
+                "INSERT INTO transcriptions (source_type, source_name, tg_chat_id, tg_link) "
+                "VALUES ('telegram', 'Гурт', -1001234567890, 'https://t.me/c/1234567890/55')")
+            conn.commit()
+
+    def _bogus_link(self, db_path):
+        with get_db_connection(db_path) as conn:
+            return conn.execute(
+                "SELECT tg_link FROM transcriptions WHERE tg_chat_id = 250264900"
+            ).fetchone()["tg_link"]
+
+    @pytest.mark.parametrize("argv", [
+        ["clear-bogus-links", "--dry-run"],
+        ["--dry-run", "clear-bogus-links"],
+    ], ids=["dry-run-after", "dry-run-before"])
+    def test_dry_run_writes_nothing_either_word_order(self, tmp_path, argv):
+        db = str(tmp_path / "t.db")
+        init_database(db)
+        self._seed(db)
+        rc = link_repair.main(["--db", db] + argv)
+        assert rc == 0
+        assert self._bogus_link(db) == "https://t.me/andriy_petrenko/515482", (
+            "--dry-run у будь-якому порядку слів не повинен писати в БД")
+
+    def test_no_dry_run_actually_clears(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        init_database(db)
+        self._seed(db)
+        rc = link_repair.main(["--db", db, "clear-bogus-links"])
+        assert rc == 0
+        assert self._bogus_link(db) is None
+
+    def test_second_apply_is_a_no_op(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        init_database(db)
+        self._seed(db)
+        first = link_repair.clear_bogus_private_links(db, dry_run=False)
+        second = link_repair.clear_bogus_private_links(db, dry_run=False)
+        assert first["cleared"] == 1
+        assert second["matched"] == 0 and second["cleared"] == 0

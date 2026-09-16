@@ -9,7 +9,7 @@ Health/робота, каталог/завантаження Whisper-модел�
 `GET /` — SPA-shell (catch-all, після /api/*). `GET /sw.js` (no-cache). `GET /api/health`,
 `/api/models`, `POST /api/download_model`, `/api/models/{update-status,check-updates}`,
 `/api/system_info`, `/api/system_stats`, `/api/polish/availability` (тіри Claude), `/api/metrics` (Prometheus).
-`APP_VERSION = "4.0.1"` (system.py:37) — джерело для `version` у health/ready/system_info.
+`APP_VERSION = "4.3.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
 `GET /api/ready` (system.py:138-177, config-registry-profiles T03) — читає `app.state.робота`
 (див. `memory/map/root.md`) + живий `_check_database_ready()` (106-136): відкриває ІСНУЮЧИЙ файл
 БД (`mode=rw`, не автостворює) і вимагає таблицю `schema_versions` з `MAX(version) >= 1`.
@@ -27,7 +27,11 @@ Health/робота, каталог/завантаження Whisper-модел�
 ## memory.py (~673) — `/api/memory/*`
 Граф памʼяті + RAG. Категорії (CRUD/merge), `<id>/category`, `suggest-category` (k-NN), `bulk-category`,
 `<id>/enrich`, `backfill`(+status, SSE-канал "backfill"), `import`, `GET search` (hybrid), `POST ask` + `ask/stream` (SSE),
+`POST ask/<int:ask_id>/rate` (Хвиля A, 16.09.2026: `{rating: 1|-1, note?}` → `rag.rate_ask`,
+записує в `ask_log`; кнопки 👍/👎 в `ask.js`),
 `entities`(+`<id>`), `action-items`(+`<id>` PATCH), `stats`. Залежить: enrichment, retrieval, rag, embeddings.
+`POST ask`/`ask/stream` приймають `channel` (`"ui"`, дефолт; MCP `ask_archive` шле `"mcp"`) —
+кожне успішне питання обох каналів логується в `ask_log` (`rag._log_ask`).
 `GET search`/`POST ask`/`POST ask/stream` усі приймають `explain` (query `?explain=1` або JSON
 `{"explain": true}`, парситься `_parse_explain()`) — прокидається в `retrieval.search`/`rag.answer_question[_stream]`,
 `why` виживає в `sources` кожного результату (T2, S2).

@@ -395,6 +395,17 @@ def enrich_transcription(
     Returns {"transcription_id", "status", "card": {...}, "embed": {...}}.
     status: "done" якщо хоч одна фаза щось зробила, інакше "skipped".
     """
+    with get_db_connection(db_path) as conn:
+        dup_row = tx_repo.get_by_id(conn, transcription_id, columns=("id", "duplicate_of"))
+    if dup_row and dup_row["duplicate_of"] is not None:
+        # Ремонт 3 (review #3): дублі (dedup_audio.py) не отримують ані картку
+        # Claude, ані чанки/ембеддинги — той самий early-exit і те саме слово
+        # "skipped_duplicate", яким інжест (transcription.py) вже позначає
+        # enrichment у відповіді /api/transcribe.
+        skip = {"status": "skipped_duplicate", "transcription_id": transcription_id}
+        return {"transcription_id": transcription_id, "status": "skipped_duplicate",
+                "card": skip, "embed": skip}
+
     card_res = _enrich_card(db_path, transcription_id, model=model, force=force, effort=effort) \
         if text_polishing.is_available() else {"status": "unavailable"}
 
@@ -523,7 +534,8 @@ def list_unenriched_ids(db_path: str, limit: Optional[int] = None) -> list[int]:
         # б не покликав. Умова дзеркалить idempotency-перевірку в
         # embeddings.chunk_and_embed_transcription (NULL = стара нарізка).
         sql = (
-            "SELECT id FROM transcriptions WHERE deleted_at IS NULL AND ("
+            "SELECT id FROM transcriptions WHERE deleted_at IS NULL "
+            "AND duplicate_of IS NULL AND ("
             "(source_type IS NOT 'telegram' AND (enriched_at IS NULL OR "
             " enrichment_version IS NULL OR enrichment_version < ?)) "
             "OR embedded_at IS NULL OR embedding_model IS NULL OR embedding_model != ? "
@@ -554,7 +566,8 @@ def backfill(
     if force:
         with get_db_connection(db_path) as conn:
             ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM transcriptions WHERE deleted_at IS NULL ORDER BY id"
+                "SELECT id FROM transcriptions WHERE deleted_at IS NULL "
+                "AND duplicate_of IS NULL ORDER BY id"
             ).fetchall()]
         if limit:
             ids = ids[:limit]
