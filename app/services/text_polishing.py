@@ -804,6 +804,36 @@ def _strip_json_fence(raw: str) -> str:
     return raw
 
 
+# Стеля довжини входу extract_meeting_card (production-rag-wave-b-03). До цієї
+# правки стелі не було взагалі — увесь транскрипт/документ ішов у промпт як є
+# (на відміну від extract_topics/analyze_sentiment вище, де truncate вже був).
+# Ризик — не JSON-збій (у нього окремий except), а помилка САМОГО API на
+# запиті, що перевищує контекстне вікно моделі: `_enrich_card` ловить її
+# широким except і лишає запис у "retry_needed" НАЗАВЖДИ (повторний backfill
+# знову шле той самий задовгий текст і знову отримує ту саму помилку). Це
+# нова експозиція саме для backfill-cards CLI — він бере і документи (Волна
+# 16E), а не лише дзвінки, і документи (розпарсені xlsx/pdf) бувають на
+# порядки довшими за стенограму дзвінка.
+# Голова 3/4 + хвіст 1/4 (не 50/50): відкриття зустрічі/документа задає
+# контекст (учасники/тема), а завершення — підсумки/рішення/дедлайни; середина
+# найдовших записів губиться, це свідомий компроміс, а не побічний ефект.
+_MAX_CARD_CHARS = 200_000
+
+
+def _truncate_card_body(body: str) -> str:
+    """Обрізати текст під стелю extract_meeting_card. `body` вже непорожній
+    (перевірка порожнечі — у виклику раніше)."""
+    if len(body) <= _MAX_CARD_CHARS:
+        return body
+    head_len = _MAX_CARD_CHARS * 3 // 4
+    tail_len = _MAX_CARD_CHARS - head_len
+    logger.warning(
+        "[meeting-card] текст задовгий (%d символів > стеля %d) — обрізано "
+        "голова+хвіст (%d/%d)", len(body), _MAX_CARD_CHARS, head_len, tail_len,
+    )
+    return body[:head_len] + "\n\n[…]\n\n" + body[-tail_len:]
+
+
 def extract_meeting_card(
     text: str,
     diarized_text: Optional[str] = None,
@@ -851,6 +881,7 @@ def extract_meeting_card(
     }
     if not body:
         return empty
+    body = _truncate_card_body(body)
 
     client = _get_client()
     model = model or get_default_model()

@@ -34,15 +34,50 @@
   `telegram_listener.py` більше не вигадує посилань для приватних чатів.
 
 ## RAG (пошук + чат)
-- **embeddings.py** — локальні e5-large (1024-dim): `embed_text()` (query:/passage: префікси),
-  три чанкери: `_chunk_from_segments()` (аудіо), `_chunk_from_blocks()` (документи, page/section),
-  `_chunk_from_text()` (плоский текст). *T6.5: межа аудіо-чанку — зміна спікера або пауза ≥1.5s
-  при наборі ≥350 СВОЇХ символів, `_MAX_CHARS`=1000 лише страховка, перекриття ≤150 симв — тільки
-  при обриві за лімітом і тільки тим, що влазить у бюджет. Зміна нарізки = бамп `EMBED_VERSION`
-  (зараз 2) → re-embed через індексер; після масового проходу `enrichment.optimize_chunk_index()`
-  зливає сегменти `chunks_fts` (без нього пошук деградує 9с → 64с).
-  Замір: чанки p50≈304 токени, ліміт 512 не тисне. Lazy singleton + lock;
-  кеш ~/.cache/huggingface ~2.2GB; mute-mode якщо нема torch.*
+- **embeddings.py** — модель/версія з реєстру (`EMBED_MODEL` env, дефолт лишається
+  `intfloat/multilingual-e5-large`; `EMBED_VERSION` int-env, дефолт лишається `2`; Хвиля B, історія 04):
+  `embed_text()`/`embed_query()`, три чанкери: `_chunk_from_segments()` (аудіо), `_chunk_from_blocks()`
+  (документи, page/section), `_chunk_from_text()` (плоский текст). *T6.5: межа аудіо-чанку — зміна
+  спікера або пауза ≥1.5s при наборі ≥350 СВОЇХ символів, `_MAX_CHARS`=1000 лише страховка,
+  перекриття ≤150 симв — тільки при обриві за лімітом і тільки тим, що влазить у бюджет. Зміна
+  нарізки/моделі = бамп `EMBED_VERSION` → re-embed (Хвиля B: через `app/services/reembed.py`, не
+  через індексер); після масового проходу `enrichment.optimize_chunk_index()` зливає сегменти
+  `chunks_fts` (без нього пошук деградує 9с → 64с). Замір: чанки p50≈304 токени, ліміт 512 не тисне.
+  Lazy singleton + lock; кеш ~/.cache/huggingface ~2.2GB; mute-mode якщо нема torch.*
+  *Хвиля B, історія 04: `_style_for(model_name)` визначає стиль префіксів за РОДИНОЮ моделі з назви
+  (окремої env для стилю нема навмисно) — `e5` (`query:`/`passage:`), `qwen3` (запит — інструкція за
+  карткою HF `Instruct: {task}\nQuery: {q}`, пасаж без префікса), `plain` (без нічого); усі три —
+  `normalize_embeddings=True`. `EMBED_DIM` — дефолт 1024 до lazy-завантаження моделі, після —
+  `_apply_model_dim()` підміняє на факт (`model.get_sentence_embedding_dimension()`). Публічні
+  сигнатури `embed_query`/`embed_text`/`chunk_and_embed_transcription` не змінились.*
+  *Хвиля B, історія 05 (контракт C4): `build_context_prefix(meta, chunk) -> str` — рядок 1 з полів БД
+  (`[тип] назва|чат · дата · спікер|автор · напрямок|нитка: label|стор. N`, порожні поля пропускаються),
+  рядок 2 — `summaries.unit_summary_line()` (лише SQL, без torch — безпечно імпортувати зі stdio-MCP),
+  якщо є. Вхід ембедера = `prefix + "\n" + text` (стиль моделі накладається зверху); `chunks.text`
+  лишається лише текстом, `chunks.context_prefix` (v43) — окрема колонка, у цитати/експорт/нитки НЕ
+  потрапляє.*
+- **summaries.py** (Хвиля B, історія 02) — сводка TG-нитки Claude з провенансом: `summarize_thread()`
+  (один абзац ≤600 симв., превʼю кожного повідомлення в промпті, стеля `TG_SUMMARY_MAX_CHARS`=20000;
+  нитка з сирим текстом <300 симв. не кличе модель — `summary_model='verbatim'`), `backfill_candidates()`/
+  `backfill()` (CLI `stats`/`backfill --dry-run --model --limit --force`, пише `tg_threads.summary` +
+  провенанс v42: `summary_source_ids_json`/`summary_at`/`summary_model`/`summary_msgs`), `stats()`
+  (покриття дзвінків/документів/ниток сводками). `unit_summary_line(conn, transcription_id) -> str|None`
+  (контракт C1) — ≤200 симв., перше речення: telegram → сводка нитки, інакше →
+  `transcriptions.summary_json.summary`; споживач — `embeddings.build_context_prefix`. *Нитка, що
+  підросла після сводки, автоматично не пересводиться — водяний знак `summary_msgs` пишеться, читач
+  запланований на Хвилю C. Лише SQL + stdlib на рівні модуля (Claude-клієнт — lazy import) — безпечно
+  імпортувати зі stdio-MCP.*
+- **reembed.py** (Хвиля B, історія 05, контракт C5) — офлайн re-embed на ЗНІМКУ під поточну пару
+  (`embeddings.EMBED_MODEL`/`EMBED_VERSION`): `stale_ids()`/`plan()` (записи, чия пара не збігається з
+  поточною, живі й не дублі), `run(db_path, limit=, dry_run=)` — по одному `chunk_and_embed_transcription`,
+  `optimize_chunk_index()` рівно один раз у кінці, тільки якщо `done>0`. CLI: `python -m
+  app.services.reembed run --db PATH [--dry-run] [--limit N] [--yes-live]`; `is_live_db()` відмовляє
+  йти по `Config.DATABASE` без `--yes-live`. Коментарі — окремим `python -m app.services.comments reindex`.
+- **query_rewrite.py** (Хвиля B, історія 07, контракт C7) — `rewrite_query(question, max_variants=3,
+  model=None) -> list[str]`: 1-3 альтернативних пошукових формулювання від Claude (`RAG_QUERY_REWRITE_MODEL`,
+  дефолт Haiku 4.5), `[]` на порожній/односкладовий запит або будь-який збій API/JSON (best-effort,
+  `logger.warning`, пошук не падає). Дублі й оригінал відсіює casefold. `_strip_json_fence` — та сама
+  функція, що в `text_polishing`.
 - **retrieval.py** — `search()`: гібрид vector(брут-форс numpy cosine, усе в RAM) + FTS5 BM25 через RRF,
   `scope_tids=` — звуження до списку записів (Трек 2; сам список рахує `scope.scope_filter_ids`,
   retrieval навмисно не знає про граф сутностей),
@@ -50,6 +85,16 @@
   замовчуванням) — cross-encoder переранжовує топ-пул (~24) ПЕРЕД diversity cap. *>100k чанків → треба sqlite-vec.*
   *Хвиля A: обидві гілки (vector і FTS) фільтрують `duplicate_of IS NULL` поруч із
   `deleted_at IS NULL` — дубль лишається в Бібліотеці, але не в пошуку.*
+  *Хвиля B, історія 04: векторна гілка бере ЛИШЕ чанки поточної епохи —
+  `embedding_model = ? AND embedding_version = ?` (`embeddings.EMBED_MODEL`/`EMBED_VERSION`) поруч із
+  `deleted_at`/`duplicate_of` — вектори різних епох ніколи не порівнюються під час нічного re-embed.*
+  *Хвиля B, історія 07 (контракт C7): `search(..., rewrite: bool | None = None)` — `None` читає гарячий
+  env `RAG_QUERY_REWRITE` (реєстр, дефолт вимкнено); `True` додає 1-3 vector+FTS підзапити варіантів
+  `query_rewrite.rewrite_query()` під ТИМИ Ж мітками `vector`/`fts` (S2 контракт `by` не змінюється),
+  злиті тим самим RRF; `explain=True` додає `why["rewrites"]`. `why["stages"]` при кількох списках
+  однієї мітки лишає запис із найкращою (найменшою) позицією тієї мітки, а не останній перезаписаний
+  список. Фолбек на відсутній індекс коментарів (стара БД без v37) відкидає лише `comment_*` списки
+  за міткою, не позиційним зрізом — інакше з увімкненим `rewrite` зріз викидав би й варіанти.*
   `attach_thread_context(db_path, chunks, max_msgs=6)` — стеля символів на TG-нитку в контексті
   (раніше без ліміту, до 353k вхідних токенів на одне питання): env `RAG_THREAD_MSG_CHARS`
   (дефолт 1500, сусіди) і `RAG_THREAD_CHARS` (дефолт 8000, уся підшита нитка), обидва в реєстрі
@@ -103,6 +148,12 @@
 - **enrichment.py** — «Meeting Memory»: `enrich_transcription()` — 1 виклик Claude → summary/key_points/
   action_items/entities → upsert графа (people/projects/orgs + aliases + mention-salience). *Ідемпотентно по
   `enriched_at`; ENRICHMENT_VERSION форсить ре-ран.*
+  *Хвиля B, історія 03 (контракт C2): `enrich_transcription(..., model: str | None = None)` —
+  keyword-only, прокинуто в `text_polishing.extract_meeting_card` (`None` = поведінка як зараз). CLI
+  `python -m app.services.enrichment backfill-cards --dry-run [--model M] [--limit N] [--kind
+  calls|docs|all]` — лише card-фаза (без embed), вибірка `summary_json IS NULL AND source_type != 'telegram'
+  AND deleted_at IS NULL AND duplicate_of IS NULL`; `--dry-run` рахує символи/токени(≈4)/вартість
+  (`pricing.estimate_cost`) і топ-10 найдовших записів, нічого не пише.*
 - **document_parser.py** — `parse_document()` → (text, blocks). Парсери по розширенню (lazy-import):
   md/txt/docx/pdf/pptx/xlsx/csv/зображення. OCR Tesseract (≤50 стор.), таблиці→markdown(+NL-опис Claude).
   *PyMuPDF/python-pptx/openpyxl опц. (ParserUnavailable); PARSER_VERSION → ре-парс.*

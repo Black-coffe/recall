@@ -338,6 +338,25 @@ def test_answer_question_empty_question_skips_search(monkeypatch):
     assert not called
 
 
+def test_answer_question_passes_rewrite_flag_from_env_constant(monkeypatch):
+    """production-rag-wave-b-07: rag.py передає `rewrite=_QUERY_REWRITE_ENABLED`
+    (той самий патерн, що rerank) — env=1 -> True, за замовчуванням -> False."""
+    captured = {}
+
+    def fake_search(db_path, q, top_k=8, category_id=None, **kw):
+        captured["rewrite"] = kw.get("rewrite")
+        return {"chunks": [], "vector_available": True}
+
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+
+    rag.answer_question(":memory:", "питання")
+    assert captured["rewrite"] is rag._QUERY_REWRITE_ENABLED is False
+
+    monkeypatch.setattr(rag, "_QUERY_REWRITE_ENABLED", True)
+    rag.answer_question(":memory:", "питання")
+    assert captured["rewrite"] is True
+
+
 def test_answer_question_no_chunks_returns_fallback(monkeypatch):
     monkeypatch.setattr(
         rag.retrieval, "search",
@@ -421,6 +440,87 @@ def test_stream_sources_event_emitted_before_no_chunks_fallback(monkeypatch):
     assert '"found": 0' in frames[0]
     assert any(f.startswith("event: delta") and "не знайдено" in f for f in frames)
     assert frames[-1].startswith("event: done")
+
+
+def test_stream_passes_rewrite_flag_from_env_constant(monkeypatch):
+    captured = {}
+
+    def fake_search(db_path, q, top_k=8, category_id=None, **kw):
+        captured["rewrite"] = kw.get("rewrite")
+        return {"chunks": [], "vector_available": False}
+
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+    monkeypatch.setattr(rag, "_QUERY_REWRITE_ENABLED", True)
+    _collect(rag.answer_question_stream(":memory:", "питання"))
+    assert captured["rewrite"] is True
+
+
+# ============================================================
+# production-rag-wave-b-08, Major 2: `RAG_QUERY_REWRITE` читається через
+# `settings.env_bool` в ОБОХ читачах (rag.py і retrieval.search) — жоден не
+# парсить прапорець власним набором істинних значень (ADR-008).
+# ============================================================
+
+@pytest.fixture
+def _reload_rag_after():
+    """`_QUERY_REWRITE_ENABLED` рахується РАЗ на імпорті — тест нижче міняє
+    env через `importlib.reload`. Декларована ПЕРЕД `monkeypatch` у сигнатурі
+    тесту (LIFO: тіардаун monkeypatch — що відкочує env — іде ПЕРШИМ, тіардаун
+    цієї фікстури — ОСТАННІМ), тож reload тут бачить уже відновлений
+    (вимкнений) env і повертає модуль у дефолтний стан для решти сесії."""
+    yield
+    import importlib
+    importlib.reload(rag)
+
+
+@pytest.mark.parametrize("val,expected", [
+    ("1", True), ("true", True), ("yes", True), ("on", True),
+    ("0", False), ("false", False), ("no", False), ("off", False),
+])
+def test_rag_query_rewrite_env_matches_retrieval_search_default(
+        _reload_rag_after, monkeypatch, tmp_path, val, expected):
+    """Major 2: значення, з яким `search` отримує `rewrite=`, збігається з
+    дефолтом `retrieval.search(rewrite=None)` під тим самим env — обидва
+    читачі йдуть через `settings.env_bool`, жоден не парсить літералом."""
+    import importlib
+    import sqlite3
+
+    from app.db.migrations import init_database
+    from app.services import query_rewrite
+
+    monkeypatch.setenv("RAG_QUERY_REWRITE", val)
+    importlib.reload(rag)
+    assert rag._QUERY_REWRITE_ENABLED is expected
+
+    db_path = str(tmp_path / "t.db")
+    init_database(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+        "meeting_date) VALUES ('file', 'Мітинг', 'бюджет проєкту', '2026-01-01')")
+    tid = cur.lastrowid
+    conn.execute(
+        "INSERT INTO chunks (transcription_id, chunk_index, start_time, end_time, "
+        "speaker, text) VALUES (?, 0, 0, 10, 'Ви', 'бюджет проєкту')", (tid,))
+    conn.commit()
+    conn.close()
+
+    called = []
+    monkeypatch.setattr(query_rewrite, "rewrite_query",
+                        lambda q, **kw: (called.append(q), [])[1])
+
+    # Незалежний вимір: дефолт retrieval.search(rewrite=None) під тим самим env.
+    rag.retrieval.search(db_path, "бюджет проєкту", rewrite=None)
+    assert bool(called) is expected
+
+    captured = {}
+
+    def fake_search(db_path_, q, top_k=8, category_id=None, **kw):
+        captured["rewrite"] = kw.get("rewrite")
+        return {"chunks": [], "vector_available": False}
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+    rag.answer_question(db_path, "питання")
+    assert captured["rewrite"] is expected
 
 
 def test_stream_yields_deltas_then_done(monkeypatch):

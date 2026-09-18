@@ -56,6 +56,7 @@ def _fake_chunk(explain: bool, rerank: bool = False) -> dict:
         why["weights"] = {"recency": 0.1, "comment": 0.1}
         why["final_raw"] = 0.5
         why["search_capped"] = {"comment_share": False, "diversity": False}
+        why["rewrites"] = []
     return {
         "chunk_id": 1, "transcription_id": 1, "source_name": "Зустріч",
         "source_type": "transcript", "meeting_date": "2026-05-14",

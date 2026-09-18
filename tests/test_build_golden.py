@@ -330,6 +330,160 @@ def test_build_golden_cli_stats_flag_prints_deficit_table(tmp_path, db, monkeypa
     assert "calls" in captured
 
 
+def test_print_stats_treats_missing_status_as_labeled_legacy_default(capsys):
+    """Legacy-пункт без явного "status" (старий golden_set.local.json) — це вже
+    розмічений вручну запис (golden_io._read_legacy за умовчанням "labeled"),
+    а не щойно намінений unlabeled."""
+    items = [{"slice": "calls", "question": "стара розмічена", "expected_facts": ["x"]}]
+    build_golden.print_stats(items)
+    captured = capsys.readouterr().out
+    assert "labeled 1 / target" in captured
+    rows = {line.split()[0]: line.split() for line in captured.splitlines()
+            if line.split() and line.split()[0] in build_golden.SLICES}
+    assert rows["calls"][1] == "1"  # колонка "labeled"
+
+
+def test_print_stats_prints_total_labeled_over_target(capsys):
+    items = [{"slice": "calls", "status": "labeled"} for _ in range(5)] + [
+        {"slice": "tg", "status": "unlabeled"},
+    ]
+    build_golden.print_stats(items)
+    captured = capsys.readouterr().out
+    assert f"labeled 5 / target {build_golden.TOTAL_TARGET}" in captured
+
+
+# ============================================================
+# build_golden — мінінг: впорядкування за частотою (production-rag-wave-b-01)
+# ============================================================
+
+def test_mine_queries_orders_repeated_questions_first_with_frequency_in_notes(tmp_path):
+    log = tmp_path / "mcp_calls.log"
+    log.write_text(
+        # "рідкісне питання" зустрічається один раз, а "часте питання" — тричі,
+        # але перша поява "часте питання" йде ПІСЛЯ рідкісного в самому лозі —
+        # частота, а не порядок появи, вирішує підсумкове впорядкування.
+        '10:00:00 →   START search_archive args={"query": "рідкісне питання", "top_k": 8}\n'
+        '10:00:01 →   START search_archive args={"query": "часте питання", "top_k": 8}\n'
+        '10:00:02 →   START search_archive args={"query": "Часте ПИТАННЯ", "top_k": 8}\n'
+        '10:00:03 →   START search_archive args={"query": "часте питання", "top_k": 8}\n',
+        encoding="utf-8",
+    )
+    out = build_golden.mine_queries(str(log))
+    questions = [q["question"] for q in out]
+    assert questions == ["часте питання", "рідкісне питання"]
+    assert "3" in out[0]["notes"]
+    assert out[1].get("notes", "") == ""  # частота 1 — нотатку не додаємо
+
+
+# ============================================================
+# build_golden — legacy `{"description":..., "items":[...]}` (golden_set.local.json)
+# ============================================================
+
+def _legacy_item():
+    return {
+        "id": "kyiv-app-stack-01",
+        "question": "Який технологічний стек обрали?",
+        "category_id": None,
+        "expected_transcription_ids": [109],
+        "expected_source_name_contains": ["Києва"],
+        "expected_facts": ["Flutter, .NET, PostgreSQL"],
+        "notes": "Технічна зустріч.",
+    }
+
+
+def test_build_golden_merges_into_legacy_json_preserves_old_items_verbatim(tmp_path, db, monkeypatch):
+    out = tmp_path / "golden_set.local.json"
+    old_item = _legacy_item()
+    payload = {"description": "Локальний набір, НЕ комітити.", "items": [old_item]}
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    log = tmp_path / "mcp_calls.log"
+    log.write_text('13:00:00 →   START search_archive args={"query": "нове мінене питання", "top_k": 8}\n',
+                    encoding="utf-8")
+    fake_chunks = [{"transcription_id": 3, "source_name": "TG нитка", "source_type": "telegram"}]
+    from app.services import retrieval
+    monkeypatch.setattr(retrieval, "search", _fake_search({"нове мінене питання": fake_chunks}))
+
+    rc = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out), "--merge"])
+    assert rc == 0
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["description"] == "Локальний набір, НЕ комітити."
+    assert len(data["items"]) == 2
+    assert data["items"][0] == old_item  # 15 наявних пунктів — незмінні
+    new_item = data["items"][1]
+    assert new_item["question"] == "нове мінене питання"
+    assert new_item["status"] == "unlabeled"
+    assert new_item["source"] == "mcp_log"
+    assert new_item["slice"] == "tg"
+    assert new_item["candidates"] == fake_chunks
+    assert new_item["expected_transcription_ids"] == []  # НЕ розмічено (Non-goals)
+
+
+def test_build_golden_second_run_same_snapshot_adds_zero_new_items(tmp_path, db, monkeypatch, capsys):
+    out = tmp_path / "golden_set.local.json"
+    payload = {"description": "d", "items": [_legacy_item()]}
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    log = tmp_path / "mcp_calls.log"
+    log.write_text('13:00:00 →   START search_archive args={"query": "стабільне питання", "top_k": 8}\n',
+                    encoding="utf-8")
+    from app.services import retrieval
+    monkeypatch.setattr(retrieval, "search", _fake_search({"стабільне питання": []}))
+
+    rc1 = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out), "--merge"])
+    assert rc1 == 0
+    after_first = json.loads(out.read_text(encoding="utf-8"))
+    assert len(after_first["items"]) == 2
+
+    capsys.readouterr()
+    rc2 = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out), "--merge"])
+    assert rc2 == 0
+    assert "нових=0" in capsys.readouterr().out
+    after_second = json.loads(out.read_text(encoding="utf-8"))
+    assert after_second == after_first  # той самий знімок — 0 нових пунктів
+
+
+# ============================================================
+# build_golden — --limit ріже лише лог, не ask_log (production-rag-wave-b-01)
+# ============================================================
+
+def _add_ask_log(db_path: str, rows: list[tuple]) -> None:
+    """`ask_log` (міграція v41) — лише колонки, які читає `mine_ask_log`."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE ask_log (id INTEGER PRIMARY KEY, question TEXT, scope_json TEXT, "
+                 "source_ids_json TEXT, rating INTEGER, note TEXT)")
+    conn.executemany("INSERT INTO ask_log (question, scope_json, source_ids_json, rating, note) "
+                     "VALUES (?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_build_golden_limit_cuts_log_questions_but_keeps_ask_log(tmp_path, db, monkeypatch, capsys):
+    """Спільний ліміт з'їдали сотні питань логу, і прогін «з обох джерел» мовчки
+    давав одне — ask_log (десяток рядків з оцінкою власника) ліміт не ріже."""
+    _add_ask_log(db, [("питання власника з оцінкою", "{}", "[]", -1, "")])
+    log = tmp_path / "mcp_calls.log"
+    log.write_text(
+        '10:00:00 →   START search_archive args={"query": "часте питання логу", "top_k": 8}\n'
+        '10:00:01 →   START search_archive args={"query": "часте питання логу", "top_k": 8}\n'
+        '10:00:02 →   START search_archive args={"query": "рідке питання логу", "top_k": 8}\n',
+        encoding="utf-8",
+    )
+    from app.services import retrieval
+    monkeypatch.setattr(retrieval, "search", _fake_search({"часте питання логу": []}))
+
+    out = tmp_path / "golden.jsonl"
+    rc = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out),
+                             "--from-ask-log", "--limit", "1"])
+    assert rc == 0
+    items = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    questions = [it["question"] for it in items]
+    assert questions == ["часте питання логу", "питання власника з оцінкою"]
+    assert "рідке питання логу" not in questions  # зрізане лімітом
+    assert "пропущено_лімітом=1" in capsys.readouterr().out
+
+
 # ============================================================
 # build_tasks_golden — стратифікована вибірка (C7)
 # ============================================================

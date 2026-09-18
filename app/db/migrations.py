@@ -91,6 +91,11 @@
         (transcription_id NOT NULL + UNIQUE(transcription_id, chunk_index)),
         а записи-повідомлення лишаються як були — дедуп, лінки і провенанс
         не ламаються.
+  v43 — chunks.context_prefix + chunks_fts по (context_prefix, text) (Волна B):
+        контекстний заголовок чанка (тип, назва/чат, дата, спікер/автор,
+        напрямок|нитка|сторінка + рядок сводки одиниці сенсу) бере участь у
+        векторі та BM25, але НЕ потрапляє в цитати — `chunks.text` лишається
+        голим текстом.
 
 Запуск: init_database(db_path) на старті app.
 Idempotent — кожна міграція робить INSERT OR IGNORE у schema_versions.
@@ -1619,6 +1624,101 @@ def init_database(db_path: str):
                   "(41, 'ask_log — лог питань UI+MCP з відповіддю, джерелами, токенами, "
                   "вартістю і оцінкою власника (сировина для golden-set)')")
         logger.info("Міграція v41: ask_log створено")
+
+    # === v42: провенанс сводки TG-нитки (Волна B, app/services/summaries.py) ==
+    # `tg_threads.summary` (з v32) уже існувала, але її ніхто не писав і не
+    # читав — сводка нитки не була "одиницею сенсу зі сводкою" нарівні з
+    # дзвінком/документом. Колонки тут — той самий провенанс, що вже є для
+    # триажу/витягу задач (triage_at/triage_model/triage_msgs): коли, якою
+    # моделлю, і головне — `summary_source_ids_json` = id САМЕ ТИХ повідомлень
+    # (`transcriptions.id`), що потрапили в промпт, бо превʼю-стеля (як у
+    # tg_tasks) означає, що не всі повідомлення нитки туди влізли.
+    # `summary_msgs` — водяний знак: нитка, що підросла, потребує нової сводки,
+    # але сама не пересводиться на кожне повідомлення.
+    if current_version < 42:
+        c.execute("PRAGMA table_info(tg_threads)")
+        tcols = {row[1] for row in c.fetchall()}
+        if tcols:
+            for col, decl in (("summary_source_ids_json", "TEXT"),
+                              ("summary_at", "TEXT"),
+                              ("summary_model", "TEXT"),
+                              ("summary_msgs", "INTEGER")):
+                if col not in tcols:
+                    c.execute(f"ALTER TABLE tg_threads ADD COLUMN {col} {decl}")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(42, 'tg_threads.summary_source_ids_json/summary_at/summary_model/"
+                  "summary_msgs — провенанс сводки нитки (Волна B)')")
+        logger.info("Міграція v42: провенанс tg_threads.summary створено")
+
+    # === v43: chunks.context_prefix + chunks_fts по (context_prefix, text) ====
+    # Волна B, історія 05. Чанк був самодостатнім лише для людини, яка вже знає,
+    # звідки він: у вектор і в BM25 йшов голий текст репліки, тож «що по
+    # Acmecorp у вересні» не знаходило повідомлення, де назва чату є, а в самій
+    # репліці — ні. `context_prefix` — один-два рядки з ПОЛІВ БД (тип, назва/чат,
+    # дата, спікер/автор, напрямок | нитка | сторінка) + рядок сводки одиниці
+    # сенсу (`summaries.unit_summary_line`). Пише його `embeddings.
+    # build_context_prefix` при ембедингу.
+    #
+    # Префікс бере участь у пошуку і НЕ бере — у цитатах: `chunks.text`
+    # лишається голим текстом, а retrieval/rag/експорт читають саме `text`
+    # (списки колонок там явні, без SELECT *).
+    #
+    # chunks_fts — external content (`content='chunks'`), тож колонки FTS
+    # зіставляються з колонками chunks ПО ІМЕНІ: додати колонку в індекс можна
+    # лише перестворенням віртуальної таблиці + `rebuild`. Тригери переписані
+    # обидва поля. Нерозмічений `MATCH` (retrieval, commitments, archive_grep)
+    # шукає по ВСІХ колонках — окремої правки споживачам не потрібно.
+    # Ідемпотентність: перебудова робиться, лише якщо в chunks_fts ще немає
+    # колонки context_prefix (а не лише за номером версії).
+    if current_version < 43:
+        c.execute("PRAGMA table_info(chunks)")
+        chunk_cols = {row[1] for row in c.fetchall()}
+        if chunk_cols:
+            if 'context_prefix' not in chunk_cols:
+                c.execute('ALTER TABLE chunks ADD COLUMN context_prefix TEXT')
+
+            c.execute("PRAGMA table_info(chunks_fts)")
+            fts_cols = {row[1] for row in c.fetchall()}
+            if 'context_prefix' not in fts_cols:
+                c.execute('DROP TRIGGER IF EXISTS chunks_ai')
+                c.execute('DROP TRIGGER IF EXISTS chunks_ad')
+                c.execute('DROP TRIGGER IF EXISTS chunks_au')
+                c.execute('DROP TABLE IF EXISTS chunks_fts')
+                c.execute('''
+                    CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                        context_prefix, text, content='chunks', content_rowid='id',
+                        tokenize='unicode61 remove_diacritics 1'
+                    )
+                ''')
+                c.execute('''
+                    CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+                        INSERT INTO chunks_fts(rowid, context_prefix, text)
+                        VALUES (new.id, new.context_prefix, new.text);
+                    END
+                ''')
+                c.execute('''
+                    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                        INSERT INTO chunks_fts(chunks_fts, rowid, context_prefix, text)
+                        VALUES ('delete', old.id, old.context_prefix, old.text);
+                    END
+                ''')
+                c.execute('''
+                    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+                        INSERT INTO chunks_fts(chunks_fts, rowid, context_prefix, text)
+                        VALUES ('delete', old.id, old.context_prefix, old.text);
+                        INSERT INTO chunks_fts(rowid, context_prefix, text)
+                        VALUES (new.id, new.context_prefix, new.text);
+                    END
+                ''')
+                # Наявні рядки (у більшості — з NULL-префіксом) мають лишитись
+                # знаходженими за своїм текстом: rebuild перечитує content-таблицю.
+                c.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(43, 'chunks.context_prefix + chunks_fts по (context_prefix, text) — "
+                  "контекстний заголовок чанка у вектор і BM25 (Волна B)')")
+        logger.info("Міграція v43: chunks.context_prefix + перебудова chunks_fts")
 
     conn.commit()
     conn.close()

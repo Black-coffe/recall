@@ -2,12 +2,16 @@
 
 Офлайн, без torch/sentence-transformers/GPU — тестуємо ЛИШЕ детерміновані
 хелпери нарізки тексту (_window_text/_split_sentences/_chunk_from_segments/
-_chunk_from_blocks/build_chunks), не embed_texts/embed_query (потребують
-реальної моделі — поза межами цього тесту). Покриває межі нарізки:
-короткі/довгі речення, кирилицю, overlap, межу _MAX_CHARS.
-"""
+_chunk_from_blocks/build_chunks). Покриває межі нарізки: короткі/довгі
+речення, кирилицю, overlap, межу _MAX_CHARS.
+
+production-rag-wave-b-04: embed_texts/embed_query теж покриті — але через
+підмінений `_encode` (фейк, що памʼятає вхідні рядки), реальна модель НЕ
+завантажується. Це перевіряє лише вибір префікса за `_style_for()`, не саме
+кодування."""
 from __future__ import annotations
 
+import importlib
 import sqlite3
 
 import numpy as np
@@ -556,6 +560,56 @@ def test_embed_version_bump_forces_reembed(db, monkeypatch):
     assert calls["n"] == 2  # версія змінилась → перекодували
 
 
+def test_embed_version_roundtrip_via_env_pair(db, monkeypatch):
+    """production-rag-wave-b-04: рішення «застаріло / актуально» приймається
+    по парі (EMBED_MODEL, EMBED_VERSION), яка тепер приходить з env — тож
+    відкат `EMBED_VERSION` назад повертає той самий стан, що й до бампу.
+    Кожна зміна пари робить наявний запис застарілим (status=embedded), а під
+    незмінною парою він одразу знову актуальний (status=skipped)."""
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    base = embeddings.EMBED_VERSION
+    tid = _add_tx(db)
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    # Бамп версії (нова пара в .env) → запис застарів, після перекодування актуальний.
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", base + 1)
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "skipped"
+
+    # Відкат тим самим рядком .env → запис знову застарілий для старої пари,
+    # а після перекодування під нею — знову актуальний, як до бампу.
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", base)
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "skipped"
+
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT embedding_model, embedding_version FROM transcriptions "
+                       "WHERE id = ?", (tid,)).fetchone()
+    conn.close()
+    assert row == (embeddings.EMBED_MODEL, base)
+
+
+def test_embed_model_and_version_come_from_env(monkeypatch):
+    """Обіцянка історії: пара Qwen3 вмикається ДВОМА рядками `.env`, відкат —
+    тими ж двома. Перевіряємо саме читання env на імпорті модуля (reload),
+    а не літерали: модель, версія і стиль префіксів мусять поїхати разом."""
+    original_model, original_version = embeddings.EMBED_MODEL, embeddings.EMBED_VERSION
+    monkeypatch.setenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    monkeypatch.setenv("EMBED_VERSION", "3")
+    try:
+        importlib.reload(embeddings)
+        assert embeddings.EMBED_MODEL == "Qwen/Qwen3-Embedding-0.6B"
+        assert embeddings.EMBED_VERSION == 3
+        assert embeddings._STYLE == "qwen3"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(embeddings)
+    assert embeddings.EMBED_MODEL == original_model
+    assert embeddings.EMBED_VERSION == original_version
+    assert embeddings._STYLE == embeddings._style_for(original_model)
+
+
 # ============================================================
 # Волна 4: Telegram — автор у чанку + заглушки не стають векторами
 # ============================================================
@@ -615,6 +669,103 @@ def test_contentless_matcher_keeps_real_text():
     assert not embeddings._is_contentless_tg("оплата у пʼятницю")
 
 
+# ============================================================
+# production-rag-wave-b-04: _style_for() — стиль префіксів за родиною моделі
+# ============================================================
+
+@pytest.mark.parametrize("name,expected", [
+    ("intfloat/multilingual-e5-large", "e5"),
+    ("intfloat/multilingual-E5-LARGE", "e5"),
+    ("Qwen/Qwen3-Embedding-0.6B", "qwen3"),
+    ("qwen/qwen3-embedding-4b", "qwen3"),
+    ("BAAI/bge-m3", "plain"),
+    ("", "plain"),
+])
+def test_style_for_families(name, expected):
+    assert embeddings._style_for(name) == expected
+
+
+def _capture_encode(monkeypatch):
+    """Підмінює _encode фейком, що памʼятає, які рядки прийшли на вхід
+    (без завантаження реальної моделі)."""
+    seen: list[list[str]] = []
+
+    def _fake(texts, batch_size=32):
+        seen.append(list(texts))
+        return np.zeros((len(texts), embeddings.EMBED_DIM), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings, "_encode", _fake)
+    return seen
+
+
+def test_embed_texts_e5_style_adds_passage_prefix(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "e5")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_texts(["Кирилична фраза про бюджет."])
+    assert seen == [["passage: Кирилична фраза про бюджет."]]
+
+
+def test_embed_texts_qwen3_style_no_passage_prefix(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "qwen3")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_texts(["Кирилична фраза про бюджет."])
+    assert seen == [["Кирилична фраза про бюджет."]]
+
+
+def test_embed_texts_plain_style_no_prefix(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "plain")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_texts(["Кирилична фраза про бюджет."])
+    assert seen == [["Кирилична фраза про бюджет."]]
+
+
+def test_embed_query_e5_style_adds_query_prefix(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "e5")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_query("Що вирішили щодо бюджету?")
+    assert seen == [["query: Що вирішили щодо бюджету?"]]
+
+
+def test_embed_query_qwen3_style_adds_instruction(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "qwen3")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_query("Що вирішили щодо бюджету?")
+    assert seen == [[f"Instruct: {embeddings._QWEN3_QUERY_TASK}\nQuery: Що вирішили щодо бюджету?"]]
+
+
+def test_embed_query_plain_style_no_prefix(monkeypatch):
+    monkeypatch.setattr(embeddings, "_STYLE", "plain")
+    seen = _capture_encode(monkeypatch)
+    embeddings.embed_query("Що вирішили щодо бюджету?")
+    assert seen == [["Що вирішили щодо бюджету?"]]
+
+
+# ============================================================
+# production-rag-wave-b-04: EMBED_DIM — дефолт до завантаження, факт після
+# ============================================================
+
+def test_embed_dim_default_before_load():
+    assert embeddings.EMBED_DIM == 1024
+
+
+class _FakeModel:
+    def __init__(self, dim):
+        self._dim = dim
+
+    def get_sentence_embedding_dimension(self):
+        return self._dim
+
+
+def test_apply_model_dim_updates_embed_dim():
+    original = embeddings.EMBED_DIM
+    try:
+        result = embeddings._apply_model_dim(_FakeModel(768))
+        assert result == 768
+        assert embeddings.EMBED_DIM == 768
+    finally:
+        embeddings.EMBED_DIM = original
+
+
 def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
     """Переіндексація має ПРИБИРАТИ старі сміттєві вектори, а не лише перестати
     робити нові: інакше фільтр заглушок нічого не змінює для наявного архіву
@@ -643,3 +794,145 @@ def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
                              (tid,)).fetchone()[0]
     conn.close()
     assert left == 0 and count_col == 0
+
+
+# ============================================================
+# production-rag-wave-b-05: контекстний префікс чанка
+# ============================================================
+
+def test_context_prefix_call_has_title_date_speaker_and_category():
+    meta = {"source_type": "file", "title": "Планерка Фонду",
+            "date": "2026-09-15", "category": "Робота",
+            "thread_label": None, "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
+    assert prefix == "[дзвінок] Планерка Фонду · 2026-09-15 · Андрій · Робота"
+
+
+def test_context_prefix_telegram_has_chat_author_and_thread_label():
+    meta = {"source_type": "telegram", "title": "Фонд · загальний",
+            "date": "2026-09-16", "category": "Робота",
+            "thread_label": "бюджет вересня", "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Оксана"})
+    assert prefix == ("[переписка] Фонд · загальний · 2026-09-16 · Оксана · "
+                      "нитка: бюджет вересня")
+    # напрямок у переписці не дублює мітку нитки (хвіст типо-специфічний)
+    assert "Робота" not in prefix
+
+
+def test_context_prefix_document_uses_page_then_section():
+    meta = {"source_type": "document", "title": "Статут фонду.pdf",
+            "date": "2026-03-01", "category": "Робота",
+            "thread_label": None, "summary_line": None}
+    with_page = embeddings.build_context_prefix(
+        meta, {"speaker": None, "page": 7, "section": "Розділ II"})
+    assert with_page == "[документ] Статут фонду.pdf · 2026-03-01 · стор. 7"
+    with_section = embeddings.build_context_prefix(
+        meta, {"speaker": None, "page": None, "section": "Розділ II"})
+    assert with_section == "[документ] Статут фонду.pdf · 2026-03-01 · Розділ II"
+
+
+def test_context_prefix_skips_missing_fields_and_never_prints_none():
+    meta = {"source_type": "file", "title": None, "date": None,
+            "category": None, "thread_label": None, "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": None})
+    assert prefix == "[дзвінок]"
+    assert "None" not in prefix
+
+
+def test_context_prefix_rejects_non_iso_date():
+    meta = {"source_type": "file", "title": "Дзвінок", "date": "невідомо"}
+    assert embeddings.build_context_prefix(meta, {}) == "[дзвінок] Дзвінок"
+    meta["date"] = "2026-09-15 12:30:00"
+    assert embeddings.build_context_prefix(meta, {}) == "[дзвінок] Дзвінок · 2026-09-15"
+
+
+def test_context_prefix_second_line_is_unit_summary():
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "summary_line": "Домовились перенести оплату на жовтень."}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
+    assert prefix.split("\n") == [
+        "[дзвінок] Планерка · 2026-09-15 · Андрій",
+        "Домовились перенести оплату на жовтень.",
+    ]
+
+
+def test_context_prefix_is_deterministic():
+    meta = {"source_type": "telegram", "title": "Acmecorp", "date": "2026-09-16",
+            "thread_label": "рахунок", "summary_line": "Рахунок виставлено."}
+    chunk = {"speaker": "Оксана"}
+    assert (embeddings.build_context_prefix(meta, chunk)
+            == embeddings.build_context_prefix(meta, chunk))
+
+
+def test_embed_writes_context_prefix_and_keeps_text_clean(db, monkeypatch):
+    """Префікс іде в ембедер і в окрему колонку; `chunks.text` — побайтово
+    той самий текст, що був у транскрипті (цитати не мають нести заголовок)."""
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    seen: list[list[str]] = []
+
+    def fake_embed(texts, batch_size=32):
+        seen.append(list(texts))
+        return _fake_embed_texts(texts, batch_size)
+
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed)
+    body = "Домовились про оплату в пʼятницю."
+    tid = _add_tg_tx(db, body)
+
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT text, context_prefix FROM chunks WHERE transcription_id = ?",
+                       (tid,)).fetchone()
+    conn.close()
+    assert row[0] == body                       # текст чистий, побайтово
+    assert row[1].startswith("[переписка] Fund")
+    assert "Адам" in row[1]
+    # фейковий ембедер БАЧИВ префікс — саме він іде у вектор
+    assert seen and seen[0][0] == row[1] + "\n" + body
+
+
+def test_embed_prefix_carries_unit_summary_of_call(db, monkeypatch):
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    tid = _add_tx(db, "Обговорили кошторис і терміни здачі.")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE transcriptions SET meeting_date = '2026-09-15', "
+        "summary_json = ? WHERE id = ?",
+        ('{"summary": "Кошторис погоджено. Терміни зсунуто."}', tid))
+    conn.commit()
+    conn.close()
+
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    conn = sqlite3.connect(db)
+    prefix = conn.execute("SELECT context_prefix FROM chunks WHERE transcription_id = ?",
+                          (tid,)).fetchone()[0]
+    conn.close()
+    lines = prefix.split("\n")
+    assert lines[0] == "[дзвінок] test · 2026-09-15"
+    assert lines[1] == "Кошторис погоджено."
+
+
+def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
+    """Назва чату звучить у префіксі й НЕ звучить у тексті репліки — пошук має
+    її знаходити (префікс у BM25), а видача — нести чистий текст."""
+    from app.services import retrieval
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    body = "рахунок виставили в понеділок, чекаємо оплату"
+    tid = _add_tg_tx(db, body, sender="Оксана")
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transcriptions SET tg_chat_title = 'Барселона' WHERE id = ?", (tid,))
+    conn.commit()
+    conn.close()
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    # vector-гілка вимкнена: у тесті немає ні моделі, ні реальних векторів
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    res = retrieval.search(db, "Барселона", top_k=5)
+    assert [c["transcription_id"] for c in res["chunks"]] == [tid]
+    assert res["chunks"][0]["text"] == body
+    assert "Барселона" not in res["chunks"][0]["text"]
+    assert "context_prefix" not in res["chunks"][0]

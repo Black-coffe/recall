@@ -1,12 +1,14 @@
 #!/usr/bin/env python
-"""Мінер golden-set із РЕАЛЬНИХ MCP-запитів (eval-gate, C1/C8).
+"""Мінер golden-set із РЕАЛЬНИХ MCP-запитів (eval-gate, C1/C8; production-rag-wave-b-01).
 
 Читає `logs/mcp_calls.log` (`RECALL_MCP_DEBUG_LOG=1`, `mcp_server.py::_CallLogMiddleware` —
 формат `HH:MM:SS →   START <tool> args={json}`), витягує `query` з `search_archive` і
-`question` з `ask_archive`, дедуплікує нормалізовано і для кожного унікального запиту
-рахує top-5 `retrieval.search` (на ЗНІМКУ БД) → кандидатів джерел і мажоритарний зріз
-(`calls`/`tg`/`docs`, C8). Кандидати — ПІДКАЗКА, не правда: кожен новий рядок виходить
-`status="unlabeled"` з порожніми `expected_*`; лише людина переводить у `labeled` (A2).
+`question` з `ask_archive`, дедуплікує нормалізовано і впорядковує за частотою
+(питання, що повторюються частіше — першими; частота > 1 йде в `notes`), і для
+кожного унікального запиту рахує top-5 `retrieval.search` (на ЗНІМКУ БД) → кандидатів
+джерел і мажоритарний зріз (`calls`/`tg`/`docs`, C8). Кандидати — ПІДКАЗКА, не правда:
+кожен новий рядок виходить `status="unlabeled"` з порожніми `expected_*`; лише людина
+переводить у `labeled` (A2).
 
 `args` у логу обрізано до 600 символів (mcp_server.py) — довгі `question`/`query`
 труться посеред рядкового значення. Парсер спершу пробує звичайний `json.loads`,
@@ -18,10 +20,25 @@ CLI:
     python -m evals.build_golden --db evals/snapshots/x.db --merge
     python -m evals.build_golden --db evals/snapshots/x.db --stats
     python -m evals.build_golden --db evals/snapshots/x.db --from-ask-log --stats
+    python -m evals.build_golden --db evals/snapshots/x.db --out evals/golden_set.local.json \
+        --merge --from-ask-log --limit 30 --stats
+
+`--limit` ріже щойно дедупльований список НОВИХ питань З ЛОГУ зверху (уже
+впорядкований за частотою) — без нього `retrieval.search` на сотнях унікальних
+питань займає години (brute-force над усім знімком); пропущені лишаються
+кандидатами на наступний прогін (`--merge` їх не бачить "known", доки не додані).
+Питання з `--from-ask-log` ліміт не ріже — інакше сотні рядків логу з'їдають
+його цілком і прогін "з обох джерел" мовчки дає одне.
 
 `--from-ask-log` додає друге джерело питань — таблицю `ask_log` (міграція v41,
 UI + MCP): там є оцінка власника 👍/👎, тож 👎-питання стають кандидатами
 першими, а кандидатами джерел ідуть ті записи, які модель реально процитувала.
+
+`--out` розпізнає формат за розширенням: `.jsonl` — сучасний (один обʼєкт на
+рядок), будь-яке інше (напр. `golden_set.local.json`) — legacy
+`{"description": ..., "items": [...]}`. У legacy-режимі наявні пункти
+читаються і записуються RAW (без нормалізації `golden_io`), щоб з `--merge`
+не набути нових ключів і лишитись тими самими, що на диску.
 """
 from __future__ import annotations
 
@@ -51,6 +68,9 @@ from evals.graph_links import is_live_db  # noqa: E402
 #: A2: ціль розмітки на зріз (НЕ критерій прийняття коду — build_golden лише
 #: рахує прогрес до неї у `--stats`).
 SLICE_TARGET = 50
+#: Ближча ціль наповнення всього набору (production-rag-wave-b-01) — окремо
+#: від SLICE_TARGET, який лишається довгостроковою ціллю на зріз.
+TOTAL_TARGET = 30
 SLICES = ("calls", "tg", "docs")
 
 _LINE_RE = re.compile(r"^\d{2}:\d{2}:\d{2} →   START (\S+) args=(.*)$")
@@ -181,15 +201,20 @@ def _norm_query(q: str) -> str:
 
 
 def mine_queries(log_path: str) -> list[dict]:
-    """Унікальні запити з логу (у порядку першої появи, дедуп нормалізовано).
+    """Унікальні запити з логу, впорядковані за частотою (найповторюваніші —
+    першими; нічия рахується за порядком першої появи, дедуп нормалізовано).
 
-    Повертає ``[{"question", "tool", "category_id"}, ...]`` — це ще НЕ golden-
-    пункти, лише сирі запити (candidates/slice рахуються окремо, лише для тих,
-    що дійсно підуть у вихідний файл, щоб не платити retrieval за дублі)."""
-    seen: set[str] = set()
-    out: list[dict] = []
+    Повертає ``[{"question", "tool", "category_id", "notes"}, ...]`` — це ще
+    НЕ golden-пункти, лише сирі запити (candidates/slice рахуються окремо,
+    лише для тих, що дійсно підуть у вихідний файл, щоб не платити retrieval
+    за дублі). Частота — скільки разів той самий запит (нормалізовано)
+    зустрівся в логу — записується в ``notes``, коли вона > 1 (гейт це поле
+    ігнорує, це підказка людині, що розмічає)."""
+    counts: Counter[str] = Counter()
+    first_seen: dict[str, dict] = {}
+    order: list[str] = []
     if not os.path.exists(log_path):
-        return out
+        return []
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             m = _LINE_RE.match(line.rstrip("\n"))
@@ -203,11 +228,23 @@ def mine_queries(log_path: str) -> list[dict]:
             if not text:
                 continue
             key = _norm_query(text)
-            if not key or key in seen:
+            if not key:
                 continue
-            seen.add(key)
-            out.append({"question": text, "tool": tool,
-                        "category_id": _category_id_from_args(argstr)})
+            counts[key] += 1
+            if key not in first_seen:
+                first_seen[key] = {"question": text, "tool": tool,
+                                    "category_id": _category_id_from_args(argstr)}
+                order.append(key)
+
+    # sorted() стабільний — при рівній частоті лишається порядок першої появи.
+    ordered_keys = sorted(order, key=lambda k: -counts[k])
+    out: list[dict] = []
+    for key in ordered_keys:
+        item = dict(first_seen[key])
+        freq = counts[key]
+        if freq > 1:
+            item["notes"] = f"частота в MCP-лозі: {freq}×"
+        out.append(item)
     return out
 
 
@@ -269,18 +306,60 @@ def candidates_for(db_path: str, question: str, top_k: int = 5) -> tuple[list[di
 
 
 # ============================================================
-# JSONL (читання — спільний `evals.golden_io.read_jsonl`, D13; запис лишається
-# тут, бо власного контракту помилок не потребує)
+# Читання/запис --out — JSONL (сучасний формат, D13) АБО legacy
+# `{"description": ..., "items": [...]}` (старий `golden_set.local.json`,
+# `evals/golden_io.py` розпізнає той самий поділ по розширенню файлу).
+# Формат для legacy читається RAW (без нормалізації `golden_io`), інакше
+# 15 наявних пунктів набувають нових ключів (`slice`/`source`/`candidates`)
+# і перестають бути тими самими, що на диску (Non-goals: не чіпати їх).
 # ============================================================
 
 
-def _write_jsonl(path: str, items: list[dict]) -> None:
+def _read_existing(path: str) -> tuple[list[dict], Optional[str]]:
+    """Прочитати наявний `--out` для merge/перевірки дублів.
+
+    Повертає ``(items, description)`` — `description` лише для legacy `.json`
+    (``None`` для `.jsonl` і для legacy-файлу без цього поля)."""
+    if path.endswith(".jsonl"):
+        return read_jsonl(path), None
+    p = Path(path)
+    if not p.exists():
+        return [], None
+    try:
+        raw_text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GoldenSetError(f"golden-set {path}: не вдалось прочитати: {exc}") from exc
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise GoldenSetError(f"golden-set {path}: невалідний JSON: {exc}") from exc
+    if isinstance(data, dict):
+        items, description = data.get("items"), data.get("description")
+    elif isinstance(data, list):
+        items, description = data, None
+    else:
+        raise GoldenSetError(f"golden-set {path}: очікується список або {{'items': [...]}}")
+    if not isinstance(items, list):
+        raise GoldenSetError(f"golden-set {path}: 'items' має бути списком")
+    return items, description
+
+
+def _write_golden(path: str, items: list[dict], description: Optional[str]) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    if path.endswith(".jsonl"):
+        with open(path, "w", encoding="utf-8") as f:
+            for it in items:
+                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+        return
+    payload: dict = {}
+    if description is not None:
+        payload["description"] = description
+    payload["items"] = items
     with open(path, "w", encoding="utf-8") as f:
-        for it in items:
-            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 
 
 _ID_RE = re.compile(r"^mined-(\d+)$")
@@ -317,9 +396,17 @@ def _make_item(idx: int, q: dict, candidates: list[dict], slice_: str) -> dict:
 
 def print_stats(items: list[dict]) -> None:
     table = {s: Counter() for s in SLICES}
+    total_labeled = 0
     for it in items:
         s = it.get("slice") if it.get("slice") in SLICES else "calls"
-        table[s][it.get("status") or "unlabeled"] += 1
+        # Пункт без явного "status" — legacy-запис (старий golden_set.local.json,
+        # `evals/golden_io.py::_read_legacy` за умовчанням вважає такі "labeled"),
+        # а НЕ щойно намінений unlabeled — інакше вже розмічені 15 пунктів рахуються
+        # як недороблена робота в цій статистиці.
+        status = it.get("status") or "labeled"
+        table[s][status] += 1
+        if status == "labeled":
+            total_labeled += 1
     print(f"{'slice':<8}{'labeled':>10}{'unlabeled':>12}{'negative':>10}{'ціль':>8}{'дефіцит':>10}")
     for s in SLICES:
         c = table[s]
@@ -327,6 +414,7 @@ def print_stats(items: list[dict]) -> None:
         deficit = max(0, SLICE_TARGET - labeled)
         print(f"{s:<8}{labeled:>10}{c.get('unlabeled', 0):>12}{c.get('negative', 0):>10}"
               f"{SLICE_TARGET:>8}{deficit:>10}")
+    print(f"labeled {total_labeled} / target {TOTAL_TARGET}")
 
 
 # ============================================================
@@ -352,6 +440,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "власника): 👎 першими, кандидати — процитовані джерела")
     parser.add_argument("--stats", action="store_true", help="Надрукувати таблицю slice×status і дефіцит до цілі")
     parser.add_argument("--top-k", type=int, default=5, help="Скільки кандидатів на запит (default: 5)")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="Скільки НОВИХ (після дедупу) питань З MCP-ЛОГУ реально прогнати "
+                              "через retrieval.search (default: без обмеження). `retrieval.search` "
+                              "— brute-force над усім знімком, тож на сотнях унікальних питань з "
+                              "логу один прогін займає години; план хвилі просить намінити "
+                              "'≥30 кандидатів' (не весь лог), тож --limit ріже впорядкований за "
+                              "частотою список логу зверху — найчастіші питання лишаються. "
+                              "Питання з --from-ask-log ліміт НЕ ріже: їх десяток і вони з "
+                              "оцінкою власника.")
     parser.add_argument("--yes-live", action="store_true",
                          help="Дозволити відкрити файл, що збігається з Config.DATABASE")
     args = parser.parse_args(argv)
@@ -367,18 +464,25 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Наявний --out читаємо ОДИН раз, незалежно від --merge: потрібен і для
     # злиття, і для підрахунку розміченого перед відмовою в перезаписі.
-    # Невалідний JSONL — exit 2 з повідомленням, а не трейсбек (D3).
+    # Формат (JSONL чи legacy `{"description":..., "items":[...]}`) визначає
+    # розширення файлу (`_read_existing`); невалідний вміст — exit 2 з
+    # повідомленням, а не трейсбек (D3).
     existing: list[dict] = []
+    description: Optional[str] = None
     if os.path.exists(args.out):
         try:
-            prior = read_jsonl(args.out)
+            prior, description = _read_existing(args.out)
         except GoldenSetError as exc:
             print(f"[build_golden] {args.out}: {exc}", file=sys.stderr)
             return 2
         if args.merge:
             existing = prior
         else:
-            lost = sum(1 for it in prior if it.get("status") in ("labeled", "negative"))
+            # Legacy-пункти часто не мають явного "status" (golden_io за
+            # умовчанням вважає їх "labeled" — це вже РОЗМІЧЕНІ вручну дані,
+            # не щойно намінені), тож дефолт тут той самий, інакше захист
+            # від перезапису мовчки не спрацьовує саме на найважливіших рядках.
+            lost = sum(1 for it in prior if (it.get("status") or "labeled") in ("labeled", "negative"))
             if lost and not args.yes_overwrite_labeled:
                 print(f"[build_golden] Відмова: {args.out} містить {lost} розмічених "
                       "(labeled/negative) пунктів і без --merge буде перезаписаний. "
@@ -407,6 +511,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         seen_new.add(key)
         new_queries.append(q)
 
+    # --limit ріже ЛИШЕ питання з MCP-логу. Їх там сотні (786 унікальних на
+    # 17.09), а `ask_log` — десяток рядків з оцінкою власника; спільний ліміт
+    # з'їдав їх до останнього, і прогін "з обох джерел" мовчки давав одне.
+    skipped_by_limit = 0
+    if args.limit is not None:
+        kept: list[dict] = []
+        from_log = 0
+        for q in new_queries:
+            if q.get("source") == "ask_log":
+                kept.append(q)
+            elif from_log < args.limit:
+                kept.append(q)
+                from_log += 1
+            else:
+                skipped_by_limit += 1
+        new_queries = kept
+
     new_items: list[dict] = []
     if new_queries:
         with _scratch_copy(args.db) as scratch:
@@ -430,8 +551,10 @@ def main(argv: Optional[list[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    _write_jsonl(args.out, items)
-    print(f"[build_golden] {args.out}: збережено={len(existing)} нових={len(new_items)} усього={len(items)}")
+    _write_golden(args.out, items, description)
+    suffix = f" пропущено_лімітом={skipped_by_limit}" if skipped_by_limit else ""
+    print(f"[build_golden] {args.out}: збережено={len(existing)} нових={len(new_items)} "
+          f"усього={len(items)}{suffix}")
 
     if args.stats:
         print_stats(items)

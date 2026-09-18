@@ -39,12 +39,23 @@ def mock_embeddings(monkeypatch):
 
 
 def _add_tx(path, source_name, meeting_date=None, category_id=None,
-            source_type="file", transcript="x"):
+            source_type="file", transcript="x",
+            embedding_model=None, embedding_version=None):
+    """embedding_model/embedding_version дефолтять на ПОТОЧНУ пару
+    (embeddings.EMBED_MODEL/EMBED_VERSION) — саме її й вимагає новий фільтр
+    епохи у retrieval._vector_search (production-rag-wave-b-04). Явно передати
+    іншу пару — щоб перевірити, що чужа епоха не потрапляє у vector-хіти."""
+    if embedding_model is None:
+        embedding_model = embeddings.EMBED_MODEL
+    if embedding_version is None:
+        embedding_version = embeddings.EMBED_VERSION
     conn = sqlite3.connect(path)
     cur = conn.execute(
         "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
-        "meeting_date, category_id) VALUES (?, ?, ?, ?, ?)",
-        (source_type, source_name, transcript, meeting_date, category_id),
+        "meeting_date, category_id, embedding_model, embedding_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (source_type, source_name, transcript, meeting_date, category_id,
+         embedding_model, embedding_version),
     )
     tid = cur.lastrowid
     conn.commit()
@@ -589,3 +600,178 @@ def test_duplicate_excluded_from_fts_branch(db, mock_embeddings):
 
     res = retrieval.search(db, "барселона", top_k=5, recency_weight=0)
     assert [c["transcription_id"] for c in res["chunks"]] == [orig]
+
+
+# ============================================================
+# production-rag-wave-b-04: епоха ембедингів (embedding_model, embedding_version)
+# ============================================================
+
+def test_other_embedding_version_excluded_from_vector_branch_but_kept_in_fts(db, mock_embeddings):
+    """Vector-хіти рахуються ЛИШЕ по чанках поточної пари (модель, версія) —
+    запис іншої епохи (напр. ще не переембеджений після зміни EMBED_VERSION)
+    не мусить брати участь у косинусах з поточним запитом. FTS5 моделі не
+    знає взагалі — той самий запис лишається лексично знаходимим."""
+    current = _add_tx(db, "Поточна епоха")
+    stale = _add_tx(db, "Стара епоха",
+                    embedding_version=embeddings.EMBED_VERSION + 1)
+    q = [1.0, 0, 0, 0]
+    _add_chunk(db, current, 0, "унікальний термін альфа", q)
+    _add_chunk(db, stale, 0, "унікальний термін альфа", q)
+
+    res = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
+    tids = {c["transcription_id"] for c in res["chunks"]}
+    assert tids == {current}, "чанк іншої версії не мусить зʼявитись у vector-хітах"
+
+    fts_res = retrieval.search(db, "унікальний термін", top_k=5, recency_weight=0)
+    fts_tids = {c["transcription_id"] for c in fts_res["chunks"]}
+    assert stale in fts_tids, "FTS-гілка епохи не знає — запис лишається знаходимим"
+
+
+def test_other_embedding_model_excluded_from_vector_branch(db, mock_embeddings):
+    other_model = _add_tx(db, "Інша модель", embedding_model="some/other-model")
+    _add_chunk(db, other_model, 0, "альфа бета", [1.0, 0, 0, 0])
+
+    res = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
+    assert res["chunks"] == []
+
+
+def test_vector_dim_mismatch_logs_error_not_silent(db, mock_embeddings, monkeypatch, caplog):
+    """Розбіжність виміру BLOB'а й EMBED_DIM більше НЕ пропускається мовчки —
+    у лозі мусить лишитись слід (id чанка, розмір, EMBED_DIM)."""
+    tid = _add_tx(db, "Пошкоджений вектор")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+    # Підмінюємо EMBED_DIM НАЖИВО (уже після вставки чанка розміром 4) —
+    # імітує розсинхрон виміру без порушення фільтра (embedding_model,
+    # embedding_version), який і мав звузити рядки до сумісних.
+    monkeypatch.setattr(embeddings, "EMBED_DIM", 8)
+    with caplog.at_level("ERROR"):
+        res = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
+    assert res["chunks"] == []
+    assert any("розмір вектора" in r.message for r in caplog.records)
+
+
+# ============================================================
+# production-rag-wave-b-07: переписування запиту (rewrite=)
+# ============================================================
+
+def test_rewrite_default_off_does_not_call_rewrite_query(db, mock_embeddings, monkeypatch):
+    from app.services import query_rewrite
+
+    def _boom(*a, **kw):
+        raise AssertionError("rewrite_query НЕ мусить викликатись, коли rewrite вимкнено")
+    monkeypatch.setattr(query_rewrite, "rewrite_query", _boom)
+    monkeypatch.delenv("RAG_QUERY_REWRITE", raising=False)
+
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+
+    res = retrieval.search(db, "qqqzzz")  # rewrite не переданий -> env вимкнено -> False
+    assert len(res["chunks"]) == 1
+
+
+def test_rewrite_false_matches_env_off_default(db, mock_embeddings, monkeypatch):
+    """production-rag-wave-b-08 (Minor 19): доводить те, що дійсно
+    порівнюється — `rewrite=False` (явно) і виклик без прапорця під вимкненим
+    env дають ІДЕНТИЧНУ видачу (обидва шляхи ведуть у той самий пост-історійний
+    код). Що `rewrite_query` при цьому НЕ викликається — доводить сусідній
+    `_boom`-тест (`test_rewrite_default_off_does_not_call_rewrite_query`), тут
+    не дублюється."""
+    monkeypatch.delenv("RAG_QUERY_REWRITE", raising=False)
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч", [1.0, 0, 0, 0])
+
+    baseline = retrieval.search(db, "бюджет проєкту")
+    explicit_off = retrieval.search(db, "бюджет проєкту", rewrite=False)
+    assert explicit_off == baseline
+
+
+def test_rewrite_true_merges_variant_fts_hit_via_rrf(db, mock_embeddings, monkeypatch):
+    """rewrite=True: варіант знаходить чанк, якого оригінальний запит НЕ знаходить
+    ЖОДНОЮ гілкою (вектор вимкнено — ізолюємо ефект до FTS) — і той усе одно
+    зʼявляється у видачі завдяки RRF-злиттю з підзапитом варіанта."""
+    from app.services import query_rewrite
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "інший фрагмент без спільних слів", None)
+    other = _add_tx(db, "Інший")
+    _add_chunk(db, other, 0, "унікальнийтермінваріанта", None)
+
+    monkeypatch.setattr(query_rewrite, "rewrite_query",
+                        lambda q, **kw: ["унікальнийтермінваріанта"])
+
+    baseline = retrieval.search(db, "qqqzzz", top_k=5)
+    assert baseline["chunks"] == [], "оригінальний запит не мусить знаходити жодного чанка"
+
+    res = retrieval.search(db, "qqqzzz", top_k=5, rewrite=True)
+    tids = {c["transcription_id"] for c in res["chunks"]}
+    assert tids == {other}, "чанк, знайдений лише варіантом, мусить потрапити у видачу"
+
+
+def test_rewrite_true_no_variants_behaves_like_off(db, mock_embeddings, monkeypatch):
+    from app.services import query_rewrite
+    monkeypatch.setattr(query_rewrite, "rewrite_query", lambda q, **kw: [])
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+
+    with_flag = retrieval.search(db, "qqqzzz", rewrite=True)
+    without_flag = retrieval.search(db, "qqqzzz", rewrite=False)
+    assert with_flag == without_flag
+
+
+def test_rewrite_explain_rewrites_empty_when_disabled(db, mock_embeddings):
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+    res = retrieval.search(db, "qqqzzz", explain=True, rewrite=False)
+    assert res["chunks"][0]["why"]["rewrites"] == []
+
+
+def test_rewrite_explain_rewrites_lists_variants_when_enabled(db, mock_embeddings, monkeypatch):
+    from app.services import query_rewrite
+    monkeypatch.setattr(query_rewrite, "rewrite_query", lambda q, **kw: ["варіант один"])
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+    res = retrieval.search(db, "qqqzzz", explain=True, rewrite=True)
+    assert res["chunks"][0]["why"]["rewrites"] == ["варіант один"]
+
+
+def test_rewrite_env_flag_enables_call_without_explicit_param(db, mock_embeddings, monkeypatch):
+    """RAG_QUERY_REWRITE=1 у env + rewrite не переданий -> search кличе
+    rewrite_query — саме так гейт (evals/gate.py) міряє ефект без зміни коду."""
+    from app.services import query_rewrite
+    called = []
+    monkeypatch.setattr(query_rewrite, "rewrite_query",
+                        lambda q, **kw: (called.append(q), [])[1])
+    monkeypatch.setenv("RAG_QUERY_REWRITE", "1")
+
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
+
+    retrieval.search(db, "qqqzzz")
+    assert called == ["qqqzzz"]
+
+
+def test_rewrite_true_survives_missing_comment_index(db, mock_embeddings, monkeypatch):
+    """Opus UNASKED 6: стара БД без міграції v37 (індекс коментарів) не мусить
+    мовчки викидати підзапити варіантів разом із комент-списками — фолбек
+    відкидає ЛИШЕ комент-списки, а не позиційний зріз `[:2]`."""
+    from app.services import query_rewrite
+
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "DROP TABLE comment_chunks_fts; DROP TABLE comment_chunks; DROP TABLE comments;")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    tid = _add_tx(db, "Мітинг")
+    _add_chunk(db, tid, 0, "інший фрагмент без спільних слів", None)
+    other = _add_tx(db, "Інший")
+    _add_chunk(db, other, 0, "унікальнийтермінваріанта", None)
+
+    monkeypatch.setattr(query_rewrite, "rewrite_query",
+                        lambda q, **kw: ["унікальнийтермінваріанта"])
+
+    res = retrieval.search(db, "qqqzzz", top_k=5, rewrite=True)
+    tids = {c["transcription_id"] for c in res["chunks"]}
+    assert tids == {other}, "хіт варіанта мусить лишитись у видачі й без індексу коментарів"

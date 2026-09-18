@@ -60,9 +60,13 @@ document/telegram/copilot/meeting_archive), `audio_downloads` (Аудіотек�
 speaker-map, `chunks`+embeddings (RAG), `categories`/`entities`/`meeting_entities`/
 `action_items`/`entity_aliases` (граф памʼяті), `segment_bookmarks`, `saved_searches`,
 `tg_monitored_chats`, `copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань
-UI+MCP). Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
-(поточна **v41**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
-питання/канал/скоуп/джерела/токени/вартість/оцінка власника, Хвиля A production-RAG 16.09.2026).
+UI+MCP), `tg_threads` (v42 — провенанс сводки нитки), `chunks.context_prefix` (v43).
+Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
+(поточна **v43**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
+питання/канал/скоуп/джерела/токени/вартість/оцінка власника (Хвиля A production-RAG,
+16.09.2026); v42 `tg_threads.summary_source_ids_json`/`summary_at`/`summary_model`/
+`summary_msgs` — провенанс сводки нитки; v43 `chunks.context_prefix` + перебудова
+`chunks_fts` на `(context_prefix, text)` (Хвиля B production-RAG, 17.09.2026)).
 
 ## Windows-специфіка
 

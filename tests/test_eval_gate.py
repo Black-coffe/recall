@@ -1245,3 +1245,63 @@ def test_gate_real_snapshot_passes_with_local_golden_set(tmp_path, monkeypatch):
 
     rc = gate.main(["--golden", str(golden_path), "--db", str(db_path), "--k", "8,12", "-q"])
     assert rc == 0
+
+
+# ============================================================
+# gate.py — прапорець --rerank (18.09.2026, знахідка стадії вмикання
+# Хвилі B: гейт міряв конфігурацію, якої в продакшені немає)
+# ============================================================
+
+def test_gate_rerank_flag_reaches_retrieval_search(db, tmp_path, monkeypatch):
+    """Без прапорця `retrieval.search` отримує rerank=False, з ним — True.
+    Саме цей аргумент відрізняє замір від бою: RAG-чат вмикає реранкер при
+    RECALL_RERANK_ENABLED=1, а гейт до цієї правки тримав False константою."""
+    golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
+    seen = []
+    inner = _good_search({"a": (1, "TG чат")})
+
+    def _spy(db_path, query, top_k=8, category_id=None, **kwargs):
+        seen.append(kwargs.get("rerank"))
+        return inner(db_path, query, top_k=top_k, category_id=category_id, **kwargs)
+
+    monkeypatch.setattr("app.services.retrieval.search", _spy)
+
+    assert gate.main(["--golden", golden, "--db", db, "--k", "2",
+                      "--min-recall", "2=0.9", "-q"]) == 0
+    assert seen == [False]
+
+    seen.clear()
+    assert gate.main(["--golden", golden, "--db", db, "--k", "2",
+                      "--min-recall", "2=0.9", "-q", "--rerank"]) == 0
+    assert seen == [True]
+
+
+def test_gate_rerank_recorded_in_provenance_and_verdict_line(db, tmp_path, monkeypatch, capsys):
+    """Прогін підписує конфігурацію двічі: у рядку вердикту (єдиний рядок під
+    `-q`) і в `--json-out`. Інакше два файли зводяться через `evals.compare`
+    без жодної згадки, що один знятий з реранкером, а другий без."""
+    golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
+    monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
+    out_path = tmp_path / "run.local.json"
+    rc = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9",
+                    "-q", "--rerank", "--json-out", str(out_path)])
+    assert rc == 0
+    line = [l for l in capsys.readouterr().out.splitlines() if l.strip()][0]
+    assert "rerank=on" in line
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["provenance"]["rerank"] is True
+
+
+def test_gate_baseline_without_rerank_not_compared_to_rerank_run(db, tmp_path, monkeypatch, capsys):
+    """Лінія, знята БЕЗ реранкера, не сміє мовчки судити прогін З ним:
+    провенанс не збігається, отже per-item diff і вердикт за лінією
+    вимикаються (той самий захист, що вже стоїть на знімку БД)."""
+    golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
+    monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
+    base = tmp_path / "base.local.json"
+    assert gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9",
+                      "-q", "--write-baseline", str(base)]) == 0
+    capsys.readouterr()
+    gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9",
+               "--rerank", "--baseline", str(base)])
+    assert "не збігається" in capsys.readouterr().err

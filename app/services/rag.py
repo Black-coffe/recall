@@ -16,6 +16,7 @@ import os
 import time
 from typing import Iterator, Optional
 
+from app.core import settings as _settings
 from app.services import retrieval, text_polishing
 from app.services import claude_retry
 from app.services.claude_retry import is_retryable_error
@@ -31,6 +32,13 @@ logger = logging.getLogger(__name__)
 # без rerank і без зміни латентності. Читаємо env напряму (як
 # COPILOT_ENABLED/embeddings.py), щоб модуль лишався standalone-тестованим.
 _RERANK_ENABLED = os.environ.get("RECALL_RERANK_ENABLED", "0").strip() in ("1", "true", "True")
+
+# production-rag-wave-b-07: переписування запиту (retrieval.py `rewrite=`,
+# app/services/query_rewrite.py) — той самий патерн, що rerank вище: дефолт
+# OFF, читається на імпорті. production-rag-wave-b-08 (Major 2, ADR-008):
+# жоден код не читає bool-прапорець власним набором істинних значень — той
+# самий `env_bool`, яким `retrieval.search` резолвить свій хот-дефолт.
+_QUERY_REWRITE_ENABLED = _settings.env_bool("RAG_QUERY_REWRITE")
 
 # Скільки фрагментів іде у контекст відповіді. 12, а не 8 — за замірами
 # eval-харнеса на golden-set (14.08.2026, після T6.5): recall@8 67.9% проти
@@ -331,6 +339,7 @@ def answer_question(
     res = retrieval.search(db_path, question, top_k=top_k, category_id=category_id,
                            scope_tids=scope_tids,
                            rerank=_RERANK_ENABLED,
+                           rewrite=_QUERY_REWRITE_ENABLED,
                            explain=explain)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     if not chunks:
@@ -482,6 +491,7 @@ def answer_question_stream(
     res = retrieval.search(db_path, question, top_k=top_k, category_id=category_id,
                            scope_tids=scope_tids,
                            rerank=_RERANK_ENABLED,
+                           rewrite=_QUERY_REWRITE_ENABLED,
                            explain=explain)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     attached = retrieval.attach_comments(db_path, chunks)

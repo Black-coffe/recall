@@ -22,6 +22,7 @@ ENRICHMENT_VERSION дозволяє форсувати масовий re-run п�
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import re
@@ -30,7 +31,7 @@ from typing import Callable, Optional
 
 from app.db.connection import get_db_connection
 from app.repositories import transcriptions as tx_repo
-from app.services import commitments, embeddings, text_polishing
+from app.services import commitments, embeddings, models, pricing, text_polishing
 
 
 logger = logging.getLogger(__name__)
@@ -379,6 +380,7 @@ def any_available() -> bool:
 def enrich_transcription(
     db_path: str,
     transcription_id: int,
+    *,
     model: Optional[str] = None,
     force: bool = False,
     effort: str = "medium",
@@ -625,3 +627,152 @@ def optimize_chunk_index(db_path: str) -> None:
     except Exception:
         logger.warning("[backfill] chunks_fts optimize не вдався — пошук лишиться "
                        "повільним до наступного проходу", exc_info=True)
+
+
+# ============================================================
+# CLI: backfill-cards (Волна B production-rag) — лише card-фаза
+# ============================================================
+#
+# `backfill()`/`list_unenriched_ids()` вище лишаються як є (HTTP-шлях через
+# job_queue) — цей CLI офлайн, і бере записи вужче: лише картка (без
+# embed-фази), лише ті, кому вона взагалі бракує (`summary_json IS NULL`),
+# і з ручним вибором моделі — дефолт `models.get_default_model()` (Opus 5)
+# дорогий на великих архівах документів.
+
+#: --kind → source_type. 'all' лишає лише базовий фільтр (не Telegram).
+_KIND_SOURCE_TYPES = {
+    "calls": ("file", "youtube", "recording"),
+    "docs": ("document",),
+}
+
+
+def _select_backfill_card_rows(db_path: str, kind: str = "all",
+                               limit: Optional[int] = None) -> list[dict]:
+    """Записи без картки: не Telegram (embed-only, T Волна 0), не soft-deleted,
+    не дублі (dedup_audio). `kind` звужує до source_type."""
+    sql = ("SELECT id, source_type, source_name, transcript_text, polished_text "
+           "FROM transcriptions WHERE summary_json IS NULL "
+           "AND source_type IS NOT 'telegram' AND deleted_at IS NULL "
+           "AND duplicate_of IS NULL")
+    params: list = []
+    if kind != "all":
+        types = _KIND_SOURCE_TYPES.get(kind)
+        if not types:
+            raise ValueError(f"невідомий --kind: {kind!r}")
+        sql += f" AND source_type IN ({','.join('?' * len(types))})"
+        params.extend(types)
+    sql += " ORDER BY id"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    with get_db_connection(db_path) as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def _dry_run_report(rows: list[dict], model: str) -> dict:
+    """Оцінка обсягу/вартості без жодного запису. tokens ≈ символи/4 (грубо,
+    без реального токенайзера); вартість — лише вхід (вихід невідомий заздалегідь)."""
+    lengths = [
+        (r["id"], len(r.get("polished_text") or r.get("transcript_text") or ""))
+        for r in rows
+    ]
+    total_chars = sum(n for _, n in lengths)
+    tokens_est = total_chars // 4
+    cost_est = pricing.estimate_cost(model, tokens_est, 0)
+    top10 = sorted(lengths, key=lambda t: -t[1])[:10]
+    return {
+        "dry_run": True, "count": len(rows), "model": model,
+        "total_chars": total_chars, "tokens_est": tokens_est,
+        "cost_est_usd_input_only": cost_est,
+        "top10": [{"id": tid, "chars": n} for tid, n in top10],
+    }
+
+
+def backfill_cards(db_path: str, model: Optional[str] = None,
+                   limit: Optional[int] = None, kind: str = "all") -> dict:
+    """Реальний прохід CLI: лише card-фаза (`_enrich_card`), НЕ embed.
+
+    Idempotent через саму вибірку (`summary_json IS NULL`) — повторний запуск
+    без нових записів обробляє 0. Збій Claude на одному записі не валить прохід:
+    `_enrich_card` вже ловить його і повертає "retry_needed" (лишається в
+    вибірці для наступного проходу), тут ловимо лише неочікувані помилки.
+    """
+    rows = _select_backfill_card_rows(db_path, kind=kind, limit=limit)
+    total = len(rows)
+    done = skipped = failed = 0
+    logger.info("[backfill-cards] start: %d записів (kind=%s, model=%s)",
+                total, kind, model or models.get_default_model())
+    for r in rows:
+        try:
+            res = _enrich_card(db_path, r["id"], model=model)
+            if res.get("status") == "enriched":
+                done += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            failed += 1
+            logger.error("[backfill-cards] tx=%s failed: %s", r["id"], e, exc_info=True)
+    result = {"total": total, "done": done, "skipped": skipped, "failed": failed}
+    logger.info("[backfill-cards] завершено: %s", result)
+    return result
+
+
+def _print_dry_run_report(report: dict) -> None:
+    print(f"Записів без картки: {report['count']}")
+    print(f"Символів разом: {report['total_chars']}")
+    print(f"Оцінка токенів (символи/4): {report['tokens_est']}")
+    print(f"Оцінка вартості лише за вхід ({report['model']}): "
+          f"${report['cost_est_usd_input_only']:.4f}")
+    print("Топ-10 найдовших:")
+    for item in report["top10"]:
+        print(f"  #{item['id']}: {item['chars']} символів")
+
+
+def _cmd(args) -> int:
+    if args.command != "backfill-cards":  # pragma: no cover
+        return 2
+    eff_model = args.model or models.get_default_model()
+    if args.dry_run:
+        rows = _select_backfill_card_rows(args.db, kind=args.kind, limit=args.limit)
+        _print_dry_run_report(_dry_run_report(rows, eff_model))
+        return 0
+    result = backfill_cards(args.db, model=args.model, limit=args.limit, kind=args.kind)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def main(argv: Optional[list] = None) -> int:
+    from config import Config
+    default_db = str(Config.BASE_DIR / Config.DATABASE)
+
+    p = argparse.ArgumentParser(
+        prog="enrichment",
+        description="Офлайн-бекфіл карток (summary/entities/action items) "
+                    "дзвінків і документів — БЕЗ embed-фази.")
+    p.add_argument("--db", default=default_db)
+    # --dry-run має рятувати з будь-якого місця рядка (як у dedup_audio.py):
+    # верхній флаг у окремий dest, фінальне значення — OR обох.
+    p.add_argument("--dry-run", dest="dry_run_pre", action="store_true",
+                   help="Нічого не писати, лише оцінка обсягу/вартості")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--dry-run", action="store_true",
+                        help="Нічого не писати, лише оцінка обсягу/вартості")
+    common.add_argument("--model", default=None,
+                        help="Override моделі Claude (дефолт — models.get_default_model())")
+    common.add_argument("--limit", type=int, default=None)
+    common.add_argument("--kind", choices=("calls", "docs", "all"), default="all",
+                        help="calls=file/youtube/recording, docs=document, all=обидва")
+
+    sub = p.add_subparsers(dest="command", required=True)
+    sub.add_parser(
+        "backfill-cards", parents=[common],
+        help="Картка Claude для записів без summary_json (не Telegram/дублі/видалені)")
+
+    args = p.parse_args(argv)
+    args.dry_run = args.dry_run or args.dry_run_pre
+    return _cmd(args)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    raise SystemExit(main())

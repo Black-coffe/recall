@@ -215,10 +215,15 @@ def _vector_search(db_path: str, query: str, candidate_k: int,
         return []
     # T4.6: soft-deleted транскрипти НЕ мають спливати у RAG/пошуку — фільтр
     # завжди активний, незалежно від category_id (не лише в category-гілках).
+    # production-rag-wave-b-04: поруч — епоха ембедингів (embedding_model +
+    # embedding_version). Vector-хіти рахуємо ТІЛЬКИ по чанках поточної пари —
+    # інакше зміна EMBED_MODEL/EMBED_VERSION мовчки мішала б косинуси різних
+    # моделей/нарізок (BLOB того самого розміру не означає ту саму модель).
     sql = ("SELECT ch.id, ch.embedding FROM chunks ch WHERE ch.embedding IS NOT NULL "
            "AND ch.transcription_id IN (SELECT id FROM transcriptions "
-           "WHERE deleted_at IS NULL AND duplicate_of IS NULL)")
-    params: list = []
+           "WHERE deleted_at IS NULL AND duplicate_of IS NULL "
+           "AND embedding_model = ? AND embedding_version = ?)")
+    params: list = [embeddings.EMBED_MODEL, embeddings.EMBED_VERSION]
     if category_id == 'none':
         sql += " AND ch.transcription_id IN (SELECT id FROM transcriptions WHERE category_id IS NULL)"
     elif category_id is not None:
@@ -238,7 +243,16 @@ def _vector_search(db_path: str, query: str, candidate_k: int,
     for r in rows:
         vec = embeddings.blob_to_vec(r["embedding"])
         if vec.shape[0] != embeddings.EMBED_DIM:
-            continue  # модель змінилась — пропускаємо несумісні
+            # Фільтр по (embedding_model, embedding_version) вище вже мав
+            # звузити рядки до поточної пари — розбіжність виміру тут означає
+            # пошкоджений BLOB чи розсинхрон версії/dim, а не звичайний шлях
+            # старіння. Раніше пропускалось мовчки — жодного сліду в логу,
+            # якщо архів раптом набрав несумісні вектори.
+            logger.error(
+                "[retrieval] chunk id=%s: розмір вектора %d != EMBED_DIM=%d "
+                "(модель/версія %s) — пропускаємо", r["id"], vec.shape[0],
+                embeddings.EMBED_DIM, embeddings.EMBED_MODEL)
+            continue
         ids[n] = r["id"]
         mat[n] = vec
         n += 1
@@ -517,7 +531,8 @@ def _build_why(cid: int, meta: dict, source_type: str, matched_by: list[str],
                rerank_scores: dict[int, float], rerank_moved: set[int],
                stage_maps: dict[str, dict[int, tuple[int, float]]],
                explain: bool, rec_w: float, com_w: float,
-               capped: dict[str, bool]) -> dict:
+               capped: dict[str, bool],
+               rewrite_variants: Optional[list[str]] = None) -> dict:
     """Контракт C2 (`docs/specs/grep-explainability/plan.md`): компактний `why`
     на кожному результаті, `stages` — лише коли `explain=True`. Не змінює
     ранжування — лише читає вже пораховані `meta`/`rerank_scores`."""
@@ -546,6 +561,10 @@ def _build_why(cid: int, meta: dict, source_type: str, matched_by: list[str],
         # цього кандидата — знахідка 12/09: назва мусить це відбивати, щоб
         # "capped" не читалось як "цей результат зачепило".
         why["search_capped"] = dict(capped)
+        # production-rag-wave-b-07: варіанти переписаного запиту, що дали
+        # додаткові підзапити цього виклику `search()` (порожньо, коли
+        # rewrite вимкнено). Той самий прапорець на ВЕСЬ пошук, не per-кандидат.
+        why["rewrites"] = list(rewrite_variants or [])
     return why
 
 
@@ -664,7 +683,8 @@ def search(db_path: str, query: str, top_k: int = 8,
            include_comments: bool = True,
            comment_weight: Optional[float] = None,
            comment_share: Optional[float] = None,
-           explain: bool = False) -> dict:
+           explain: bool = False,
+           rewrite: Optional[bool] = None) -> dict:
     """Гібридний пошук. category_id — обмежити одним напрямком (None = усі).
     scope_tids — звузити до конкретних записів (другий шар скоупу поверх
     категорії); список рахує `app.services.scope.scope_filter_ids`.
@@ -679,6 +699,12 @@ def search(db_path: str, query: str, top_k: int = 8,
     компактний `why` на кожному результаті, True — додає `why["stages"]` з
     позицією і сирим скором на кожній стадії, де кандидат зустрівся. Не
     впливає на ранжування чи порядок видачі.
+    rewrite — production-rag-wave-b-07: `None` (дефолт) читає гарячий env
+    `RAG_QUERY_REWRITE`; `False`/вимкнений env — `query_rewrite.rewrite_query`
+    НЕ викликається взагалі, видача побайтово як без прапорця. `True` — 1-3
+    альтернативних формулювання запиту (Claude) дають ДОДАТКОВІ vector+FTS
+    підзапити в той самий список перед RRF (`_rrf` їх не розрізняє від
+    оригіналу — не чіпає RRF/recency/cap/rerank/комент-шар).
     Returns {"query", "chunks": [...], "vector_available": bool}."""
     query = (query or "").strip()
     if not query:
@@ -688,6 +714,8 @@ def search(db_path: str, query: str, top_k: int = 8,
     cap = _MAX_PER_MEETING if max_per_meeting is None else max_per_meeting
     com_w = _COMMENT_WEIGHT if comment_weight is None else comment_weight
     comment_share = (_COMMENT_MAX_SHARE if comment_share is None else comment_share)
+    if rewrite is None:
+        rewrite = _settings.env_bool("RAG_QUERY_REWRITE")
 
     candidate_k = candidate_k or max(top_k * 5, 40)
     vec_hits = _vector_search(db_path, query, candidate_k, category_id, scope_tids)
@@ -695,26 +723,57 @@ def search(db_path: str, query: str, top_k: int = 8,
 
     lists = [vec_hits, fts_hits]
     labels = ["vector", "fts"]
+
+    # production-rag-wave-b-07: варіанти переписаного запиту — ДОДАТКОВІ
+    # vector+FTS підзапити в той самий список перед RRF, з тими самими
+    # labels "vector"/"fts" (RRF і matched_by не розрізняють, ЧИЙ це
+    # формулювання — оригінал чи варіант). rewrite_query() best-effort:
+    # порожній список при вимкненому прапорці, збою API чи невалідному JSON.
+    rewrite_variants: list[str] = []
+    if rewrite:
+        from app.services import query_rewrite
+        rewrite_variants = query_rewrite.rewrite_query(query)
+        for variant in rewrite_variants:
+            lists.append(_vector_search(db_path, variant, candidate_k, category_id, scope_tids))
+            labels.append("vector")
+            lists.append(_fts_search(db_path, variant, candidate_k, category_id, scope_tids))
+            labels.append("fts")
+
     if include_comments:
         # Індекс коментарів може бути відсутній на старій БД (міграція v37 ще
         # не застосована) — тоді просто працюємо як раніше. Валити пошук через
         # відсутню таблицю не можна: це головний шлях усього продукту.
         ck = min(candidate_k, _COMMENT_CANDIDATE_CAP)
         try:
-            lists.append(_comment_vector_search(db_path, query, ck, category_id, scope_tids))
-            lists.append(_comment_fts_search(db_path, query, ck, category_id, scope_tids))
-            labels += ["comment_vector", "comment_fts"]
+            comment_lists = [
+                _comment_vector_search(db_path, query, ck, category_id, scope_tids),
+                _comment_fts_search(db_path, query, ck, category_id, scope_tids),
+            ]
         except sqlite3.OperationalError as exc:
+            # Стара БД без міграції v37 (індекс коментарів) — відкидаємо ЛИШЕ
+            # комент-списки, а не позиційний зріз [:2]: з увімкненим `rewrite`
+            # перед ними вже стоять додаткові vector/fts підзапити варіантів
+            # (production-rag-wave-b-07), і зріз [:2] мовчки викидав би їх усі.
             logger.debug("[retrieval] індекс коментарів недоступний: %s", exc)
-            lists = lists[:2]
-            labels = labels[:2]
+        else:
+            lists += comment_lists
+            labels += ["comment_vector", "comment_fts"]
 
     # explain=True: позиція+сирий скор кожного кандидата в кожному вхідному
     # списку (до RRF) — саме те, чого рангу самого по собі бракує (C2).
-    stage_maps: dict[str, dict[int, tuple[int, float]]] = {
-        lbl: {cid: (pos, raw) for pos, (cid, raw) in enumerate(lst)}
-        for lbl, lst in zip(labels, lists)
-    }
+    # Мітки НЕ перейменовуються для варіантів переписаного запиту (History 07,
+    # контракт S2 C2: `by` лишається vector/fts) — тож label може повторитись
+    # (оригінал + варіант(и), кожен зі своїм списком vector/fts). Тому це
+    # ЗЛИТТЯ по мітці, а не перезапис останнім списком: кандидат, знайдений і
+    # оригіналом, і варіантом, лишає запис із найкращою (найменшою) позицією
+    # саме того списку.
+    stage_maps: dict[str, dict[int, tuple[int, float]]] = {}
+    for lbl, lst in zip(labels, lists):
+        smap = stage_maps.setdefault(lbl, {})
+        for pos, (cid, raw) in enumerate(lst):
+            cur = smap.get(cid)
+            if cur is None or pos < cur[0]:
+                smap[cid] = (pos, raw)
 
     fused = _rrf(lists, labels)
     if not fused:
@@ -824,7 +883,8 @@ def search(db_path: str, query: str, top_k: int = 8,
             if cid in rerank_scores:
                 entry["rerank_score"] = round(rerank_scores[cid], 5)
             entry["why"] = _build_why(cid, meta, entry["source_type"], entry["matched_by"],
-                                      rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w, _capped)
+                                      rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w,
+                                      _capped, rewrite_variants)
             out.append(entry)
             continue
         r = by_id[cid]
@@ -861,7 +921,8 @@ def search(db_path: str, query: str, top_k: int = 8,
         if cid in rerank_scores:
             entry["rerank_score"] = round(rerank_scores[cid], 5)
         entry["why"] = _build_why(cid, meta, entry["source_type"], entry["matched_by"],
-                                  rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w, _capped)
+                                  rerank_scores, rerank_moved, stage_maps, explain, rec_w, com_w,
+                                  _capped, rewrite_variants)
         out.append(entry)
     return {"query": query, "chunks": out, "vector_available": embeddings.is_available()}
 

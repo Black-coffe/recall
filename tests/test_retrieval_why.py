@@ -46,11 +46,15 @@ def mock_embeddings(monkeypatch):
 
 
 def _add_tx(path, name="Дзвінок", date="2026-08-01", category_id=None):
+    """embedding_model/embedding_version — поточна пара (production-rag-wave-b-04):
+    retrieval._vector_search тепер фільтрує по (EMBED_MODEL, EMBED_VERSION), інакше
+    NULL-дефолт не потрапляв би у vector-гілку взагалі."""
     conn = sqlite3.connect(path)
     cur = conn.execute(
         "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
-        "meeting_date, category_id) VALUES ('file', ?, 'x', ?, ?)",
-        (name, date, category_id))
+        "meeting_date, category_id, embedding_model, embedding_version) "
+        "VALUES ('file', ?, 'x', ?, ?, ?, ?)",
+        (name, date, category_id, embeddings.EMBED_MODEL, embeddings.EMBED_VERSION))
     tid = cur.lastrowid
     conn.commit(); conn.close()
     return tid
@@ -297,3 +301,47 @@ def test_source_ids_from_chunks_unaffected(db, mock_embeddings):
     res = retrieval.search(db, "бюджет проєкту", top_k=5, explain=True)
     ids = source_ids_from_chunks(res["chunks"])
     assert tid in ids
+
+
+# ============================================================
+# production-rag-wave-b-08, Major 4: stage_maps по мітках `vector`/`fts`
+# ЗЛИВАЮТЬСЯ по кандидату (найкраща позиція), а не перезаписуються останнім
+# списком — мітки не міняються для варіантів переписаного запиту (S2 C2).
+# ============================================================
+
+def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddings, monkeypatch):
+    from app.services import query_rewrite
+
+    tid = _add_tx(db)
+    conn = sqlite3.connect(db)
+    ids = []
+    for text in ("лише оригінал", "оригінал і варіант", "лише варіант"):
+        cur = conn.execute(
+            "INSERT INTO chunks (transcription_id, chunk_index, start_time, end_time, "
+            "speaker, text) VALUES (?, ?, 0, 10, 'Ви', ?)",
+            (tid, len(ids), text))
+        ids.append(cur.lastrowid)
+    conn.commit(); conn.close()
+    only_orig, both, only_variant = ids
+
+    monkeypatch.setattr(query_rewrite, "rewrite_query", lambda q, **kw: ["варіант запиту"])
+
+    def fake_vector_search(db_path, query, candidate_k, category_id=None, scope_tids=None):
+        if query == "оригінал запиту":
+            return [(only_orig, 0.9), (both, 0.5)]
+        if query == "варіант запиту":
+            return [(both, 0.95), (only_variant, 0.4)]
+        return []
+    monkeypatch.setattr(retrieval, "_vector_search", fake_vector_search)
+    monkeypatch.setattr(retrieval, "_fts_search", lambda *a, **kw: [])
+
+    res = retrieval.search(db, "оригінал запиту", top_k=5, explain=True, rewrite=True)
+    by_id = {c["chunk_id"]: c for c in res["chunks"]}
+
+    # Кандидат лише з оригінального запиту — позиція/скор оригінального списку.
+    assert by_id[only_orig]["why"]["stages"]["vector"] == {"pos": 0, "sim": 0.9}
+    # Кандидат і з оригіналу (pos=1), і з варіанта (pos=0) — найкраща позиція,
+    # зі скором того списку, де вона досягнута (варіант).
+    assert by_id[both]["why"]["stages"]["vector"] == {"pos": 0, "sim": 0.95}
+    # Кандидат лише з варіанта — позиція/скор варіантного списку.
+    assert by_id[only_variant]["why"]["stages"]["vector"] == {"pos": 1, "sim": 0.4}

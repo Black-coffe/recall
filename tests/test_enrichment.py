@@ -20,7 +20,7 @@ import pytest
 
 from app.db.connection import get_db_connection
 from app.db.migrations import init_database
-from app.services import enrichment
+from app.services import enrichment, text_polishing
 
 
 # ============================================================
@@ -604,3 +604,186 @@ def test_enrich_transcription_skips_duplicate(db_path, monkeypatch):
     res_orig = enrichment.enrich_transcription(db_path, original)
     assert res_orig["card"]["status"] == "enriched"
     assert calls == [1]
+
+
+# ============================================================
+# enrich_transcription: model keyword-only + прокидання до extract_meeting_card
+# (production-rag-wave-b-03)
+# ============================================================
+
+def test_enrich_transcription_model_is_keyword_only(db_path):
+    with pytest.raises(TypeError):
+        enrichment.enrich_transcription(db_path, 1, "claude-sonnet-5")  # noqa: не keyword
+
+
+def test_enrich_transcription_model_reaches_extract_meeting_card(db_path, monkeypatch):
+    tid = _insert_transcription(db_path)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "is_available", lambda: True)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(k.get("model")) or _sample_card())
+    monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: False)
+    enrichment.enrich_transcription(db_path, tid, model="claude-sonnet-5")
+    assert calls == ["claude-sonnet-5"]
+
+
+def test_enrich_transcription_model_none_keeps_default_behavior(db_path, monkeypatch):
+    tid = _insert_transcription(db_path)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "is_available", lambda: True)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(k.get("model")) or _sample_card())
+    monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: False)
+    enrichment.enrich_transcription(db_path, tid)  # model не передано → None
+    assert calls == [None]
+
+
+# ============================================================
+# text_polishing._truncate_card_body: стеля довжини extract_meeting_card
+# (production-rag-wave-b-03 — раніше стелі не було взагалі)
+# ============================================================
+
+def test_truncate_card_body_noop_under_ceiling():
+    body = "короткий транскрипт"
+    assert text_polishing._truncate_card_body(body) == body
+
+
+def test_truncate_card_body_cuts_head_and_tail_over_ceiling(caplog):
+    body = "A" * (text_polishing._MAX_CARD_CHARS + 50_000)
+    caplog.set_level("WARNING")
+    result = text_polishing._truncate_card_body(body)
+    assert len(result) < len(body)
+    assert len(result) <= text_polishing._MAX_CARD_CHARS + len("\n\n[…]\n\n")
+    assert result.startswith("A")
+    assert result.endswith("A")
+    assert "[…]" in result
+    assert any("текст задовгий" in r.message for r in caplog.records)
+
+
+# ============================================================
+# CLI backfill-cards (production-rag-wave-b-03) — лише card-фаза, --dry-run
+# ============================================================
+
+def test_select_backfill_card_rows_excludes_telegram_deleted_duplicate_and_done(db_path):
+    ok_call = _insert_transcription(db_path, source_type="file")
+    ok_doc = _insert_transcription(db_path, source_type="document")
+    _insert_transcription(db_path, source_type="telegram")
+    _insert_transcription(db_path, deleted_at=1234567890.0)
+    _insert_transcription(db_path, duplicate_of=ok_call)
+    _insert_transcription(db_path, source_type="file", summary_json='{"summary": "готово"}')
+
+    ids = {r["id"] for r in enrichment._select_backfill_card_rows(db_path, kind="all")}
+    assert ids == {ok_call, ok_doc}
+
+
+def test_select_backfill_card_rows_kind_calls_vs_docs(db_path):
+    call_tid = _insert_transcription(db_path, source_type="youtube")
+    doc_tid = _insert_transcription(db_path, source_type="document")
+
+    calls_ids = {r["id"] for r in enrichment._select_backfill_card_rows(db_path, kind="calls")}
+    docs_ids = {r["id"] for r in enrichment._select_backfill_card_rows(db_path, kind="docs")}
+    assert calls_ids == {call_tid}
+    assert docs_ids == {doc_tid}
+
+
+def test_select_backfill_card_rows_invalid_kind_raises(db_path):
+    with pytest.raises(ValueError):
+        enrichment._select_backfill_card_rows(db_path, kind="bogus")
+
+
+def test_select_backfill_card_rows_respects_limit(db_path):
+    for _ in range(3):
+        _insert_transcription(db_path, source_type="file")
+    rows = enrichment._select_backfill_card_rows(db_path, limit=2)
+    assert len(rows) == 2
+
+
+def test_dry_run_report_counts_chars_cost_and_top10_without_writing(db_path):
+    tid_short = _insert_transcription(db_path, transcript_text="а" * 100)
+    tid_long = _insert_transcription(db_path, transcript_text="б" * 300)
+
+    rows = enrichment._select_backfill_card_rows(db_path)
+    report = enrichment._dry_run_report(rows, "claude-sonnet-5")
+
+    assert report["count"] == 2
+    assert report["total_chars"] == 400
+    assert report["tokens_est"] == 100
+    assert report["top10"][0] == {"id": tid_long, "chars": 300}
+    assert report["cost_est_usd_input_only"] > 0
+
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT summary_json FROM transcriptions WHERE id=?",
+                           (tid_short,)).fetchone()
+    assert row["summary_json"] is None
+
+
+def test_backfill_cards_runs_once_then_zero_on_rerun(db_path, monkeypatch):
+    _insert_transcription(db_path)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(1) or _sample_card())
+
+    result1 = enrichment.backfill_cards(db_path)
+    assert result1 == {"total": 1, "done": 1, "skipped": 0, "failed": 0}
+    assert len(calls) == 1
+
+    result2 = enrichment.backfill_cards(db_path)
+    assert result2 == {"total": 0, "done": 0, "skipped": 0, "failed": 0}
+    assert len(calls) == 1, "повторний запуск не мав звернутись до Claude знову"
+
+
+def test_backfill_cards_logs_and_continues_on_unexpected_error(db_path, monkeypatch):
+    tid_boom = _insert_transcription(db_path)
+    tid_ok = _insert_transcription(db_path)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: _sample_card())
+    orig_enrich_card = enrichment._enrich_card
+
+    def _boom_then_ok(db_path_, transcription_id, model=None, force=False, effort="medium"):
+        if transcription_id == tid_boom:
+            raise RuntimeError("несподівана помилка")
+        return orig_enrich_card(db_path_, transcription_id, model=model, force=force, effort=effort)
+
+    monkeypatch.setattr(enrichment, "_enrich_card", _boom_then_ok)
+    result = enrichment.backfill_cards(db_path)
+    assert result == {"total": 2, "done": 1, "skipped": 0, "failed": 1}
+    assert tid_ok  # запис без бум-помилки таки обробився
+
+
+def test_cli_dry_run_after_subcommand_prints_report_without_writing(db_path, capsys):
+    tid = _insert_transcription(db_path)
+    assert enrichment.main(["--db", db_path, "backfill-cards", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Записів без картки: 1" in out
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT summary_json FROM transcriptions WHERE id=?", (tid,)).fetchone()
+    assert row["summary_json"] is None
+
+
+def test_cli_dry_run_before_subcommand(db_path, capsys):
+    """--dry-run рятує з будь-якого місця рядка (як dedup_audio.py)."""
+    _insert_transcription(db_path)
+    assert enrichment.main(["--db", db_path, "--dry-run", "backfill-cards"]) == 0
+    out = capsys.readouterr().out
+    assert "Записів без картки: 1" in out
+
+
+def test_cli_without_dry_run_runs_real_backfill(db_path, monkeypatch, capsys):
+    tid = _insert_transcription(db_path)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: _sample_card())
+    assert enrichment.main(["--db", db_path, "backfill-cards"]) == 0
+    capsys.readouterr()
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT summary_json FROM transcriptions WHERE id=?", (tid,)).fetchone()
+    assert row["summary_json"] is not None
+
+
+def test_cli_model_override_reaches_extract_meeting_card(db_path, monkeypatch):
+    _insert_transcription(db_path)
+    calls = []
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: calls.append(k.get("model")) or _sample_card())
+    assert enrichment.main(
+        ["--db", db_path, "backfill-cards", "--model", "claude-haiku-4-5-20251001"]) == 0
+    assert calls == ["claude-haiku-4-5-20251001"]

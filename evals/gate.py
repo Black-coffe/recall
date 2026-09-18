@@ -40,6 +40,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from app.core import settings as _settings  # noqa: E402
 from evals import golden_io  # noqa: E402
 from evals import metrics as ev_metrics  # noqa: E402
 from evals import snapshot as ev_snapshot  # noqa: E402
@@ -206,25 +207,33 @@ def _sabotage_pool(pool: list[dict], mode: str, k: int) -> list[dict]:
 
 
 def _search(db_path: str, item: dict, k: int, *,
-            sabotage: Optional[str]) -> tuple[list[dict], Optional[bool]]:
+            sabotage: Optional[str], rerank: bool = False) -> tuple[list[dict], Optional[bool]]:
     """Без саботажу (D4/знахідка 5) — те саме `top_k`, що продакшн: `k`, а не
     зріз k із запиту `k*4` (стеля коментарів `_cap_comments` рахується від
     `top_k`, тож більший запит пускає в топ те, чого продакшн туди не пустив
     би). Саботаж лишається вправі просити більший пул — інструмент, а не
-    замір (Non-goals)."""
+    замір (Non-goals).
+
+    `rerank` (18.09.2026) — другий етап `retrieval.search` тим самим
+    cross-encoder'ом, яким його вмикає RAG-чат (`rag.py` `_RERANK_ENABLED` з
+    `RECALL_RERANK_ENABLED`). Дефолт лишається False, щоб старі лінії й
+    прогони не змінили сенс заднім числом; вмикає його оператор прапорцем
+    `--rerank`, і прогін підписує себе в провенансі. `rerank_pool_size` не
+    передаємо — продакшн теж не передає, тобто пул береться з дефолту
+    `retrieval` і замір не розходиться з боєм ще й тут."""
     from app.services import retrieval
 
     if sabotage:
         pool_size = k * 4
         res = retrieval.search(
             db_path, item["question"], top_k=pool_size,
-            category_id=item.get("category_id"),
+            category_id=item.get("category_id"), rerank=rerank,
         )
         chunks = _sabotage_pool(res["chunks"], sabotage, k)
     else:
         res = retrieval.search(
             db_path, item["question"], top_k=k,
-            category_id=item.get("category_id"),
+            category_id=item.get("category_id"), rerank=rerank,
         )
         chunks = res["chunks"]
     return chunks[:k], res.get("vector_available")
@@ -248,7 +257,8 @@ def _item_hit(row: dict) -> Optional[bool]:
 
 
 def _run_k(golden_items: list[dict], db_path: str, k: int, *,
-           sabotage: Optional[str]) -> tuple[list[dict], dict, dict, Optional[bool]]:
+           sabotage: Optional[str],
+           rerank: bool = False) -> tuple[list[dict], dict, dict, Optional[bool]]:
     """Пункти зі `status="unlabeled"` пропускаються повністю (C1); `negative`
     рахується (search запускається, лишається в per-item звіті), але не
     входить у `aggregate`/`by_slice` (recall_at_k/source_name_hit — `None`,
@@ -261,7 +271,7 @@ def _run_k(golden_items: list[dict], db_path: str, k: int, *,
     for item in golden_items:
         if item["status"] == "unlabeled":
             continue
-        chunks, vec_avail = _search(db_path, item, k, sabotage=sabotage)
+        chunks, vec_avail = _search(db_path, item, k, sabotage=sabotage, rerank=rerank)
         if vector_available is None:
             vector_available = vec_avail
         row = ev_metrics.evaluate_item(item, chunks)
@@ -330,6 +340,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help=f"Макс. к-сть пунктів hit→miss відносно лінії (default: {_DEFAULT_MAX_ITEM_REGRESSIONS})")
     parser.add_argument("--baseline", default=None, help="Базова лінія (C2) для порівняння і per-item diff")
     parser.add_argument("--write-baseline", default=None, help="Записати поточний прогін як нову базову лінію (C2)")
+    parser.add_argument("--rerank", action="store_true",
+                        help="Міряти З cross-encoder-реранкером (як RAG-чат при "
+                             "RECALL_RERANK_ENABLED=1). Дефолт — без нього; прапорець "
+                             "пишеться у провенанс, тож лінія без реранка і прогін з "
+                             "ним не порівнюються мовчки")
     parser.add_argument("--sabotage", choices=["shuffle", "reverse"], default=None,
                          help="Детерміновано зламати пул кандидатів перед відсіканням (C6) — для перевірки самого гейта")
     parser.add_argument("--no-snapshot", action="store_true",
@@ -431,7 +446,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         with measure_cm as measure_db:
             for k in ks:
                 rows, agg, by_slice, vec_avail = _run_k(
-                    golden_items, measure_db, k, sabotage=args.sabotage)
+                    golden_items, measure_db, k, sabotage=args.sabotage,
+                    rerank=args.rerank)
                 rows_by_k[k] = {r["id"]: r for r in rows}
                 agg_by_k[k] = agg
                 by_slice_by_k[k] = by_slice
@@ -459,7 +475,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         "db_snapshot": {"path": os.path.abspath(search_db), "size": snap_stat.st_size,
                          "mtime": snap_stat.st_mtime},
         "vector_available": vector_available,
-        "rerank": False,  # гейт не вмикає reranker (T6.4) — константа, поки нема прапорця
+        "rerank": bool(args.rerank),
+        # Борг Хвилі B (`leftovers.md`, Descoped): `rewrite` гейт не вмикає
+        # прапорцем — `retrieval.search` читає гарячий env сам, — але прогін
+        # МУСИТЬ сказати, з чим він знятий, інакше дві лінії з різним
+        # RAG_QUERY_REWRITE зводяться мовчки. Резолвимо тим самим `env_bool`,
+        # що й retrieval.py:718 (ADR-008: одна реалізація на прапорець).
+        "rewrite": _settings.env_bool("RAG_QUERY_REWRITE"),
     }
 
     baseline = None
@@ -619,7 +641,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         for f_ in failures:
             print(f"  FAIL: {f_}")
 
+    # Конфігурація — у тому ж рядку, що й вердикт: знахідка 17.09.2026 у тому й
+    # була, що прогони без реранкера читали як бойові числа (50.0% проти 78.6%
+    # на k=8). Рядок під `-q` єдиний, тож підпис мусить бути саме тут.
     print(f"[gate] {verdict} k={','.join(str(k) for k in ks)}"
+          f" [rerank={'on' if current_provenance['rerank'] else 'off'},"
+          f" rewrite={'on' if current_provenance['rewrite'] else 'off'}]"
           + (f" — {'; '.join(failures)}" if failures else ""))
 
     if args.json_out:
@@ -635,6 +662,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for k in ks
             },
             "per_item": {str(k): list(rows_by_k[k].values()) for k in ks},
+            # Без цього два `--json-out` зводяться через `evals.compare` без
+            # жодної згадки, з якою конфігурацією знятий кожен (знахідка
+            # 17.09.2026). `compare` читає лише aggregate/per_item — зайвий
+            # ключ його не чіпає, але прогін тепер носить свій підпис у файлі.
+            "provenance": current_provenance,
         }
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2, sort_keys=True)

@@ -126,6 +126,14 @@ qrcode>=7.0
 #    не годиться; e5-large має model.safetensors → ОК. use_safetensors=True у коді.
 sentence-transformers==3.4.1
 transformers>=4.41,<5
+# production-rag-wave-b-04: пара EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B (перемикач
+# через .env, дефолт коду лишається e5-large) вимагає архітектуру Qwen3 у
+# transformers — вона зʼявилась ще ДО поточного нижнього піна >=4.41, тож нижню
+# межу тут НЕ бампаємо: .venv на момент цього запису вже стоїть на transformers
+# 4.57.6/sentence-transformers 3.4.1, обидва достатні для завантаження чекпойнта
+# (перевірено реальним прогоном — Implementation notes нижче). Той самий пін
+# 1024-dim/safetensors, що й для e5-large, тож ланцюжок несумісностей вище не
+# зачіпається.
 # T6.4 (Волна 4): опційний RAG-чат rerank (app/services/reranker.py) — CrossEncoder
 # з ТОГО Ж пакету sentence-transformers, НОВА залежність НЕ потрібна. Модель за
 # замовч. BAAI/bge-reranker-v2-m3 (~2.3GB, HF): перевірено — має ЛИШЕ model.safetensors

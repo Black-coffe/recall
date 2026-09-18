@@ -2,8 +2,10 @@
 
 Семантичний шар RAG-архіву. Транскрипт ріжеться на чанки (вікна по ходах
 спікера з перекриттям), кожен кодується локальною мультимовною моделлю
-(multilingual-e5-large на RTX 3090, 1024-dim) у float32-вектор → зберігається
-BLOB у таблиці chunks. (Чому НЕ bge-m3 — див. коментар біля EMBED_MODEL нижче.)
+(дефолт — multilingual-e5-large на RTX 3090, 1024-dim; конфігурується через
+EMBED_MODEL/EMBED_VERSION, стиль префіксів запиту/пасажу — за родиною моделі,
+див. _style_for()) у float32-вектор → зберігається BLOB у таблиці chunks.
+(Чому НЕ bge-m3 — див. коментар біля EMBED_MODEL нижче.)
 
 Чому локально, а не хмара: безкоштовно на тисячах чанків, приватно (нічого не
 йде назовні), відмінно для UA/RU, GPU вже є. Модель — lazy singleton, тягнеться
@@ -11,6 +13,12 @@ BLOB у таблиці chunks. (Чому НЕ bge-m3 — див. комента�
 
 Все опціонально: якщо sentence-transformers/torch недоступні — is_available()
 =False, embeddings просто вимикаються, FTS5-пошук далі працює.
+
+Волна B (історія 05): кожен чанк несе ще й КОНТЕКСТНИЙ ПРЕФІКС
+(build_context_prefix) — тип/назва/дата/спікер/напрямок|нитка|сторінка + рядок
+сводки одиниці сенсу. Префікс іде у вектор і в chunks_fts (колонка
+chunks.context_prefix, міграція v43), але НЕ в chunks.text — цитати, експорт і
+нитки далі бачать лише сказане.
 """
 from __future__ import annotations
 
@@ -33,9 +41,14 @@ logger = logging.getLogger(__name__)
 # safetensors), а transformers>=4.56 блокує torch.load на torch<2.6 (CVE-2025-32434),
 # а наш torch запінено на 2.5.1 (стабільність faster-whisper/ctranslate2). e5-large
 # має model.safetensors → вантажиться без проблем. Ціна: ліміт 512 токенів + e5
-# потребує query:/passage: префіксів (обробляється нижче).
+# потребує query:/passage: префіксів (обробляється нижче через _style_for()).
+#
+# production-rag-wave-b, історія 04: перехід на Qwen/Qwen3-Embedding-0.6B —
+# пара `EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B` + `EMBED_VERSION=3` (обидва в
+# .env), відкат — тими ж двома. Дефолти коду НЕ мінялись (Non-goals) — це
+# опційний перемикач, не новий дефолт.
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-large")
-EMBED_DIM = 1024
+EMBED_DIM = 1024  # дефолт до lazy-завантаження моделі; _apply_model_dim() підміняє на факт
 # T6.8: EMBED_VERSION тепер СТРУКТУРНО підключено до idempotency-check у
 # chunk_and_embed_transcription() — версія зберігається поряд з embedding_model
 # у transcriptions.embedding_version (міграція v28) і звіряється при рішенні
@@ -47,8 +60,56 @@ EMBED_DIM = 1024
 # наявні вектори застаріли. Бамп означає: список роботи індексера
 # (enrichment.list_unenriched_ids) починає віддавати ВЕСЬ архів на re-embed
 # (локально, без Claude — картка при цьому skip'ається за enrichment_version).
-EMBED_VERSION = 2
-_E5_STYLE = "e5" in EMBED_MODEL.lower()  # e5 потребує query:/passage: префіксів
+#
+# EMBED_VERSION тепер конфігурується через env (реєстр app/core/settings.py,
+# дефолт лишається 2) — v3 зарезервована для пари з Qwen3-Embedding вище.
+EMBED_VERSION = int(os.environ.get("EMBED_VERSION", "2"))
+
+# Стеля довжини послідовності. Потрібна тому, що НЕ кожна модель привозить її
+# сама: e5 має sentence_bert_config.json з max_seq_length=512, а
+# Qwen3-Embedding-0.6B цього файла не має взагалі — і sentence-transformers
+# тоді бере min(config.max_position_embeddings, tokenizer.model_max_length)
+# (Transformer.py:98), тобто 32768. Наслідок заміряно 17.09.2026 на re-embed
+# знімка: чанки-монстри (у боєвому архіві max 73k символів ≈ 18k токенів —
+# документи й TG, ліміт _MAX_CHARS=1000 діє лише на аудіо-шляху) проходили
+# всі 28 шарів уваги на повну довжину, кешуючий аллокатор torch тримав пік
+# 17.3 ГБ VRAM і не віддавав його, відеопамʼять переповнювалась, WDDM починав
+# вивантажувати її в RAM — швидкість впала в 30 разів (45 → 1.5 записи/хв).
+#
+# 1024, а не 512 «як в e5»: на нашій кирилиці токенізатор Qwen3 дає 2.02
+# символи/токен проти 3.57 в e5 (замір на 300 бойових чанках), тож звичайний
+# чанк — p50=285, p95=471, max=551 токенів. На 512 обрізало б уже нормальні
+# чанки. На 1024 звичайний чанк входить цілком, а монстри ріжуться на ~2070
+# символах проти ~1830 в e5 — тобто СИМВОЛІВ обидві моделі читають майже
+# порівну, і різниця в eval лишається різницею моделей, а не глибини зрізу.
+# Застосовується лише як СТЕЛЯ: модель зі своїм меншим лімітом (e5 — 512)
+# не чіпається.
+EMBED_MAX_SEQ = int(os.environ.get("EMBED_MAX_SEQ", "1024"))
+
+
+def _style_for(model_name: str) -> str:
+    """Стиль префіксів запиту/пасажу за РОДИНОЮ моделі (визначається з назви
+    EMBED_MODEL — окремої env-змінної для стилю немає навмисно, родина й
+    назва моделі це одне й те саме рішення).
+
+    - ``e5`` (``intfloat/multilingual-e5-*``): query:/passage: префікси.
+    - ``qwen3`` (``Qwen/Qwen3-Embedding-*``): інструкція для запиту за карткою
+      моделі на HF (``Instruct: {task}\\nQuery: {q}``), пасаж БЕЗ префікса.
+    - інше (``plain``): без префіксів — звичайний encode.
+    """
+    name = (model_name or "").lower()
+    if "qwen3" in name:
+        return "qwen3"
+    if "e5" in name:
+        return "e5"
+    return "plain"
+
+
+_STYLE = _style_for(EMBED_MODEL)
+
+# Задача для Qwen3-інструкції запиту (картка моделі на HF) — узагальнений
+# retrieval, той самий текст для будь-якого питання по архіву.
+_QWEN3_QUERY_TASK = "Given a search query, retrieve relevant passages that answer the query"
 
 # Чанкінг. _MAX_CHARS тримаємо нижче 512-токенного ліміту e5. Замір на живому
 # архіві (чанків аудіо-шляху, токенізатор multilingual-e5-large): p50=304,
@@ -146,6 +207,35 @@ def unavailability_reason() -> str:
     return _unavailable_reason or "sentence-transformers/torch недоступні"
 
 
+def _apply_model_dim(model) -> int:
+    """Синхронізує EMBED_DIM із фактичним виміром завантаженої моделі.
+
+    До цього виклику EMBED_DIM лишається дефолтом 1024 — так
+    retrieval._vector_search бачить актуальний вимір одразу після lazy-
+    завантаження моделі, без рестарту процесу. Винесено окремою функцією,
+    щоб покрити тестом без реального завантаження (torch/sentence-transformers
+    у юніт-тестах не піднімаються, memory mcp-stdio-no-heavy-models)."""
+    global EMBED_DIM
+    EMBED_DIM = model.get_sentence_embedding_dimension()
+    return EMBED_DIM
+
+
+def _apply_max_seq(model) -> int:
+    """Опускає max_seq_length моделі до EMBED_MAX_SEQ, якщо той менший.
+
+    Тільки вниз: модель зі своїм меншим лімітом (e5 — 512) лишається як є,
+    інакше ми б їй цей ліміт ПІДНІМАЛИ. Окремою функцією — з тієї ж причини,
+    що й _apply_model_dim: тест не піднімає torch."""
+    current = getattr(model, "max_seq_length", None)
+    if current is None or EMBED_MAX_SEQ <= 0:
+        return current
+    if current > EMBED_MAX_SEQ:
+        logger.info("[embeddings] max_seq_length %d → %d (стеля EMBED_MAX_SEQ)",
+                    current, EMBED_MAX_SEQ)
+        model.max_seq_length = EMBED_MAX_SEQ
+    return model.max_seq_length
+
+
 def _get_model():
     global _model
     if _model is not None:
@@ -163,9 +253,11 @@ def _get_model():
         _model = SentenceTransformer(
             EMBED_MODEL, device=device, model_kwargs={"use_safetensors": True},
         )
-        logger.info("[embeddings] Модель готова за %.1fs (dim=%d)",
-                    (datetime.now() - t0).total_seconds(),
-                    _model.get_sentence_embedding_dimension())
+        _apply_model_dim(_model)
+        _apply_max_seq(_model)
+        logger.info("[embeddings] Модель готова за %.1fs (dim=%d, max_seq=%s)",
+                    (datetime.now() - t0).total_seconds(), EMBED_DIM,
+                    getattr(_model, "max_seq_length", "?"))
         return _model
 
 
@@ -179,19 +271,27 @@ def _encode(texts: list[str], batch_size: int = 32) -> np.ndarray:
 
 
 def embed_texts(texts: list[str], batch_size: int = 32) -> np.ndarray:
-    """Закодувати чанки-passages → np.float32 [N, dim], L2-нормалізовані."""
+    """Закодувати чанки-passages → np.float32 [N, dim], L2-нормалізовані.
+
+    Префікс залежить від родини моделі (_style_for): e5 — 'passage: ', qwen3
+    і plain — без префікса (картка Qwen3-Embedding префіксує лише запит)."""
     if not texts:
         return np.zeros((0, EMBED_DIM), dtype=np.float32)
-    if _E5_STYLE:
+    if _STYLE == "e5":
         texts = [f"passage: {t}" for t in texts]
     return _encode(texts, batch_size)
 
 
 def embed_query(text: str) -> np.ndarray:
-    """Вектор одного запиту (1D float32, нормалізований). Для e5 — префікс 'query:'."""
+    """Вектор одного запиту (1D float32, нормалізований).
+
+    Префікс залежить від родини моделі (_style_for): e5 — 'query: ', qwen3 —
+    інструкція за карткою моделі на HF, plain — без префікса."""
     t = text or ""
-    if _E5_STYLE:
+    if _STYLE == "e5":
         t = f"query: {t}"
+    elif _STYLE == "qwen3":
+        t = f"Instruct: {_QWEN3_QUERY_TASK}\nQuery: {t}"
     v = _encode([t])
     return v[0] if len(v) else np.zeros(EMBED_DIM, dtype=np.float32)
 
@@ -452,6 +552,134 @@ def build_chunks(segments_json: Optional[str], transcript_text: str,
 
 
 # ============================================================
+# Контекстний префікс чанка (Волна B, історія 05)
+# ============================================================
+#
+# Чанк був самодостатнім лише для того, хто вже знає, звідки він: у вектор і в
+# BM25 йшов голий текст репліки. Назва чату, дата, автор, напрямок і тема нитки
+# лежали в сусідніх колонках і в пошуку не брали участі взагалі.
+#
+# Префікс — це ПОЛЯ БД, а не переказ тексту моделлю: рядок 1 — провенанс,
+# рядок 2 — один рядок сводки одиниці сенсу (`summaries.unit_summary_line`,
+# контракт C1). Він іде в ембедер і в `chunks_fts`, але НЕ в `chunks.text` —
+# цитати, експорт і нитки далі показують лише те, що людина справді сказала.
+
+#: Порядок полів у рядку 1 фіксований (контракт C4 плану) — префікс має бути
+#: детермінованим: той самий запис дає той самий рядок, інакше кожен re-embed
+#: змінював би вектори «сам по собі».
+_PREFIX_SEP = " · "
+
+_KIND_LABELS = {"telegram": "переписка", "document": "документ"}
+
+
+def _prefix_date(value: Optional[str]) -> Optional[str]:
+    """`YYYY-MM-DD` з дати запису. meeting_date і created_at обидва починаються
+    з ISO-дати, тож беремо перші 10 символів і перевіряємо форму — сміття
+    («невідомо», порожнє) у префікс не пускаємо."""
+    s = (str(value) if value is not None else "").strip()
+    if not s:
+        return None
+    head = s[:10]
+    return head if re.match(r"^\d{4}-\d{2}-\d{2}$", head) else None
+
+
+def build_context_prefix(meta: dict, chunk: dict) -> str:
+    """Контекстний заголовок чанка (контракт C4): 1–2 рядки.
+
+    Рядок 1: ``[тип] назва|чат · YYYY-MM-DD · спікер|автор · хвіст``, де хвіст
+    залежить від типу — напрямок (дзвінок), ``нитка: label`` (переписка),
+    ``стор. N`` або секція (документ). Порожні поля просто пропускаються;
+    рядка «None» не буває ніколи.
+    Рядок 2: `unit_summary_line` одиниці сенсу, якщо вона є.
+
+    `meta` — поля ЗАПИСУ (`_load_prefix_meta`), `chunk` — поля самого чанка
+    (`speaker`, `page`, `section`). Функція чиста й детермінована.
+    """
+    source_type = (meta.get("source_type") or "").strip()
+    kind = _KIND_LABELS.get(source_type, "дзвінок")
+
+    parts: list[str] = [f"[{kind}]"]
+
+    def _add(value) -> None:
+        s = str(value).strip() if value is not None else ""
+        if s:
+            parts.append(s)
+
+    _add(meta.get("title"))
+    _add(_prefix_date(meta.get("date")))
+    _add(chunk.get("speaker"))
+
+    if source_type == "telegram":
+        label = (meta.get("thread_label") or "").strip() if meta.get("thread_label") else ""
+        if label:
+            _add(f"нитка: {label}")
+    elif source_type == "document":
+        page = chunk.get("page")
+        if page is not None and str(page).strip():
+            _add(f"стор. {page}")
+        else:
+            _add(chunk.get("section"))
+    else:
+        _add(meta.get("category"))
+
+    # Перший елемент — мітка типу в дужках, вона приклеюється до назви пробілом,
+    # решта — через роздільник: "[дзвінок] Назва · 2026-09-17 · Андрій · Фонд".
+    if len(parts) == 1:
+        line1 = parts[0]
+    else:
+        line1 = parts[0] + " " + _PREFIX_SEP.join(parts[1:])
+
+    summary_line = (meta.get("summary_line") or "").strip() if meta.get("summary_line") else ""
+    return f"{line1}\n{summary_line}" if summary_line else line1
+
+
+def _load_prefix_meta(conn, transcription_id: int) -> dict:
+    """Поля запису для префікса одним доджойном: категорія (напрямок) і мітка
+    нитки лежать у сусідніх таблицях, а не в `transcriptions`.
+
+    Сводка береться через `summaries.unit_summary_line` (лише SQL — модуль
+    навмисно без torch/anthropic на рівні імпорту, memory
+    `mcp-stdio-no-heavy-models`)."""
+    row = conn.execute(
+        "SELECT t.source_type, t.source_name, t.original_filename, t.tg_chat_title, "
+        "       t.meeting_date, t.created_at, t.tg_date, "
+        "       cat.name AS category_name, th.label AS thread_label "
+        "FROM transcriptions t "
+        "LEFT JOIN categories cat ON cat.id = t.category_id "
+        "LEFT JOIN tg_threads th ON th.id = t.tg_thread_id "
+        "WHERE t.id = ?",
+        (transcription_id,),
+    ).fetchone()
+    if not row:
+        return {}
+
+    source_type = row["source_type"]
+    if source_type == "telegram":
+        title = row["tg_chat_title"] or row["source_name"]
+    elif source_type == "document":
+        title = row["source_name"] or row["original_filename"]
+    else:
+        title = row["source_name"]
+
+    try:
+        from app.services.summaries import unit_summary_line
+        summary_line = unit_summary_line(conn, transcription_id)
+    except Exception:  # noqa: BLE001 — префікс без сводки кращий за зірваний ембединг
+        logger.debug("[embeddings] unit_summary_line не вдався для tx=%s",
+                     transcription_id, exc_info=True)
+        summary_line = None
+
+    return {
+        "source_type": source_type,
+        "title": title,
+        "date": row["meeting_date"] or row["tg_date"] or row["created_at"],
+        "category": row["category_name"],
+        "thread_label": row["thread_label"],
+        "summary_line": summary_line,
+    }
+
+
+# ============================================================
 # Збереження
 # ============================================================
 
@@ -533,6 +761,9 @@ def chunk_and_embed_transcription(db_path: str, transcription_id: int,
         structure_json = row["structure_json"] if "structure_json" in row.keys() else None
         is_telegram = row["source_type"] == "telegram"
         tg_sender = row["tg_sender"] if is_telegram else None
+        # Волна B: поля для контекстного префікса — тим самим зʼєднанням, поки
+        # воно відкрите (назва/чат, дата, напрямок, мітка нитки, рядок сводки).
+        prefix_meta = _load_prefix_meta(conn, transcription_id)
 
     chunks = build_chunks(segments_json, body, speaker_map, structure_json)
 
@@ -557,8 +788,18 @@ def chunk_and_embed_transcription(db_path: str, transcription_id: int,
                     "reason": "tg_contentless"}
         return {"status": "empty", "transcription_id": transcription_id}
 
-    # Кодуємо поза БД-зʼєднанням (GPU-операція)
-    vecs = embed_texts([ch["text"] for ch in chunks])
+    # Волна B: контекстний префікс рахуємо ПІСЛЯ нарізки й TG-постпроцесу —
+    # у ньому бере участь спікер чанку (для TG його щойно проставили) і
+    # сторінка/секція документа.
+    for ch in chunks:
+        ch["context_prefix"] = build_context_prefix(prefix_meta, ch)
+
+    # Кодуємо поза БД-зʼєднанням (GPU-операція). У вектор іде префікс+текст —
+    # сам текст лишається в `chunks.text` недоторканим (цитати, експорт, нитки).
+    vecs = embed_texts([
+        (ch["context_prefix"] + "\n" + ch["text"]) if ch["context_prefix"] else ch["text"]
+        for ch in chunks
+    ])
 
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
@@ -566,11 +807,13 @@ def chunk_and_embed_transcription(db_path: str, transcription_id: int,
         for ch, vec in zip(chunks, vecs):
             c.execute(
                 "INSERT INTO chunks (transcription_id, chunk_index, start_time, "
-                "end_time, speaker, text, embedding, token_estimate, page, section) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "end_time, speaker, text, embedding, token_estimate, page, section, "
+                "context_prefix) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (transcription_id, ch["chunk_index"], ch["start_time"], ch["end_time"],
                  ch["speaker"], ch["text"], vec.astype(np.float32).tobytes(),
-                 len(ch["text"]) // 4, ch.get("page"), ch.get("section")),
+                 len(ch["text"]) // 4, ch.get("page"), ch.get("section"),
+                 ch.get("context_prefix") or None),
             )
         c.execute(
             "UPDATE transcriptions SET embedded_at = CURRENT_TIMESTAMP, "
