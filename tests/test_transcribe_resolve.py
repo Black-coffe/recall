@@ -84,6 +84,8 @@ class TestResolveFileSource:
                 'youtube_info': {}, 'download_id': None,
                 'library_audio_id': None, 'library_recording_sid': None,
                 'source_type': 'file',
+                # editable-title-description-02: лише 'library' заповнює це.
+                'title': None, 'description': None,
             }
 
     def test_missing_audio_field_raises_400(self, app):

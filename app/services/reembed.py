@@ -38,6 +38,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -171,6 +172,128 @@ def run(db_path: str, limit: Optional[int] = None, dry_run: bool = False) -> dic
               "version": embeddings.EMBED_VERSION}
     logger.info("[reembed] завершено: %s", result)
     return result
+
+
+# ============================================================
+# Точковий re-embed ОДНОГО запису (історія 03)
+# ============================================================
+#
+# Навіщо окремо від `run`. Після правки назви/опису (`PATCH /api/history/<id>`)
+# застаріває рівно один запис: пара (модель, версія) у нього та сама, тому
+# `stale_ids` його не бачить взагалі, а прохід по всьому архіву заради одного
+# запису — години GPU. Тут — `chunk_and_embed_transcription(force=True)` на
+# один id у фоновій черзі; `optimize_chunk_index` НЕ кличеться (десяток
+# DELETE+INSERT сегментацію FTS не кришить, а сам optimize коштує хвилини).
+
+#: Через скільки перевіряти знову, якщо в цей момент триває живий запис.
+_DEFER_SECONDS = 30.0
+
+#: id, які чекають на вікно без запису. Набір (а не лічильник) згортає серію
+#: правок однієї картки в одну майбутню задачу: користувач править назву,
+#: потім опис — переембеджувати треба один раз, і вже з обома значеннями.
+_pending_lock = threading.Lock()
+_pending_ids: set[int] = set()
+
+
+def _recording_active() -> bool:
+    """Чи триває просто зараз живий запис. Прапорець — `active_session_id`
+    сервісу запису (те саме джерело, що й `GET /api/recordings/active`):
+    стан читається без session_id і без блокувань черги."""
+    try:
+        from app import state
+        service = getattr(state, "recording_service", None)
+        return bool(service is not None and service.active_session_id)
+    except Exception:  # noqa: BLE001 — нема сервісу/стану = запису нема
+        logger.debug("[reembed] стан запису недоступний — вважаємо, що запису нема",
+                     exc_info=True)
+        return False
+
+
+def _record_reembed_job(job, transcription_id: int, db_path: str) -> dict:
+    """Тіло фонової задачі. `force=True` обовʼязковий: `embedded_at` у запису
+    стоїть, пара (модель, версія) не змінилась — без force прохід вважав би
+    роботу зробленою і новий префікс ніколи б не доїхав у вектори.
+
+    Id знімається з `_pending_ids` САМЕ ТУТ, на старті тіла — до читання рядка.
+    Якби його знімав планувальник одразу після `submit`, виклик, що встиг
+    отримати `"pending"`, покладався б на задачу, яка вже прочитала рядок зі
+    старою метою, і його правка не доїхала б у вектори взагалі."""
+    with _pending_lock:
+        _pending_ids.discard(int(transcription_id))
+    res = embeddings.chunk_and_embed_transcription(db_path, transcription_id, force=True)
+    logger.info("[reembed] точковий re-embed tx=%s: %s", transcription_id, res.get("status"))
+    return res
+
+
+def _submit_record_reembed(transcription_id: int, db_path: str) -> str:
+    """Поставити задачу в чергу або відкласти, поки триває запис."""
+    if _recording_active():
+        timer = threading.Timer(_DEFER_SECONDS, _retry_record_reembed,
+                                args=(transcription_id, db_path))
+        timer.daemon = True
+        timer.start()
+        logger.info("[reembed] tx=%s відкладено на %sс — триває запис",
+                    transcription_id, _DEFER_SECONDS)
+        return "deferred"
+
+    from app import state
+    queue = getattr(state, "job_queue", None)
+    if queue is None:
+        with _pending_lock:
+            _pending_ids.discard(transcription_id)
+        logger.info("[reembed] tx=%s не переембеджено: черги задач немає", transcription_id)
+        return "skipped"
+
+    queue.submit("reembed_record", _record_reembed_job, transcription_id, db_path,
+                 meta={"transcription_id": transcription_id, "reason": "meta_changed",
+                       "db_path": db_path})
+    return "queued"
+
+
+def _retry_record_reembed(transcription_id: int, db_path: str) -> None:
+    """Повтор із таймера: якщо запис і далі триває — ще один таймер."""
+    try:
+        _submit_record_reembed(transcription_id, db_path)
+    except Exception:  # noqa: BLE001 — таймер у фоні, падіння нікому не долетить
+        with _pending_lock:
+            _pending_ids.discard(transcription_id)
+        logger.exception("[reembed] tx=%s: повтор точкового re-embed зірвався",
+                         transcription_id)
+
+
+def schedule_record_reembed(transcription_id: int, *, db_path: str) -> str:
+    """Переембедити чанки ОДНОГО запису у фоні. Повертає що сталося:
+
+    - ``"queued"``    — задача стала в `job_queue`;
+    - ``"deferred"``  — триває живий запис, повтор через `_DEFER_SECONDS`
+      (слот черги при цьому НЕ займається — інакше очікування зʼїло б один із
+      двох воркерів пулу);
+    - ``"pending"``   — цей id уже чекає свого вікна, другої задачі не буде;
+    - ``"skipped"``   — переембеджувати нічим (немає torch/моделі або черги).
+
+    `db_path` — обовʼязковий keyword БЕЗ дефолту: дефолт «`None` = бойова БД»
+    означав би, що будь-який виклик із тестової/тимчасової БД мовчки переписує
+    чанки бойового архіву. Шлях завжди приходить явно від того, хто відкрив
+    зʼєднання (у PATCH — `current_app.config["DATABASE"]`).
+    """
+    tid = int(transcription_id)
+    if not embeddings.is_available():
+        logger.info("[reembed] tx=%s не переембеджено: %s", tid,
+                    embeddings.unavailability_reason())
+        return "skipped"
+
+    if not db_path:
+        logger.info("[reembed] tx=%s не переембеджено: невідомий шлях до БД", tid)
+        return "skipped"
+    path = str(db_path)
+
+    with _pending_lock:
+        if tid in _pending_ids:
+            logger.debug("[reembed] tx=%s уже чекає на re-embed", tid)
+            return "pending"
+        _pending_ids.add(tid)
+
+    return _submit_record_reembed(tid, path)
 
 
 # ============================================================

@@ -315,6 +315,69 @@
         });
     };
 
+    // Edit-metadata modal (title + multiline description) — shared by the
+    // record page pencil, Library row action and Audio card action (C6).
+    //   opts.title, opts.description — current values (prefilled)
+    //   opts.titleRequired — block save while title is empty (default false;
+    //     records fall back to source_name server-side, so it's optional there)
+    //   opts.save(values) — async fn performing the actual PATCH
+    //     (R.api.updateRecord/updateAudio). Thrown Error.message is shown in
+    //     .rc-modal__err and the modal stays open; on success the modal closes
+    //     and resolves {title, description}.
+    // Resolves null on Escape/backdrop/Cancel.
+    UI.editMetaModal = function (opts) {
+        opts = opts || {};
+        return new Promise((resolve) => {
+            const ov = U.el('div', { class: 'rc-modal-ov' });
+            ov.innerHTML = `
+                <div class="rc-modal" role="dialog" aria-modal="true" aria-label="Назва й опис">
+                    <div class="rc-modal__h"><i class="fa-solid fa-pen"></i> Назва й опис</div>
+                    <label class="rc-field__label" for="rcMetaTitle">Назва</label>
+                    <input class="rc-input" id="rcMetaTitle" autocomplete="off" maxlength="200"
+                           placeholder="Назва запису" value="${U.esc(opts.title || '')}">
+                    <label class="rc-field__label" for="rcMetaDesc" style="margin-top:var(--rc-3)">Опис</label>
+                    <textarea class="rc-textarea" id="rcMetaDesc" placeholder="Опис (необов'язково)">${U.esc(opts.description || '')}</textarea>
+                    <div class="rc-modal__err" id="rcMetaErr"></div>
+                    <div class="rc-modal__actions">
+                        <button class="rc-btn rc-btn--sm" id="rcMetaCancel">Скасувати</button>
+                        <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcMetaSave">Зберегти</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(ov);
+            const titleI = ov.querySelector('#rcMetaTitle');
+            const descI = ov.querySelector('#rcMetaDesc');
+            const errEl = ov.querySelector('#rcMetaErr');
+            const saveB = ov.querySelector('#rcMetaSave');
+            setTimeout(() => titleI.focus(), 30);
+            let done = false;
+            const close = (val) => {
+                if (done) return; done = true;
+                document.removeEventListener('keydown', onKey, true);
+                ov.remove(); resolve(val);
+            };
+            const save = async () => {
+                const title = titleI.value.trim();
+                if (opts.titleRequired && !title) { titleI.focus(); return; }
+                const values = { title, description: descI.value.trim() };
+                saveB.disabled = true; errEl.textContent = '';
+                try {
+                    if (typeof opts.save === 'function') await opts.save(values);
+                    close(values);
+                } catch (e) {
+                    errEl.textContent = (e && e.message) || 'Не вдалося зберегти';
+                    saveB.disabled = false; titleI.focus();
+                }
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(null); }
+            };
+            document.addEventListener('keydown', onKey, true);
+            ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(null); });
+            saveB.addEventListener('click', save);
+            ov.querySelector('#rcMetaCancel').addEventListener('click', () => close(null));
+        });
+    };
+
     // Sticky action-toast for undo affordances (T4.6). Unlike UI.toast, it
     // carries an explicit action button and does not vanish after the short
     // 3.2s info-toast window — it lives for opts.duration (default 7s) or

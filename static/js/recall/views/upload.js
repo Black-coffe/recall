@@ -133,6 +133,14 @@
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
+                        <label class="rc-field__label" for="rcUpTitle">Назва (необовʼязково)</label>
+                        <input class="rc-input" id="rcUpTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(st.file.name)}">
+                    </div>
+                    <div class="rc-field">
+                        <label class="rc-field__label" for="rcUpDesc">Опис (необовʼязково)</label>
+                        <textarea class="rc-textarea" id="rcUpDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
+                    </div>
+                    <div class="rc-field">
                         <label class="rc-field__label" for="rcUpModel">Модель розпізнавання</label>
                         <select class="rc-select" id="rcUpModel">${modelOpts}</select>
                     </div>
@@ -163,7 +171,7 @@
     }
 
     function setFormDisabled(ctx, disabled) {
-        ctx.mount.querySelectorAll('#rcUpModel,#rcUpLang,#rcUpCat,#rcUpDiar,#rcUpStart,#rcUpBack,#rcUpClear')
+        ctx.mount.querySelectorAll('#rcUpTitle,#rcUpDesc,#rcUpModel,#rcUpLang,#rcUpCat,#rcUpDiar,#rcUpStart,#rcUpBack,#rcUpClear')
             .forEach(e => { e.disabled = disabled; });
     }
 
@@ -185,6 +193,8 @@
             language: (ctx.mount.querySelector('#rcUpLang') || {}).value || 'uk',
             category_id: (ctx.mount.querySelector('#rcUpCat') || {}).value || '',
             diarize: !!(ctx.mount.querySelector('#rcUpDiar') || {}).checked,
+            title: ((ctx.mount.querySelector('#rcUpTitle') || {}).value || '').trim(),
+            description: ((ctx.mount.querySelector('#rcUpDesc') || {}).value || '').trim(),
         };
         st.opts = o; st.busy = true;
         setFormDisabled(ctx, true);
@@ -204,6 +214,8 @@
         fd.append('language', o.language);
         if (o.diarize) fd.append('diarize', 'true');
         if (o.category_id) fd.append('category_id', o.category_id);
+        if (o.title) fd.append('title', o.title);
+        if (o.description) fd.append('description', o.description);
 
         bgJob = { label };
         R.api.transcribeUpload(

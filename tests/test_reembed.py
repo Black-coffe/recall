@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 import numpy as np
 import pytest
@@ -283,7 +284,10 @@ def _downgrade_to_pre_v43(path: str) -> None:
     conn.execute("CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN "
                  "INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text); END")
     conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
-    conn.execute("DELETE FROM schema_versions WHERE version = 43")
+    # Версія БД рахується як МАКСИМУМ у schema_versions, тож знести треба всі
+    # записи від 43 і вище — інакше поява наступної міграції (v44) лишає
+    # current_version=44, гілка v43 не виконується, і тест перевіряє порожнечу.
+    conn.execute("DELETE FROM schema_versions WHERE version >= 43")
     conn.commit()
     conn.close()
 
@@ -380,3 +384,174 @@ def test_optimize_chunk_index_works_after_rebuild(db, fake_embedder):
                         ('"кошторис"',)).fetchall()
     conn.close()
     assert hits
+
+
+# ============================================================
+# editable-title-description-03: точковий re-embed одного запису
+# ============================================================
+
+class FakeJob:
+    def __init__(self, kind, meta):
+        self.kind = kind
+        self.meta = meta
+
+    def is_cancelled(self):
+        return False
+
+
+class FakeQueue:
+    """Черга, що виконує задачу одразу і памʼятає, з чим її покликали."""
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, kind, fn, *args, meta=None, **kwargs):
+        job = FakeJob(kind, meta or {})
+        self.calls.append({"kind": kind, "args": args, "meta": job.meta})
+        self.result = fn(job, *args, **kwargs)
+        return job
+
+
+class FakeRecorder:
+    def __init__(self, active=False):
+        self.active_session_id = "sess-1" if active else None
+
+
+@pytest.fixture
+def scheduler_env(monkeypatch):
+    """Фейкова черга + відсутній запис + доступні ембединги; набір очікуючих
+    id чистимо, щоб тести не текли один в одного."""
+    from app import state
+
+    queue = FakeQueue()
+    recorder = FakeRecorder(active=False)
+    monkeypatch.setattr(state, "job_queue", queue, raising=False)
+    monkeypatch.setattr(state, "recording_service", recorder, raising=False)
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(reembed, "_DEFER_SECONDS", 0.05)
+    reembed._pending_ids.clear()
+    yield queue, recorder
+    reembed._pending_ids.clear()
+
+
+def test_schedule_record_reembed_queues_per_record_embed(db, scheduler_env, monkeypatch):
+    queue, _ = scheduler_env
+    seen = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: seen.append((path, tid, force))
+                        or {"status": "embedded"})
+    tid = _add_tx(db, source_name="Планерка Фонду")
+
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "queued"
+    assert queue.calls[0]["kind"] == "reembed_record"
+    assert queue.calls[0]["meta"]["transcription_id"] == tid
+    # шлях БД їде і в аргументах задачі, і в meta — саме той, що передали
+    assert queue.calls[0]["args"] == (tid, db)
+    assert queue.calls[0]["meta"]["db_path"] == db
+    # force=True обовʼязковий: пара (модель, версія) не змінилась, без нього
+    # запис вважався б уже обробленим і новий префікс не доїхав би у вектори.
+    assert seen == [(db, tid, True)]
+
+
+def test_schedule_record_reembed_defers_while_recording(db, scheduler_env, monkeypatch):
+    queue, recorder = scheduler_env
+    calls = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: calls.append(tid)
+                        or {"status": "embedded"})
+    recorder.active_session_id = "sess-live"
+    tid = _add_tx(db)
+
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "deferred"
+    assert queue.calls == [] and calls == []          # слот черги не зайнятий
+    # другий виклик під час очікування не плодить другої задачі
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "pending"
+
+    recorder.active_session_id = None
+    deadline = time.time() + 3.0
+    while not queue.calls and time.time() < deadline:
+        time.sleep(0.02)
+    assert [c["meta"]["transcription_id"] for c in queue.calls] == [tid]
+    assert calls == [tid]
+    assert tid not in reembed._pending_ids
+
+
+def test_schedule_record_reembed_skips_without_torch(db, scheduler_env, monkeypatch):
+    queue, _ = scheduler_env
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    monkeypatch.setattr(embeddings, "unavailability_reason", lambda: "torch не встановлено")
+    assert reembed.schedule_record_reembed(_add_tx(db), db_path=db) == "skipped"
+    assert queue.calls == []
+
+
+def test_schedule_record_reembed_skips_without_queue(db, scheduler_env, monkeypatch):
+    from app import state
+    monkeypatch.setattr(state, "job_queue", None, raising=False)
+    tid = _add_tx(db)
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "skipped"
+    assert tid not in reembed._pending_ids
+
+
+def test_after_meta_update_schedules_only_on_real_change(monkeypatch, db):
+    from app.services import record_meta
+
+    seen = []
+    monkeypatch.setattr(reembed, "schedule_record_reembed",
+                        lambda tid, **kw: seen.append((tid, kw)) or "queued")
+    record_meta.after_meta_update(77, changed=True, db_path=db)
+    assert seen == [(77, {"db_path": db})]
+    record_meta.after_meta_update(78, changed=False, db_path=db)
+    assert seen == [(77, {"db_path": db})]
+
+
+def test_schedule_record_reembed_requires_db_path(db, scheduler_env):
+    """Дефолту «None = бойова БД» немає: без шляху — TypeError, не тиха бойова."""
+    queue, _ = scheduler_env
+    with pytest.raises(TypeError):
+        reembed.schedule_record_reembed(_add_tx(db))
+    assert queue.calls == []
+
+
+class SlowQueue:
+    """Черга, що НЕ стартує задачу одразу — задачу запускає тест вручну."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, kind, fn, *args, meta=None, **kwargs):
+        job = FakeJob(kind, meta or {})
+        self.jobs.append((job, fn, args, kwargs))
+        return job
+
+    def run_next(self):
+        job, fn, args, kwargs = self.jobs.pop(0)
+        return fn(job, *args, **kwargs)
+
+
+def test_pending_is_released_when_job_starts_not_at_submit(db, scheduler_env, monkeypatch):
+    """Виклик, що отримав `"pending"`, покритий задачею, яка ще не читала рядок.
+
+    Id знімається з `_pending_ids` на старті тіла задачі: доки задача не
+    почалась, другий виклик отримує `"pending"` (і це правда — його правку
+    задача ще побачить), а перший виклик ПІСЛЯ старту читання дає нову задачу.
+    """
+    from app import state
+
+    queue = SlowQueue()
+    monkeypatch.setattr(state, "job_queue", queue, raising=False)
+    reads = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: reads.append((path, tid))
+                        or {"status": "embedded"})
+    tid = _add_tx(db, source_name="Планерка Фонду")
+
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "queued"
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "pending"
+    assert len(queue.jobs) == 1 and reads == []
+
+    queue.run_next()                       # задача стартувала і прочитала рядок
+    assert reads == [(db, tid)]
+    assert tid not in reembed._pending_ids
+
+    assert reembed.schedule_record_reembed(tid, db_path=db) == "queued"
+    assert len(queue.jobs) == 1

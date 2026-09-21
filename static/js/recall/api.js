@@ -136,6 +136,7 @@
     A.transcript = (id) => getJSON('/api/history/' + id);
     A.audioUrl = (id) => '/api/transcription/' + id + '/audio';
     A.exportUrl = (fmt) => '/api/export/' + fmt;
+    A.updateRecord = (id, body) => A.patch('/api/history/' + id, body);
 
     // — Ingest: YouTube → download → transcribe (lands in History/transcriptions) —
     A.models = () => getJSON('/api/models');
@@ -179,6 +180,7 @@
 
     // — Audio Library (audio_downloads): downloaded audio + saved recordings —
     A.audioDownloads = (params) => getJSON('/api/audio/downloads' + qs(params));
+    A.updateAudio = (id, body) => A.patch('/api/audio/downloads/' + id, body);
     A.audioDelete = (id) => A.del('/api/audio/downloads/' + id);
     A.audioPlay = (id) => A.post('/api/audio/play/' + id);
     A.audioExplorer = (id) => A.post('/api/audio/open-explorer/' + id);

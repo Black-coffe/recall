@@ -280,6 +280,14 @@ class SessionStore:
             mf['name'] = name
         return self.modify(session_id, _m)
 
+    def set_description(self, session_id: str, description: Optional[str]) -> dict:
+        """Опис запису (editable-title-description-02) — той самий шлях, що й
+        `set_name`; ключ 'description' відсутній у старих manifest'ах,
+        читачі беруть його через ``.get('description')``."""
+        def _m(mf: dict) -> None:
+            mf['description'] = description
+        return self.modify(session_id, _m)
+
     def update_stream_bytes(
         self,
         session_id: str,

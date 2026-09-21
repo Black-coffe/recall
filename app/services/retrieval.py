@@ -34,7 +34,7 @@ import numpy as np
 
 from app.core import settings as _settings
 from app.db.connection import get_db_connection
-from app.services import embeddings, reranker
+from app.services import embeddings, record_meta, reranker
 
 
 logger = logging.getLogger(__name__)
@@ -469,6 +469,9 @@ def _comment_entry(key: int, row, meta: dict) -> dict:
         "target_type": row["target_type"],
         "target_id": row["target_id"],
         "target_label": _target_label(row),
+        # Той самий ключ, що й у чанків транскрипту: споживач не має
+        # розгалужуватись за типом, щоб назвати джерело.
+        "display_name": _target_label(row),
         "transcription_id": row["target_id"] if row["target_type"] == "transcription" else None,
         "source_name": _target_label(row),
         "doc_type": None,
@@ -791,7 +794,7 @@ def search(db_path: str, query: str, top_k: int = 8,
             rows = conn.execute(
                 f"SELECT ch.id, ch.transcription_id, ch.chunk_index, ch.start_time, "
                 f"ch.end_time, ch.speaker, ch.text, ch.page, ch.section, "
-                f"t.source_name, t.source_type, t.doc_type, "
+                f"t.source_name, t.title, t.source_type, t.doc_type, "
                 f"t.tg_chat_id, t.tg_chat_title, t.tg_message_id, t.tg_link, t.tg_reply_to, "
                 f"t.tg_thread_id, "
                 f"COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
@@ -892,6 +895,15 @@ def search(db_path: str, query: str, top_k: int = 8,
             "chunk_id": cid,
             "transcription_id": r["transcription_id"],
             "source_name": r["source_name"],
+            # Власна назва запису (контракт C2): `source_name` лишається
+            # провенансом (імʼя файлу / превʼю TG) — його читають наявні
+            # споживачі й `why`, — а людське імʼя приїжджає ПОРУЧ окремими
+            # ключами, щоб контекст для Claude і UI називали запис так, як його
+            # назвав власник.
+            "title": r["title"],
+            "display_name": record_meta.display_name(
+                {"title": r["title"], "source_name": r["source_name"],
+                 "id": r["transcription_id"]}),
             "source_type": r["source_type"],
             "doc_type": r["doc_type"],
             "meeting_date": r["meeting_date"],

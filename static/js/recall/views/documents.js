@@ -114,6 +114,14 @@
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
+                        <label class="rc-field__label" for="rcDocTitle">Назва (необовʼязково)</label>
+                        <input class="rc-input" id="rcDocTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(st.file.name)}">
+                    </div>
+                    <div class="rc-field">
+                        <label class="rc-field__label" for="rcDocDesc">Опис (необовʼязково)</label>
+                        <textarea class="rc-textarea" id="rcDocDesc" maxlength="4000" placeholder="Короткий опис документа…"></textarea>
+                    </div>
+                    <div class="rc-field">
                         <label class="rc-field__label" for="rcDocCat">Напрямок</label>
                         <select class="rc-select rc-catsel" id="rcDocCat" data-cat-first="none">${catOpts}</select>
                     </div>
@@ -133,7 +141,7 @@
     }
 
     function setFormDisabled(ctx, disabled) {
-        ctx.mount.querySelectorAll('#rcDocCat,#rcDocStart,#rcDocBack,#rcDocClear').forEach(e => { e.disabled = disabled; });
+        ctx.mount.querySelectorAll('#rcDocTitle,#rcDocDesc,#rcDocCat,#rcDocStart,#rcDocBack,#rcDocClear').forEach(e => { e.disabled = disabled; });
     }
 
     // T5.6: XHR лишається один виклик (api.js не займаємо) — реальний прогрес
@@ -146,6 +154,10 @@
     function start(ctx, force) {
         if (!st || !st.file || st.busy || bgJob) return;
         st.category_id = (ctx.mount.querySelector('#rcDocCat') || {}).value || st.category_id || '';
+        const titleEl = ctx.mount.querySelector('#rcDocTitle');
+        const descEl = ctx.mount.querySelector('#rcDocDesc');
+        if (titleEl) st.title = titleEl.value.trim();
+        if (descEl) st.description = descEl.value.trim();
         st.busy = true;
         setFormDisabled(ctx, true);
 
@@ -160,6 +172,8 @@
         const fd = new FormData();
         fd.append('document', st.file);
         if (st.category_id) fd.append('category_id', st.category_id);
+        if (st.title) fd.append('title', st.title);
+        if (st.description) fd.append('description', st.description);
         if (force) fd.append('force', 'true');
 
         bgJob = { label };

@@ -12,8 +12,13 @@
 - **api.js** (230) — JSON-обгортки (get/post/patch/put/del), multipart-аплоад через XHR з progress.
   **SSE через `fetch`+`ReadableStream.getReader()`, НЕ EventSource** (`postSseStream()`/`sseStream()`,
   буфер по `\n\n`, парс `event:`/`data:`, abort через AbortController).
+  `A.updateRecord(id, body)` → `PATCH /api/history/<id>`, `A.updateAudio(id, body)` →
+  `PATCH /api/audio/downloads/<id>` (`editable-title-description`-05, 4.5.0).
 - **ui.js** (198) — toast, skeleton, empty/error, source-badge, категорії (модалка + глобальний
   capture-перехоплювач `.rc-catsel` на сентинелі `UI.CAT_NEW`), кеш `Recall.state.categories` (`bustCategories()`).
+  `UI.editMetaModal({title, description, titleRequired=false}) -> Promise<{title, description} | null>`
+  (`editable-title-description`-05, 4.5.0) — спільна модалка «Назва + Опис» для олівця на сторінці
+  запису, рядка Бібліотеки й картки Аудіотеки; `null` = скасовано. CSS-клас `.rc-textarea`.
 - **util.js** (110) — escape(XSS), кирилиця→ASCII слаг, parseId, формат дат/тривалості/байтів, `el()`, debounce.
 - **cmdk.js** (119) — ⌘K палітра: nav-роути + debounce-пошук транскриптів (220ms) + «Запитати архів».
 - **research_export.js** (84) — спільний SSE-драйвер для /research та картки сутності (originals 0-ток + AI-summary).
@@ -24,7 +29,7 @@
 | `/` | home | Дашборд: плитки stats, ask-box, останні записи |
 | `/library` | library | Історія: пошук + фасети (джерело/категорія/період), пагінація, bulk-категорія/видалення. **Рядок рендериться ПО ТИПУ джерела** (`rowParts()`): TG — чат+відправник у підписі й повідомлення в тілі; дзвінок — тривалість/спікери/задачі; документ — файл/сторінки. Дубль (Хвиля A) несе бейдж «дубль #N» (`t.duplicate_of`) |
 | `/audio` | audio | Аудіотека (YouTube+записи): play/explore/transcribe/delete, бейдж активної транскрипції, фільтр **«Без транскрипта»** (`?transcribed=0`) |
-| `/transcript/:slug` | transcript | Запис: 3 view (plain/segments/polished), плеєр+seek по сегменту, закладки, категорія, **таймлайн ко-пілота**, word cloud |
+| `/transcript/:slug` | transcript | Запис: 3 view (plain/segments/polished), плеєр+seek по сегменту, закладки, категорія, **таймлайн ко-пілота**, word cloud, олівець біля заголовка → `UI.editMetaModal` (перейменування пере-слагує URL, `editable-title-description`-05) |
 | `/ask` | ask | RAG-чат: `api.askStream()` (fetch+SSE), цитати-посилання, 👍/👎+замітка під відповіддю (`R.api.rateAsk(askId, rating, note)` → `POST /api/memory/ask/<id>/rate`, Хвиля A 16.09.2026 — розмітка golden-set, не «лайк») |
 | `/research` | research | Дослідження бренду: preview → originals(.md) / AI-summary |
 | `/entities`, `/entities/:id` | entities | Граф: значущі сутності (≥2 згадки) + картка (co-mentions, timeline, export) |
@@ -38,7 +43,7 @@
 | `/record` | record | Рекордер: SSE level+сегменти (fetch), setup→active→stop-name→transcribe, мега-панель ко-пілота |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v63`.** Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v64`** (`editable-title-description`-06, 4.5.0). Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas
@@ -53,6 +58,11 @@ CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуютьс�
    лишався видимим під `hidden` (порожня `.rc-bulkbar` висіла внизу Бібліотеки завжди).
 8. **Мета-рядки збирати `.filter(Boolean).join(sep)`**, НЕ хардкодити `<span class="sep">·</span>`
    між полями: у телеграма немає ні мови, ні моделі, і в рядку лишались висячі «· ·».
+9. **`display_name` замість `source_name`** (`editable-title-description`, 4.5.0): усюди, де раніше
+   читалось `t.source_name`, тепер `t.display_name || t.source_name`; виняток — рядок TG у
+   Бібліотеці, який показує `t.title`, якщо є, інакше нинішню логіку чату. Поля «Назва»/«Опис» у
+   формах `/upload`, `/youtube`, `/documents` ідуть у тому самому `FormData`, що й файл/модель;
+   рекордер шле `description` у `/api/recording/<sid>/save`.
 
 **CSS:** `static/css/recall.css` (1397) — токени (`--rc-canvas/ink/accent/src-*`), Fraunces/Inter/IBM Plex Mono, скоуп `.rc-app`.
 **Порядок завантаження:** namespace → util → api → ui → research_export → views → shell → cmdk → router.

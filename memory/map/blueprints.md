@@ -20,9 +20,21 @@ Health/робота, каталог/завантаження Whisper-модел�
 
 ## transcription.py (~1600 — найбільший) — `/api/transcribe`, `/api/history/*`, `/api/transcription/<id>/*`, `/api/export/*`
 Ядро: транскрипція file/youtube, історія, пост-обробка. `POST /api/transcribe`, `/api/transcribe/active`,
-`GET /api/history`, `/api/history/<id>`, `DELETE`, `bulk_delete`, `bulk_export`, `<id>/audio`,
+`GET /api/history`, `/api/history/<id>`, `PATCH /api/history/<id>`, `DELETE`, `bulk_delete`, `bulk_export`, `<id>/audio`,
 `<id>/segments/{merge,split}`, `<id>/{polish,summarize,sentiment,translate,topics}` (Claude SSE),
 `POST /api/export/<format>` (txt/srt/json). Залежить: text_polishing, enrichment, whisper_manager.
+`editable-title-description` (4.5.0): `GET /api/history` (список) і `GET /api/history/<id>` (деталь)
+кожен елемент несе `title`/`description`/`display_name` (`record_meta.display_name()`) поруч із
+`source_name`; `?q=` шукає і по `title`/`description` (FTS5, `transcriptions_fts` v44). `PATCH
+/api/history/<int:id>` — JSON `{"title"?: str|null, "description"?: str|null}`, жодного ключа → 400,
+не-рядок у полі → 400, довжина > `TITLE_MAX`/`DESCRIPTION_MAX` → 400, нема запису → 404, інакше 200
+`{"success": true, "record": {...,"display_name"}}`; викликає `record_meta.update_meta` →
+`record_meta.after_meta_update(..., db_path=current_app.config["DATABASE"])` (точковий re-embed при
+реальній зміні, `app/services/reembed.py`). `POST /api/transcribe` (multipart) приймає необовʼязкові
+`title`/`description` для будь-якого `source_type` (нормалізація `record_meta`, довше за стелю → 400
+до початку роботи; явне значення форми має пріоритет над копією з `audio_downloads`). Експорти
+(`/api/export/<fmt>`, `bulk_export`) використовують `display_name` у заголовку й імені файлу; payload
+без `title`/`source_name`/`id` — старий нейтральний фолбек, не `Запис #None`.
 
 ## memory.py (~673) — `/api/memory/*`
 Граф памʼяті + RAG. Категорії (CRUD/merge), `<id>/category`, `suggest-category` (k-NN), `bulk-category`,
@@ -46,11 +58,20 @@ Health/робота, каталог/завантаження Whisper-модел�
 (mic/system device + language + copilot), `<sid>/{pause,resume,stop,save,discard,state,stream(SSE)}`,
 `/recordings/{active,recovered}`. Залежить: recording_service, live_transcribe_worker, copilot_worker.
 **Gotchas:** finalize async (може >5хв на довгих); 409 якщо сесія вже активна; SSE level 10Hz; save deadline 5хв.
+`POST <sid>/save` (`editable-title-description`-02, 4.5.0) JSON `{"name": str, "description"?: str}`
+— `description` нормалізується (`record_meta`) і йде в маніфест сесії → `register_recording()` →
+`audio_downloads.description`.
 
 ## audio_library.py (~329) — `/api/audio/*`
 Аудіотека (YouTube + записи). `POST /download`, `GET /downloads` (page/filter), `DELETE /downloads/<id>`,
 `check-duplicate`, `open-explorer/<id>`, `play/<id>`. **Gotchas:** Phase 21 категорія через
 `COALESCE(transcript.category_id, audio_downloads.category_id)`; source_type=youtube|recording|file.
+`PATCH /api/audio/downloads/<int:id>` (`editable-title-description`-02/07, 4.5.0) JSON
+`{"title"?: str, "description"?: str|null}` — жоден ключ → 400, порожній `title` → 400 (нема
+фолбека, на відміну від `transcriptions.title`), нема запису → 404, інакше 200
+`{"success": true, "item": {"id","title","description"}}`. `GET /downloads` (кожен елемент) віддає
+`description` (рядок або `null`) поруч із `title` — звідти `audio.js` префілить модалку; без цього
+ключа наступний PATCH тихо стирав би збережений опис (рада, раунд 1, ask 1).
 
 ## youtube.py (~131) — `/api/youtube/*`
 `POST /info`, `POST /download` (фон, rate-limited), `GET /progress/<id>`. Залежить: youtube_pytubefix.
@@ -58,6 +79,8 @@ Health/робота, каталог/завантаження Whisper-модел�
 ## documents.py (~456) — `/api/documents/*`
 `POST /upload` (sync-parse), `<id>/reparse`, `import-folder` (фон+SSE). Дедуп по content_hash;
 OCR опц.; опис таблиць Claude. Залежить: document_parser, text_polishing.
+`POST /upload` (`editable-title-description`-02, 4.5.0) multipart приймає необовʼязкові `title`/
+`description` (нормалізація `record_meta`, валідація ДО парсингу файлу).
 
 ## telegram.py (~760) — `/api/telegram/*`
 `POST /ingest` (localhost+token), `GET /status`, `/dialogs`, `/coverage`, `/chats`, `POST /chats`,

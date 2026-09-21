@@ -1424,7 +1424,11 @@
                 <div class="rc-rec-summary rc-mono"><i class="fa-solid fa-circle-check" style="color:var(--rc-ok)"></i> Запис зупинено · ${fmt(st.elapsedSec)} · ${segs} ${segs === 1 ? 'сегмент' : 'сегментів'}</div>
                 <div class="rc-field">
                     <label class="rc-field__label" for="rcRecName">Назва запису</label>
-                    <input class="rc-input" id="rcRecName" placeholder="${U.esc(autoName || 'Запис…')}" autocomplete="off">
+                    <input class="rc-input" id="rcRecName" placeholder="${U.esc(autoName || 'Запис…')}" autocomplete="off" maxlength="200">
+                </div>
+                <div class="rc-field">
+                    <label class="rc-field__label" for="rcRecDesc">Опис (необовʼязково)</label>
+                    <textarea class="rc-textarea" id="rcRecDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
                 </div>
                 <label class="rc-check" style="margin-top:8px"><input type="checkbox" id="rcRecWantTr" checked> <span>Одразу транскрибувати (інакше — лише зберегти аудіо)</span></label>
                 <div class="rc-rec-tropts" id="rcRecTrOpts">
@@ -1455,6 +1459,7 @@
         const sid = st.sessionId;
         if (!sid) return;
         const name = (ctx.mount.querySelector('#rcRecName') || {}).value || '';
+        const description = ((ctx.mount.querySelector('#rcRecDesc') || {}).value || '').trim();
         const want = !!(ctx.mount.querySelector('#rcRecWantTr') || {}).checked;
         const model = (ctx.mount.querySelector('#rcRecModel') || {}).value || DEFAULT_MODEL;
         const lang = (ctx.mount.querySelector('#rcRecTrLang') || {}).value || 'uk';
@@ -1464,9 +1469,11 @@
         const run = ctx.mount.querySelector('#rcRecSaveRun');
         if (run) run.innerHTML = `<div class="rc-run__hint rc-mono" style="margin-top:12px"><i class="fa-solid fa-spinner fa-spin"></i> Зводжу та зберігаю запис… (для довгих записів — до хвилини)</div>`;
 
+        const savePayload = { name: name.trim() };
+        if (description) savePayload.description = description;
         let sb;
         try {
-            sb = await R.api.post('/api/recording/' + sid + '/save', { name: name.trim() });
+            sb = await R.api.post('/api/recording/' + sid + '/save', savePayload);
         } catch (err) {
             // Finalize довший за дедлайн (504) → запис усе одно авто-реєструється
             // на сервері. Не блокуємо — ведемо в Аудіотеку, де він зʼявиться.

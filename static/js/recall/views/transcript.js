@@ -48,7 +48,7 @@
         }
 
         // canonical slug fix
-        const canonical = '/transcript/' + U.slug(id, t.source_name);
+        const canonical = '/transcript/' + U.slug(id, t.display_name || t.source_name);
         if (location.pathname !== canonical) R.router.replace(canonical + location.search);
 
         paint(ctx, id, t);
@@ -70,7 +70,11 @@
                         <span>RECALL · ЗАПИС <span class="rc-id">#${id}</span></span>
                         <span>·</span>${UI.srcBadge(t.source_type)}
                     </div>
-                    <h1 class="rc-record__title">${U.esc(t.source_name || ('Запис #' + id))}</h1>
+                    <div class="rc-record__titlerow">
+                        <h1 class="rc-record__title" id="rcRecordTitle">${U.esc(t.display_name || t.source_name || ('Запис #' + id))}</h1>
+                        <button class="rc-iconbtn" id="rcMetaEditBtn" aria-label="Редагувати назву й опис" title="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
+                    </div>
+                    ${t.description ? `<p class="rc-record__desc" id="rcRecordDesc">${U.esc(t.description)}</p>` : ''}
                     ${provenanceHTML(t)}
                 </div>
                 <div class="rc-record__actions">
@@ -123,6 +127,34 @@
             ctx.mount.querySelectorAll('#rcViewToggle button').forEach(x => x.classList.toggle('is-active', x === b));
             R.router.replace(location.pathname + (mode !== 'text' ? '?view=' + mode : ''));
             renderBody(ctx, t);
+        });
+
+        // edit title/description
+        ctx.mount.querySelector('#rcMetaEditBtn').addEventListener('click', async () => {
+            const res = await UI.editMetaModal({
+                title: t.title || '',
+                description: t.description || '',
+                save: async (values) => {
+                    const r = await R.api.updateRecord(id, values);
+                    Object.assign(t, r.record || {});
+                },
+            });
+            if (!res) return;
+            const titleEl = ctx.mount.querySelector('#rcRecordTitle');
+            if (titleEl) titleEl.textContent = t.display_name || t.source_name || ('Запис #' + id);
+            let descEl = ctx.mount.querySelector('#rcRecordDesc');
+            if (t.description) {
+                if (!descEl) {
+                    descEl = U.el('p', { class: 'rc-record__desc', id: 'rcRecordDesc' });
+                    ctx.mount.querySelector('.rc-record__titlerow').insertAdjacentElement('afterend', descEl);
+                }
+                descEl.textContent = t.description;
+            } else if (descEl) {
+                descEl.remove();
+            }
+            const canonical = '/transcript/' + U.slug(id, t.display_name || t.source_name);
+            if (location.pathname !== canonical) R.router.replace(canonical + location.search);
+            UI.toast('Збережено', 'success');
         });
 
         // copy

@@ -268,6 +268,25 @@
                 doSingleDelete(ctx, id, row && row.source_name);
             });
         });
+        listEl.querySelectorAll('[data-act="edit"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const id = parseInt(btn.dataset.id, 10);
+                const row = curRows.find(r => r.id === id);
+                if (!row) return;
+                const res = await UI.editMetaModal({
+                    title: row.title || '',
+                    description: row.description || '',
+                    save: async (values) => {
+                        const r = await R.api.updateRecord(id, values);
+                        Object.assign(row, r.record || {});
+                    },
+                });
+                if (!res) return;
+                renderRows(ctx);
+                UI.toast('Збережено', 'success');
+            });
+        });
         // Коментарі: лічильники одним запитом ПІСЛЯ рендеру рядків. Не блокуємо
         // список — картка без бейджа лишається повністю робочою, а бейдж
         // доїжджає окремо (лічильники не варті затримки всієї Бібліотеки).
@@ -327,7 +346,7 @@
 
         if (src === 'telegram') {
             return {
-                title: `<span class="rc-rec__chat">${U.esc(tgChat(t))}</span>${
+                title: t.title ? U.esc(t.title) : `<span class="rc-rec__chat">${U.esc(tgChat(t))}</span>${
                     t.tg_sender ? `<span class="sep">·</span><span class="rc-rec__who">${U.esc(t.tg_sender)}</span>` : ''}`,
                 titleClass: 'rc-rec__title rc-rec__title--label',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
@@ -337,7 +356,7 @@
         }
         if (src === 'document') {
             return {
-                title: U.esc(t.original_filename || t.source_name || ('Документ #' + t.id)),
+                title: U.esc(t.display_name || t.original_filename || t.source_name || ('Документ #' + t.id)),
                 titleClass: 'rc-rec__title',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
                             t.page_count ? `<span>${t.page_count} ${U.plural(t.page_count, ['стор.', 'стор.', 'стор.'])}</span>` : '',
@@ -346,7 +365,7 @@
         }
         const dur = t.youtube_duration;
         return {
-            title: U.esc(t.source_name || ('Запис #' + t.id)),
+            title: U.esc(t.display_name || t.source_name || ('Запис #' + t.id)),
             titleClass: 'rc-rec__title',
             meta: meta([
                 UI.srcBadge(src),
@@ -360,7 +379,7 @@
     }
 
     function rowHTML(t) {
-        const href = '/transcript/' + U.slug(t.id, t.source_name);
+        const href = '/transcript/' + U.slug(t.id, t.display_name || t.source_name);
         const p = rowParts(t);
         const rail = t.youtube_thumbnail
             ? `<img class="rc-rec__thumb" src="${U.esc(t.youtube_thumbnail)}" alt="" loading="lazy">`
@@ -374,6 +393,7 @@
             ? `<a class="rc-iconbtn rc-rec__ext" href="${U.esc(t.tg_link)}" target="_blank" rel="noopener"
                   title="Відкрити у Telegram" aria-label="Відкрити у Telegram"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
         const check = selecting ? `<span class="rc-rec__check"><input type="checkbox" ${selected.has(t.id) ? 'checked' : ''} tabindex="-1"></span>` : '';
+        const edit = !selecting ? `<button class="rc-iconbtn rc-rec__edit" data-act="edit" data-id="${t.id}" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>` : '';
         const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="Видалити запис" aria-label="Видалити запис"><i class="fa-solid fa-trash"></i></button>` : '';
         return `<div class="rc-rec${selecting ? ' is-select' : ''}${selected.has(t.id) ? ' is-checked' : ''}" data-id="${t.id}" data-href="${U.esc(href)}">
             ${check}<span class="rc-rec__rail">${rail}</span>
@@ -383,7 +403,7 @@
                     ? (preview ? `<div class="rc-rec__preview rc-rec__preview--lead">${preview}</div>` : '') + `<div class="rc-rec__meta">${p.meta}</div>`
                     : `<div class="rc-rec__meta">${p.meta}</div>` + (preview ? `<div class="rc-rec__preview">${preview}</div>` : '')}
             </div>
-            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${tgLink}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
+            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${tgLink}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
         </div>`;
     }
 

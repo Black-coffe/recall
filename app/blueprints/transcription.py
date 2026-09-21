@@ -3,6 +3,7 @@
 - POST   /api/transcribe                      (file/youtube → transcript)
 - GET    /api/history                         (list з фільтрами + FTS)
 - GET    /api/history/<id>                    (get one)
+- PATCH  /api/history/<id>                    (власна назва/опис, v44)
 - DELETE /api/history/<id>                    (soft-delete one, T4.6)
 - POST   /api/history/<id>/restore            (undo soft-delete, T4.6)
 - POST   /api/history/bulk_delete             (mass, ЗАЛИШАЄТЬСЯ фізичним)
@@ -24,7 +25,7 @@ from werkzeug.utils import secure_filename
 
 from app import state
 from app.repositories import transcriptions as tx_repo
-from app.services import dedup_audio, text_polishing
+from app.services import dedup_audio, record_meta, text_polishing
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
 from app.utils.fts import sanitize_fts_query
@@ -82,6 +83,10 @@ def _empty_source_meta(source_type: str) -> dict:
         'library_audio_id': None,
         'library_recording_sid': None,
         'source_type': source_type,
+        # editable-title-description-02: копія з Аудіотеки (лише 'library'
+        # заповнює), форма (request.form title/description) має пріоритет.
+        'title': None,
+        'description': None,
     }
 
 
@@ -199,6 +204,9 @@ def resolve_library_source() -> tuple[str, str, dict]:
     inherited = (row['source_type'] if 'source_type' in row.keys() else None) or 'youtube'
     meta = _empty_source_meta(inherited)
     meta['library_audio_id'] = audio_id_int
+    # Успадковуємо власну назву/опис Аудіотеки — форма перебиває це в transcribe().
+    meta['title'] = row['title'] if 'title' in row.keys() else None
+    meta['description'] = row['description'] if 'description' in row.keys() else None
     # Phase 21: для recording зберігаємо sid → нижче лінкуємо копілот-сесію.
     if inherited == 'recording':
         meta['library_recording_sid'] = row['recording_session_id'] if 'recording_session_id' in row.keys() else None
@@ -236,6 +244,14 @@ def transcribe():
     model_name = request.form.get('model', 'base')
     language = request.form.get('language', 'uk')
 
+    # editable-title-description-02: власні title/description з форми —
+    # валідуємо ДО початку роботи резолвера (файл/завантаження/транскрипція).
+    try:
+        form_title = record_meta.normalize_title(request.form.get('title'))
+        form_description = record_meta.normalize_description(request.form.get('description'))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
     resolver = _SOURCE_RESOLVERS.get(source_type)
     if resolver is None:
         return jsonify({"success": False, "error": "Невірний тип джерела"}), 400
@@ -243,6 +259,10 @@ def transcribe():
         filepath, source_name, meta = resolver()
     except _SourceResolutionError as e:
         return jsonify(e.payload), e.status
+
+    # Форма перебиває копію з Аудіотеки (лише 'library'-джерело її несе).
+    record_title = form_title if form_title is not None else meta['title']
+    record_description = form_description if form_description is not None else meta['description']
 
     youtube_info = meta['youtube_info']
     download_id = meta['download_id']
@@ -403,8 +423,8 @@ def transcribe():
                          (source_type, source_name, source_url, youtube_id, youtube_title,
                           youtube_author, youtube_duration, youtube_thumbnail, file_path,
                           transcript_text, language, model_used, processing_time, segments,
-                          category_id, content_hash, duplicate_of)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+                          category_id, content_hash, duplicate_of, title, description)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
                 source_type, source_name,
                 youtube_info.get('original_url') if source_type == 'youtube' else None,
                 youtube_info.get('video_id') if source_type == 'youtube' else None,
@@ -414,7 +434,7 @@ def transcribe():
                 youtube_info.get('thumbnail') if source_type == 'youtube' else None,
                 filepath, result['text'], result['language'], model_name,
                 processing_time, json.dumps(result['segments']),
-                category_id, text_hash, duplicate_of,
+                category_id, text_hash, duplicate_of, record_title, record_description,
             ))
             transcription_id = c.lastrowid
             result['transcription_id'] = transcription_id
@@ -698,7 +718,10 @@ def get_history():
         # кожна форма потребує своїх полів: TG — чат/відправник/лінк, дзвінок —
         # тривалість/спікери/скільки задач, документ — сторінки/ім'я файлу.
         # Два корельовані підзапити на сторінку в 20 рядків — дешево.
-        cols = '''t.id, t.created_at, t.source_type, t.source_name, t.youtube_thumbnail,
+        # `title`/`description` (v44) — поруч із `source_name`, не замість нього:
+        # source_name лишається провенансом, display_name рахує record_meta.
+        cols = '''t.id, t.created_at, t.source_type, t.source_name, t.title, t.description,
+                       t.youtube_thumbnail,
                        t.language, t.model_used, t.processing_time, t.category_id, t.doc_type,
                        t.tg_chat_title, t.tg_sender, t.tg_link,
                        t.youtube_duration, t.youtube_author,
@@ -737,8 +760,14 @@ def get_history():
             '''
             transcriptions = c.execute(select_sql, params + [per_page, offset]).fetchall()
 
+    items = []
+    for t in transcriptions:
+        item = dict(t)
+        item['display_name'] = record_meta.display_name(item)
+        items.append(item)
+
     return jsonify({
-        'transcriptions': [dict(t) for t in transcriptions],
+        'transcriptions': items,
         'total': total,
         'page': page,
         'per_page': per_page,
@@ -795,7 +824,48 @@ def get_transcription(transcription_id):
     ]
     result['entities'] = [dict(r) for r in entity_rows]
     result['action_items'] = [dict(r) for r in action_item_rows]
+    # title/description приходять із SELECT * (v44); display_name — похідне поле.
+    result['display_name'] = record_meta.display_name(result)
     return jsonify(result)
+
+
+@transcription_bp.route('/api/history/<int:transcription_id>', methods=['PATCH'])
+def patch_transcription_meta(transcription_id):
+    """Змінити власну назву/опис запису після збереження (спека editable-title-description).
+
+    JSON ``{"title"?: str|null, "description"?: str|null}`` — міняються лише
+    передані ключі. Порожній рядок означає «прибрати» (``NULL``), а НЕ копію
+    ``source_name``: провенанс запису лишається недоторканим у будь-якому разі.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "Очікується JSON-обʼєкт"}), 400
+    if 'title' not in payload and 'description' not in payload:
+        return jsonify({"success": False,
+                        "error": "Потрібне хоча б одне поле: title або description"}), 400
+
+    kwargs = {}
+    if 'title' in payload:
+        kwargs['title'] = payload['title']
+    if 'description' in payload:
+        kwargs['description'] = payload['description']
+
+    try:
+        with _get_db() as conn:
+            record = record_meta.update_meta(conn, transcription_id, **kwargs)
+    except ValueError as e:
+        # Контрольована помилка нормалізації (довжина) — її текст писався для людини.
+        return jsonify({"success": False, "error": str(e)}), 400
+
+    if record is None:
+        return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+
+    changed = record.pop('changed', False)
+    # db_path явно від запиту (той самий, яким відкрито зʼєднання вище): без
+    # нього re-embed пішов би в Config.DATABASE і переписав чанки чужої БД.
+    record_meta.after_meta_update(transcription_id, changed=changed,
+                                  db_path=current_app.config['DATABASE'])
+    return jsonify({"success": True, "record": record})
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['DELETE'])
@@ -971,6 +1041,7 @@ def bulk_export_transcriptions():
             # (індекс по target) і в масштабі bulk-експорту незначуще проти
             # витягування самих транскриптів.
             item['comments'] = _export_comments(item['id'])
+            item['display_name'] = record_meta.display_name(item)
             export_data.append(item)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -983,7 +1054,7 @@ def bulk_export_transcriptions():
             with open(export_path, 'w', encoding='utf-8') as f:
                 for item in export_data:
                     f.write(f"\n{'='*60}\n")
-                    f.write(f"Джерело: {item['source_name']}\n")
+                    f.write(f"Джерело: {item['display_name']}\n")
                     f.write(f"Дата: {item['created_at']}\n")
                     f.write(f"Мова: {item['language']}\n")
                     f.write(f"{'='*60}\n\n")
@@ -1023,7 +1094,7 @@ def bulk_export_transcriptions():
             for idx, item in enumerate(export_data):
                 if idx > 0:
                     doc.add_page_break()
-                doc.add_heading(item['source_name'] or 'Транскрипт', level=1)
+                doc.add_heading(item['display_name'] or 'Транскрипт', level=1)
                 meta = doc.add_paragraph()
                 meta.add_run(f'Дата: {item["created_at"]}   ·   Мова: {item["language"]}').italic = True
                 for c in (item.get('comments') or []):
@@ -1077,7 +1148,7 @@ def bulk_export_transcriptions():
             export_path = os.path.join(current_app.config['TRANSCRIPTS_FOLDER'], f"bulk_export_{timestamp}.md")
             with open(export_path, 'w', encoding='utf-8') as f:
                 for item in export_data:
-                    f.write(f'# {item["source_name"]}\n\n')
+                    f.write(f'# {item["display_name"]}\n\n')
                     f.write(f'**Дата:** {item["created_at"]} · **Мова:** {item["language"]}\n\n')
                     f.write(_comments_md(item.get('comments') or []))
                     segs = item['segments']
@@ -1872,7 +1943,16 @@ def export_transcript(format):
     data = request.json
     text = data.get('text', '')
     segments = data.get('segments', [])
-    source_name = data.get('source_name', 'transcript')
+    # editable-title-description-02: заголовок у контенті та імʼя
+    # згенерованого файлу — display_name (title → source_name → «Запис #id»);
+    # поле source_name у JSON-payload лишається недоторканим (провенанс).
+    # Коли в payload нема ні title, ні source_name, ні id — беремо старий
+    # нейтральний фолбек: `display_name` дав би «Запис #None» у заголовку
+    # документа й в імені файлу.
+    if any(data.get(k) for k in ('title', 'source_name', 'id')):
+        record_display_name = record_meta.display_name(data)
+    else:
+        record_display_name = 'transcript'
     speakers_list = data.get('speakers', []) or []
 
     # Build raw_label → display_name map (Phase 10.5)
@@ -1905,7 +1985,7 @@ def export_transcript(format):
     export_comments = _export_comments(data.get('id'))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_source_name = re.sub(r'[^\w\s-]', '', source_name)
+    safe_source_name = re.sub(r'[^\w\s-]', '', record_display_name)
     safe_source_name = re.sub(r'[-\s]+', '-', safe_source_name)[:50]
 
     transcripts_dir = os.path.abspath(current_app.config['TRANSCRIPTS_FOLDER'])
@@ -1965,7 +2045,7 @@ def export_transcript(format):
             return f'{hrs:02d}:{mins:02d}:{secs:02d}' if hrs else f'{mins:02d}:{secs:02d}'
 
         with open(export_path, 'w', encoding='utf-8') as f:
-            f.write(f'# {source_name}\n\n')
+            f.write(f'# {record_display_name}\n\n')
             f.write(_comments_md(export_comments))
             if has_speakers and segments:
                 # Speaker summary
@@ -2023,7 +2103,7 @@ def export_transcript(format):
             return f'{hrs:02d}:{mins:02d}:{secs:02d}' if hrs else f'{mins:02d}:{secs:02d}'
 
         doc = Document()
-        doc.add_heading(source_name or 'Транскрипт', level=1)
+        doc.add_heading(record_display_name or 'Транскрипт', level=1)
 
         if export_comments:
             doc.add_heading('Коментарі власника', level=2)
@@ -2090,6 +2170,7 @@ def export_transcript(format):
             # бачити, що це інший шар — свідомо написане про запис, а не
             # розпізнане з нього.
             payload = dict(data)
+            payload['display_name'] = record_display_name
             if export_comments:
                 payload['comments'] = export_comments
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -2142,7 +2223,7 @@ def export_transcript(format):
         doc = SimpleDocTemplate(
             export_path, pagesize=A4,
             leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm,
-            title=source_name, author='Whisper UI',
+            title=record_display_name, author='Whisper UI',
         )
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle(
@@ -2168,7 +2249,7 @@ def export_transcript(format):
             return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         story = []
-        story.append(Paragraph(_esc(source_name), title_style))
+        story.append(Paragraph(_esc(record_display_name), title_style))
         meta_parts = [datetime.now().strftime('%Y-%m-%d %H:%M')]
         if data.get('language'):
             meta_parts.append(f"мова: {data['language']}")

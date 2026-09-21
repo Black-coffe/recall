@@ -583,6 +583,23 @@ def _prefix_date(value: Optional[str]) -> Optional[str]:
     return head if re.match(r"^\d{4}-\d{2}-\d{2}$", head) else None
 
 
+#: Опис запису (`transcriptions.description`) може бути до 4000 символів —
+#: у префікс іде лише голова: префікс повторюється в КОЖНОМУ чанку запису, і
+#: довгий опис витіснив би з вікна ембедера сам текст.
+_PREFIX_DESCRIPTION_MAX = 300
+
+
+def _prefix_description(value) -> Optional[str]:
+    """Опис одним рядком: переноси → пробіли, обрізано до 300 символів.
+    Порожнє/не-рядок → None (рядка «опис:» у префіксі просто не буде)."""
+    if not isinstance(value, str):
+        return None
+    flat = " ".join(value.split())
+    if not flat:
+        return None
+    return flat[:_PREFIX_DESCRIPTION_MAX]
+
+
 def build_context_prefix(meta: dict, chunk: dict) -> str:
     """Контекстний заголовок чанка (контракт C4): 1–2 рядки.
 
@@ -590,7 +607,8 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
     залежить від типу — напрямок (дзвінок), ``нитка: label`` (переписка),
     ``стор. N`` або секція (документ). Порожні поля просто пропускаються;
     рядка «None» не буває ніколи.
-    Рядок 2: `unit_summary_line` одиниці сенсу, якщо вона є.
+    Рядок «опис: …» (якщо власник його написав) і рядок 2:
+    `unit_summary_line` одиниці сенсу, якщо вона є.
 
     `meta` — поля ЗАПИСУ (`_load_prefix_meta`), `chunk` — поля самого чанка
     (`speaker`, `page`, `section`). Функція чиста й детермінована.
@@ -629,8 +647,15 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
     else:
         line1 = parts[0] + " " + _PREFIX_SEP.join(parts[1:])
 
+    lines = [line1]
+    description = _prefix_description(meta.get("description"))
+    if description:
+        lines.append(f"опис: {description}")
+
     summary_line = (meta.get("summary_line") or "").strip() if meta.get("summary_line") else ""
-    return f"{line1}\n{summary_line}" if summary_line else line1
+    if summary_line:
+        lines.append(summary_line)
+    return "\n".join(lines)
 
 
 def _load_prefix_meta(conn, transcription_id: int) -> dict:
@@ -641,7 +666,8 @@ def _load_prefix_meta(conn, transcription_id: int) -> dict:
     навмисно без torch/anthropic на рівні імпорту, memory
     `mcp-stdio-no-heavy-models`)."""
     row = conn.execute(
-        "SELECT t.source_type, t.source_name, t.original_filename, t.tg_chat_title, "
+        "SELECT t.source_type, t.source_name, t.title, t.description, "
+        "       t.original_filename, t.tg_chat_title, "
         "       t.meeting_date, t.created_at, t.tg_date, "
         "       cat.name AS category_name, th.label AS thread_label "
         "FROM transcriptions t "
@@ -655,11 +681,19 @@ def _load_prefix_meta(conn, transcription_id: int) -> dict:
 
     source_type = row["source_type"]
     if source_type == "telegram":
-        title = row["tg_chat_title"] or row["source_name"]
+        fallback = row["tg_chat_title"] or row["source_name"]
     elif source_type == "document":
-        title = row["source_name"] or row["original_filename"]
+        fallback = row["source_name"] or row["original_filename"]
     else:
-        title = row["source_name"]
+        fallback = row["source_name"]
+
+    # Власна назва (`transcriptions.title`, контракт C2) б'є провенанс; якщо її
+    # нема — лишається та сама логіка, що була до історії 03 (для TG це чат).
+    # Порожні обидва поля лишаються порожнім місцем у префіксі (як було), а не
+    # штучним «Запис #id», який display_name віддає для UI.
+    from app.services.record_meta import display_name as _display_name
+    title = (_display_name({"title": row["title"], "source_name": fallback})
+             if (row["title"] or fallback) else None)
 
     try:
         from app.services.summaries import unit_summary_line
@@ -672,6 +706,7 @@ def _load_prefix_meta(conn, transcription_id: int) -> dict:
     return {
         "source_type": source_type,
         "title": title,
+        "description": row["description"],
         "date": row["meeting_date"] or row["tg_date"] or row["created_at"],
         "category": row["category_name"],
         "thread_label": row["thread_label"],

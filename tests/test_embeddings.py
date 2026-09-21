@@ -593,8 +593,17 @@ def test_embed_version_roundtrip_via_env_pair(db, monkeypatch):
 def test_embed_model_and_version_come_from_env(monkeypatch):
     """Обіцянка історії: пара Qwen3 вмикається ДВОМА рядками `.env`, відкат —
     тими ж двома. Перевіряємо саме читання env на імпорті модуля (reload),
-    а не літерали: модель, версія і стиль префіксів мусять поїхати разом."""
-    original_model, original_version = embeddings.EMBED_MODEL, embeddings.EMBED_VERSION
+    а не літерали: модель, версія і стиль префіксів мусять поїхати разом.
+
+    Гейт-9 (знахідка 15): НЕ пінити "оригінал" тим, що зараз лежить у
+    `embeddings.EMBED_MODEL/EMBED_VERSION` на старті тесту — це залежить від
+    того, чи вже десь у сесії викликався `load_dotenv()` (власницький `.env`
+    несе `EMBED_VERSION=4`, дефолт коду — 2). Пінимо буквальні дефолти коду
+    (`app/services/embeddings.py`) і на кожному кроці явно керуємо env через
+    monkeypatch — незалежно від порядку збирання файлів pytest."""
+    DEFAULT_MODEL = "intfloat/multilingual-e5-large"
+    DEFAULT_VERSION = 2
+
     monkeypatch.setenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
     monkeypatch.setenv("EMBED_VERSION", "3")
     try:
@@ -603,11 +612,15 @@ def test_embed_model_and_version_come_from_env(monkeypatch):
         assert embeddings.EMBED_VERSION == 3
         assert embeddings._STYLE == "qwen3"
     finally:
-        monkeypatch.undo()
+        # Відкат — теж явними значеннями (не тим, що випадково в os.environ
+        # цієї сесії), інакше тест знову стає залежним від порядку файлів.
+        monkeypatch.setenv("EMBED_MODEL", DEFAULT_MODEL)
+        monkeypatch.setenv("EMBED_VERSION", str(DEFAULT_VERSION))
         importlib.reload(embeddings)
-    assert embeddings.EMBED_MODEL == original_model
-    assert embeddings.EMBED_VERSION == original_version
-    assert embeddings._STYLE == embeddings._style_for(original_model)
+
+    assert embeddings.EMBED_MODEL == DEFAULT_MODEL
+    assert embeddings.EMBED_VERSION == DEFAULT_VERSION
+    assert embeddings._STYLE == embeddings._style_for(DEFAULT_MODEL)
 
 
 # ============================================================
@@ -936,3 +949,88 @@ def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
     assert res["chunks"][0]["text"] == body
     assert "Барселона" not in res["chunks"][0]["text"]
     assert "context_prefix" not in res["chunks"][0]
+
+
+# ============================================================
+# editable-title-description-03: власна назва й опис у префіксі
+# ============================================================
+
+def test_context_prefix_uses_own_title_instead_of_source_name():
+    meta = {"source_type": "file", "title": "Планерка Фонду",
+            "date": "2026-09-15", "category": "Робота",
+            "description": None, "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
+    assert prefix.split("\n")[0].startswith("[дзвінок] Планерка Фонду ·")
+
+
+def test_context_prefix_description_line_is_flat_and_capped():
+    long_tail = "деталі " * 100
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "description": f"Розбір\nбюджету на жовтень. {long_tail}",
+            "summary_line": None}
+    lines = embeddings.build_context_prefix(meta, {"speaker": None}).split("\n")
+    assert lines[0] == "[дзвінок] Планерка · 2026-09-15"
+    assert lines[1].startswith("опис: Розбір бюджету на жовтень. деталі")
+    assert "\n" not in lines[1]
+    assert len(lines[1]) == len("опис: ") + embeddings._PREFIX_DESCRIPTION_MAX
+
+
+def test_context_prefix_without_description_has_no_description_line():
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "description": None, "summary_line": "Кошторис погоджено."}
+    assert embeddings.build_context_prefix(meta, {"speaker": None}).split("\n") == [
+        "[дзвінок] Планерка · 2026-09-15",
+        "Кошторис погоджено.",
+    ]
+    empty = dict(meta, description="   \n  ")
+    assert "опис" not in embeddings.build_context_prefix(empty, {})
+    assert "None" not in embeddings.build_context_prefix(empty, {})
+
+
+def test_load_prefix_meta_prefers_title_and_carries_description(db):
+    tid = _add_tx(db, "Обговорили кошторис.")
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transcriptions SET title = ?, description = ? WHERE id = ?",
+                 ("Планерка Фонду", "Розбір кошторису на жовтень", tid))
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    meta = embeddings._load_prefix_meta(conn, tid)
+    conn.close()
+    assert meta["title"] == "Планерка Фонду"
+    assert meta["description"] == "Розбір кошторису на жовтень"
+
+
+def test_load_prefix_meta_falls_back_to_chat_title_for_telegram(db):
+    """Без власної назви префікс лишається побайтово таким, як до історії 03."""
+    tid = _add_tg_tx(db, "рахунок виставили")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    meta = embeddings._load_prefix_meta(conn, tid)
+    conn.close()
+    assert meta["title"] == "Fund" and meta["description"] is None
+
+
+def test_description_only_term_is_searchable_and_result_carries_display_name(db, monkeypatch):
+    """Термін звучить ЛИШЕ в описі запису — пошук має знаходити чанк через
+    префікс, віддавати чистий текст і називати запис власною назвою."""
+    from app.services import retrieval
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    body = "домовились закрити питання до понеділка"
+    tid = _add_tx(db, body)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transcriptions SET title = ?, description = ? WHERE id = ?",
+                 ("Планерка Фонду", "Про ремонт Андріївського узвозу", tid))
+    conn.commit()
+    conn.close()
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    res = retrieval.search(db, "Андріївського", top_k=5)
+    assert [c["transcription_id"] for c in res["chunks"]] == [tid]
+    hit = res["chunks"][0]
+    assert hit["text"] == body
+    assert "Андріївського" not in hit["text"]
+    assert hit["display_name"] == "Планерка Фонду"
+    assert hit["source_name"] == "test"

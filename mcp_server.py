@@ -100,6 +100,7 @@ except ImportError:
 
 from config import Config
 from app.db.connection import get_db_connection
+from app.services import record_meta
 
 import httpx
 from fastmcp import FastMCP
@@ -498,6 +499,9 @@ def get_transcript(transcription_id: int, include_segments: bool = False) -> dic
     напрямок, summary). include_segments=True — додати посегментну розбивку з
     таймкодами/спікерами (для аудіо).
 
+    `display_name` — як запис називати людині (`title`, якщо власник його задав,
+    інакше `source_name`); `title`/`description` — сирі поля, можуть бути `null`.
+
     Для Telegram додається `thread` — уся нитка розмови, до якої належить це
     повідомлення (Волна 4.5). Окрема репліка в переписці часто нечитабельна
     («Ок», «а скільки там?»), тож без нитки відповідь довелось би вгадувати.
@@ -509,7 +513,8 @@ def get_transcript(transcription_id: int, include_segments: bool = False) -> dic
     скасовує відповідне місце транскрипту."""
     with get_db_connection(DB_PATH) as conn:
         r = conn.execute(
-            "SELECT id, created_at, source_type, source_name, language, model_used, "
+            "SELECT id, created_at, source_type, source_name, title, description, "
+            "language, model_used, "
             "category_id, meeting_date, doc_type, original_filename, page_count, "
             "summary_json, transcript_text, polished_text, segments, "
             # Провенанс Telegram: без (tg_chat_id, tg_message_id) знахідку не
@@ -534,6 +539,7 @@ def get_transcript(transcription_id: int, include_segments: bool = False) -> dic
                 thread = {**_row(th), "messages": [_row(m) for m in msgs]}
         comments = _comments_for(conn, "transcription", int(transcription_id))
     d = _row(r)
+    d["display_name"] = record_meta.display_name(d)
     if thread:
         d["thread"] = thread
     if comments:
@@ -583,8 +589,12 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
                 category_id: Optional[int] = None) -> list:
     """Останні записи архіву (id, дата, тип джерела, назва, мова, напрямок, розмір
     тексту). source_type: recording|youtube|document|telegram|file. Для огляду
-    «що є свіжого» перед точковим пошуком."""
-    sql = ("SELECT id, created_at, source_type, source_name, language, category_id, "
+    «що є свіжого» перед точковим пошуком.
+
+    `display_name` — як запис називати людині (`title`, якщо власник його задав,
+    інакше `source_name`); `title`/`description` — сирі поля, можуть бути `null`."""
+    sql = ("SELECT id, created_at, source_type, source_name, title, description, "
+           "language, category_id, "
            "doc_type, meeting_date, tg_chat_id, tg_chat_title, tg_sender, tg_message_id, "
            "length(transcript_text) AS text_len FROM transcriptions")
     where, params = [], []
@@ -596,7 +606,12 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC LIMIT ?"; params.append(min(int(limit), 200))
     with get_db_connection(DB_PATH) as conn:
-        return [_row(r) for r in conn.execute(sql, params)]
+        rows = []
+        for r in conn.execute(sql, params):
+            d = _row(r)
+            d["display_name"] = record_meta.display_name(d)
+            rows.append(d)
+        return rows
 
 
 @mcp.tool
@@ -1516,7 +1531,7 @@ def transcript_resource(transcription_id: str) -> str:
     d = get_transcript(int(transcription_id))  # reuse tool logic
     if "error" in d:
         return d["error"]
-    head = f"# {d.get('source_name')} (#{d.get('id')}, {d.get('source_type')}, {d.get('meeting_date') or d.get('created_at')})\n\n"
+    head = f"# {d.get('display_name') or d.get('source_name')} (#{d.get('id')}, {d.get('source_type')}, {d.get('meeting_date') or d.get('created_at')})\n\n"
     return head + (d.get("transcript_text") or "")
 
 

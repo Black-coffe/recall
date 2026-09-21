@@ -106,7 +106,7 @@
         answerEl.querySelectorAll('.rc-ask__cite').forEach(el => {
             el.addEventListener('click', () => {
                 const src = sources[parseInt(el.dataset.i, 10)];
-                if (src && src.transcription_id) R.router.navigate('/transcript/' + U.slug(src.transcription_id, src.source_name));
+                if (src && src.transcription_id) R.router.navigate('/transcript/' + U.slug(src.transcription_id, src.display_name || src.source_name));
             });
         });
     }
@@ -150,8 +150,8 @@
         if (!box || !sources.length) return;
         box.innerHTML = `<div class="rc-eyebrow" style="margin-bottom:8px">Джерела · ${sources.length}</div>
             <div class="rc-tags">${sources.map((s, i) =>
-                `<a class="rc-entity" href="/transcript/${U.slug(s.transcription_id, s.source_name)}">
-                    <span class="rc-entity__type">[${i + 1}]</span>${U.esc(s.source_name || ('#' + s.transcription_id))}</a>`
+                `<a class="rc-entity" href="/transcript/${U.slug(s.transcription_id, s.display_name || s.source_name)}">
+                    <span class="rc-entity__type">[${i + 1}]</span>${U.esc(s.display_name || s.source_name || ('#' + s.transcription_id))}</a>`
             ).join('')}</div>`;
     }
 

@@ -252,7 +252,10 @@ def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] =
             continue
 
         kind = "Документ" if source_type == "document" else "Мітинг"
-        head = f"[{i}] {kind} «{ch['source_name']}»"
+        # Називаємо запис так, як його назвав власник (`display_name` —
+        # `title`, інакше провенанс `source_name`): модель цитує те імʼя, яке
+        # людина бачить у списку, а не «rec_2026-09-17_final.mp3».
+        head = f"[{i}] {kind} «{ch.get('display_name') or ch['source_name']}»"
         if ch.get("meeting_date"):
             head += f" ({ch['meeting_date']})"
         if ch.get("speaker"):

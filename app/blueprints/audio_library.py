@@ -18,6 +18,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.services import record_meta
 from app.utils.youtube_id import extract_youtube_id
 
 
@@ -231,6 +232,7 @@ def get_audio_downloads():
 
     results = [{
         'id': d['id'], 'title': d['title'], 'author': d['author'],
+        'description': d['description'] if 'description' in d.keys() else None,
         'duration': d['duration'], 'thumbnail_url': d['thumbnail_url'],
         'file_path': d['file_path'], 'file_size': d['file_size'],
         'audio_quality': d['audio_quality'], 'created_at': d['created_at'],
@@ -287,6 +289,63 @@ def delete_audio_download(download_id):
         )
         conn.commit()
     return jsonify({'success': True, 'id': download_id})
+
+
+@audio_bp.route('/api/audio/downloads/<int:download_id>', methods=['PATCH'])
+def patch_audio_download(download_id):
+    """Власна назва/опис картки Аудіотеки (editable-title-description-02, контракт C3).
+
+    JSON ``{"title"?: str, "description"?: str|null}``. На відміну від PATCH
+    /api/history/<id>: ``audio_downloads.title`` — ``NOT NULL`` (провенанс
+    завжди мав назву), тому порожній/відсутній рядок тут — 400, а не «прибрати
+    в NULL». ``description`` можна очистити (``null``/порожній рядок → NULL).
+    Лише за ``id`` — не за ``youtube_id``/``file_path``.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'success': False, 'error': 'Очікується JSON-обʼєкт'}), 400
+    if 'title' not in payload and 'description' not in payload:
+        return jsonify({'success': False,
+                        'error': 'Потрібне хоча б одне поле: title або description'}), 400
+
+    updates: dict = {}
+    if 'title' in payload:
+        raw_title = payload['title']
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            return jsonify({'success': False, 'error': 'Назва не може бути порожньою'}), 400
+        try:
+            updates['title'] = record_meta.normalize_title(raw_title)
+        except ValueError as e:
+            return jsonify({'success': False, 'error': str(e)}), 400
+    if 'description' in payload:
+        try:
+            updates['description'] = record_meta.normalize_description(payload['description'])
+        except ValueError as e:
+            return jsonify({'success': False, 'error': str(e)}), 400
+
+    with _get_db() as conn:
+        c = conn.cursor()
+        row = c.execute(
+            'SELECT id, title, description FROM audio_downloads '
+            'WHERE id = ? AND deleted_at IS NULL',
+            (download_id,),
+        ).fetchone()
+        if not row:
+            return jsonify({'success': False, 'error': 'Запис не знайдено'}), 404
+
+        if updates:
+            assignments = ', '.join(f'{field} = ?' for field in updates)
+            c.execute(
+                f'UPDATE audio_downloads SET {assignments} WHERE id = ?',
+                [*updates.values(), download_id],
+            )
+            conn.commit()
+
+        item = c.execute(
+            'SELECT * FROM audio_downloads WHERE id = ?', (download_id,),
+        ).fetchone()
+
+    return jsonify({'success': True, 'item': dict(item)})
 
 
 @audio_bp.route('/api/audio/downloads/<int:download_id>/restore', methods=['POST'])

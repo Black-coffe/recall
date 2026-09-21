@@ -1720,5 +1720,83 @@ def init_database(db_path: str):
                   "контекстний заголовок чанка у вектор і BM25 (Волна B)')")
         logger.info("Міграція v43: chunks.context_prefix + перебудова chunks_fts")
 
+    # === v44: transcriptions.title/description + ці колонки в transcriptions_fts ===
+    # Спека editable-title-description, історія 01. `source_name` лишається
+    # провенансом (ім'я файлу, заголовок YouTube, превʼю TG-повідомлення) і
+    # НЕ перезаписується: власна назва живе окремою колонкою `title`, тож
+    # TG-re-persist, який оновлює `source_name`, не стирає ручне перейменування.
+    #
+    # transcriptions_fts — external content (`content='transcriptions'`), тож
+    # колонки індексу зіставляються з колонками таблиці ПО ІМЕНІ: додати
+    # колонку можна лише перестворенням віртуальної таблиці + `rebuild`
+    # (той самий патерн, що у v43 для chunks_fts). Порядок колонок збережено:
+    # `transcript_text` лишається нульовою, бо `snippet(transcriptions_fts, 0, …)`
+    # у `GET /api/history` адресує її номером.
+    # Ідемпотентність: перебудова робиться, лише якщо у FTS ще немає колонки
+    # `title` (а не лише за номером версії).
+    if current_version < 44:
+        c.execute("PRAGMA table_info(transcriptions)")
+        tx_cols = {row[1] for row in c.fetchall()}
+        if tx_cols:
+            if 'title' not in tx_cols:
+                c.execute('ALTER TABLE transcriptions ADD COLUMN title TEXT')
+            if 'description' not in tx_cols:
+                c.execute('ALTER TABLE transcriptions ADD COLUMN description TEXT')
+
+            c.execute("PRAGMA table_info(transcriptions_fts)")
+            fts_cols = {row[1] for row in c.fetchall()}
+            if fts_cols and 'title' not in fts_cols:
+                c.execute('DROP TRIGGER IF EXISTS transcriptions_ai')
+                c.execute('DROP TRIGGER IF EXISTS transcriptions_ad')
+                c.execute('DROP TRIGGER IF EXISTS transcriptions_au')
+                c.execute('DROP TABLE IF EXISTS transcriptions_fts')
+                c.execute('''
+                    CREATE VIRTUAL TABLE transcriptions_fts USING fts5(
+                        transcript_text, source_name, youtube_title, title, description,
+                        content='transcriptions',
+                        content_rowid='id',
+                        tokenize='unicode61 remove_diacritics 1'
+                    )
+                ''')
+                c.execute('''
+                    CREATE TRIGGER transcriptions_ai
+                    AFTER INSERT ON transcriptions BEGIN
+                        INSERT INTO transcriptions_fts(rowid, transcript_text, source_name,
+                                                       youtube_title, title, description)
+                        VALUES (new.id, new.transcript_text, new.source_name,
+                                new.youtube_title, new.title, new.description);
+                    END
+                ''')
+                c.execute('''
+                    CREATE TRIGGER transcriptions_ad
+                    AFTER DELETE ON transcriptions BEGIN
+                        INSERT INTO transcriptions_fts(transcriptions_fts, rowid, transcript_text,
+                                                       source_name, youtube_title, title, description)
+                        VALUES ('delete', old.id, old.transcript_text, old.source_name,
+                                old.youtube_title, old.title, old.description);
+                    END
+                ''')
+                c.execute('''
+                    CREATE TRIGGER transcriptions_au
+                    AFTER UPDATE ON transcriptions BEGIN
+                        INSERT INTO transcriptions_fts(transcriptions_fts, rowid, transcript_text,
+                                                       source_name, youtube_title, title, description)
+                        VALUES ('delete', old.id, old.transcript_text, old.source_name,
+                                old.youtube_title, old.title, old.description);
+                        INSERT INTO transcriptions_fts(rowid, transcript_text, source_name,
+                                                       youtube_title, title, description)
+                        VALUES (new.id, new.transcript_text, new.source_name,
+                                new.youtube_title, new.title, new.description);
+                    END
+                ''')
+                # Наявні рядки (у всіх title/description = NULL) мають лишитись
+                # знаходженими за source_name/текстом: rebuild перечитує таблицю.
+                c.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(44, 'transcriptions.title/description + перебудова transcriptions_fts — "
+                  "власна назва й опис запису, редаговані після збереження')")
+        logger.info("Міграція v44: transcriptions.title/description + перебудова transcriptions_fts")
+
     conn.commit()
     conn.close()

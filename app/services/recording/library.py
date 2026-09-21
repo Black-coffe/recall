@@ -56,7 +56,7 @@ def _find_existing(c, session_id: str, youtube_id: str):
     потоків з розривом у мілісекунди — див. ON CONFLICT у register_recording).
     """
     return c.execute(
-        'SELECT id, title, category_id, has_video FROM audio_downloads '
+        'SELECT id, title, description, category_id, has_video FROM audio_downloads '
         'WHERE recording_session_id = ? OR youtube_id = ? LIMIT 1',
         (session_id, youtube_id),
     ).fetchone()
@@ -115,6 +115,10 @@ def register_recording(
         or manifest.get('auto_name')
         or f'Запис {session_id[:8]}'
     )
+    # editable-title-description-02: опис несе manifest (немає окремого
+    # аргумента, як у `name` — форма стоп-екрана пише його прямо в manifest
+    # через SessionStore.set_description() до виклику register_recording()).
+    manifest_description = manifest.get('description') or None
     duration = float(manifest.get('total_duration_sec', 0.0) or 0.0)
     file_size = Path(final_mp3).stat().st_size
     youtube_id = f'recording_{session_id}'
@@ -139,17 +143,18 @@ def register_recording(
             # а переходить на існуючий рядок (гілка existing нижче).
             c.execute(
                 '''INSERT INTO audio_downloads
-                     (youtube_url, youtube_id, title, author, duration,
+                     (youtube_url, youtube_id, title, description, author, duration,
                       file_path, file_size, audio_format,
                       source_type, recording_session_id,
                       recording_segments, recording_duration_sec, category_id,
                       has_video, primary_video_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(youtube_id) DO NOTHING''',
                 (
                     f'recording://{session_id}',
                     youtube_id,
                     resolved_name,
+                    manifest_description,
                     'Локальний запис',
                     int(duration) if duration > 0 else None,
                     final_mp3,
@@ -183,6 +188,9 @@ def register_recording(
             if explicit and existing['title'] != explicit:
                 sets.append('title = ?'); vals.append(explicit)
                 resolved_name = explicit
+            existing_description = existing['description'] if 'description' in existing.keys() else None
+            if manifest_description is not None and existing_description != manifest_description:
+                sets.append('description = ?'); vals.append(manifest_description)
             existing_cat = existing['category_id'] if 'category_id' in existing.keys() else None
             if category_id is not None and existing_cat is None:
                 sets.append('category_id = ?'); vals.append(category_id)

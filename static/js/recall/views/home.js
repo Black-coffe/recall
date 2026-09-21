@@ -74,12 +74,12 @@
                 return;
             }
             box.innerHTML = rows.map(t => {
-                const href = '/transcript/' + U.slug(t.id, t.source_name);
+                const href = '/transcript/' + U.slug(t.id, t.display_name || t.source_name);
                 const thumb = t.youtube_thumbnail
                     ? `<img class="rc-rec__thumb" src="${U.esc(t.youtube_thumbnail)}" alt="" loading="lazy">`
                     : `<div class="rc-rec__icon"><i class="${U.SRC_ICON[t.source_type] || 'fa-solid fa-file'}"></i></div>`;
                 return `<div class="rc-rec" data-href="${U.esc(href)}">${thumb}
-                    <div class="rc-rec__body"><div class="rc-rec__title">${U.esc(t.source_name || ('#' + t.id))}</div>
+                    <div class="rc-rec__body"><div class="rc-rec__title">${U.esc(t.display_name || t.source_name || ('#' + t.id))}</div>
                     <div class="rc-rec__meta">${UI.srcBadge(t.source_type)}<span>${U.fmtDate(t.created_at)}</span></div></div>
                     <div class="rc-rec__aside">${UI.catChip(t.category_id, cats)}</div></div>`;
             }).join('');

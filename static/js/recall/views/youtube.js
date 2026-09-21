@@ -209,6 +209,14 @@
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
+                        <label class="rc-field__label" for="rcYtTitle">Назва (необовʼязково)</label>
+                        <input class="rc-input" id="rcYtTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(info.title || 'як у відео')}">
+                    </div>
+                    <div class="rc-field">
+                        <label class="rc-field__label" for="rcYtDesc">Опис (необовʼязково)</label>
+                        <textarea class="rc-textarea" id="rcYtDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
+                    </div>
+                    <div class="rc-field">
                         <label class="rc-field__label" for="rcYtModel">Модель розпізнавання</label>
                         <select class="rc-select" id="rcYtModel">${modelOpts}</select>
                     </div>
@@ -269,7 +277,7 @@
     }
 
     function setSettingsDisabled(ctx, disabled) {
-        ctx.mount.querySelectorAll('#rcYtModel,#rcYtLang,#rcYtCat,#rcYtDiar,#rcYtTrim,#rcYtFrom,#rcYtTo,#rcYtStart,#rcYtBack')
+        ctx.mount.querySelectorAll('#rcYtTitle,#rcYtDesc,#rcYtModel,#rcYtLang,#rcYtCat,#rcYtDiar,#rcYtTrim,#rcYtFrom,#rcYtTo,#rcYtStart,#rcYtBack')
             .forEach(e => { e.disabled = disabled; });
     }
 
@@ -280,10 +288,12 @@
         const language = (ctx.mount.querySelector('#rcYtLang') || {}).value || 'uk';
         const category_id = (ctx.mount.querySelector('#rcYtCat') || {}).value || '';
         const diarize = !!(ctx.mount.querySelector('#rcYtDiar') || {}).checked;
+        const title = ((ctx.mount.querySelector('#rcYtTitle') || {}).value || '').trim();
+        const description = ((ctx.mount.querySelector('#rcYtDesc') || {}).value || '').trim();
         let trim;
         try { trim = readTrim(); }
         catch (e) { UI.toast(e.message, 'error'); return; }
-        st.opts = { model, language, category_id, diarize, trim };
+        st.opts = { model, language, category_id, diarize, trim, title, description };
         st.busy = true;
         setSettingsDisabled(ctx, true);
 
@@ -382,6 +392,8 @@
         fd.append('language', o.language || 'uk');
         if (o.diarize) fd.append('diarize', 'true');
         if (o.category_id) fd.append('category_id', o.category_id);
+        if (o.title) fd.append('title', o.title);
+        if (o.description) fd.append('description', o.description);
 
         bgJob = { label };
         const run = ctx.mount.querySelector('#rcYtRun');

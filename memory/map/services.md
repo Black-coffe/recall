@@ -33,6 +33,20 @@
   `python -m app.services.telegram_link_repair clear-bogus-links --dry-run`. `_chat_link` у
   `telegram_listener.py` більше не вигадує посилань для приватних чатів.
 
+## Назва й опис запису (Tier 3, `editable-title-description`, 4.5.0, 21.09.2026)
+- **record_meta.py** — `TITLE_MAX=200`/`DESCRIPTION_MAX=4000`; `normalize_title()`/
+  `normalize_description()` (порожнє/`None` → `None`; не-рядок → `ValueError`; довше за
+  стелю → `ValueError`), `display_name(row) -> str` (`title` → `source_name` → `f"Запис #{id}"`),
+  `update_meta(conn, transcription_id, *, title=UNSET, description=UNSET)` (лише передані поля;
+  `changed=False` якщо значення не змінились — UPDATE не виконується), `after_meta_update(
+  transcription_id, *, changed, db_path)` (при `changed` → lazy-імпорт `reembed.
+  schedule_record_reembed(tid, db_path=db_path)`, інакше no-op). *Лише stdlib +
+  `app.db.connection` — безпечно імпортувати зі stdio-MCP (памʼятка `mcp-stdio-no-heavy-models`).
+  `source_name` — провенанс, НЕ перезаписується. Споживачі: `PATCH /api/history/<id>`,
+  `PATCH /api/audio/downloads/<id>`, `/api/transcribe`, `/api/documents/upload`,
+  `embeddings._load_prefix_meta`, `mcp_server.py` (list_recent/get_transcript/search_archive/
+  ask_archive/експорт), коментарі (`target_name`).*
+
 ## RAG (пошук + чат)
 - **embeddings.py** — модель/версія з реєстру (`EMBED_MODEL` env, дефолт лишається
   `intfloat/multilingual-e5-large`; `EMBED_VERSION` int-env, дефолт лишається `2`; Хвиля B, історія 04):
@@ -56,6 +70,11 @@
   якщо є. Вхід ембедера = `prefix + "\n" + text` (стиль моделі накладається зверху); `chunks.text`
   лишається лише текстом, `chunks.context_prefix` (v43) — окрема колонка, у цитати/експорт/нитки НЕ
   потрапляє.*
+  *`editable-title-description`-03/08 (4.5.0): рядок 1 бере назву через `record_meta.display_name()`
+  (власний `title` бʼє провенанс `source_name`), між рядком 1 і сводкою вставляється `опис: {…}`,
+  якщо `transcriptions.description` задано — обрізано до `_PREFIX_DESCRIPTION_MAX=300` символів,
+  переноси → пробіли (повторюється в КОЖНОМУ чанку запису, довгий опис витіснив би текст із вікна
+  ембедера). `_load_prefix_meta` читає `title`/`description` з `transcriptions` у тому самому SELECT.*
 - **summaries.py** (Хвиля B, історія 02) — сводка TG-нитки Claude з провенансом: `summarize_thread()`
   (один абзац ≤600 симв., превʼю кожного повідомлення в промпті, стеля `TG_SUMMARY_MAX_CHARS`=20000;
   нитка з сирим текстом <300 симв. не кличе модель — `summary_model='verbatim'`), `backfill_candidates()`/
@@ -73,6 +92,15 @@
   `optimize_chunk_index()` рівно один раз у кінці, тільки якщо `done>0`. CLI: `python -m
   app.services.reembed run --db PATH [--dry-run] [--limit N] [--yes-live]`; `is_live_db()` відмовляє
   йти по `Config.DATABASE` без `--yes-live`. Коментарі — окремим `python -m app.services.comments reindex`.
+  *`editable-title-description`-03/08 (контракт C4, 4.5.0): `schedule_record_reembed(transcription_id,
+  *, db_path: str) -> str` — точковий re-embed ОДНОГО запису після правки назви/опису (`db_path`
+  обовʼязковий keyword БЕЗ дефолту — «бойова БД за замовчуванням» переписувала б бойові чанки з
+  тестового виклику; шлях завжди від `current_app.config["DATABASE"]` того запиту, що зробив PATCH).
+  Повертає `"queued"` (у `job_queue`, kind `reembed_record`), `"deferred"` (іде живий запис —
+  `threading.Timer` повтор через `_DEFER_SECONDS`, слот черги НЕ займається), `"pending"` (id уже в
+  `_pending_ids` — друга задача не ставиться; id знімається з набору на СТАРТІ тіла задачі, до
+  читання рядка — інакше виклик, що отримав `"pending"`, міг покладатись на задачу зі старою метою),
+  `"skipped"` (mute-mode/нема черги). Викликається з `record_meta.after_meta_update`.*
 - **query_rewrite.py** (Хвиля B, історія 07, контракт C7) — `rewrite_query(question, max_variants=3,
   model=None) -> list[str]`: 1-3 альтернативних пошукових формулювання від Claude (`RAG_QUERY_REWRITE_MODEL`,
   дефолт Haiku 4.5), `[]` на порожній/односкладовий запит або будь-який збій API/JSON (best-effort,

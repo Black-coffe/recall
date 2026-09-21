@@ -51,7 +51,7 @@ from typing import Optional
 import numpy as np
 
 from app.db.connection import get_db_connection
-from app.services import embeddings
+from app.services import embeddings, record_meta
 
 
 logger = logging.getLogger(__name__)
@@ -472,7 +472,8 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
     """
     where, params = _feed_where(kind, target_type, since, search)
     sel = ", ".join("c." + f for f in _ROW_FIELDS.split(", "))
-    sql = (f"SELECT {sel}, t.source_name AS tx_name, a.title AS audio_title "
+    sql = (f"SELECT {sel}, t.source_name AS tx_name, t.title AS tx_title, "
+           f"a.title AS audio_title "
            f"FROM comments c "
            f"LEFT JOIN transcriptions t ON c.target_type = 'transcription' "
            f"AND t.id = c.target_id "
@@ -497,8 +498,17 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
     out = []
     for r in rows:
         d = _to_dict(r)
-        name = d.pop("tx_name", None) or d.pop("audio_title", None)
-        d.pop("tx_name", None); d.pop("audio_title", None)
+        tx_name = d.pop("tx_name", None)
+        tx_title = d.pop("tx_title", None)
+        audio_title = d.pop("audio_title", None)
+        if d["target_type"] == "transcription" and (tx_name is not None or tx_title is not None):
+            # editable-title-description-02: власна назва (title) перебиває
+            # source_name — display_name рахує той самий пріоритет, що й GET.
+            name = record_meta.display_name(
+                {"id": d["target_id"], "title": tx_title, "source_name": tx_name}
+            )
+        else:
+            name = tx_name or audio_title
         d["target_name"] = name or f"{d['target_type']} #{d['target_ref']}"
         out.append(d)
     return {"comments": out, "total": int(total), "by_kind": by_kind,

@@ -30,6 +30,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, g, jsonify, request, stream_with_context
 
 from app import state
+from app.services import record_meta
 from app.services.recording.service import (
     RecordingError,
     SessionConflictError,
@@ -484,6 +485,12 @@ def save_recording(session_id: str):
         return err
     data = request.get_json(silent=True) or {}
     name_input = (data.get('name') or '').strip() if isinstance(data.get('name'), str) else ''
+    # editable-title-description-02: опис стоп-екрана — валідуємо одразу,
+    # до очікування finalize.
+    try:
+        description_input = record_meta.normalize_description(data.get('description'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
     store = state.recording_service.store
     deadline = time.time() + _SAVE_FINALIZE_DEADLINE_SEC
@@ -529,6 +536,13 @@ def save_recording(session_id: str):
         store.set_name(session_id, name)
     except SessionStoreError:
         pass
+    if description_input is not None:
+        try:
+            store.set_description(session_id, description_input)
+        except SessionStoreError:
+            pass
+        else:
+            manifest['description'] = description_input
 
     # Реєстрація в audio_downloads через спільний хелпер. Ідемпотентно:
     # серверний finalize-callback вже міг авто-зареєструвати цей запис —

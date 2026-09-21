@@ -250,6 +250,7 @@
                 ${tr}
                 <button class="rc-iconbtn" data-act="play" title="Відтворити у системному плеєрі" aria-label="Відтворити"><i class="fa-solid fa-play"></i></button>
                 <button class="rc-iconbtn" data-act="explorer" title="Показати у Провіднику" aria-label="Показати у Провіднику"><i class="fa-solid fa-folder-open"></i></button>
+                <button class="rc-iconbtn" data-act="edit" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
                 <button class="rc-iconbtn rc-rec__del" data-act="delete" title="Видалити файл" aria-label="Видалити файл"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>`;
@@ -273,6 +274,21 @@
         act('explorer').addEventListener('click', async () => {
             try { await R.api.audioExplorer(d.id); }
             catch (e) { UI.toast(e.message || 'Не вдалося відкрити Провідник', 'error'); }
+        });
+        act('edit').addEventListener('click', async () => {
+            const res = await UI.editMetaModal({
+                title: d.title || '',
+                description: d.description || '',
+                titleRequired: true,
+                save: async (values) => {
+                    const r = await R.api.updateAudio(d.id, values);
+                    Object.assign(d, r.item || {});
+                },
+            });
+            if (!res) return;
+            const titleEl = row.querySelector('.rc-rec__title');
+            if (titleEl) titleEl.textContent = d.title || ('Аудіо #' + d.id);
+            UI.toast('Збережено', 'success');
         });
         act('delete').addEventListener('click', async () => {
             const ok = await UI.confirmModal({

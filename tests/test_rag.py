@@ -696,3 +696,37 @@ def test_context_without_thread_is_unchanged():
 def test_context_ignores_empty_thread():
     ctx = rag._build_context([_tg_chunk(thread={"messages": [], "label": "x"})])
     assert "домовились про оплату" in ctx
+
+
+# ============================================================
+# editable-title-description-03: запис називається власною назвою
+# ============================================================
+
+def test_build_context_names_record_by_display_name():
+    ch = {
+        "source_type": "meeting", "source_name": "rec_2026-09-17_final.mp3",
+        "title": "Планерка Фонду", "display_name": "Планерка Фонду",
+        "meeting_date": "2026-09-17", "text": "Обговорили кошторис.",
+    }
+    ctx = rag._build_context([ch])
+    assert "«Планерка Фонду»" in ctx
+    assert "rec_2026-09-17_final.mp3" not in ctx
+
+
+def test_build_context_falls_back_to_source_name_without_title():
+    ch = {"source_type": "meeting", "source_name": "Дзвінок з клієнтом",
+          "display_name": None, "text": "Обговорили бюджет."}
+    assert "«Дзвінок з клієнтом»" in rag._build_context([ch])
+
+
+def test_sources_carry_display_name(monkeypatch):
+    """`sources[]` — це ті самі чанки з retrieval, тож нові ключі доїжджають
+    до клієнта крізь order_citables без окремої правки."""
+    chunks = [{
+        "source_type": "meeting", "source_name": "rec_1.mp3",
+        "title": "Планерка Фонду", "display_name": "Планерка Фонду",
+        "transcription_id": 5, "meeting_date": "2026-09-17",
+        "text": "Обговорили кошторис.",
+    }]
+    ordered = rag.order_citables(chunks, [])
+    assert [s["display_name"] for s in ordered] == ["Планерка Фонду"]

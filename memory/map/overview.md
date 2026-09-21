@@ -10,7 +10,7 @@ Recall — це **монолітний Flask-сервер** + **2 окремі �
    `app.py` через `subprocess.Popen` (якщо `TELEGRAM_ENABLED` + є `telegram.session`).
    Контрол-API на localhost:5051; шле повідомлення назад у Flask `/api/telegram/ingest`.
 3. **`mcp_server.py`** — окремий MCP-сервер: **read-first** міст до Recall для
-   Claude Code/Desktop (32 read-only тулзів; write-поверхня прибрана у Волні 1). Stdio-конектор (**default**) спавнить сам клієнт
+   Claude Code/Desktop (35 read-only тулзів; write-поверхня прибрана у Волні 1). Stdio-конектор (**default**) спавнить сам клієнт
    (`claude mcp add`, user-scope) — окремо піднімати не треба; http+ключ — опційно.
    Гібрид: читає SQLite напряму, а записи/live/AI-дії проксіює на запущений `app.py`.
 
@@ -60,13 +60,17 @@ document/telegram/copilot/meeting_archive), `audio_downloads` (Аудіотек�
 speaker-map, `chunks`+embeddings (RAG), `categories`/`entities`/`meeting_entities`/
 `action_items`/`entity_aliases` (граф памʼяті), `segment_bookmarks`, `saved_searches`,
 `tg_monitored_chats`, `copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань
-UI+MCP), `tg_threads` (v42 — провенанс сводки нитки), `chunks.context_prefix` (v43).
+UI+MCP), `tg_threads` (v42 — провенанс сводки нитки), `chunks.context_prefix` (v43),
+`transcriptions.title`/`.description` (v44).
 Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
-(поточна **v43**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
+(поточна **v44**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
 питання/канал/скоуп/джерела/токени/вартість/оцінка власника (Хвиля A production-RAG,
 16.09.2026); v42 `tg_threads.summary_source_ids_json`/`summary_at`/`summary_model`/
 `summary_msgs` — провенанс сводки нитки; v43 `chunks.context_prefix` + перебудова
-`chunks_fts` на `(context_prefix, text)` (Хвиля B production-RAG, 17.09.2026)).
+`chunks_fts` на `(context_prefix, text)` (Хвиля B production-RAG, 17.09.2026); v44
+`transcriptions.title`/`.description` (NULL — фолбек на `source_name`, `record_meta.
+display_name()`) + перебудова `transcriptions_fts` на обидві колонки
+(`editable-title-description`, 4.5.0, 21.09.2026)).
 
 ## Windows-специфіка
 

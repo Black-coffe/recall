@@ -775,3 +775,32 @@ def test_rewrite_true_survives_missing_comment_index(db, mock_embeddings, monkey
     res = retrieval.search(db, "qqqzzz", top_k=5, rewrite=True)
     tids = {c["transcription_id"] for c in res["chunks"]}
     assert tids == {other}, "хіт варіанта мусить лишитись у видачі й без індексу коментарів"
+
+
+# ============================================================
+# editable-title-description-03: title/display_name у видачі
+# ============================================================
+
+def test_search_result_carries_title_and_display_name(db, mock_embeddings):
+    tid = _add_tx(db, "rec_2026-09-17_final.mp3", meeting_date="2026-09-17")
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transcriptions SET title = ? WHERE id = ?",
+                 ("Планерка Фонду", tid))
+    conn.commit()
+    conn.close()
+    _add_chunk(db, tid, 0, "домовились про кошторис на жовтень", [1, 0, 0, 0])
+
+    hit = retrieval.search(db, "кошторис", top_k=3)["chunks"][0]
+    assert hit["source_name"] == "rec_2026-09-17_final.mp3"   # провенанс не змінився
+    assert hit["title"] == "Планерка Фонду"
+    assert hit["display_name"] == "Планерка Фонду"
+    assert "why" in hit
+
+
+def test_search_display_name_falls_back_to_source_name(db, mock_embeddings):
+    tid = _add_tx(db, "Дзвінок з клієнтом", meeting_date="2026-09-17")
+    _add_chunk(db, tid, 0, "домовились про кошторис на жовтень", [1, 0, 0, 0])
+
+    hit = retrieval.search(db, "кошторис", top_k=3)["chunks"][0]
+    assert hit["title"] is None
+    assert hit["display_name"] == "Дзвінок з клієнтом"

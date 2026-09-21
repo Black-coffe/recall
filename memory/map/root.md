@@ -87,12 +87,17 @@ Telethon-сесію не відкрити двома клієнтами — Flas
 
 ## mcp_server.py (785)
 **Призначення:** окремий MCP-сервер — **read-first** міст до Recall для Claude Code/Desktop.
-**32 read-only тулзів**, жодного create/update/delete (стратегічне рішення власника 02.07.2026;
+**35 read-only тулзів**, жодного create/update/delete (стратегічне рішення власника 02.07.2026;
 38 write-тулзів фізично видалено у Волні 1 — карта до цього стверджувала «~80 tools, CRUD-міст»).
 Число тулзів у `about()` рахується з реєстру FastMCP (`_registered_tool_names()`), а не хардкодиться.
 **Гібрид:** 15 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, працюють БЕЗ запущеного app.py,
 серед них `grep_archive`), 17 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
 default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути torch/e5 у stdio-процес.
+`editable-title-description`-04 (4.5.0): `list_recent`/`get_transcript`/`search_archive`/
+`ask_archive` (sources), ресурс `recall://transcript/{id}` і експорт-заголовок несуть
+`display_name` поруч із `source_name`; `get_transcript`/`list_recent` додають `title`/
+`description`. Нових тулзів немає — свідоме звуження на запис: коментарний фід
+`target_name`, згадки сутностей і `research_export` лишаються на `source_name`.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
 **Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини. `ask_archive` шле

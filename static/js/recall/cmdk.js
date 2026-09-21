@@ -65,9 +65,9 @@
                 const data = await R.api.history({ search: q, per_page: 6 });
                 const recs = (data.transcriptions || []).map(t => ({
                     group: 'Записи', icon: U.SRC_ICON[t.source_type] || 'fa-file',
-                    label: t.source_name || ('Запис #' + t.id),
+                    label: t.display_name || t.source_name || ('Запис #' + t.id),
                     badge: '#' + t.id,
-                    path: '/transcript/' + U.slug(t.id, t.source_name),
+                    path: '/transcript/' + U.slug(t.id, t.display_name || t.source_name),
                 }));
                 // also offer "ask the archive: q"
                 const ask = { group: 'Дія', icon: 'fa-comments', label: 'Запитати архів: «' + q + '»',

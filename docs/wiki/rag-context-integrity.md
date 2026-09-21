@@ -2,7 +2,7 @@
 domain: rag
 tags: [retrieval, rag, dedup, ask-log, telegram, embeddings, query-rewrite]
 related: [map/services.md, map/blueprints.md, entity-graph-provenance]
-last-verified: 2026-09-17
+last-verified: 2026-09-21
 ---
 
 # RAG context: duplicates are excluded, threads are capped, order is chronological, every answer is logged
@@ -83,10 +83,14 @@ decision, `mcp-read-first-strategy`), the UI 👍/👎 in `ask.js` is the only r
 surface.
 
 **The chunk's context prefix goes into the vector and into BM25, never into a
-citation.** `app.services.embeddings.build_context_prefix(meta, chunk)` builds a
-one-or-two-line header from database fields alone — type, title/chat, date,
-speaker/author, and a directory/thread-label/page tail — plus, on a second
-line, `app.services.summaries.unit_summary_line()` if one exists. The embedder's
+citation.** `app.services.embeddings.build_context_prefix(meta, chunk)` builds a header of
+up to three lines from database fields alone: line 1 — type, title/chat, date,
+speaker/author, and a directory/thread-label/page tail; then an optional
+`опис: …` line carrying the owner's own `transcriptions.description` (flattened
+— newlines become spaces — and cut at `_PREFIX_DESCRIPTION_MAX` = 300
+characters, so a long description cannot crowd the chunk's own text out of the
+embedder's window); then `app.services.summaries.unit_summary_line()` if one
+exists. The embedder's
 input is `prefix + "\n" + text` (the model-family style from `_style_for` layers
 on top of that); `chunks.text` stays text-only. Migration v43 adds
 `chunks.context_prefix` and rebuilds `chunks_fts` to index `(context_prefix,
@@ -116,7 +120,13 @@ limit=, dry_run=)` re-runs `chunk_and_embed_transcription` for every record
 whose pair doesn't match the process's current `EMBED_MODEL`/`EMBED_VERSION`,
 then calls `enrichment.optimize_chunk_index()` exactly once at the end (only if
 something was actually rewritten) — the same FTS-fragmentation fix Wave A's
-bulk passes depend on. `reembed.is_live_db()` refuses to touch a path that
+bulk passes depend on. The point re-embed after an owner edits a title/description
+(`record_meta.after_meta_update` → `reembed.schedule_record_reembed`) takes its
+`db_path` as a **required** keyword straight from the request that made the
+edit (`current_app.config["DATABASE"]`) — there is deliberately no "`None` =
+live database" default, because that default let a test-suite PATCH against a
+temporary DB rewrite the chunks of live records with the same ids.
+`reembed.is_live_db()` refuses to touch a path that
 resolves to `Config.DATABASE` unless `--yes-live` is passed; the intended flow
 is snapshot A (current pair) → snapshot B (candidate pair) → `evals.gate` on
 both → `evals.compare` → a human decision, before the live `.env` or live DB

@@ -470,6 +470,24 @@ html, body { margin: 0; padding: 0; }
     border-color: var(--rc-accent);
     box-shadow: 0 0 0 3px var(--rc-accent-ring);
 }
+.rc-textarea {
+    padding: var(--rc-2) var(--rc-3);
+    border: 1px solid var(--rc-hairline-2);
+    border-radius: var(--rc-r-2);
+    background: var(--rc-surface);
+    color: var(--rc-ink);
+    font-family: inherit;
+    font-size: var(--rc-t-sm);
+    min-height: 5.5em;
+    resize: vertical;
+    transition: border-color var(--rc-fast), box-shadow var(--rc-fast);
+}
+.rc-textarea::placeholder { color: var(--rc-ink-3); }
+.rc-textarea:focus {
+    outline: none;
+    border-color: var(--rc-accent);
+    box-shadow: 0 0 0 3px var(--rc-accent-ring);
+}
 .rc-search {
     display: flex; align-items: center; gap: var(--rc-2);
     height: 38px; padding: 0 var(--rc-3);
@@ -661,8 +679,16 @@ html, body { margin: 0; padding: 0; }
 .rc-record__title {
     font-size: var(--rc-t-h1);
     line-height: 1.16;
-    margin-bottom: var(--rc-4);
     max-width: 30ch;
+}
+.rc-record__titlerow { display: flex; align-items: flex-start; gap: var(--rc-2); margin-bottom: var(--rc-4); }
+.rc-record__titlerow .rc-iconbtn { flex: none; margin-top: 2px; }
+.rc-record__desc {
+    color: var(--rc-ink-2);
+    font-size: var(--rc-t-sm);
+    white-space: pre-wrap;
+    margin: calc(-1 * var(--rc-3)) 0 var(--rc-4);
+    max-width: 60ch;
 }
 .rc-record__thumb {
     float: right;
@@ -1420,7 +1446,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-modal-ov { position: fixed; inset: 0; z-index: 1000; background: rgba(20, 22, 28, .42); display: flex; align-items: center; justify-content: center; padding: var(--rc-4); }
 .rc-modal { background: var(--rc-surface); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); box-shadow: 0 18px 50px rgba(20, 22, 28, .28); width: 100%; max-width: 420px; padding: var(--rc-5, 20px); }
 .rc-modal__h { font-weight: 700; font-size: var(--rc-t-md, 1.05rem); margin-bottom: var(--rc-4); display: flex; align-items: center; gap: var(--rc-2); }
-.rc-modal .rc-input, .rc-modal .rc-select { width: 100%; margin-top: var(--rc-1); }
+.rc-modal .rc-input, .rc-modal .rc-select, .rc-modal .rc-textarea { width: 100%; margin-top: var(--rc-1); }
 .rc-modal__row { display: flex; align-items: center; gap: var(--rc-3); margin-top: var(--rc-3); }
 .rc-modal__row input[type=color] { width: 40px; height: 32px; padding: 0; border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); background: none; cursor: pointer; }
 .rc-modal__err { color: var(--rc-err); font-size: var(--rc-t-xs); min-height: 1.1em; margin-top: var(--rc-2); }

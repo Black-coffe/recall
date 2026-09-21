@@ -29,7 +29,7 @@ from werkzeug.utils import secure_filename
 
 from app import state
 from app.repositories import transcriptions as tx_repo
-from app.services import document_parser, text_polishing
+from app.services import document_parser, record_meta, text_polishing
 from app.utils.files import allowed_document_file
 from app.utils.paths import safe_path_within, safe_path_within_any
 
@@ -123,9 +123,11 @@ def _find_duplicate(db_path: str, content_hash: str):
 
 
 def _persist_document(db_path: str, *, source_name: str, filepath: str, parsed: dict,
-                      category_id, parse_time: float) -> int:
+                      category_id, parse_time: float,
+                      title: str | None = None, description: str | None = None) -> int:
     """INSERT документа у transcriptions. Returns transcription_id.
-    Спільний для upload і folder-import (не залежить від request context)."""
+    Спільний для upload і folder-import (не залежить від request context).
+    `title`/`description` — уже нормалізовані викликачем (editable-title-description-02)."""
     parsed_at = datetime.now().isoformat(timespec='seconds')
     with _conn(db_path) as conn:
         c = conn.cursor()
@@ -134,13 +136,14 @@ def _persist_document(db_path: str, *, source_name: str, filepath: str, parsed: 
                (source_type, source_name, file_path, transcript_text, language,
                 model_used, processing_time, segments, category_id,
                 doc_type, original_filename, page_count, byte_size, content_hash,
-                parsed_at, parser_version, structure_json)
-               VALUES ('document', ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                parsed_at, parser_version, structure_json, title, description)
+               VALUES ('document', ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 source_name, filepath, parsed["text"], parse_time, category_id,
                 parsed["doc_type"], source_name, parsed.get("page_count"),
                 parsed.get("byte_size"), parsed.get("content_hash"),
                 parsed_at, parsed.get("parser_version"), _structure_json(parsed),
+                title, description,
             ),
         )
         tid = c.lastrowid
@@ -213,6 +216,13 @@ def upload_document():
         return jsonify({"success": False,
                         "error": f"Непідтримуваний формат. Дозволені: {supported}"}), 400
 
+    # editable-title-description-02: валідуємо ДО парсингу/збереження файлу.
+    try:
+        title = record_meta.normalize_title(request.form.get('title'))
+        description = record_meta.normalize_description(request.form.get('description'))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
     db_path = _db_path()
     force = (request.form.get('force') or '').lower() in ('1', 'true', 'yes', 'on')
     original_name = file.filename
@@ -256,6 +266,7 @@ def upload_document():
     transcription_id = _persist_document(
         db_path, source_name=original_name, filepath=filepath, parsed=parsed,
         category_id=category_id, parse_time=parse_time,
+        title=title, description=description,
     )
     state.metrics.inc("whisper_documents_total", doc_type=parsed["doc_type"])
     enrich_status = _submit_enrichment(transcription_id, db_path)
