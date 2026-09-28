@@ -16,7 +16,10 @@ EMBED_MODEL/EMBED_VERSION, стиль префіксів запиту/пасаж
 
 Волна B (історія 05): кожен чанк несе ще й КОНТЕКСТНИЙ ПРЕФІКС
 (build_context_prefix) — тип/назва/дата/спікер/напрямок|нитка|сторінка + рядок
-сводки одиниці сенсу. Префікс іде у вектор і в chunks_fts (колонка
+сводки одиниці сенсу. directions-projects-tags-03 (нова епоха, номер задається
+рядком `EMBED_VERSION` у `.env` — див. коментар біля константи): напрямок став
+ШЛЯХОМ «Напрямок → Проєкт» і друкується для ВСІХ типів записів, а під рядком 1
+зʼявився рядок «теги: …». Префікс іде у вектор і в chunks_fts (колонка
 chunks.context_prefix, міграція v43), але НЕ в chunks.text — цитати, експорт і
 нитки далі бачать лише сказане.
 """
@@ -25,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import threading
 from datetime import datetime
 from typing import Optional
@@ -32,6 +36,9 @@ from typing import Optional
 import numpy as np
 
 from app.db.connection import get_db_connection
+# Єдиний резолвер таксономії (contract C2): звідси беремо ЛИШЕ `norm_name` —
+# модуль на stdlib, без torch/flask, тож імпорт безпечний і для stdio-MCP.
+from app.services import categories as _categories
 
 
 logger = logging.getLogger(__name__)
@@ -44,9 +51,9 @@ logger = logging.getLogger(__name__)
 # потребує query:/passage: префіксів (обробляється нижче через _style_for()).
 #
 # production-rag-wave-b, історія 04: перехід на Qwen/Qwen3-Embedding-0.6B —
-# пара `EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B` + `EMBED_VERSION=3` (обидва в
-# .env), відкат — тими ж двома. Дефолти коду НЕ мінялись (Non-goals) — це
-# опційний перемикач, не новий дефолт.
+# пара `EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B` + свіжий номер епохи (обидва
+# рядками в `.env`), відкат — тими ж двома. Дефолти коду НЕ мінялись
+# (Non-goals) — це опційний перемикач, не новий дефолт.
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-large")
 EMBED_DIM = 1024  # дефолт до lazy-завантаження моделі; _apply_model_dim() підміняє на факт
 # T6.8: EMBED_VERSION тепер СТРУКТУРНО підключено до idempotency-check у
@@ -61,9 +68,38 @@ EMBED_DIM = 1024  # дефолт до lazy-завантаження моделі
 # (enrichment.list_unenriched_ids) починає віддавати ВЕСЬ архів на re-embed
 # (локально, без Claude — картка при цьому skip'ається за enrichment_version).
 #
-# EMBED_VERSION тепер конфігурується через env (реєстр app/core/settings.py,
-# дефолт лишається 2) — v3 зарезервована для пари з Qwen3-Embedding вище.
+# EMBED_VERSION конфігурується через env (реєстр app/core/settings.py) — і
+# ЛИШЕ через нього: ADR-016 («config first, code default second») тримає дефолт
+# коду на 2 незалежно від того, яку епоху зараз носить бойова БД. Наступні
+# епохи бойова проходила саме так — рядком у `.env`, дефолт коду не рухався.
+#
+# directions-projects-tags-03 знову змінює сам текст, який іде в ембедер і в
+# `chunks_fts.context_prefix`: контекстний префікс чанка несе ШЛЯХ напрямку
+# («Напрямок → Проєкт») для ВСІХ типів записів і рядок «теги: …», тож наявні
+# вектори застаріли. Нову епоху вмикає рядок у `.env` (крок 1 рунбука
+# міграції), а номер беруть СТРОГО вище пари, яку тримає бойова БД:
+#   SELECT embedding_model, embedding_version, COUNT(*)
+#     FROM transcriptions GROUP BY 1, 2;
+# Номер, який у БД уже є, форматів НЕ розділив би: пін ADR-017 («вектор ніколи
+# не змішує епохи») порівнював би старі й нові префікси як одну епоху, а
+# `reembed.run --dry-run` показав би 0. Саме це стереже PREFIX_FORMAT нижче —
+# перевірити пару ДО рестарту: `python -m app.services.reembed epoch-check`.
 EMBED_VERSION = int(os.environ.get("EMBED_VERSION", "2"))
+
+# Формат контекстного префікса чанка, який будує ЦЕЙ код (факт коду, не
+# налаштування — env для нього немає навмисно):
+#   1 — префікс до спеки directions-projects-tags (без шляху «Напрямок →
+#       Проєкт» для всіх типів і без рядка «теги: …»);
+#   2 — поточний.
+# Правило: чанки нового формату можна писати лише в епоху, яку НІХТО не
+# будував старішим форматом. Яким форматом побудовано кожну пару, памʼятає
+# таблиця `embedding_epochs` (міграція v46; усе, що існувало до неї, —
+# формат 1); перелік пар архіву — тим самим SQL, що вище:
+#   SELECT embedding_model, embedding_version, COUNT(*)
+#     FROM transcriptions GROUP BY 1, 2;
+# Збіг номера зі старішим форматом = ВІДМОВА писати (epoch_status нижче), а не
+# тихе змішування двох форматів в одній вибірці retrieval.search.
+PREFIX_FORMAT = 2
 
 # Стеля довжини послідовності. Потрібна тому, що НЕ кожна модель привозить її
 # сама: e5 має sentence_bert_config.json з max_seq_length=512, а
@@ -600,15 +636,54 @@ def _prefix_description(value) -> Optional[str]:
     return flat[:_PREFIX_DESCRIPTION_MAX]
 
 
-def build_context_prefix(meta: dict, chunk: dict) -> str:
-    """Контекстний заголовок чанка (контракт C4): 1–2 рядки.
+#: Роздільник склейки тегів у SQL (`GROUP_CONCAT(..., char(31))`) — U+001F
+#: (unit separator). Не кома: кома в назві тега дозволена і розвалила б розбір.
+_TAG_SEP = "\x1f"
 
-    Рядок 1: ``[тип] назва|чат · YYYY-MM-DD · спікер|автор · хвіст``, де хвіст
-    залежить від типу — напрямок (дзвінок), ``нитка: label`` (переписка),
-    ``стор. N`` або секція (документ). Порожні поля просто пропускаються;
-    рядка «None» не буває ніколи.
-    Рядок «опис: …» (якщо власник його написав) і рядок 2:
-    `unit_summary_line` одиниці сенсу, якщо вона є.
+#: Скільки тегів запису потрапляє у префікс і яка стеля на весь рядок.
+#: Теги повторюються в КОЖНОМУ чанку запису — довгий хвіст витіснив би з вікна
+#: ембедера сам текст, а користі після перших кількох назв майже немає.
+_PREFIX_TAGS_MAX = 5
+_PREFIX_TAGS_LINE_MAX = 60
+
+
+def _prefix_tags_line(names) -> Optional[str]:
+    """Рядок «теги: a, b, c» або None. ≤5 назв, увесь рядок ≤60 символів.
+
+    Ріжемо ПО ЦІЛОМУ ТЕГУ: обрізок назви («інвест») — не тег, а сміттєвий
+    токен, який ще й ловився б на чужі запити. `names` приходить уже
+    впорядкованим за `name_norm` (`_load_prefix_meta`).
+    """
+    if not names:
+        return None
+    line, taken = "теги:", 0
+    for raw in list(names)[:_PREFIX_TAGS_MAX]:
+        name = " ".join(str(raw).split())
+        if not name:
+            continue
+        candidate = line + (", " if taken else " ") + name
+        if len(candidate) > _PREFIX_TAGS_LINE_MAX:
+            break
+        line, taken = candidate, taken + 1
+    return line if taken else None
+
+
+def build_context_prefix(meta: dict, chunk: dict) -> str:
+    """Контекстний заголовок чанка (контракти C4 + C5): 1–4 рядки.
+
+    Рядок 1: ``[тип] назва|чат · YYYY-MM-DD · спікер|автор · Напрямок → Проєкт
+    · хвіст``, де хвіст залежить від типу — ``нитка: label`` (переписка),
+    ``стор. N`` або секція (документ), порожньо (дзвінок/файл). Порожні поля
+    просто пропускаються; рядка «None» не буває ніколи.
+
+    Шлях напрямку (directions-projects-tags-03) стоїть у рядку 1 для ВСІХ
+    типів записів, а не лише для дзвінків: саме префікси дали +10.3 п.п. на
+    бойовому, і TG/документи не мають лишатись без ієрархії. Без напрямку
+    сегмент шляху просто зникає — запис без напрямку й тегів дає префікс,
+    побайтово рівний епосі 2.
+
+    Далі: рядок «теги: a, b» (якщо теги є), рядок «опис: …» (якщо власник його
+    написав) і `unit_summary_line` одиниці сенсу, якщо вона є.
 
     `meta` — поля ЗАПИСУ (`_load_prefix_meta`), `chunk` — поля самого чанка
     (`speaker`, `page`, `section`). Функція чиста й детермінована.
@@ -627,6 +702,10 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
     _add(_prefix_date(meta.get("date")))
     _add(chunk.get("speaker"))
 
+    # Шлях напрямку — для всіх типів і ПЕРЕД хвостом типу. Для дзвінка/файлу
+    # хвоста немає, тож позиція шляху лишилась тією самою, що в епосі 2.
+    _add(meta.get("category_path") or meta.get("category"))
+
     if source_type == "telegram":
         label = (meta.get("thread_label") or "").strip() if meta.get("thread_label") else ""
         if label:
@@ -637,8 +716,6 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
             _add(f"стор. {page}")
         else:
             _add(chunk.get("section"))
-    else:
-        _add(meta.get("category"))
 
     # Перший елемент — мітка типу в дужках, вона приклеюється до назви пробілом,
     # решта — через роздільник: "[дзвінок] Назва · 2026-09-17 · Андрій · Фонд".
@@ -648,6 +725,9 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
         line1 = parts[0] + " " + _PREFIX_SEP.join(parts[1:])
 
     lines = [line1]
+    tags_line = _prefix_tags_line(meta.get("tags"))
+    if tags_line:
+        lines.append(tags_line)
     description = _prefix_description(meta.get("description"))
     if description:
         lines.append(f"опис: {description}")
@@ -659,8 +739,12 @@ def build_context_prefix(meta: dict, chunk: dict) -> str:
 
 
 def _load_prefix_meta(conn, transcription_id: int) -> dict:
-    """Поля запису для префікса одним доджойном: категорія (напрямок) і мітка
-    нитки лежать у сусідніх таблицях, а не в `transcriptions`.
+    """Поля запису для префікса одним доджойном: напрямок з його батьком,
+    теги і мітка нитки лежать у сусідніх таблицях, а не в `transcriptions`.
+
+    Один SELECT навмисно: `_load_prefix_meta` кличеться на КОЖЕН запис
+    масового re-embed (тисячі), і другий похід у БД за тегами коштував би
+    зайвий раунд на запис.
 
     Сводка береться через `summaries.unit_summary_line` (лише SQL — модуль
     навмисно без torch/anthropic на рівні імпорту, memory
@@ -669,9 +753,16 @@ def _load_prefix_meta(conn, transcription_id: int) -> dict:
         "SELECT t.source_type, t.source_name, t.title, t.description, "
         "       t.original_filename, t.tg_chat_title, "
         "       t.meeting_date, t.created_at, t.tg_date, "
-        "       cat.name AS category_name, th.label AS thread_label "
+        "       cat.name AS category_name, parent.name AS parent_name, "
+        "       th.label AS thread_label, "
+        # Роздільник — U+001F (unit separator), а не кома: у назві тега кома
+        # дозволена, і склейка комами розвалила б розбір назад.
+        "       (SELECT GROUP_CONCAT(tg.name, char(31)) FROM record_tags rt "
+        "          JOIN tags tg ON tg.id = rt.tag_id "
+        "         WHERE rt.transcription_id = t.id) AS tag_names "
         "FROM transcriptions t "
         "LEFT JOIN categories cat ON cat.id = t.category_id "
+        "LEFT JOIN categories parent ON parent.id = cat.parent_id "
         "LEFT JOIN tg_threads th ON th.id = t.tg_thread_id "
         "WHERE t.id = ?",
         (transcription_id,),
@@ -703,12 +794,31 @@ def _load_prefix_meta(conn, transcription_id: int) -> dict:
                      transcription_id, exc_info=True)
         summary_line = None
 
+    # Шлях напрямку: «Напрямок → Проєкт» для вузла-проєкта, сама назва для
+    # напрямку. Дерево рівно двох рівнів (ADR-023 §E), тож одного self-JOIN
+    # вистачає — рекурсія не потрібна.
+    category_name = row["category_name"]
+    parent_name = row["parent_name"]
+    if category_name and parent_name:
+        category_path = f"{parent_name} → {category_name}"
+    else:
+        category_path = category_name
+
+    # Порядок тегів — за `name_norm`, і рахуємо його в PYTHON: SQLite LOWER()
+    # згортає лише ASCII, тож сортування кирилиці на боці БД було б випадковим
+    # (памʼятка `plan-dictated-sql-ignored-own-memory`).
+    raw_tags = row["tag_names"] or ""
+    tags = sorted((t for t in raw_tags.split(_TAG_SEP) if t.strip()),
+                  key=_categories.norm_name)
+
     return {
         "source_type": source_type,
         "title": title,
         "description": row["description"],
         "date": row["meeting_date"] or row["tg_date"] or row["created_at"],
-        "category": row["category_name"],
+        "category": category_name,
+        "category_path": category_path,
+        "tags": tags,
         "thread_label": row["thread_label"],
         "summary_line": summary_line,
     }
@@ -727,6 +837,92 @@ _TG_CONTENTLESS = re.compile(r"^\s*\[[^\]]{0,60}\]\s*$")
 
 def _is_contentless_tg(text: str) -> bool:
     return bool(_TG_CONTENTLESS.match(text or ""))
+
+
+# ============================================================
+# Гард формату префікса (епоха ↔ формат), історія 17
+# ============================================================
+
+#: ERROR про розбіжність формату друкується РАЗ на процес: інакше кожен новий
+#: транскрипт (а на TG це десятки за годину) додавав би в лог той самий абзац.
+_epoch_mismatch_logged = False
+
+
+def _db_prefix_format(conn, model: str, version: int) -> Optional[int]:
+    """Яким форматом побудовано епоху `(model, version)` за даними БД.
+
+    `None` — епохи ще ніхто не будував. БД нижче v46 (таблиці нема) читається
+    тим самим правилом, яке кодує бекфіл міграції: пара, що вже є в
+    `transcriptions`, побудована форматом 1. Без цього кроку перевірка ДО
+    рестарту (крок 1 рунбука — саме той момент, коли v46 ще не накотилась)
+    завжди казала б «нова епоха» і не ловила б забутий `.env`.
+    """
+    try:
+        row = conn.execute(
+            "SELECT prefix_format FROM embedding_epochs WHERE model = ? AND version = ?",
+            (model, version),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        logger.debug("[embeddings] embedding_epochs немає (БД нижче v46) — "
+                     "формат епохи визначаємо за transcriptions", exc_info=True)
+        legacy = conn.execute(
+            "SELECT 1 FROM transcriptions WHERE embedding_model = ? "
+            "AND embedding_version = ? LIMIT 1", (model, version),
+        ).fetchone()
+        return 1 if legacy is not None else None
+    return int(row[0]) if row is not None else None
+
+
+def epoch_status(conn) -> dict:
+    """Чи можна писати чанки поточного `PREFIX_FORMAT` у поточну епоху.
+
+    Повертає `{"ok", "reason", "pair", "db_format"}`, де `reason`:
+
+    - ``"ok"``              — епоха вже побудована цим самим форматом;
+    - ``"format_mismatch"`` — епоха побудована ІНШИМ форматом: писати не можна,
+      бо `stale_ids` такий запис не побачить (пара збігається), і два формати
+      змішаються в одній вибірці `retrieval.search` (ADR-017);
+    - ``"new_epoch"``       — епохи ще немає, формат вільний (свіжа установка
+      або піднятий `EMBED_VERSION`).
+    """
+    pair = (EMBED_MODEL, EMBED_VERSION)
+    db_format = _db_prefix_format(conn, EMBED_MODEL, EMBED_VERSION)
+    if db_format is None:
+        reason = "new_epoch"
+    elif db_format == PREFIX_FORMAT:
+        reason = "ok"
+    else:
+        reason = "format_mismatch"
+    return {"ok": reason != "format_mismatch", "reason": reason,
+            "pair": pair, "db_format": db_format}
+
+
+def register_epoch(conn) -> None:
+    """Запамʼятати, що епоху `(EMBED_MODEL, EMBED_VERSION)` будує `PREFIX_FORMAT`.
+
+    Викликається в тій самій транзакції, що й перші чанки епохи — щоб не
+    лишилось стану «чанки нового формату є, а памʼяті про формат немає».
+    """
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO embedding_epochs (model, version, prefix_format) "
+            "VALUES (?, ?, ?)", (EMBED_MODEL, EMBED_VERSION, PREFIX_FORMAT))
+    except sqlite3.OperationalError:
+        # БД нижче v46 — міграція накотиться на старті app.py; чанки через це
+        # писати не забороняємо, але мовчати про це не можна.
+        logger.warning("[embeddings] епоху %s/v%s не зареєстровано: немає таблиці "
+                       "embedding_epochs (БД нижче v46)", EMBED_MODEL, EMBED_VERSION)
+
+
+def epoch_mismatch_message(status: dict) -> str:
+    """Один текст відмови для всіх трьох місць (письменник чанків, `reembed.run`,
+    CLI `epoch-check`) — щоб у лозі й у консолі була та сама підказка."""
+    model, version = status["pair"]
+    return (f"епоха {model} / v{version} побудована форматом префікса "
+            f"{status['db_format']}, а код пише формат {PREFIX_FORMAT}. "
+            f"Підніміть EMBED_VERSION у .env СТРОГО вище будь-якої пари, яку "
+            f"тримає БД (перевірка: python -m app.services.reembed epoch-check), "
+            f"і перезапустіть; далі масовий прохід python -m app.services.reembed run.")
 
 
 def _mark_embedded_without_chunks(db_path: str, transcription_id: int) -> None:
@@ -781,6 +977,21 @@ def chunk_and_embed_transcription(db_path: str, transcription_id: int,
         if already and not force:
             return {"status": "skipped", "transcription_id": transcription_id,
                     "reason": "already_embedded"}
+
+        # Історія 17: чанки нового формату префікса не лягають у епоху, яку
+        # будував старіший формат. Записом тут не рятуємось — запис лишається
+        # без чанків і його підбере `reembed.run` після підняття EMBED_VERSION
+        # (інакше два формати змішались би в одній вибірці retrieval.search, і
+        # `stale_ids` цього не побачив би: пара ж збігається).
+        epoch = epoch_status(conn)
+        if not epoch["ok"]:
+            global _epoch_mismatch_logged
+            if not _epoch_mismatch_logged:
+                _epoch_mismatch_logged = True
+                logger.error("[embeddings] чанки НЕ записуються: %s",
+                             epoch_mismatch_message(epoch))
+            return {"status": "epoch_mismatch", "transcription_id": transcription_id,
+                    "reason": epoch["reason"], "db_format": epoch["db_format"]}
 
         body = row["polished_text"] or row["transcript_text"] or ""
         if not body.strip():
@@ -838,6 +1049,10 @@ def chunk_and_embed_transcription(db_path: str, transcription_id: int,
 
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
+        if epoch["reason"] == "new_epoch":
+            # Та сама транзакція, що й перші чанки епохи: інакше лишився б стан
+            # «чанки нового формату є, а памʼяті про формат немає».
+            register_epoch(conn)
         c.execute("DELETE FROM chunks WHERE transcription_id = ?", (transcription_id,))
         for ch, vec in zip(chunks, vecs):
             c.execute(

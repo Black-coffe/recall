@@ -730,3 +730,76 @@ def test_sources_carry_display_name(monkeypatch):
     }]
     ordered = rag.order_citables(chunks, [])
     assert [s["display_name"] for s in ordered] == ["Планерка Фонду"]
+
+
+# ============================================================
+# directions-projects-tags-03: нові осі скоупу доїжджають у retrieval
+# ============================================================
+
+def test_answer_question_passes_tags_since_until_to_search(monkeypatch):
+    """rag нічого не переосмислює: осі йдуть у `retrieval.search` як є."""
+    captured = {}
+
+    def fake_search(db_path, q, top_k=8, category_id=None, **kw):
+        captured.update(kw)
+        captured["category_id"] = category_id
+        return {"chunks": [], "vector_available": True}
+
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+    rag.answer_question(":memory:", "питання", category_id=7,
+                        tags=["AI", "інвестори"], since="2026-09-01",
+                        until="2026-09-30")
+    assert captured["category_id"] == 7
+    assert captured["tags"] == ["AI", "інвестори"]
+    assert captured["since"] == "2026-09-01"
+    assert captured["until"] == "2026-09-30"
+
+
+def test_answer_question_without_new_axes_sends_none(monkeypatch):
+    """Старий виклик лишається старим викликом — жодного тихого звуження."""
+    captured = {}
+
+    def fake_search(db_path, q, top_k=8, category_id=None, **kw):
+        captured.update(kw)
+        return {"chunks": [], "vector_available": True}
+
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+    rag.answer_question(":memory:", "питання")
+    assert captured["tags"] is None
+    assert captured["since"] is None and captured["until"] is None
+
+
+def test_answer_question_stream_passes_tags_since_until(monkeypatch):
+    captured = {}
+
+    def fake_search(db_path, q, top_k=8, category_id=None, **kw):
+        captured.update(kw)
+        return {"chunks": [], "vector_available": True}
+
+    monkeypatch.setattr(rag.retrieval, "search", fake_search)
+    list(rag.answer_question_stream(":memory:", "питання", tags=["AI"],
+                                    since="2026-09-01", until="2026-09-30"))
+    assert captured["tags"] == ["AI"]
+    assert captured["since"] == "2026-09-01"
+    assert captured["until"] == "2026-09-30"
+
+
+def test_new_axes_do_not_change_sources_or_why(monkeypatch):
+    """`sources`/`why` — контракт S2: нові осі їх не чіпають."""
+    chunks = _sample_chunks()
+    monkeypatch.setattr(
+        rag.retrieval, "search",
+        lambda db_path, q, top_k=8, category_id=None, **kw: {
+            "chunks": chunks, "vector_available": True},
+    )
+    monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: object())
+    monkeypatch.setattr(
+        rag.text_polishing, "_stream_with_retry",
+        lambda client, timeout, request_kwargs, what="polish": FakeFinalMessage(
+            ["Відповідь."], model="claude-x", usage=FakeUsage(100, 20, 30)))
+
+    plain = rag.answer_question(":memory:", "питання")
+    tagged = rag.answer_question(":memory:", "питання", tags=["AI"],
+                                 since="2026-09-01")
+    assert tagged["sources"] == plain["sources"]
+    assert tagged["found"] == plain["found"]

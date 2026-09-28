@@ -15,7 +15,9 @@ Endpoints:
 - ``GET    /api/recording/<sid>/state``   — snapshot.
 - ``GET    /api/recording/<sid>/live-transcript`` — снапшот live-preview сегментів (RAM).
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
-- ``GET    /api/recordings/active``       — поточна active session (для reattach).
+- ``POST   /api/recording/<sid>/system-source`` — перенацілити системний звук (ADR-026 D3).
+- ``GET    /api/recording/apps``          — застосунки, що звучать зараз (C3).
+- ``GET    /api/recordings/active``       — усі живі сесії (для reattach).
 
 Якщо ``state.recording_service is None`` (RECORDING_ENABLED=False
 або ImportError) — кожен endpoint повертає 503.
@@ -31,7 +33,9 @@ from flask import Blueprint, Response, current_app, g, jsonify, request, stream_
 
 from app import state
 from app.services import record_meta
+from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
 from app.services.recording.service import (
+    NoSystemStreamError,
     RecordingError,
     SessionConflictError,
     SessionNotFoundError,
@@ -95,24 +99,32 @@ def _internal_error_response(error_code: str):
 
 def _end_copilot_for(recording_session_id: str) -> None:
     """Phase 19: завершити копілот-сесію, прив'язану до запису (якщо є).
-    М'яко — будь-яка помилка лише логується, не впливає на stop/discard запису."""
-    # Спершу зупинити фоновий топік-трекер (Крок 2), тоді закрити сесію.
-    if state.copilot_worker is not None:
-        try:
-            state.copilot_worker.stop(recording_session_id, wait=False)
-        except Exception:
-            logger.debug(
-                "copilot_worker.stop failed for %s (best-effort, не блокує stop/discard)",
-                recording_session_id, exc_info=True,
-            )
+    Делегує єдиному хелперу копілота (C6); м'яко — не впливає на stop/discard."""
+    try:
+        from app.blueprints.copilot import end_for_recording
+        end_for_recording(recording_session_id)
+    except Exception:
+        logger.warning("copilot end failed for %s", recording_session_id, exc_info=True)
+
+
+def _unsupported_spec_response(e: Exception):
+    return jsonify({
+        'success': False,
+        'error': str(e),
+        'error_code': 'UNSUPPORTED_SOURCE_SPEC',
+    }), 400
+
+
+def _copilot_active(recording_session_id: str) -> bool:
+    """Чи веде копілот цей запис (рядок copilot_sessions ще не 'ended')."""
     if state.copilot_service is None:
-        return
+        return False
     try:
         cs = state.copilot_service.get_by_recording(recording_session_id)
-        if cs and cs.get('status') != 'ended':
-            state.copilot_service.end(cs['id'])
-    except Exception as e:
-        logger.warning("copilot end failed for %s: %s", recording_session_id, e)
+    except Exception:
+        logger.debug("copilot lookup failed for %s", recording_session_id, exc_info=True)
+        return False
+    return bool(cs and cs.get('status') == 'active')
 
 
 # ---------------------------------------------------------------- devices
@@ -257,7 +269,20 @@ def start_recording():
     else:
         live_lang = None
 
-    if mic_idx is None and sys_idx is None:
+    # ADR-026 D3: system_source {mode, apps}. 'all' (або відсутній) — сьогоднішній
+    # шлях через endpoint system_device_index; include/exclude вмикають системний
+    # потік і без девайса. Невалідний spec → 400 ДО будь-якого старту.
+    sys_spec = None
+    raw_source = data.get('system_source')
+    if raw_source is not None:
+        try:
+            sys_spec = SystemSpec.from_dict(raw_source)
+        except UnsupportedSourceSpecError as e:
+            return _unsupported_spec_response(e)
+        if sys_spec.mode == 'all':
+            sys_spec = None
+
+    if mic_idx is None and sys_idx is None and sys_spec is None:
         return jsonify({
             'success': False,
             'error': 'Потрібен хоча б один з mic_device_index/system_device_index',
@@ -305,15 +330,19 @@ def start_recording():
             system_device_index=int(sys_idx) if sys_idx is not None else None,
             mic_device_name=data.get('mic_device_name'),
             system_device_name=data.get('system_device_name'),
+            system_source=sys_spec,
             video_spec=video_spec,
         )
     except SessionConflictError as e:
         return jsonify({
             'success': False,
             'error': str(e),
-            'error_code': 'SESSION_CONFLICT',
-            'active_session_id': state.recording_service.active_session_id,
+            'error_code': 'SESSION_LIMIT',
+            'active': e.active,
+            'limit': e.limit,
         }), 409
+    except UnsupportedSourceSpecError as e:
+        return _unsupported_spec_response(e)
     except RecordingError as e:
         return jsonify({
             'success': False,
@@ -335,8 +364,9 @@ def start_recording():
         try:
             manifest = state.recording_service.store.read(sid)
             streams = manifest.get('streams') or {}
-            for stream_name, idx in (('mic', mic_idx), ('system', sys_idx)):
-                if idx is None:
+            for stream_name, on in (('mic', mic_idx is not None),
+                                    ('system', sys_idx is not None or sys_spec is not None)):
+                if not on:
                     continue
                 stream_meta = streams.get(stream_name) or {}
                 pcm_path = state.recording_service.store.pcm_path(sid, stream_name)
@@ -357,9 +387,13 @@ def start_recording():
     # створюємо копілот-сесію, прив'язану до запису. На Кроці 1 це лише
     # persist налаштувань (вектор/режим/важливість/бюджет/лише-локально);
     # live-аналіз додається у наступних кроках. М'яко: помилка тут не валить старт.
+    # C6: копілот один на процес — зайнятий іншим живим записом → запис уже
+    # стартував, відповідаємо 200 з copilot.error_code='COPILOT_BUSY'.
     copilot_session_id = None
+    copilot_summary: dict = {'started': False}
     copilot_cfg = data.get('copilot')
     if copilot_cfg is not None and state.copilot_service is not None:
+        from app.services.copilot.service import CopilotBusyError
         try:
             res = state.copilot_service.start(settings=copilot_cfg, recording_session_id=sid)
             copilot_session_id = res.get('copilot_session_id')
@@ -370,8 +404,20 @@ def start_recording():
                     recording_session_id=sid,
                     config=res.get('config'),
                 )
+        except CopilotBusyError as e:
+            copilot_summary = {'started': False, 'error_code': 'COPILOT_BUSY',
+                               'owner_session_id': e.owner_session_id}
         except Exception as e:
             logger.warning("copilot start failed: %s", e)
+        if copilot_session_id:
+            copilot_summary = {'started': True}
+
+    if sys_spec is not None:
+        system_source = sys_spec.to_dict()
+    elif sys_idx is not None:
+        system_source = SystemSpec('all', device_index=int(sys_idx)).to_dict()
+    else:
+        system_source = None
 
     return jsonify({
         'success': True,
@@ -379,6 +425,8 @@ def start_recording():
         'sse_url': f'/api/recording/{sid}/stream',
         'state_url': f'/api/recording/{sid}/state',
         'copilot_session_id': copilot_session_id,
+        'copilot': copilot_summary,
+        'system_source': system_source,
         'video': video_summary,
     })
 
@@ -394,8 +442,6 @@ def pause_recording(session_id: str):
         state.recording_service.pause(session_id)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
-    except SessionConflictError as e:
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'WRONG_SESSION'}), 409
     return jsonify({'success': True, 'session_id': session_id, 'status': 'paused'})
 
 
@@ -408,9 +454,79 @@ def resume_recording(session_id: str):
         state.recording_service.resume(session_id)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
-    except SessionConflictError as e:
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'WRONG_SESSION'}), 409
     return jsonify({'success': True, 'session_id': session_id, 'status': 'recording'})
+
+
+_RETARGET_REASONS = ('user', 'auto_restore')
+
+
+@recording_bp.route('/api/recording/<session_id>/system-source', methods=['POST'])
+def set_system_source(session_id: str):
+    """Перенацілити системний звук живої сесії (ADR-026 D3, контракт C5).
+
+    Body: ``{mode: 'all'|'include'|'exclude', apps?: [exe], reason?: 'user'|'auto_restore'}``.
+    """
+    err = _require_service()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason') or 'user'
+    if reason not in _RETARGET_REASONS:
+        return jsonify({
+            'success': False,
+            'error': f"reason має бути одним із {list(_RETARGET_REASONS)}",
+            'error_code': 'INVALID_REASON',
+        }), 400
+    try:
+        spec = SystemSpec.from_dict({'mode': data.get('mode'), 'apps': data.get('apps')})
+    except UnsupportedSourceSpecError as e:
+        return _unsupported_spec_response(e)
+
+    try:
+        res = state.recording_service.retarget_system(session_id, spec, reason)
+    except SessionNotFoundError as e:
+        return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
+    except NoSystemStreamError as e:
+        return jsonify({'success': False, 'error': str(e), 'error_code': 'NO_SYSTEM_STREAM'}), 409
+    except UnsupportedSourceSpecError as e:
+        return _unsupported_spec_response(e)
+    except RecordingError as e:
+        return jsonify({'success': False, 'error': str(e), 'error_code': 'RETARGET_FAILED'}), 400
+    except Exception as e:
+        logger.exception("set_system_source crashed: %s", e)
+        return _internal_error_response('INTERNAL')
+
+    return jsonify({
+        'success': True,
+        'session_id': session_id,
+        'source': res.get('source'),
+        'event': res.get('event'),
+        'applied_on_resume': bool(res.get('applied_on_resume', False)),
+    })
+
+
+@recording_bp.route('/api/recording/apps', methods=['GET'])
+def list_apps():
+    """Застосунки, що звучать зараз, з позначкою, які живі записи їх пишуть (C3).
+    Ніколи не 500: будь-яка помилка → ``available: false``."""
+    err = _require_service()
+    if err:
+        return err
+    try:
+        from app.services.recording.app_audio import list_sounding_apps
+        live_specs = {}
+        for sid in state.recording_service.active_session_ids():
+            try:
+                live_specs[sid] = state.recording_service.get_state(sid).get('system_source') or {}
+            except Exception:
+                logger.debug("apps: state of %s unavailable", sid, exc_info=True)
+        # Сесія без системного потоку нічого з динаміків не пише.
+        live_specs = {sid: spec for sid, spec in live_specs.items() if spec}
+        result = list_sounding_apps(live_specs=live_specs)
+    except Exception as e:
+        logger.warning("list_apps degraded: %s", e, exc_info=True)
+        result = {'available': False, 'reason': 'enumeration error', 'apps': []}
+    return jsonify({'success': True, **result})
 
 
 @recording_bp.route('/api/recording/<session_id>/stop', methods=['POST'])
@@ -433,16 +549,13 @@ def stop_recording(session_id: str):
         state.recording_service.stop(session_id, name=name)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
-    except SessionConflictError as e:
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'WRONG_SESSION'}), 409
     except Exception as e:
         logger.exception("stop_recording crashed: %s", e)
         return _internal_error_response('INTERNAL')
 
-    # Phase 12.26: Stop live transcribe worker.
-    # wait=True: дожидаемся завершения worker-потоков, чтобы они не дёргали GPU
-    # (faster-whisper) в момент, когда сразу после stop пойдёт полный transcribe
-    # с переключением модели.
+    # Phase 12.26: Stop live transcribe worker ЦІЄЇ сесії (per-sid): живі воркери
+    # іншого запису не чекаємо. Повна транскрипція серіалізується з ними
+    # семафором WHISPER_MAX_PARALLEL=1 — їхня лента просто відстане (ADR-026, Ask 10).
     if state.live_transcribe_worker is not None:
         try:
             state.live_transcribe_worker.stop(session_id, wait=True)
@@ -759,20 +872,39 @@ def get_recovered_sessions():
 
 @recording_bp.route('/api/recordings/active', methods=['GET'])
 def get_active_session():
-    """Повертає поточну active session (якщо є). Використовується UI на
-    init — щоб reattach до триваючого запису."""
+    """Усі живі сесії (C5). UI на init робить reattach до кожної; MCP обирає
+    сесію явно. ``session_id``/``state`` заповнені лише коли сесія рівно одна."""
     err = _require_service()
     if err:
         return err
-    sid = state.recording_service.active_session_id
-    if sid is None:
-        return jsonify({'success': True, 'active': False, 'session_id': None})
-    snapshot = state.recording_service.get_state(sid)
+    sessions = []
+    snapshots = {}
+    for sid in state.recording_service.active_session_ids():
+        try:
+            snap = state.recording_service.get_state(sid)
+        except SessionNotFoundError:
+            continue  # зупинилась між переліком і знімком
+        snapshots[sid] = snap
+        streams = snap.get('streams') or {}
+        sessions.append({
+            'session_id': sid,
+            'state': snap,  # повний знімок /state — SPA робить reattach по ньому
+            'name': snap.get('name'),
+            'auto_name': snap.get('auto_name'),
+            'elapsed_seconds': snap.get('elapsed_seconds', 0.0),
+            'streams': {name: bool((streams.get(name) or {}).get('enabled'))
+                        for name in ('mic', 'system')},
+            'system_source': snap.get('system_source'),
+            'copilot_active': _copilot_active(sid),
+        })
+    sole = sessions[0]['session_id'] if len(sessions) == 1 else None
     return jsonify({
         'success': True,
-        'active': True,
-        'session_id': sid,
-        'state': snapshot,
+        'active': bool(sessions),
+        'count': len(sessions),
+        'sessions': sessions,
+        'session_id': sole,
+        'state': snapshots[sole] if sole else None,
     })
 
 

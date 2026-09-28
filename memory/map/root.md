@@ -11,6 +11,8 @@
 Усі singleton-и створюються тут і йдуть у `app.state.init()`.
 **Gotchas:** telegram_listener спавниться **один раз** (gate `WERKZEUG_RUN_MAIN`, інакше reloader дублює).
 SSE-публікація поза локом. `_recording_finalize_callback` кладе finalize в job_queue (non-blocking) → 'finalized' через SSE.
+`RecordingService(max_active=cfg.RECORDING_MAX_ACTIVE, app_source_factory=_app_source_factory)` (app.py:843-853);
+фабрика будує `AppAudioSource` з резолвером `session_roots(exe, fallback=resolve_root_pids)` (app.py:832-841).
 CSP тільки на HTML.
 **Профіль/headless (спек `config-registry-profiles`, S2):** при `cfg.HEADLESS` blueprint recorder
 не піднімається — `RecordingService`/`LiveTranscribeWorker`/`CopilotWorker`-гілки взагалі не
@@ -36,7 +38,7 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 визначення класу).
 **Entry points:** `get_config()`, `update_config(**kw)`, `init_directories()`.
 **Ключові прапори:** `WHISPER_BACKEND` (faster>openai), `WHISPER_MAX_PARALLEL=1`, `WHISPER_BATCH_SIZE=8`,
-`FORCE_CPU`, `RECORDING_ENABLED` (auto-detect pyaudiowpatch), `TELEGRAM_*`, `COPILOT_ENABLED`,
+`FORCE_CPU`, `RECORDING_ENABLED` (auto-detect pyaudiowpatch), `RECORDING_MAX_ACTIVE` (дефолт 2, мін 1), `TELEGRAM_*`, `COPILOT_ENABLED`,
 `LOCAL_LLM_URL`/`LOCAL_LLM_MODEL` (Ollama, напр. qwen2.5:14b-instruct-q5_K_M), `MAX_CONTENT_LENGTH=20GB`.
 `cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
 `RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
@@ -98,6 +100,14 @@ default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути
 `display_name` поруч із `source_name`; `get_transcript`/`list_recent` додають `title`/
 `description`. Нових тулзів немає — свідоме звуження на запис: коментарний фід
 `target_name`, згадки сутностей і `research_export` лишаються на `source_name`.
+**Таксономія (`directions-projects-tags`, 4.6.0, 22-23.09.2026):** `list_categories` = дерево
+`categories.list_tree` (кожен вузол несе `path` «Напрямок → Проєкт», унікальний за побудовою —
+`resolve_node(path) == id`). 9 тулзів отримали `tags`/`since`/`until`:
+`search_archive`/`list_recent`/`list_action_items`/`ask_archive`/`research_export`/
+`research_preview`/`research_summary`/`search_history` (+ `category_id` у `grep_archive`); direct-DB
+тулзи будують SQL лише через `app.services.categories.filter_sql/tags_sql/date_sql`. `ask_archive`
+приймає `project=` як голу назву АБО повний шлях — на 409 `ambiguous` з HTTP повертає ноту з
+`candidates` (перелік шляхів), не виняток. Число тулзів лишилось **35** — нових не додано.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
 **Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини. `ask_archive` шле
@@ -108,6 +118,9 @@ UI осідають в одній таблиці `ask_log` (сировина д�
 source_type=, transcription_id=, days=)` — буквальний/regex-пошук ТОЧНОГО РЯДКА по `chunks`
 (без ембеддингів, без ранжування) поверх `app.services.archive_grep.grep()`; для ID/сум/@ніків,
 які FTS5-токенізація й reranker ховають.
+**Живі тулзи (4.7.0, ADR-026 D4):** `get_active_recording` завжди несе `count`+`sessions`;
+`get_live_transcript`/`get_live_copilot`/`ask_live` без `session_id` при >1 живому записі повертають
+`error_code:'AMBIGUOUS_SESSION'` зі списком сесій і сесію не вгадують (`_resolve_live_session`).
 **Транспорти:** stdio (**default**, клієнт сам спавнить) або http (`--transport http`, Bearer).
 **Resources:** `recall://about` (огляд+статистика+карта тулзів), `recall://transcript/{id}`,
 `recall://entity/{id}`.

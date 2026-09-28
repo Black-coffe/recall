@@ -2,7 +2,7 @@
 
 **Проблема** (гриль 24.07.2026, підтверджено запитами до БД): скоуп пошуку був
 одношаровим — категорія, — і не сужував нічого. Усі 21 моніторених Telegram-чатів
-успадковували ОДНУ категорію «Робота», через що вона зібрала 78%
+успадковували ОДНУ категорію «Фонд Робота», через що вона зібрала 78%
 категоризованих фрагментів; ще більша частина архіву не мали категорії взагалі й при
 увімкненому скоупі випадали з пошуку. Копілот під час дзвінка одночасно
 змішував напрямки і сліпнув до частини архіву.
@@ -34,11 +34,12 @@ import json
 import logging
 import re
 import sys
-import unicodedata
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 from app.db.connection import get_db_connection
+from app.services import categories
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,9 @@ KNN_MIN_CONFIDENCE = 0.6
 _claude_warned = False
 
 
-def _norm_name(name: str) -> str:
-    """Ключ унікальності категорій — той самий, що у міграції v20 (casefold)."""
-    return unicodedata.normalize("NFKC", (name or "").strip()).casefold()
-
-
-def _slugify(name: str) -> str:
-    s = unicodedata.normalize("NFKD", (name or "").strip().lower())
-    s = re.sub(r"[^\w\s-]", "", s, flags=re.UNICODE)
-    return re.sub(r"[\s_]+", "-", s).strip("-") or "cat"
+# Нормалізатор імені і парсер шляху живуть в одному місці — `categories`
+# (`norm_name`/`name_keys`/`split_path`). Власні копії тут уже розходились із
+# ним (v47: стиск повторних пробілів був лише в `categories`).
 
 
 # ============================================================
@@ -72,8 +67,12 @@ def _slugify(name: str) -> str:
 def load_mapping(path: str = DEFAULT_MAPPING_PATH) -> list[dict]:
     """Карта чат→напрямок з локального JSON.
 
-    Формат: {"chats": [{"chat_id": -100…, "title": "…", "category": "NOVA"}, …]}
+    Формат: {"chats": [{"chat_id": -100…, "title": "…", "category": "NOVA",
+             "parent"?: "Фонд Робота", "tags"?: ["AI"]}, …]}
     `title` — лише для читабельності діффу, зіставлення йде за `chat_id`.
+    `parent` (контракт C7, опційно) — напрямок, під яким `category` живе як
+    проєкт; без нього `category` лишається напрямком (як і раніше). `tags`
+    (опційно) — теги, які успадкує вся історія чату через `apply_chat_tags`.
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     chats = data.get("chats") if isinstance(data, dict) else data
@@ -83,77 +82,201 @@ def load_mapping(path: str = DEFAULT_MAPPING_PATH) -> list[dict]:
     for row in chats:
         if row.get("chat_id") is None or not (row.get("category") or "").strip():
             raise ValueError(f"{path}: рядок без chat_id/category: {row}")
+        parent = (row.get("parent") or "").strip() or None
+        tags = [str(t).strip() for t in (row.get("tags") or []) if str(t).strip()]
         out.append({"chat_id": int(row["chat_id"]), "title": row.get("title") or "",
-                    "category": row["category"].strip()})
+                    "category": row["category"].strip(), "parent": parent, "tags": tags})
     return out
 
 
-def _ensure_categories(conn, names: list[str], *, dry_run: bool) -> dict[str, Optional[int]]:
-    """Назва напрямку → id. Відсутні створює (idempotent за name_norm)."""
-    existing = {}
-    for r in conn.execute("SELECT id, name, name_norm FROM categories"):
-        existing[r["name_norm"] or _norm_name(r["name"])] = r["id"]
-    order_row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM categories").fetchone()
-    next_order = (order_row["m"] or 0) + 1
+def _find_direction(conn, name: str) -> Optional[dict]:
+    """Напрямок (вузол верхнього рівня) із такою назвою або None.
 
-    resolved: dict[str, Optional[int]] = {}
-    for name in dict.fromkeys(names):
-        key = _norm_name(name)
-        if key in existing:
-            resolved[name] = existing[key]
+    Шукає САМЕ серед напрямків, а не через `resolve_node`: між собою вони
+    унікальні навіть після v47, тож однойменний проєкт чужого напрямку не має
+    робити рядок карти чатів неоднозначним."""
+    key = categories.norm_name(name)
+    for r in conn.execute("SELECT id, name, name_norm FROM categories "
+                          "WHERE parent_id IS NULL").fetchall():
+        if key in categories.name_keys(r["name"], r["name_norm"]):
+            return categories.get_category(conn, r["id"])
+    return None
+
+
+def _find_child(conn, parent_id: int, name: str) -> Optional[dict]:
+    """Проєкт із такою назвою САМЕ під цим батьком або None."""
+    key = categories.norm_name(name)
+    for r in conn.execute("SELECT id, name, name_norm FROM categories WHERE parent_id = ?",
+                          (int(parent_id),)).fetchall():
+        if key in categories.name_keys(r["name"], r["name_norm"]):
+            return {"id": r["id"], "parent_id": int(parent_id)}
+    return None
+
+
+def _row_key(row: dict) -> tuple[str, str]:
+    """Ключ рядка карти чатів — **пара** `(norm(parent), norm(category))`.
+
+    Гола `category` ключем бути не може з v47: два рядки
+    `{"Маркетинг", parent: "Фонд Робота"}` і `{"Маркетинг", parent:
+    "Фріланс"}` — це ДВА різні вузли, а спільний кеш за іменем звів би їх в
+    один і привʼязав обидва чати до першого (історія другого поїхала б у чужий
+    напрямок мовчки)."""
+    return (categories.norm_name(row.get("parent") or ""),
+            categories.norm_name(row["category"]))
+
+
+def _target_path(row: dict) -> str:
+    """Куди рядок карти цілиться: «Батько → Категорія» або гола назва."""
+    parent = (row.get("parent") or "").strip()
+    return f"{parent} {categories.PATH_SEP} {row['category']}" if parent else row["category"]
+
+
+def _create_node(conn, created: list, name: str,
+                 parent: Optional[tuple[int, str]] = None) -> int:
+    """Створити вузол у транзакції проходу і записати створення в `created`.
+
+    `categories_created` — це журнал ФАКТИЧНИХ створень цього проходу, а не
+    окремо виведений план: `--dry-run` виконує той самий код і відкочується,
+    тож превʼю не може розійтись із реальним прогоном (історія 26 — три раунди
+    поспіль окрема гілка плану розходилась то за нотою `namesake`, то за
+    порядком рядків). `namesake` — шляхи вузлів, які вже носять цю назву
+    деінде (включно зі створеними раніше в цьому ж проході): не помилка (тезки
+    дозволені, ADR §E), але саме те, що людина мусить побачити ДО прогону на
+    живому архіві."""
+    parent_id, parent_name = parent if parent else (None, None)
+    key = categories.norm_name(name)
+    namesake = [categories.node_path(conn, r["id"]) for r in conn.execute(
+        "SELECT id, name, name_norm FROM categories").fetchall()
+        if key in categories.name_keys(r["name"], r["name_norm"])]
+    node_id = categories.create_category(conn, name, parent_id=parent_id,
+                                         commit=False)["id"]
+    created.append({
+        "path": f"{parent_name} {categories.PATH_SEP} {name}" if parent_name else name,
+        "namesake": namesake,
+        "note": ("тезка існує: " + ", ".join(f"«{p}»" for p in namesake)
+                 if namesake else None)})
+    return node_id
+
+
+def _ensure_categories(conn, mapping: list[dict], *, ambiguous: dict, created: list
+                       ) -> dict[tuple[str, str], Optional[int]]:
+    """Пара `(parent, category)` → id вузла (контракт **C7**).
+
+    Пише в транзакцію викликача (`commit=False`) — завершує її
+    `apply_chat_categories`: `commit()` або, у `--dry-run`, `rollback()`.
+
+    Порядок резолву **детермінований і не залежить від порядку рядків карти**:
+
+    1. спершу всі рядки з `parent`: напрямок створюється за потреби,
+       `category` шукається **серед дітей саме цього батька** і створюється
+       там, якщо її немає. Такий рядок ніколи не reparent-ить чужий вузол і
+       ніколи не буває `ambiguous` — він адресує вузол парою;
+    2. потім голі рядки — через `categories.resolve_node` по дереву, що вже
+       включає створення кроку 1. Тож `[{Маркетинг, parent: Фонд}, {Маркетинг}]`
+       у будь-якому порядку дає той самий результат: голий рядок бачить
+       «Фонд → Маркетинг» як єдиний збіг. Нема збігу — створюється напрямок;
+       кілька (а напрямку-тезки нема) — рядок пропускається (`None` + запис у
+       `ambiguous[_row_key] = {category, candidates}`), бо «перший збіг» тут
+       означає приписати всю історію чату навмання обраному напрямку.
+
+    Ключ резолву, кешу і `ambiguous` — ПАРА (`_row_key`), а не гола
+    `category`: два рядки з однією назвою під різними батьками — це два вузли,
+    і рядок, що чисто розвʼязався парою, не відхиляється через голого тезку.
+    """
+    resolved: dict[tuple[str, str], Optional[int]] = {}
+    parent_ids: dict[str, int] = {}
+
+    # 1) Рядки з parent.
+    for m in mapping:
+        if not m.get("parent"):
             continue
-        if dry_run:
-            resolved[name] = None            # ще не існує — покажемо як «створити»
+        key = _row_key(m)
+        if key in resolved:
             continue
-        cur = conn.execute(
-            "INSERT INTO categories (name, slug, sort_order, name_norm) VALUES (?, ?, ?, ?)",
-            (name, _slugify(name), next_order, key))
-        next_order += 1
-        existing[key] = cur.lastrowid
-        resolved[name] = cur.lastrowid
+        pkey, name, parent_name = key[0], m["category"], m["parent"]
+        if pkey not in parent_ids:
+            node = _find_direction(conn, parent_name)
+            parent_ids[pkey] = (node["id"] if node else
+                                _create_node(conn, created, parent_name))
+        pid = parent_ids[pkey]
+        child = _find_child(conn, pid, name)
+        resolved[key] = (child["id"] if child else
+                         _create_node(conn, created, name,
+                                      (pid, categories.get_category(conn, pid)["name"])))
+
+    # 2) Голі рядки — по дереву, що вже містить створення кроку 1.
+    for m in mapping:
+        if m.get("parent"):
+            continue
+        key = _row_key(m)
+        if key in resolved:
+            continue
+        name = m["category"]
+        try:
+            match = categories.resolve_node(conn, name)
+        except categories.CategoryError as exc:
+            if exc.code != "ambiguous":
+                raise
+            ambiguous[key] = {"category": name, "candidates": list(exc.candidates)}
+            resolved[key] = None
+            continue
+        resolved[key] = match if match is not None else _create_node(conn, created, name)
     return resolved
 
 
 def apply_chat_categories(db_path: str, *, mapping_path: str = DEFAULT_MAPPING_PATH,
                           dry_run: bool = False) -> dict:
-    """Розкласти Telegram-чати по напрямках: створити відсутні категорії,
-    прив'язати чат у `tg_monitored_chats` і перерозмітити його історію.
+    """Розкласти Telegram-чати по напрямках/проєктах і тегах (контракт **C7**):
+    створити відсутню таксономію, прив'язати чат у `tg_monitored_chats`,
+    перерозмітити його історію через `categories.set_category` і застосувати
+    теги чату через `categories.apply_chat_tags`. Після `commit` — точковий
+    re-embed усіх записів, чий префікс змінився.
 
-    Ідемпотентно: повторний прохід нічого не змінює. Записи інших джерел
-    (дзвінки/файли) НЕ чіпає — у них своя розмітка (`label_uncategorized`).
+    **Один писальний шлях (історія 26).** `dry_run` НЕ має власної гілки: прохід
+    виконує рівно той самий код на тому самому зʼєднанні (письменники з
+    `commit=False`) і закінчується `rollback()` замість `commit()`, без
+    планування re-embed. Усе, що друкує превʼю, — це те, що зробив прохід, тож
+    `stats` dry-run і реального однакові (крім `reembed_scheduled`).
+
+    Ідемпотентно: повторний прохід нічого не змінює (і не кличе re-embed).
+    Записи інших джерел (дзвінки/файли) НЕ чіпає — у них своя розмітка
+    (`label_uncategorized`).
     """
     mapping = load_mapping(mapping_path)
     stats = {"chats": len(mapping), "categories_created": [], "chats_bound": 0,
-             "chats_inserted": 0, "records_recategorized": 0, "per_chat": []}
+             "chats_inserted": 0, "records_recategorized": 0, "tags_applied": 0,
+             "ambiguous": [], "per_chat": []}
+    changed_ids: set[int] = set()
+    ambiguous: dict[tuple[str, str], dict] = {}
 
     with get_db_connection(db_path) as conn:
-        before = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM categories")}
-        cat_ids = _ensure_categories(conn, [m["category"] for m in mapping], dry_run=dry_run)
-        stats["categories_created"] = sorted(
-            {m["category"] for m in mapping if _norm_name(m["category"])
-             not in {_norm_name(n) for n in before.values()}})
+        created: list[dict] = []
+        cat_ids = _ensure_categories(conn, mapping, ambiguous=ambiguous, created=created)
+        stats["ambiguous"] = [ambiguous[k] for k in sorted(ambiguous)]
+        stats["categories_created"] = created
 
         for m in mapping:
-            cid, cat_id = m["chat_id"], cat_ids.get(m["category"])
+            key = _row_key(m)
+            cid, cat_id, tags = m["chat_id"], cat_ids.get(key), m.get("tags") or []
             row = conn.execute(
                 "SELECT enabled, category_id FROM tg_monitored_chats WHERE chat_id = ?",
                 (cid,)).fetchone()
-            n_wrong = conn.execute(
-                "SELECT COUNT(*) AS n FROM transcriptions WHERE source_type = 'telegram' "
-                "AND tg_chat_id = ? AND deleted_at IS NULL "
-                "AND (category_id IS NULL OR category_id <> COALESCE(?, -1))",
-                (cid, cat_id)).fetchone()["n"]
-            stats["per_chat"].append({
-                "title": m["title"], "category": m["category"],
-                "monitored": bool(row), "records_to_move": n_wrong})
-            if dry_run:
-                # Превʼю має рахувати те саме, що зробить реальний прохід:
-                # інакше «0 привʼязок» у dry-run виглядає як «нічого не зміниться».
-                stats["records_recategorized"] += n_wrong
-                if row is None:
-                    stats["chats_inserted"] += 1
-                elif row["category_id"] != cat_id:
-                    stats["chats_bound"] += 1
+            # Нота називає ЦІЛЬОВИЙ ШЛЯХ, а не голу назву: після v47 «Акмекорп»
+            # у превʼю не відрізнити від «Фонд Робота → Акмекорп», а це два
+            # різні вузли і два різні місця, куди поїде історія чату.
+            target = (categories.node_path(conn, cat_id) if cat_id
+                      else _target_path(m))
+            row_stat = {
+                "title": m["title"], "category": m["category"], "parent": m.get("parent"),
+                "tags": tags, "monitored": bool(row), "records_to_move": 0,
+                "note": f"ціль: «{target}»"}
+            stats["per_chat"].append(row_stat)
+            if key in ambiguous:
+                # Ні в dry-run, ні в реальному проході: інакше `cat_id=None`
+                # зняв би з чату напрямок, який людина ставила руками.
+                row_stat["note"] = (
+                    "неоднозначно, вкажіть parent: "
+                    + ", ".join(f"«{p}»" for p in ambiguous[key]["candidates"]))
                 continue
 
             if row is None:
@@ -169,15 +292,31 @@ def apply_chat_categories(db_path: str, *, mapping_path: str = DEFAULT_MAPPING_P
                              (cat_id, cid))
                 stats["chats_bound"] += 1
 
-            cur = conn.execute(
-                "UPDATE transcriptions SET category_id = ? WHERE source_type = 'telegram' "
-                "AND tg_chat_id = ? AND deleted_at IS NULL "
-                "AND (category_id IS NULL OR category_id <> ?)", (cat_id, cid, cat_id))
-            stats["records_recategorized"] += cur.rowcount
-        if not dry_run:
+            record_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM transcriptions WHERE source_type = 'telegram' "
+                "AND tg_chat_id = ? AND deleted_at IS NULL", (cid,)).fetchall()]
+            changed_cat = categories.set_category(conn, record_ids, cat_id, commit=False)
+            changed_ids.update(changed_cat)
+            row_stat["records_to_move"] = len(changed_cat)
+            stats["records_recategorized"] += len(changed_cat)
+
+            changed_tags = categories.apply_chat_tags(conn, cid, tags, commit=False)
+            changed_ids.update(changed_tags)
+            stats["tags_applied"] += len(changed_tags)
+        # Єдина розвилка dry-run — кінець транзакції (і re-embed нижче).
+        if dry_run:
+            conn.rollback()
+        else:
             conn.commit()
+
+    if not dry_run and changed_ids:
+        from app.services import reembed
+        reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
+                                         reason="apply-chats")
+    stats["reembed_scheduled"] = len(changed_ids) if not dry_run else 0
     logger.info("apply_chat_categories: chats=%(chats)s bound=%(chats_bound)s "
-                "inserted=%(chats_inserted)s records=%(records_recategorized)s", stats)
+                "inserted=%(chats_inserted)s records=%(records_recategorized)s "
+                "tags=%(tags_applied)s", stats)
     return stats
 
 
@@ -191,10 +330,22 @@ def _title_matchers(conn) -> list[tuple[int, str, "re.Pattern"]]:
 
     Назви записів у власника вже містять напрямок («NOVA я та Микола по
     маркетингу»), і це детермінований сигнал, сильніший за k-NN.
+
+    v47: назва, що сидить більше ніж на одному вузлі («Маркетинг» під двома
+    напрямками), матчера не отримує взагалі. Детермінований сигнал тут — це
+    назва, яка вказує РІВНО на один вузол; з двома кандидатами вибір був би
+    монеткою, а монетка сильнішою за k-NN не буває.
     """
+    rows = conn.execute("SELECT id, name FROM categories").fetchall()
+    seen: dict[str, int] = defaultdict(int)
+    for r in rows:
+        seen[categories.norm_name(r["name"])] += 1
+
     out = []
-    for r in conn.execute("SELECT id, name FROM categories"):
+    for r in rows:
         name = (r["name"] or "").strip()
+        if seen[categories.norm_name(name)] > 1:
+            continue
         tokens = [t for t in re.split(r"[\s/|,]+", name) if len(t) >= 3
                   and t.lower() not in _TITLE_STOPWORDS]
         if not tokens:
@@ -208,7 +359,7 @@ def _title_matchers(conn) -> list[tuple[int, str, "re.Pattern"]]:
 def _prior_correct(candidates: list[dict], sizes: dict[int, int]) -> list[dict]:
     """Прибрати перекос k-NN у бік найбільшої категорії.
 
-    Сусідів у «Робота» більше просто тому, що записів там у рази більше,
+    Сусідів у «Фонд Робота» більше просто тому, що записів там у рази більше,
     тож голосування за сирими скорами стягує туди все підряд (перевірено: дзвінок
     з NOVA у назві отримував «Фонд» з 0.625).
 
@@ -228,19 +379,86 @@ def _prior_correct(candidates: list[dict], sizes: dict[int, int]) -> list[dict]:
     return sorted(rescored, key=lambda c: -c["score"])
 
 
-def _ask_claude_category(title: str, excerpt: str, cats: list[tuple[int, str]]) -> Optional[int]:
+def _category_paths(conn) -> list[tuple[int, str]]:
+    """Усі вузли дерева як `(id, "Напрямок → Проєкт"|"Напрямок")` (контракт C7).
+
+    Кандидат-проєкт дозволений нарівні з напрямком — заявка «Акмекорп» точніша
+    за грубе «Фонд Робота», якщо архів уже розкладений на проєкти.
+    """
+    out = []
+    by_id = {}
+    for node in categories.list_tree(conn):
+        by_id[node["id"]] = node
+        if node["level"] == "project":
+            parent = by_id.get(node["parent_id"])
+            label = f"{parent['name']} → {node['name']}" if parent else node["name"]
+        else:
+            label = node["name"]
+        out.append((node["id"], label))
+    return out
+
+
+def _map_claude_answer(raw: str, cats: list[tuple[int, str]]
+                       ) -> tuple[Optional[int], str, list]:
+    """Відповідь арбітра → `(id вузла | None, причина, шляхи-кандидати)`.
+
+    Три форми, у порядку спадання однозначності: число-id зі списку, повний
+    шлях «Напрямок → Проєкт», гола назва. Гола назва береться, ЛИШЕ якщо вона
+    вказує рівно на один вузол: після v47 «Маркетинг» є у двох напрямках, і
+    «перший збіг» тут — це тихо приписаний чужий напрямок (причина
+    `ambiguous`, вона ж лічильник у stats, а шляхи їдуть у вивід проходу).
+    `NONE`/незрозуміле → `unknown`.
+
+    Форма id — лише коли ЦІЛА відповідь є числом. Раніше бралась перша цифра
+    будь-де в тексті, тож назва з числом («Проєкт 2026») читалась як id 2026:
+    серед 29 чинних назв цифр немає, але перший такий вузол мовчки ламав би
+    арбітра. Шлях розбирає `categories.split_path` — той самий парсер, що й у
+    резолвера, тож «Фріланс→Маркетинг» і «Фріланс → Маркетинг» однакові."""
+    answer = str(raw or "").strip()
+    ids = {cid for cid, _ in cats}
+    try:
+        cid = int(answer)
+    except ValueError:
+        pass
+    else:
+        return (cid, "id", []) if cid in ids else (None, "unknown", [])
+
+    key = categories.split_path(answer)
+    if not key:
+        return None, "unknown", []
+    by_path = [cid for cid, label in cats if categories.split_path(label) == key]
+    if len(by_path) == 1:
+        return by_path[0], "path", []
+    leaves = [(cid, label) for cid, label in cats
+              if categories.norm_name(label.split(categories.PATH_SEP)[-1])
+              == categories.norm_name(answer)]
+    if len(leaves) == 1:
+        return leaves[0][0], "name", []
+    if leaves:
+        return None, "ambiguous", [label for _, label in leaves]
+    return None, "unknown", []
+
+
+def _ask_claude_category(title: str, excerpt: str, cats: list[tuple[int, str]],
+                         stats: Optional[dict] = None) -> Optional[int]:
     """Останній рубіж для записів, де ні назва, ні k-NN не дали впевненості.
 
-    Дешева модель (Haiku) бачить назву, початок тексту і список напрямків —
-    для різнорідного хвоста (ютуб-відео, документи, разові дзвінки) це точніше
-    за голосування сусідів у перекошеному корпусі. Повертає None, якщо модель
-    не впевнена: «не розмічено» краще за «розмічено не туди».
+    Дешева модель (Haiku) бачить назву, початок тексту і список напрямків/
+    проєктів (`_category_paths`, шляхом «Напрямок → Проєкт») — для різнорідного
+    хвоста (ютуб-відео, документи, разові дзвінки) це точніше за голосування
+    сусідів у перекошеному корпусі. Повертає None, якщо модель не впевнена:
+    «не розмічено» краще за «розмічено не туди».
+
+    Модель просять відповісти id, але вона охоче відповідає назвою — тож
+    відповідь мапиться `_map_claude_answer` (id → шлях → гола назва з ЄДИНИМ
+    збігом). Неоднозначна гола назва нічого не призначає і рахується в
+    `stats['claude_ambiguous']`, якщо `stats` передали.
     """
     from app.services import models, text_polishing
 
     listing = "\n".join(f"{cid}. {name}" for cid, name in cats)
     prompt = (
-        "Ось перелік напрямків архіву:\n" + listing +
+        "Ось перелік напрямків/проєктів архіву:\n" + listing +
         f"\n\nЗапис — назва: «{title}»\nПочаток тексту:\n{excerpt[:1500]}\n\n"
         "До якого напрямку він належить? Відповідай ЛИШЕ числом-id зі списку, "
         "або словом NONE, якщо жоден не підходить чи ти не впевнений."
@@ -257,11 +475,17 @@ def _ask_claude_category(title: str, excerpt: str, cats: list[tuple[int, str]]) 
             logger.warning("scope: Claude-класифікація недоступна (%s) — решта лишається людині", exc)
             _claude_warned = True
         return None
-    m = re.search(r"\d+", raw)
-    if not m:
-        return None
-    cid = int(m.group())
-    return cid if cid in {c for c, _ in cats} else None
+    cid, reason, candidates = _map_claude_answer(raw, cats)
+    if reason == "ambiguous":
+        logger.info("scope: арбітр назвав «%s» — така назва є в кількох напрямках (%s), "
+                    "лишаю без призначення", raw, ", ".join(candidates))
+        if stats is not None:
+            stats["claude_ambiguous"] = stats.get("claude_ambiguous", 0) + 1
+            seen = stats.setdefault("claude_ambiguous_paths", [])
+            for label in candidates:
+                if label not in seen:
+                    seen.append(label)
+    return cid
 
 
 def label_uncategorized(db_path: str, *, min_confidence: float = KNN_MIN_CONFIDENCE,
@@ -277,7 +501,8 @@ def label_uncategorized(db_path: str, *, min_confidence: float = KNN_MIN_CONFIDE
     from app.services import categorize
 
     stats = {"scanned": 0, "labeled": 0, "by_title": 0, "by_knn": 0, "by_claude": 0,
-             "low_confidence": 0, "no_neighbors": 0, "samples": []}
+             "low_confidence": 0, "no_neighbors": 0, "claude_ambiguous": 0,
+             "claude_ambiguous_paths": [], "samples": []}
     types = source_types or ("recording", "file", "meeting_archive", "youtube", "document")
     placeholders = ",".join("?" * len(types))
     with get_db_connection(db_path) as conn:
@@ -311,13 +536,13 @@ def label_uncategorized(db_path: str, *, min_confidence: float = KNN_MIN_CONFIDE
             conf, method = ranked[0]["score"], "knn"
         if conf < min_confidence and use_claude:
             with get_db_connection(db_path) as conn:
-                cats = [(c["id"], c["name"]) for c in
-                        conn.execute("SELECT id, name FROM categories ORDER BY id")]
+                cats = _category_paths(conn)
                 row = conn.execute(
                     "SELECT COALESCE(summary_json, substr(COALESCE(polished_text, "
                     "transcript_text), 1, 1500)) AS body FROM transcriptions WHERE id = ?",
                     (r["id"],)).fetchone()
-            picked = _ask_claude_category(title, (row["body"] if row else "") or "", cats)
+            picked = _ask_claude_category(title, (row["body"] if row else "") or "", cats,
+                                          stats)
             if picked:
                 cat_id = picked
                 cat_name = dict(cats).get(picked, "")
@@ -335,10 +560,20 @@ def label_uncategorized(db_path: str, *, min_confidence: float = KNN_MIN_CONFIDE
             stats["samples"].append({
                 "id": r["id"], "source": r["source_type"], "name": title[:58],
                 "category": cat_name, "confidence": conf, "method": method})
+    changed_ids: set[int] = set()
     if updates and not dry_run:
+        by_cat: dict[int, list[int]] = defaultdict(list)
+        for cat_id, tid in updates:
+            by_cat[cat_id].append(tid)
         with get_db_connection(db_path) as conn:
-            conn.executemany("UPDATE transcriptions SET category_id = ? WHERE id = ?", updates)
-            conn.commit()
+            for cat_id, ids in by_cat.items():
+                changed_ids.update(categories.set_category(conn, ids, cat_id))
+
+    if not dry_run and changed_ids:
+        from app.services import reembed
+        reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
+                                         reason="label-rest")
+    stats["reembed_scheduled"] = len(changed_ids) if not dry_run else 0
     stats["labeled"] = len(updates)
     logger.info("label_uncategorized: scanned=%(scanned)s labeled=%(labeled)s "
                 "low_conf=%(low_confidence)s", stats)
@@ -426,20 +661,32 @@ def scope_filter_ids(db_path: str, project: list[str] | str) -> list[int]:
     entity_ids = resolve_scope(db_path, names)
     tids = set(scope_transcription_ids(db_path, entity_ids))
 
-    # Назва може збігатись із НАПРЯМКОМ («Datalink», «Ділова англійська», «HoReCa»):
-    # тоді зріз має включати весь напрямок. Без цього латинська назва давала
-    # порожньо там, де в графі/тексті лежить кирилиця («Сенсети»).
+    # Назва може збігатись із вузлом дерева — НАПРЯМКОМ («Datalink», «Ділова
+    # English», «HoReCa») або проєктом («Акмекорп»). Для напрямку зріз має
+    # включати ВСЕ ПІДДЕРЕВО (його проєкти теж), інакше латинська назва
+    # напрямку давала порожньо там, де в графі/тексті лежить кирилиця
+    # («Сенсети»), а проєкти всередині напрямку взагалі випадали зі зрізу.
+    # `filter_sql` — те саме джерело семантики двох рівнів, що й у фільтрах
+    # UI/MCP (контракт C2): id напрямку розкривається в нього самого і його
+    # проєкти, id проєкту (листка) дає лише його.
     # Порівнюємо за name_norm (casefold з Python), а НЕ через SQLite LOWER():
     # вбудований LOWER згортає лише ASCII, тож «Юридичне» не збігалося саме з
     # собою — та сама пастка, через яку в міграції v20 і зʼявився name_norm.
+    # v47: назва може сидіти на КІЛЬКОХ вузлах («Маркетинг» у двох напрямках).
+    # Тоді `resolve_node` кидає `CategoryError('ambiguous')` зі списком шляхів,
+    # і зріз НЕ ловить цей виняток: обʼєднати піддерева тезок означало б тихо
+    # відповісти на інше питання (префікс чанка їх якраз розводить), а взяти
+    # перший — приписати відповідь чужому напрямку. Питач уточнює повний шлях
+    # «Напрямок → Проєкт» — його `resolve_node` розбирає точно.
     with get_db_connection(db_path) as conn:
-        ph = ",".join("?" * len(names))
-        keys = [_norm_name(n) for n in names]
-        rows = conn.execute(
-            f"SELECT t.id AS tid FROM transcriptions t JOIN categories c ON c.id = t.category_id "
-            f"WHERE t.deleted_at IS NULL AND COALESCE(c.name_norm, c.name) IN ({ph})",
-            keys).fetchall()
-        tids.update(r["tid"] for r in rows)
+        node_ids = [nid for nid in (categories.resolve_node(conn, n) for n in names)
+                    if nid is not None]
+        for node_id in dict.fromkeys(node_ids):
+            frag, params = categories.filter_sql("t.category_id", node_id)
+            rows = conn.execute(
+                f"SELECT t.id AS tid FROM transcriptions t WHERE t.deleted_at IS NULL{frag}",
+                params).fetchall()
+            tids.update(r["tid"] for r in rows)
 
     variants = _name_variants(db_path, names, entity_ids)
     if variants:

@@ -8,6 +8,7 @@
 - POST /api/audio/open-explorer/<id>
 - POST /api/audio/play/<id>
 """
+import json
 import logging
 import os
 import subprocess
@@ -18,6 +19,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.services import categories as cat_svc
 from app.services import record_meta
 from app.utils.youtube_id import extract_youtube_id
 
@@ -30,6 +32,22 @@ def _get_db():
     """Helper для отримання DB connection з blueprint."""
     from app.db.connection import get_db_connection
     return get_db_connection(current_app.config['DATABASE'])
+
+
+def _parse_youtube_tags(raw) -> list:
+    """`audio_downloads.tags` (легасі JSON-колонка YouTube-тегів) → список.
+
+    Наразі завжди пишеться `'[]'` при завантаженні (тег-екстракція не
+    підключена) — порожній список тут чесний, а не заглушка.
+    """
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("[audio_library] audio_downloads.tags не JSON — ігнорую")
+        return []
+    return data if isinstance(data, list) else []
 
 
 @audio_bp.route('/api/audio/download', methods=['POST'])
@@ -116,11 +134,16 @@ def get_audio_downloads():
     sort_by = request.args.get('sort_by', 'created_at')
     sort_order = request.args.get('sort_order', 'desc')
     source_type = request.args.get('source_type', '').strip().lower()
-    # Напрямок: приймаємо лише числовий id (підзапит повертає INTEGER без
-    # affinity, тож порівнюємо з int-параметром, не текстом).
-    _cat_raw = request.args.get('category_id', '').strip()
-    category_id = int(_cat_raw) if _cat_raw.isdigit() else None
     per_page = min(per_page, 100)
+    # C4: напрямок (з розкриттям на проєкти), теги (OR), період —
+    # `app/services/categories.py`, той самий набір осей, що й /api/history.
+    try:
+        category_value = cat_svc.parse_filter(request.args.get('category_id'))
+        tag_names = cat_svc.parse_tags(request.args.get('tags'))
+        since_val = cat_svc.parse_date(request.args.get('since'))
+        until_val = cat_svc.parse_date(request.args.get('until'))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
     # Phase 14: напрямок (category) історично живе на transcriptions. Аудіо
     # лінкується до останнього свого транскрипту через file_path, тож напрямок
@@ -134,6 +157,18 @@ def get_audio_downloads():
         '(SELECT t.category_id FROM transcriptions t WHERE t.file_path = a.file_path '
         'ORDER BY t.id DESC LIMIT 1), a.category_id)'
     )
+    # Теги живуть лише на transcriptions (не на audio_downloads) — тому, на
+    # відміну від напрямку, тут НЕМАЄ fallback на власне значення: без
+    # транскрипту `tx_id_subq`/`tx_date_subq` дають NULL і рядок випадає з
+    # тег-/період-фільтра (елемент лишається видимим без них, з `tags: []`).
+    tx_id_subq = (
+        '(SELECT t.id FROM transcriptions t WHERE t.file_path = a.file_path '
+        'ORDER BY t.id DESC LIMIT 1)'
+    )
+    tx_date_subq = (
+        '(SELECT COALESCE(t.meeting_date, t.created_at) FROM transcriptions t '
+        'WHERE t.file_path = a.file_path ORDER BY t.id DESC LIMIT 1)'
+    )
     # Головна робота на цій сторінці — знайти те, що ще НЕ перетворене на текст.
     # Без цього фільтра нетранскрибовані губляться серед сотні вже оброблених.
     has_tr_subq = (
@@ -143,13 +178,20 @@ def get_audio_downloads():
     _tr_raw = request.args.get('transcribed', '').strip()
     transcribed = _tr_raw if _tr_raw in ('0', '1') else None
 
+    cat_frag, cat_params = cat_svc.filter_sql(cat_subq, category_value)
+    tags_frag, tags_params = cat_svc.tags_sql(tx_id_subq, tag_names)
+    date_frag, date_params = cat_svc.date_sql(tx_date_subq, since_val, until_val)
+    extra_sql = cat_frag + tags_frag + date_frag
+    extra_params = cat_params + tags_params + date_params
+
     with _get_db() as conn:
         c = conn.cursor()
 
-        # Cross-cutting фільтри (search + напрямок) — застосовуються і до
-        # counts по source_type, бо чипи джерел мають відображати ці звуження.
-        # T4.6: soft-deleted (undo-вікно) ніколи не показуємо — обов'язковий
-        # системний фільтр, не залежить від query-параметрів.
+        # Cross-cutting фільтри (search + напрямок + теги + період) —
+        # застосовуються і до counts по source_type, бо чипи джерел мають
+        # відображати ці звуження. T4.6: soft-deleted (undo-вікно) ніколи не
+        # показуємо — обов'язковий системний фільтр, не залежить від
+        # query-параметрів.
         base_clauses = ['a.deleted_at IS NULL']
         base_params = []
         search_param = None
@@ -157,9 +199,11 @@ def get_audio_downloads():
             base_clauses.append('(a.title LIKE ? OR a.author LIKE ?)')
             search_param = f'%{search}%'
             base_params.extend([search_param, search_param])
-        if category_id is not None:
-            base_clauses.append(f'{cat_subq} = ?')
-            base_params.append(category_id)
+        # base_clauses ніколи не порожній (a.deleted_at IS NULL завжди перший),
+        # тож extra_sql (кожен фрагмент починається з " AND ") можна дописувати
+        # напряму — WHERE вже гарантовано є.
+        base_sql = ' WHERE ' + ' AND '.join(base_clauses) + extra_sql
+        base_params_full = base_params + extra_params
 
         where_clauses = list(base_clauses)
         params = list(base_params)
@@ -172,7 +216,8 @@ def get_audio_downloads():
         if transcribed is not None:
             where_clauses.append(has_tr_subq if transcribed == '1' else f'NOT {has_tr_subq}')
 
-        where_sql = (' WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
+        where_sql = ' WHERE ' + ' AND '.join(where_clauses) + extra_sql
+        params_full = params + extra_params
 
         valid_sort_fields = ['created_at', 'title', 'author', 'duration', 'file_size']
         if sort_by not in valid_sort_fields:
@@ -194,33 +239,41 @@ def get_audio_downloads():
             f'FROM audio_downloads a{where_sql} '
             f'ORDER BY {sort_by} {sort_order} LIMIT ? OFFSET ?'
         )
-        c.execute(query, params + [per_page, (page - 1) * per_page])
+        c.execute(query, params_full + [per_page, (page - 1) * per_page])
         downloads = c.fetchall()
 
         # Total з урахуванням фільтрів
-        c.execute(f'SELECT COUNT(*) as total FROM audio_downloads a{where_sql}', params)
+        c.execute(f'SELECT COUNT(*) as total FROM audio_downloads a{where_sql}', params_full)
         total = c.fetchone()['total']
 
         # Counts по source_type — для UI segmented control. Враховує
-        # cross-cutting фільтри (search + напрямок), але не source_type filter
-        # (бо ми хочемо знати counts по ВСІХ джерелах у межах звуження).
-        base_sql = (' WHERE ' + ' AND '.join(base_clauses)) if base_clauses else ''
+        # cross-cutting фільтри (search + напрямок + теги + період), але не
+        # source_type filter (бо ми хочемо знати counts по ВСІХ джерелах у
+        # межах звуження). `base_sql` вже несе extra_sql (див. вище).
         c.execute(
             f'SELECT a.source_type, COUNT(*) AS n FROM audio_downloads a{base_sql} '
             f'GROUP BY a.source_type',
-            base_params,
+            base_params_full,
         )
         counts_by_type = {row['source_type']: row['n'] for row in c.fetchall()}
 
-        # Скільки ще чекає на транскрипцію — у межах search/напрямку, але без
-        # фільтрів source_type/transcribed, щоб число на чипі не «схлопувалось»
-        # у нуль після того, як фільтр застосували.
+        # Скільки ще чекає на транскрипцію — у межах search/напрямку/тегів/
+        # періоду, але без фільтрів source_type/transcribed, щоб число на чипі
+        # не «схлопувалось» у нуль після того, як фільтр застосували.
+        # `base_sql` завжди починається з WHERE (a.deleted_at IS NULL завжди
+        # перший у base_clauses), тож " AND " далі безумовний.
         c.execute(
             f'SELECT COUNT(*) AS n FROM audio_downloads a{base_sql}'
-            f'{" AND " if base_clauses else " WHERE "}NOT {has_tr_subq}',
-            base_params,
+            f' AND NOT {has_tr_subq}',
+            base_params_full,
         )
         untranscribed = c.fetchone()['n']
+
+        # Теги — завжди останнього транскрипту аудіо (єдине місце, де вони
+        # живуть); без транскрипту — `[]`, а не відсутній ключ.
+        tx_ids = [d['transcription_id'] for d in downloads if d['transcription_id'] is not None]
+        tags_map = cat_svc.tags_for(conn, tx_ids)
+        suggested_map = {tid: cat_svc.suggested_tags(conn, tid) for tid in tx_ids}
 
     counts = {
         'all': sum(counts_by_type.values()),
@@ -251,6 +304,13 @@ def get_audio_downloads():
         # Phase 22: відеозапис (захоплення екрану). Frontend показує 📹 Відео badge.
         'has_video': d['has_video'] if 'has_video' in d.keys() else 0,
         'primary_video_path': d['primary_video_path'] if 'primary_video_path' in d.keys() else None,
+        # C4: теги останнього транскрипту ([] без нього) + підказки Claude.
+        'tags': tags_map.get(d['transcription_id'], []) if d['transcription_id'] is not None else [],
+        'suggested_tags': (suggested_map.get(d['transcription_id'], [])
+                           if d['transcription_id'] is not None else []),
+        # Легасі YouTube-теги (`audio_downloads.tags`, JSON) — окремий ключ,
+        # щоб не плутати з тегами архіву (record_tags).
+        'youtube_tags': _parse_youtube_tags(d['tags']) if 'tags' in d.keys() else [],
     } for d in downloads]
 
     return jsonify({

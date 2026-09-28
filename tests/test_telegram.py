@@ -260,6 +260,110 @@ class TestChatsToggleEndpoint:
         assert r.status_code == 400
 
 
+class TestChatTags:
+    """Історія 05: тег живе на чаті так само, як напрямок — ретроактивно на
+    всю історію і успадковується новими повідомленнями."""
+
+    @staticmethod
+    def _seed(app, monkeypatch):
+        """Напрямок «Фонд Робота» → проєкт «Акмекорп», чат проєкту з парою
+        повідомлень. Повертає (direction_id, project_id)."""
+        scheduled = []
+        monkeypatch.setattr(tg, "_schedule_reembed",
+                            lambda ids, reason: scheduled.append((sorted(ids), reason)) or
+                            {"mode": "point", "count": len(ids), "stale": 0})
+        with get_db_connection(app.config["DATABASE"]) as conn:
+            conn.execute("DELETE FROM categories")
+            conn.execute("INSERT INTO categories (id, name, name_norm, sort_order, parent_id) "
+                         "VALUES (1, 'Фонд Робота', 'фонд робота', 1, NULL)")
+            conn.execute("INSERT INTO categories (id, name, name_norm, sort_order, parent_id) "
+                         "VALUES (2, 'Акмекорп', 'акмекорп', 2, 1)")
+            conn.execute("INSERT INTO tg_monitored_chats (chat_id, title, chat_type, enabled, "
+                         "category_id) VALUES (-300, 'Акмекорп чат', 'group', 1, 2)")
+            conn.execute("INSERT INTO tg_monitored_chats (chat_id, title, chat_type, enabled, "
+                         "category_id) VALUES (-900, 'Чужий чат', 'group', 1, NULL)")
+            for mid in (1, 2):
+                conn.execute(
+                    "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+                    "tg_chat_id, tg_message_id, category_id) VALUES ('telegram', "
+                    "'[TG] Акмекорп чат', 'x', -300, ?, 2)", (mid,))
+            conn.commit()
+        return scheduled
+
+    def test_filter_by_direction_includes_project_chats_and_tags(self, tg_app, monkeypatch):
+        """`?category_id=<напрямок>` дає й чати його проєктів (контракт C2),
+        а рядок несе теги чату."""
+        self._seed(tg_app, monkeypatch)
+        c = tg_app.test_client()
+        c.put("/api/telegram/chats/-300/tags", json={"tags": ["AI"]})
+
+        rows = c.get("/api/telegram/chats?category_id=1").get_json()["chats"]
+        assert [r["chat_id"] for r in rows] == [-300], "чат проєкту в зрізі напрямку"
+        assert [t["name"] for t in rows[0]["tags"]] == ["AI"]
+
+        only_project = c.get("/api/telegram/chats?category_id=2").get_json()["chats"]
+        assert [r["chat_id"] for r in only_project] == [-300]
+        assert c.get("/api/telegram/chats?category_id=none").get_json()["chats"][0][
+            "chat_id"] == -900
+        assert c.get("/api/telegram/chats?category_id=дурня").status_code == 400
+
+    def test_put_tags_is_retroactive_and_idempotent(self, tg_app, monkeypatch):
+        scheduled = self._seed(tg_app, monkeypatch)
+        c = tg_app.test_client()
+        r = c.put("/api/telegram/chats/-300/tags",
+                  json={"tags": ["AI", "інвестори"]}).get_json()
+        assert r["success"] and r["records_changed"] == 2
+        assert [t["name"] for t in r["tags"]] == ["AI", "інвестори"]
+        assert scheduled and scheduled[-1][1] == "chat-tags"
+
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            names = {row[0] for row in conn.execute(
+                "SELECT tg.name FROM record_tags rt JOIN tags tg ON tg.id = rt.tag_id "
+                "WHERE rt.source = 'chat'")}
+        assert names == {"AI", "інвестори"}
+
+        # повторний той самий PUT — 0 змін, GPU не чіпаємо
+        scheduled.clear()
+        again = c.put("/api/telegram/chats/-300/tags",
+                      json={"tags": ["AI", "інвестори"]}).get_json()
+        assert again["records_changed"] == 0
+        assert all(not ids for ids, _ in scheduled), \
+            "нічого не змінилось — у re-embed нема чого слати"
+
+    def test_put_tags_unknown_chat_404(self, tg_app, monkeypatch):
+        self._seed(tg_app, monkeypatch)
+        r = tg_app.test_client().put("/api/telegram/chats/-777/tags", json={"tags": ["AI"]})
+        assert r.status_code == 404
+
+    def test_put_tags_requires_body(self, tg_app, monkeypatch):
+        self._seed(tg_app, monkeypatch)
+        assert tg_app.test_client().put("/api/telegram/chats/-300/tags",
+                                        json={}).status_code == 400
+
+    def test_new_message_inherits_chat_tags(self, tg_app, monkeypatch):
+        """Нове повідомлення в чат отримує обидва теги з `source='chat'` —
+        так само, як успадковує напрямок чату."""
+        self._seed(tg_app, monkeypatch)
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        c = tg_app.test_client()
+        c.put("/api/telegram/chats/-300/tags", json={"tags": ["AI", "інвестори"]})
+
+        r = c.post("/api/telegram/ingest",
+                   json={"kind": "text", "text": "свіже повідомлення", "chat_id": -300,
+                         "message_id": 77, "chat_title": "Акмекорп чат"},
+                   headers={"X-Telegram-Token": "testtoken"}).get_json()
+        tid = r["transcription_id"]
+        with get_db_connection(tg_app.config["DATABASE"]) as conn:
+            rows = conn.execute(
+                "SELECT tg.name, rt.source FROM record_tags rt JOIN tags tg ON tg.id = rt.tag_id "
+                "WHERE rt.transcription_id = ?", (tid,)).fetchall()
+            cat = conn.execute("SELECT category_id FROM transcriptions WHERE id = ?",
+                               (tid,)).fetchone()[0]
+        assert {row[0] for row in rows} == {"AI", "інвестори"}
+        assert {row[1] for row in rows} == {"chat"}
+        assert cat == 2, "напрямок/проєкт чату успадковується як і раніше"
+
+
 class TestIngestAuthAndDedup:
     def test_no_token_forbidden(self, tg_app):
         r = tg_app.test_client().post("/api/telegram/ingest",

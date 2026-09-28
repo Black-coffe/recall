@@ -21,6 +21,7 @@
 - 🎙️ **Транскрипція** — faster-whisper (CTranslate2) з VAD-фільтром (Silero); openai-whisper як fallback. Динамічний каталог ~17 моделей (tiny → large-v3, distilled, turbo).
 - 🗣️ **Діаризація** — pyannote, розділення спікерів + іменування на сторінці запису.
 - 🔴 **Запис** — серверний recorder (мікрофон + system loopback) з live-діаризацією та live-сегментами через SSE.
+- 🎚️ **Паралельні записи з ізоляцією звуку** (4.7.0) — два дзвінки одночасно, у кожного свої мікрофон і системний звук; системний звук по застосунку: «весь / тільки ці / усе, крім цього» (Windows process loopback). Recall показує, що зараз звучить, і питає «Виключити Zoom з цього запису? Лишити в іншому тільки Zoom?» — перемикання на льоту без зупинки запису. Копілот — на одному записі з перенесенням. Джерело звуку — окремий інтерфейс `AudioSource`, під macOS/Linux згодом.
 - 🧩 **Граф сутностей і задачі** — Claude витягує summary / key points / action items / entities; дашборд задач + напрямки (категорії).
 - 🔍 **Vector search + RAG-чат** — e5-large embeddings (1024-dim) + FTS5, гібридний retrieval (RRF + recency + diversity), «питай архів» зі стрімом.
 - 🎬 **YouTube** — завантаження аудіо через **pytubefix** (публічні відео, анонімно), опційна обрізка.
@@ -154,7 +155,7 @@ recall/  (Recall)
 - **Транскрипція**: `POST /api/transcribe`, `GET /api/history`, `POST /api/transcription/<id>/{polish,summarize,translate,topics}`, `POST /api/export/<format>`
 - **YouTube**: `POST /api/youtube/{info,download}`, `GET /api/youtube/progress/<id>`
 - **Аудіотека**: `GET /api/audio/downloads`, `POST /api/audio/{download,play/<id>}`
-- **Запис**: `POST /api/recording/{start,<sid>/stop,<sid>/save}`, `GET /api/recording/<sid>/stream` (SSE)
+- **Запис**: `POST /api/recording/{start,<sid>/stop,<sid>/save}`, `GET /api/recording/<sid>/stream` (SSE); паралельні записи — `GET /api/recordings/active` (`sessions[]`), `GET /api/recording/apps` (що звучить), `POST /api/recording/<sid>/system-source` (перемкнути джерело на льоту), `POST /api/copilot/move`
 - **Памʼять/RAG**: `GET /api/memory/{search,entities,action-items}`, `POST /api/memory/ask/stream` (SSE)
 - **Документи/Telegram/Дослідження/Co-pilot/Спікери**: `/api/documents/*`, `/api/telegram/*`, `/api/research/*`, `/api/copilot/*`, `/api/speakers/*`
 - **Система**: `GET /api/{health,models,system_info,system_stats,metrics}`

@@ -326,7 +326,11 @@ def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddi
 
     monkeypatch.setattr(query_rewrite, "rewrite_query", lambda q, **kw: ["варіант запиту"])
 
-    def fake_vector_search(db_path, query, candidate_k, category_id=None, scope_tids=None):
+    # **_kw: сигнатуру `_vector_search` розширили новими осями (tags/since/
+    # until) — фейк мусить їх приймати, інакше падіння приїде здалеку
+    # (памʼятка `graceful-degradation-hides-test-fake-drift`).
+    def fake_vector_search(db_path, query, candidate_k, category_id=None,
+                           scope_tids=None, **_kw):
         if query == "оригінал запиту":
             return [(only_orig, 0.9), (both, 0.5)]
         if query == "варіант запиту":
@@ -345,3 +349,29 @@ def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddi
     assert by_id[both]["why"]["stages"]["vector"] == {"pos": 0, "sim": 0.95}
     # Кандидат лише з варіанта — позиція/скор варіантного списку.
     assert by_id[only_variant]["why"]["stages"]["vector"] == {"pos": 1, "sim": 0.4}
+
+
+# ============================================================
+# directions-projects-tags-03: нові осі не чіпають S2-контракт why
+# ============================================================
+
+def test_tag_and_date_axes_keep_why_shape(db, mock_embeddings):
+    """Теги/період ріжуть кандидатів у SQL ДО RRF — форма `why` та сама."""
+    from app.services import categories
+
+    tid = _add_tx(db, "Дзвінок", date="2026-09-10")
+    _add_chunk(db, tid, 0, "обговорили бюджет проєкту")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    categories.set_tags(conn, tid, add=["AI"])
+    conn.commit(); conn.close()
+
+    plain = retrieval.search(db, "бюджет", top_k=5, explain=True)
+    axed = retrieval.search(db, "бюджет", top_k=5, explain=True, tags=["AI"],
+                            since="2026-09-10", until="2026-09-10")
+    assert [c["chunk_id"] for c in axed["chunks"]] == [c["chunk_id"] for c in plain["chunks"]]
+    for got, want in zip(axed["chunks"], plain["chunks"]):
+        assert set(got["why"]) == set(want["why"])
+        assert got["why"]["by"] == want["why"]["by"]
+        assert got["why"]["stages"] == want["why"]["stages"]
+        assert got["matched_by"] == want["matched_by"]

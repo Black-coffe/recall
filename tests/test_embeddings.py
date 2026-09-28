@@ -12,13 +12,14 @@ production-rag-wave-b-04: embed_texts/embed_query теж покриті — ал
 from __future__ import annotations
 
 import importlib
+import logging
 import sqlite3
 
 import numpy as np
 import pytest
 
 from app.db.migrations import init_database
-from app.services import embeddings
+from app.services import categories, embeddings
 
 
 # ============================================================
@@ -598,18 +599,18 @@ def test_embed_model_and_version_come_from_env(monkeypatch):
     Гейт-9 (знахідка 15): НЕ пінити "оригінал" тим, що зараз лежить у
     `embeddings.EMBED_MODEL/EMBED_VERSION` на старті тесту — це залежить від
     того, чи вже десь у сесії викликався `load_dotenv()` (власницький `.env`
-    несе `EMBED_VERSION=4`, дефолт коду — 2). Пінимо буквальні дефолти коду
+    несе свою версію). Пінимо буквальні дефолти коду
     (`app/services/embeddings.py`) і на кожному кроці явно керуємо env через
     monkeypatch — незалежно від порядку збирання файлів pytest."""
     DEFAULT_MODEL = "intfloat/multilingual-e5-large"
     DEFAULT_VERSION = 2
 
     monkeypatch.setenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
-    monkeypatch.setenv("EMBED_VERSION", "3")
+    monkeypatch.setenv("EMBED_VERSION", "5")
     try:
         importlib.reload(embeddings)
         assert embeddings.EMBED_MODEL == "Qwen/Qwen3-Embedding-0.6B"
-        assert embeddings.EMBED_VERSION == 3
+        assert embeddings.EMBED_VERSION == 5
         assert embeddings._STYLE == "qwen3"
     finally:
         # Відкат — теж явними значеннями (не тим, що випадково в os.environ
@@ -815,33 +816,35 @@ def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
 
 def test_context_prefix_call_has_title_date_speaker_and_category():
     meta = {"source_type": "file", "title": "Планерка Фонду",
-            "date": "2026-09-15", "category": "Робота",
+            "date": "2026-09-15", "category": "Фонд Робота",
             "thread_label": None, "summary_line": None}
     prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
-    assert prefix == "[дзвінок] Планерка Фонду · 2026-09-15 · Андрій · Робота"
+    assert prefix == "[дзвінок] Планерка Фонду · 2026-09-15 · Андрій · Фонд Робота"
 
 
 def test_context_prefix_telegram_has_chat_author_and_thread_label():
     meta = {"source_type": "telegram", "title": "Фонд · загальний",
-            "date": "2026-09-16", "category": "Робота",
+            "date": "2026-09-16", "category": "Фонд Робота",
             "thread_label": "бюджет вересня", "summary_line": None}
     prefix = embeddings.build_context_prefix(meta, {"speaker": "Оксана"})
+    # directions-projects-tags-03: напрямок тепер стоїть і в переписці — перед
+    # міткою нитки (епоха 2 його тут не друкувала взагалі).
     assert prefix == ("[переписка] Фонд · загальний · 2026-09-16 · Оксана · "
-                      "нитка: бюджет вересня")
-    # напрямок у переписці не дублює мітку нитки (хвіст типо-специфічний)
-    assert "Робота" not in prefix
+                      "Фонд Робота · нитка: бюджет вересня")
 
 
 def test_context_prefix_document_uses_page_then_section():
     meta = {"source_type": "document", "title": "Статут фонду.pdf",
-            "date": "2026-03-01", "category": "Робота",
+            "date": "2026-03-01", "category": "Фонд Робота",
             "thread_label": None, "summary_line": None}
     with_page = embeddings.build_context_prefix(
         meta, {"speaker": None, "page": 7, "section": "Розділ II"})
-    assert with_page == "[документ] Статут фонду.pdf · 2026-03-01 · стор. 7"
+    assert with_page == ("[документ] Статут фонду.pdf · 2026-03-01 · "
+                         "Фонд Робота · стор. 7")
     with_section = embeddings.build_context_prefix(
         meta, {"speaker": None, "page": None, "section": "Розділ II"})
-    assert with_section == "[документ] Статут фонду.pdf · 2026-03-01 · Розділ II"
+    assert with_section == ("[документ] Статут фонду.pdf · 2026-03-01 · "
+                            "Фонд Робота · Розділ II")
 
 
 def test_context_prefix_skips_missing_fields_and_never_prints_none():
@@ -957,7 +960,7 @@ def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
 
 def test_context_prefix_uses_own_title_instead_of_source_name():
     meta = {"source_type": "file", "title": "Планерка Фонду",
-            "date": "2026-09-15", "category": "Робота",
+            "date": "2026-09-15", "category": "Фонд Робота",
             "description": None, "summary_line": None}
     prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
     assert prefix.split("\n")[0].startswith("[дзвінок] Планерка Фонду ·")
@@ -1034,3 +1037,354 @@ def test_description_only_term_is_searchable_and_result_carries_display_name(db,
     assert "Андріївського" not in hit["text"]
     assert hit["display_name"] == "Планерка Фонду"
     assert hit["source_name"] == "test"
+
+
+# ============================================================
+# directions-projects-tags-03: шлях напрямку і теги в префіксі, епоха 3
+# ============================================================
+
+def _seed_tree(db_path, direction="Фонд Робота", project="Акмекорп"):
+    """Напрямок + проєкт усередині нього. Повертає (direction_id, project_id)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    d = _ensure_node(conn, direction)
+    p = _ensure_node(conn, project, parent_id=d)
+    conn.commit()
+    conn.close()
+    return d, p
+
+
+def _ensure_node(conn, name, parent_id=None):
+    """id вузла дерева за назвою — init_database уже засіває частину назв."""
+    row = conn.execute("SELECT id FROM categories WHERE name_norm = ?",
+                       (categories.norm_name(name),)).fetchone()
+    if row:
+        conn.execute("UPDATE categories SET parent_id = ? WHERE id = ?",
+                     (parent_id, row[0]))
+        return row[0]
+    return categories.create_category(conn, name, parent_id=parent_id)["id"]
+
+
+def _set_category(db_path, tid, cid):
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE transcriptions SET category_id = ? WHERE id = ?", (cid, tid))
+    conn.commit()
+    conn.close()
+
+
+def _tag(db_path, tid, *names):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    categories.set_tags(conn, tid, add=list(names))
+    conn.commit()
+    conn.close()
+
+
+def test_context_prefix_path_goes_before_type_tail_for_telegram():
+    """Шлях напрямку тепер є і в переписці — ПЕРЕД міткою нитки."""
+    meta = {"source_type": "telegram", "title": "Фонд · загальний",
+            "date": "2026-09-16", "category": "Акмекорп",
+            "category_path": "Фонд Робота → Акмекорп",
+            "thread_label": "бюджет вересня", "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Оксана"})
+    assert prefix == ("[переписка] Фонд · загальний · 2026-09-16 · Оксана · "
+                      "Фонд Робота → Акмекорп · нитка: бюджет вересня")
+
+
+def test_context_prefix_path_goes_before_page_for_document():
+    meta = {"source_type": "document", "title": "Статут фонду.pdf",
+            "date": "2026-03-01", "category": "Акмекорп",
+            "category_path": "Фонд Робота → Акмекорп",
+            "thread_label": None, "summary_line": None}
+    prefix = embeddings.build_context_prefix(
+        meta, {"speaker": None, "page": 7, "section": "Розділ II"})
+    assert prefix == ("[документ] Статут фонду.pdf · 2026-03-01 · "
+                      "Фонд Робота → Акмекорп · стор. 7")
+
+
+def test_context_prefix_path_for_call_keeps_epoch2_position():
+    meta = {"source_type": "file", "title": "Планерка Фонду",
+            "date": "2026-09-15", "category": "Акмекорп",
+            "category_path": "Фонд Робота → Акмекорп", "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Андрій"})
+    assert prefix == ("[дзвінок] Планерка Фонду · 2026-09-15 · Андрій · "
+                      "Фонд Робота → Акмекорп")
+
+
+def test_context_prefix_direction_without_project_has_no_arrow():
+    meta = {"source_type": "telegram", "title": "Фонд · загальний",
+            "date": "2026-09-16", "category": "Фонд Робота",
+            "category_path": "Фонд Робота", "thread_label": None,
+            "summary_line": None}
+    prefix = embeddings.build_context_prefix(meta, {"speaker": "Оксана"})
+    assert prefix.endswith("· Фонд Робота")
+    assert "→" not in prefix
+
+
+def test_context_prefix_tags_line_after_line_one():
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "category_path": "Фонд Робота", "tags": ["AI", "інвестори"],
+            "description": "Розбір бюджету", "summary_line": "Кошторис погоджено."}
+    assert embeddings.build_context_prefix(meta, {"speaker": None}).split("\n") == [
+        "[дзвінок] Планерка · 2026-09-15 · Фонд Робота",
+        "теги: AI, інвестори",
+        "опис: Розбір бюджету",
+        "Кошторис погоджено.",
+    ]
+
+
+def test_context_prefix_tags_line_keeps_at_most_five():
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "tags": ["AI", "гроші", "право", "найм", "склад", "шостий"]}
+    line = embeddings.build_context_prefix(meta, {}).split("\n")[1]
+    assert line == "теги: AI, гроші, право, найм, склад"
+    assert "шостий" not in line
+
+
+def test_context_prefix_tags_line_cut_by_whole_tag_under_sixty():
+    meta = {"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+            "tags": ["довгий тег про інвестиції", "ще один довгий тег сюди",
+                     "третій"]}
+    line = embeddings.build_context_prefix(meta, {}).split("\n")[1]
+    assert len(line) <= embeddings._PREFIX_TAGS_LINE_MAX
+    assert line == "теги: довгий тег про інвестиції, ще один довгий тег сюди"
+    # обрізок назви — не тег: або тег цілий, або його немає
+    assert "третій" not in line
+
+
+def test_context_prefix_without_direction_and_tags_is_byte_identical_to_epoch2():
+    """Запис без напрямку й тегів дає рівно той самий рядок, що до історії."""
+    for meta, chunk, expected in (
+        ({"source_type": "file", "title": "Планерка", "date": "2026-09-15",
+          "category": None, "category_path": None, "tags": [],
+          "thread_label": None, "summary_line": None},
+         {"speaker": "Андрій"}, "[дзвінок] Планерка · 2026-09-15 · Андрій"),
+        ({"source_type": "telegram", "title": "Fund", "date": "2026-09-16",
+          "category": None, "category_path": None, "tags": [],
+          "thread_label": "рахунок", "summary_line": None},
+         {"speaker": "Оксана"}, "[переписка] Fund · 2026-09-16 · Оксана · нитка: рахунок"),
+        ({"source_type": "document", "title": "Статут.pdf", "date": "2026-03-01",
+          "category": None, "category_path": None, "tags": [],
+          "thread_label": None, "summary_line": None},
+         {"speaker": None, "page": 7}, "[документ] Статут.pdf · 2026-03-01 · стор. 7"),
+    ):
+        assert embeddings.build_context_prefix(meta, chunk) == expected
+
+
+def test_load_prefix_meta_builds_path_and_sorts_tags_by_norm(db):
+    _, pid = _seed_tree(db)
+    tid = _add_tx(db, "Обговорили кошторис.")
+    _set_category(db, tid, pid)
+    _tag(db, tid, "інвестори", "AI")
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    meta = embeddings._load_prefix_meta(conn, tid)
+    conn.close()
+    assert meta["category"] == "Акмекорп"
+    assert meta["category_path"] == "Фонд Робота → Акмекорп"
+    assert meta["tags"] == ["AI", "інвестори"]   # порядок за name_norm, не за вставкою
+
+
+def test_load_prefix_meta_direction_node_has_plain_path(db):
+    did, _ = _seed_tree(db)
+    tid = _add_tx(db, "Обговорили кошторис.")
+    _set_category(db, tid, did)
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    meta = embeddings._load_prefix_meta(conn, tid)
+    conn.close()
+    assert meta["category_path"] == "Фонд Робота" and meta["tags"] == []
+
+
+def test_tag_lands_in_prefix_and_is_searchable_but_not_in_text(db, monkeypatch):
+    """Тег звучить лише в префіксі: пошук за ним знаходить чанк (BM25 по
+    context_prefix), а `chunks.text` лишається побайтово чистим."""
+    from app.services import retrieval
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    body = "домовились закрити питання до понеділка"
+    tid = _add_tx(db, body)
+    _tag(db, tid, "інвестори")
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    conn = sqlite3.connect(db)
+    prefix = conn.execute("SELECT context_prefix FROM chunks WHERE transcription_id = ?",
+                          (tid,)).fetchone()[0]
+    conn.close()
+    assert "теги: інвестори" in prefix.split("\n")
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    res = retrieval.search(db, "інвестори", top_k=5)
+    assert [c["transcription_id"] for c in res["chunks"]] == [tid]
+    assert res["chunks"][0]["text"] == body
+    assert "інвестори" not in res["chunks"][0]["text"]
+
+
+def test_embed_version_code_default_stays_two(monkeypatch):
+    """ADR-016: зміна формату префікса НЕ рухає дефолт коду — без змінної
+    середовища модуль і далі дає епоху 2 (та саму, що на `main`).
+
+    Змінну знімаємо явно, бо власницький `.env` несе свою версію і могла вже
+    доїхати в `os.environ` через чийсь `load_dotenv()`; читання файлу тест не
+    робить взагалі, тож він зелений і з `.env` у корені, і без нього."""
+    monkeypatch.delenv("EMBED_VERSION", raising=False)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+    try:
+        importlib.reload(embeddings)
+        assert embeddings.EMBED_VERSION == 2
+        assert embeddings.EMBED_MODEL == "intfloat/multilingual-e5-large"
+    finally:
+        monkeypatch.setenv("EMBED_VERSION", "2")
+        monkeypatch.setenv("EMBED_MODEL", "intfloat/multilingual-e5-large")
+        importlib.reload(embeddings)
+
+
+def test_embed_version_epoch_comes_from_env(monkeypatch):
+    """Нову епоху вмикає рядок `.env`, а не правка коду: бойова тримає пару
+    (e5-large, 4), тож формат префікса цієї спеки їде під номером 5."""
+    monkeypatch.setenv("EMBED_VERSION", "5")
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+    try:
+        importlib.reload(embeddings)
+        assert embeddings.EMBED_VERSION == 5
+    finally:
+        monkeypatch.setenv("EMBED_VERSION", "2")
+        monkeypatch.setenv("EMBED_MODEL", "intfloat/multilingual-e5-large")
+        importlib.reload(embeddings)
+
+
+# ============================================================
+# directions-projects-tags-17: гард формату префікса (epoch ↔ PREFIX_FORMAT)
+# ============================================================
+
+def _stamp_epoch(path, model, version, prefix_format):
+    """Рядок, який лишає по собі бекфіл v46 (або попередній прохід)."""
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT OR REPLACE INTO embedding_epochs (model, version, prefix_format) "
+                 "VALUES (?, ?, ?)", (model, version, prefix_format))
+    conn.commit()
+    conn.close()
+
+
+def _epochs(path):
+    conn = sqlite3.connect(path)
+    rows = conn.execute("SELECT model, version, prefix_format FROM embedding_epochs "
+                        "ORDER BY version").fetchall()
+    conn.close()
+    return rows
+
+
+def _chunk_count(path, tid):
+    conn = sqlite3.connect(path)
+    n = conn.execute("SELECT COUNT(*) FROM chunks WHERE transcription_id = ?",
+                     (tid,)).fetchone()[0]
+    conn.close()
+    return n
+
+
+def _status(db):
+    conn = sqlite3.connect(db)
+    try:
+        return embeddings.epoch_status(conn)
+    finally:
+        conn.close()
+
+
+def test_epoch_status_reads_format_of_current_pair(db, monkeypatch):
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    assert _status(db) == {"ok": True, "reason": "new_epoch",
+                           "pair": (embeddings.EMBED_MODEL, 4), "db_format": None}
+
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    assert _status(db)["reason"] == "format_mismatch"
+
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, embeddings.PREFIX_FORMAT)
+    status = _status(db)
+    assert status["reason"] == "ok" and status["db_format"] == embeddings.PREFIX_FORMAT
+
+
+def test_epoch_status_without_table_falls_back_to_existing_pairs(db, monkeypatch):
+    """БД нижче v46 (крок 1 рунбука — перевірка ДО рестарту): памʼяті про
+    формат ще немає, тож пара, яка вже є в `transcriptions`, рахується старим
+    форматом — саме так її стемплює бекфіл міграції."""
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+                 "embedding_model, embedding_version) VALUES ('file', 'Планерка', "
+                 "'Обговорили кошторис.', ?, 4)", (embeddings.EMBED_MODEL,))
+    conn.execute("DROP TABLE embedding_epochs")
+    conn.commit()
+
+    assert embeddings.epoch_status(conn)["reason"] == "format_mismatch"
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 5)
+    assert embeddings.epoch_status(conn)["reason"] == "new_epoch"
+    conn.close()
+
+
+def test_embed_refuses_to_write_new_format_into_older_epoch(db, monkeypatch, caplog):
+    """Рестарт із забутим `.env`: епоха 4 побудована форматом 1, код пише
+    формат 2 — жодного чанка і РІВНО один ERROR на процес."""
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    monkeypatch.setattr(embeddings, "_epoch_mismatch_logged", False)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    first = _add_tx(db)
+    second = _add_tx(db)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.embeddings"):
+        res = embeddings.chunk_and_embed_transcription(db, first)
+        res2 = embeddings.chunk_and_embed_transcription(db, second)
+
+    assert res["status"] == "epoch_mismatch" and res2["status"] == "epoch_mismatch"
+    assert _chunk_count(db, first) == 0 and _chunk_count(db, second) == 0
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1                      # не спамимо на кожен запис
+    message = errors[0].getMessage()
+    assert "EMBED_VERSION" in message
+    assert f"{embeddings.EMBED_MODEL} / v4" in message
+    # запис лишився «незембедженим» — його підбере `run` після підняття епохи
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT embedded_at, embedding_version FROM transcriptions "
+                       "WHERE id = ?", (first,)).fetchone()
+    conn.close()
+    assert row[0] is None and row[1] is None
+
+
+def test_embed_writes_and_registers_epoch_after_version_bump(db, monkeypatch):
+    """Піднятий `EMBED_VERSION` — епоха вільна: чанки пишуться, а БД запамʼятовує,
+    яким форматом її побудовано."""
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    monkeypatch.setattr(embeddings, "_epoch_mismatch_logged", False)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    tid = _add_tx(db)
+
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 5)
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+
+    assert _chunk_count(db, tid) > 0
+    assert _epochs(db) == [(embeddings.EMBED_MODEL, 4, 1),
+                           (embeddings.EMBED_MODEL, 5, embeddings.PREFIX_FORMAT)]
+
+
+def test_fresh_install_registers_its_own_epoch(db, monkeypatch):
+    """Порожня БД і дефолтна епоха 2: гард нікому не заважає, а формат епохи
+    фіксується з першого ж запису (PREFIX_FORMAT — не другий EMBED_VERSION)."""
+    monkeypatch.setattr(embeddings, "is_available", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 2)
+    monkeypatch.setattr(embeddings, "_epoch_mismatch_logged", False)
+    tid = _add_tx(db)
+
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+    assert _epochs(db) == [(embeddings.EMBED_MODEL, 2, embeddings.PREFIX_FORMAT)]
+
+    # друга епоха реєструється окремим рядком, стару не чіпає
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 3)
+    assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
+    assert _epochs(db) == [(embeddings.EMBED_MODEL, 2, embeddings.PREFIX_FORMAT),
+                           (embeddings.EMBED_MODEL, 3, embeddings.PREFIX_FORMAT)]

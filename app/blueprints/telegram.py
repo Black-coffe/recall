@@ -42,6 +42,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from app import state
 from app.core import settings as _settings
+from app.services import categories as cat_svc
 from app.utils.paths import safe_path_within
 from telegram_common import CONTROL_TOKEN_HEADER, control_token
 
@@ -67,6 +68,22 @@ def _db_path() -> str:
 def _conn(db_path: str):
     from app.db.connection import get_db_connection
     return get_db_connection(db_path)
+
+
+def _schedule_reembed(ids, reason: str) -> dict:
+    """Поставити змінені записи в точковий re-embed (напрямок і теги їдуть у
+    контекстний префікс чанка). Помилка планувальника не валить запит —
+    правка вже збережена, re-embed вторинний. `reembed` — усередині функції:
+    він тягне `embeddings` (torch), памʼятка `mcp-stdio-no-heavy-models`."""
+    if not ids:
+        return {"mode": "none", "count": 0, "stale": 0}
+    try:
+        from app.services import reembed
+        return reembed.schedule_records_reembed(ids, db_path=_db_path(), reason=reason)
+    except Exception:  # noqa: BLE001 — зміна вже в БД, re-embed вторинний
+        logger.exception("[tg] %s: не вдалось запланувати re-embed для %s записів",
+                         reason, len(ids))
+        return {"mode": "none", "count": 0, "stale": 0}
 
 
 def _is_localhost() -> bool:
@@ -214,6 +231,12 @@ def _persist(db_path: str, *, kind: str, text: str, prov: dict, category_id,
                 return existing["id"]
             raise
         tid = c.lastrowid
+        chat_id = prov.get("chat_id")
+        if chat_id is not None:
+            # Інжест успадковує НЕ ЛИШЕ category_id (див. _resolve_category
+            # вище) — теги, привʼязані до чату (`PUT .../<chat_id>/tags`),
+            # ретроактивно точнісінько так само, як і напрямок.
+            cat_svc.inherit_chat_tags(conn, tid, chat_id)
         conn.commit()
     return tid
 
@@ -610,15 +633,30 @@ def tg_dialogs():
 
 @telegram_bp.route('/api/telegram/chats', methods=['GET'])
 def tg_chats():
-    """Моніторені чати з БД (працює навіть коли слухач вимкнений)."""
+    """Моніторені чати з БД (працює навіть коли слухач вимкнений).
+
+    `?category_id=` — той самий фільтр, що й скрізь (контракт C2, через
+    `categories.filter_sql`): id напрямку розкривається в нього самого й усі
+    його проєкти, id проєкту (листка) дає лише його. Кожен рядок несе `tags`
+    (`categories.chat_tags`) — набір, який успадкує вся майбутня історія чату.
+    """
+    try:
+        frag, params = cat_svc.filter_sql("m.category_id", request.args.get("category_id"))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
     with _conn(_db_path()) as conn:
         rows = conn.execute(
             "SELECT m.chat_id, m.title, m.username, m.chat_type, m.enabled, "
             "m.category_id, m.last_message_id, c.name AS category_name "
             "FROM tg_monitored_chats m LEFT JOIN categories c ON c.id = m.category_id "
-            "ORDER BY m.enabled DESC, m.title"
+            f"WHERE 1=1{frag} ORDER BY m.enabled DESC, m.title", params
         ).fetchall()
-    return jsonify({"success": True, "chats": [dict(r) for r in rows]})
+        chats = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = cat_svc.chat_tags(conn, d["chat_id"])
+            chats.append(d)
+    return jsonify({"success": True, "chats": chats})
 
 
 @telegram_bp.route('/api/telegram/chats', methods=['POST'])
@@ -667,6 +705,50 @@ def tg_chats_upsert():
         )
         conn.commit()
     return jsonify({"success": True, "chat_id": chat_id, "enabled": enabled, "category_id": cat})
+
+
+@telegram_bp.route('/api/telegram/chats/<int(signed=True):chat_id>/tags', methods=['PUT'])
+def tg_chat_tags_put(chat_id: int):
+    """Замінити НАБІР тегів чату (`{"tags": ["AI", "інвестори"]}`).
+
+    `int(signed=True)`, а не голий `int`: id груп і каналів у Telegram
+    відʼємні (`-100…`), а дефолтний конвертер Flask мінус не приймає — з ним
+    ендпоінт віддавав би 404 рівно на тих чатах, заради яких існує.
+
+    PUT, а не POST-додавання: тег чату — це властивість чату цілком, і зняття
+    його з карти мусить знятись із історії так само ретроактивно, як додавання
+    лягає на неї (`categories.apply_chat_tags` чіпає лише рядки з
+    `source='chat'`, ручний тег на конкретному повідомленні лишається).
+
+    404 на неморніторений чат: теги без `tg_monitored_chats` висіли б на
+    `chat_id`, якого UI не показує, і зняти їх було б нічим.
+
+    `records_changed` — скільки записів реально змінили набір тегів; рівно ці
+    id йдуть у точковий re-embed (теги в контекстному префіксі чанка), тож
+    повторний той самий PUT дає 0 і GPU не чіпає.
+    """
+    data = request.get_json(silent=True) or {}
+    if "tags" not in data:
+        return jsonify({"success": False, "error": "tags обов'язковий"}), 400
+    raw = data["tags"]
+    if not isinstance(raw, (list, tuple, str)):
+        return jsonify({"success": False, "error": "tags: список назв"}), 400
+    names = cat_svc.parse_tags(raw)
+    too_long = [n for n in names if len(n) > cat_svc.TAG_NAME_MAX]
+    if too_long:
+        return jsonify({"success": False,
+                        "error": f"назва тега довша за {cat_svc.TAG_NAME_MAX}: "
+                                 f"{too_long[0]!r}"}), 400
+
+    with _conn(_db_path()) as conn:
+        if not conn.execute("SELECT 1 FROM tg_monitored_chats WHERE chat_id = ?",
+                            (chat_id,)).fetchone():
+            return jsonify({"success": False, "error": "чат не моніториться"}), 404
+        changed = cat_svc.apply_chat_tags(conn, chat_id, names)
+        tags = cat_svc.chat_tags(conn, chat_id)
+    reembed_stats = _schedule_reembed(changed, "chat-tags")
+    return jsonify({"success": True, "chat_id": chat_id, "tags": tags,
+                    "records_changed": len(changed), "reembed": reembed_stats})
 
 
 @telegram_bp.route('/api/telegram/chats/toggle', methods=['POST'])

@@ -467,7 +467,8 @@ def test_get_active_recording_no_active_session_passthrough(monkeypatch):
 
     monkeypatch.setattr(m, "_api", fake_api)
     out = m.get_active_recording()
-    assert out == {"success": True, "active": False, "session_id": None}
+    assert out == {"success": True, "active": False, "session_id": None,
+                   "count": 0, "sessions": []}
 
 
 def test_get_active_recording_no_copilot_session_defaults(db, monkeypatch):
@@ -511,3 +512,181 @@ def test_get_active_recording_db_locked_degrades_instead_of_raising(db, monkeypa
     assert out["session_id"] == "rec_locked"
     assert out["copilot_session_id"] is None
     assert out["copilot_active"] is False
+
+
+# --------------------------------------------------------------------------
+# Правило неоднозначності (C7, ADR-026 D4): кілька записів — не вгадуємо
+# --------------------------------------------------------------------------
+
+_TWO = {"success": True, "active": True, "count": 2, "session_id": None, "state": None,
+        "sessions": [
+            {"session_id": "rec_Андрій", "state": "recording", "name": "Дзвінок з Андрієм",
+             "auto_name": None, "elapsed_seconds": 12.0, "streams": ["mic"],
+             "system_source": None, "copilot_active": True},
+            {"session_id": "rec_Олена", "state": "recording", "name": None,
+             "auto_name": "Zoom", "elapsed_seconds": 3.0, "streams": ["system"],
+             "system_source": "zoom.exe", "copilot_active": False},
+        ]}
+
+
+def _only_active(payload, calls):
+    def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
+        calls.append(path)
+        if path == "/api/recordings/active":
+            return json.loads(json.dumps(payload))
+        raise AssertionError(f"second call {path}")
+    return fake_api
+
+
+def _assert_ambiguous(out):
+    assert out["success"] is False
+    assert out["error_code"] == "AMBIGUOUS_SESSION"
+    assert [s["session_id"] for s in out["sessions"]] == ["rec_Андрій", "rec_Олена"]
+    assert out["hint"] == "pass session_id"
+
+
+def test_ambiguous_live_transcript_makes_no_second_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "_api", _only_active(_TWO, calls))
+    _assert_ambiguous(m.get_live_transcript())
+    assert calls == ["/api/recordings/active"]
+
+
+def test_ambiguous_live_copilot_app_up(db, monkeypatch):
+    from app.db.connection import get_db_connection
+    with get_db_connection(db) as conn:
+        _add_copilot_session(conn, recording_session_id="rec_Андрій", status="active")
+        conn.commit()
+    calls = []
+    monkeypatch.setattr(m, "_api", _only_active(_TWO, calls))
+    _assert_ambiguous(m.get_live_copilot())
+    assert calls == ["/api/recordings/active"]
+
+
+def test_ambiguous_ask_live_does_not_ask(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "_api", _only_active(_TWO, calls))
+    _assert_ambiguous(m.ask_live("що сказав Андрій?"))
+    assert calls == ["/api/recordings/active"]
+
+
+def test_explicit_session_id_calls_through_despite_many(db, monkeypatch):
+    calls = []
+
+    def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
+        calls.append((path, body))
+        if path == "/api/recordings/active":
+            raise AssertionError("explicit session_id must not resolve")
+        return {"success": True, "available": True, "segments": [], "answer": "ok"}
+
+    monkeypatch.setattr(m, "_api", fake_api)
+    assert m.get_live_transcript(session_id="rec_Олена")["available"] is True
+    assert m.ask_live("питання", session_id="rec_Олена")["answer"] == "ok"
+    assert m.get_live_copilot(session_id="rec_Олена")["available"] is False  # direct-DB
+    assert calls == [("/api/recording/rec_Олена/live-transcript", None),
+                     ("/api/copilot/live-ask",
+                      {"question": "питання", "session_id": "rec_Олена", "scope": "both"})]
+
+
+@pytest.mark.parametrize("active", [
+    {"success": True, "active": True, "count": 1, "session_id": "rec_1", "state": "recording",
+     "sessions": [{"session_id": "rec_1"}]},
+    {"success": True, "session_id": "rec_1"},
+])
+def test_single_session_resolves_both_shapes(active, monkeypatch):
+    calls = []
+
+    def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
+        calls.append((path, body))
+        if path == "/api/recordings/active":
+            return dict(active)
+        return {"success": True, "available": True, "segments": [], "answer": "a"}
+
+    monkeypatch.setattr(m, "_api", fake_api)
+    assert m.get_live_transcript()["available"] is True
+    assert calls[1][0] == "/api/recording/rec_1/live-transcript"
+    calls.clear()
+    m.ask_live("q")
+    # розв'язана локально сесія передається явно
+    assert calls[1] == ("/api/copilot/live-ask",
+                        {"question": "q", "session_id": "rec_1", "scope": "both"})
+
+
+@pytest.mark.parametrize("active", [
+    {"success": True, "active": False, "count": 0, "sessions": [], "session_id": None,
+     "state": None},
+    {"success": True, "session_id": None},
+])
+def test_zero_sessions_is_todays_unavailable(active, db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "_api", _only_active(active, calls))
+    out = m.get_live_transcript()
+    assert out["available"] is False and out["reason"] == "немає активної сесії запису"
+    out = m.get_live_copilot()
+    assert out["available"] is False and out["reason"] == "немає активної сесії запису"
+
+
+def test_ask_live_passes_server_ambiguity_through(monkeypatch):
+    def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
+        if path == "/api/recordings/active":
+            return {"error": "HTTP 500"}
+        return {"success": False, "error_code": "AMBIGUOUS_SESSION", "error": "HTTP 409",
+                "status_code": 409, "sessions": _TWO["sessions"], "hint": "pass session_id"}
+
+    monkeypatch.setattr(m, "_api", fake_api)
+    _assert_ambiguous(m.ask_live("q"))
+
+
+def test_get_active_recording_two_sessions_lists(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "_api", _only_active(_TWO, calls))
+    out = m.get_active_recording()
+    assert out["count"] == 2
+    assert len(out["sessions"]) == 2
+    assert out["session_id"] is None
+    assert calls == ["/api/recordings/active"]
+
+
+def test_get_active_recording_one_session_adds_count(db, monkeypatch):
+    def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
+        if path == "/api/recordings/active":
+            return {"success": True, "active": True, "count": 1, "session_id": "rec_1",
+                    "state": "recording", "sessions": [{"session_id": "rec_1"}]}
+        return {"success": True, "available": True, "segments": []}
+
+    monkeypatch.setattr(m, "_api", fake_api)
+    out = m.get_active_recording()
+    assert out["count"] == 1
+    assert out["session_id"] == "rec_1"
+    assert out["copilot_session_id"] is None
+    assert out["live_transcript_available"] is True
+
+
+def _app_down(*a, **kw):
+    return {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."}
+
+
+def test_live_copilot_db_fallback_two_active_is_ambiguous(db, monkeypatch):
+    from app.db.connection import get_db_connection
+    with get_db_connection(db) as conn:
+        _add_copilot_session(conn, recording_session_id="rec_Андрій", status="active")
+        _add_copilot_session(conn, recording_session_id="rec_Олена", status="active")
+        conn.commit()
+    monkeypatch.setattr(m, "_api", _app_down)
+    out = m.get_live_copilot()
+    assert out["error_code"] == "AMBIGUOUS_SESSION"
+    assert sorted(s["session_id"] for s in out["sessions"]) == ["rec_Андрій", "rec_Олена"]
+
+
+def test_live_copilot_db_fallback_one_active_is_todays_answer(db, monkeypatch):
+    from app.db.connection import get_db_connection
+    with get_db_connection(db) as conn:
+        cs_id = _add_copilot_session(conn, recording_session_id="rec_Андрій", status="active")
+        _add_copilot_session(conn, recording_session_id="rec_old", status="ended")
+        conn.commit()
+    monkeypatch.setattr(m, "_api", _app_down)
+    out = m.get_live_copilot()
+    assert out["available"] is True
+    assert out["session_id"] == "rec_Андрій"
+    assert out["copilot_session_id"] == cs_id
+    assert "app.py" in out["session_resolution"]

@@ -778,3 +778,375 @@ def test_v27_migration_is_idempotent(tmp_path: Path):
         assert _schema_version(conn) >= 27
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- v45
+
+def test_v45_adds_parent_id_tag_tables_and_suggestions(tmp_path: Path):
+    """Спека directions-projects-tags, історія 01: дерево напрямків + словник тегів."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert 'parent_id' in _columns(conn, 'categories')
+        assert 'suggested_tags_json' in _columns(conn, 'transcriptions')
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert {'tags', 'record_tags', 'tg_chat_tags'} <= tables
+        indexes = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        assert 'idx_categories_parent' in indexes
+        assert 'idx_record_tags_tag' in indexes
+        assert _schema_version(conn) >= 45
+    finally:
+        conn.close()
+
+
+def test_v45_tag_tables_enforce_their_keys(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("INSERT INTO tags (name, name_norm) VALUES ('Інвестори', 'інвестори')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO tags (name, name_norm) VALUES ('інвестори', 'інвестори')")
+        tag_id = conn.execute("SELECT id FROM tags").fetchone()[0]
+        conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (1, ?)",
+                     (tag_id,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (1, ?)",
+                         (tag_id,))
+        # source за замовчуванням — ручний тег
+        assert conn.execute("SELECT source FROM record_tags").fetchone()[0] == 'manual'
+        conn.execute("INSERT INTO tg_chat_tags (chat_id, tag_id) VALUES (777, ?)", (tag_id,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO tg_chat_tags (chat_id, tag_id) VALUES (777, ?)",
+                         (tag_id,))
+    finally:
+        conn.close()
+
+
+def test_v45_applies_on_top_of_a_v44_database(tmp_path: Path):
+    """БД рівня v44 доганяє схему, не втрачаючи даних і не чіпаючи name_norm."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO categories (name, name_norm) VALUES "
+                 "('Юридичне', 'юридичне')")
+    conn.execute("DELETE FROM schema_versions WHERE version >= 45")
+    conn.commit()
+    conn.close()
+
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert 'parent_id' in _columns(conn, 'categories')
+        assert conn.execute(
+            "SELECT name_norm FROM categories WHERE name = 'Юридичне'"
+        ).fetchone()[0] == 'юридичне'
+        assert _schema_version(conn) >= 45
+    finally:
+        conn.close()
+
+
+def test_v45_migration_is_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert list(_columns(conn, 'categories')).count('parent_id') == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 45").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- v46
+
+def _rollback_to_v45(db: str) -> None:
+    """Повернути БД у стан «до v46»: таблиці немає, версія 45."""
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE IF EXISTS embedding_epochs")
+    conn.execute("DELETE FROM schema_versions WHERE version >= 46")
+    conn.commit()
+    conn.close()
+
+
+def test_v46_stamps_existing_pairs_as_prefix_format_1(tmp_path: Path):
+    """Усе, що існувало ДО v46, побудовано старим форматом префікса — бекфіл
+    саме це й записує, а повторна міграція рядка не множить."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    for name in ('Планерка з фондом', 'Дзвінок про кошторис'):
+        conn.execute(
+            "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+            "embedding_model, embedding_version) VALUES ('file', ?, ?, ?, 4)",
+            (name, 'Обговорили терміни здачі.', 'intfloat/multilingual-e5-large'))
+    # запис без ембедингу і запис до v28 (версія NULL) у таблицю не потрапляють
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text) "
+                 "VALUES ('file', 'Ще не ембеджено', 'Текст.')")
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+                 "embedding_model) VALUES ('file', 'Легасі', 'Текст.', 'старий/ембедер')")
+    conn.commit()
+    conn.close()
+    _rollback_to_v45(db)
+
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT model, version, prefix_format FROM embedding_epochs "
+                            "ORDER BY version").fetchall()
+        assert rows == [('intfloat/multilingual-e5-large', 4, 1)]
+        assert _schema_version(conn) >= 46
+    finally:
+        conn.close()
+
+    init_database(db)          # повторна міграція — той самий рядок
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM embedding_epochs").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 46").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_v46_on_empty_database_creates_table_without_rows(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'embedding_epochs')
+        assert set(cols) == {'model', 'version', 'prefix_format', 'created_at'}
+        assert cols['prefix_format']['notnull'] is True
+        assert conn.execute("SELECT COUNT(*) FROM embedding_epochs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v46_pair_is_unique(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("INSERT INTO embedding_epochs (model, version, prefix_format) "
+                     "VALUES ('intfloat/multilingual-e5-large', 5, 2)")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO embedding_epochs (model, version, prefix_format) "
+                         "VALUES ('intfloat/multilingual-e5-large', 5, 1)")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- v47
+
+def _rollback_to_v46(db: str) -> None:
+    """Повернути `categories` у стан «до v47»: inline UNIQUE на `name` (v15),
+    глобальний UNIQUE-індекс на `name_norm` (v20), без індексу братів."""
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(categories)")]
+    conn.execute("DROP INDEX IF EXISTS idx_categories_parent_name")
+    conn.execute('''CREATE TABLE categories_old (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        slug TEXT UNIQUE,
+        color TEXT,
+        icon TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        name_norm TEXT,
+        parent_id INTEGER
+    )''')
+    cols_sql = ", ".join(cols)
+    conn.execute(f"INSERT INTO categories_old ({cols_sql}) "
+                 f"SELECT {cols_sql} FROM categories")
+    conn.execute("DROP TABLE categories")
+    conn.execute("ALTER TABLE categories_old RENAME TO categories")
+    conn.execute("CREATE UNIQUE INDEX idx_categories_name_norm ON categories(name_norm)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)")
+    conn.execute("DELETE FROM schema_versions WHERE version >= 47")
+    conn.commit()
+    conn.close()
+
+
+def _seed_refs(db: str) -> dict:
+    """Рядки всіх чотирьох таблиць, що посилаються на напрямок, + проєкт."""
+    conn = sqlite3.connect(db)
+    fund = conn.execute("SELECT id FROM categories WHERE name = 'Фонд Робота'"
+                        ).fetchone()[0]
+    conn.execute("INSERT INTO categories (name, name_norm, slug, sort_order, parent_id) "
+                 "VALUES ('Акмекорп', 'акмекорп', 'acmecorp', 9, ?)", (fund,))
+    proj = conn.execute("SELECT id FROM categories WHERE name = 'Акмекорп'").fetchone()[0]
+    conn.execute("INSERT INTO tg_monitored_chats (chat_id, title, chat_type, enabled, "
+                 "category_id) VALUES (-100, 'Акмекорп чат', 'group', 1, ?)", (proj,))
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
+                 "category_id) VALUES ('telegram', '[TG] Акмекорп', 'Текст.', ?)", (proj,))
+    conn.execute("INSERT INTO audio_downloads (youtube_url, youtube_id, title, file_path, "
+                 "source_type, category_id) VALUES ('u', 'y1', 'Запис', 'f.mp3', "
+                 "'recording', ?)", (proj,))
+    conn.execute("INSERT INTO copilot_sessions (recording_session_id, category_id) "
+                 "VALUES ('rec_1', ?)", (proj,))
+    conn.commit()
+    conn.close()
+    return {"work": fund, "proj": proj}
+
+
+def test_v47_rebuild_keeps_ids_and_all_category_refs(tmp_path: Path):
+    """Перебудова `categories` не міняє id і не зачіпає жодного посилання —
+    попри `ON DELETE SET NULL` на `tg_monitored_chats.category_id` (v18)."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    ids = _seed_refs(db)
+    _rollback_to_v46(db)
+
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT id FROM categories WHERE name = 'Акмекорп'"
+                            ).fetchone()[0] == ids["proj"]
+        assert conn.execute("SELECT parent_id FROM categories WHERE id = ?",
+                            (ids["proj"],)).fetchone()[0] == ids["work"]
+        for table in ('tg_monitored_chats', 'transcriptions', 'audio_downloads',
+                      'copilot_sessions'):
+            kept = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE category_id = ?",
+                (ids["proj"],)).fetchone()[0]
+            assert kept == 1, f"{table}: посилання на напрямок обнулилось"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert _schema_version(conn) >= 47
+    finally:
+        conn.close()
+
+
+def test_v47_drops_global_name_unique_and_adds_sibling_index(tmp_path: Path):
+    """DDL без UNIQUE на `name`, `slug` унікальний, є `idx_categories_parent_name`."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    _rollback_to_v46(db)
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'"
+        ).fetchone()[0]
+        unique_single = []
+        for idx in conn.execute("PRAGMA index_list(categories)").fetchall():
+            if not idx[2]:
+                continue
+            cols = [r[2] for r in conn.execute(f"PRAGMA index_info('{idx[1]}')")]
+            unique_single.append((idx[1], cols))
+        all_cols = [cols for _, cols in unique_single]
+        assert ['name'] not in all_cols, ddl
+        assert ['name_norm'] not in all_cols, ddl
+        assert ['slug'] in all_cols, ddl
+        assert any(n == 'idx_categories_parent_name' for n, _ in unique_single)
+
+        fund = conn.execute("SELECT id FROM categories WHERE name = 'Фонд Робота'"
+                            ).fetchone()[0]
+        free = conn.execute("SELECT id FROM categories WHERE name = 'Фріланс'").fetchone()[0]
+        # однойменні проєкти різних напрямків співіснують…
+        conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
+                     "VALUES ('Маркетинг', 'маркетинг', 'm1', ?)", (fund,))
+        conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
+                     "VALUES ('Маркетинг', 'маркетинг', 'm2', ?)", (free,))
+        # …а два однойменні брати — ні
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
+                         "VALUES ('Маркетинг', 'маркетинг', 'm3', ?)", (fund,))
+        # напрямки між собою теж (COALESCE(parent_id, 0) = 0)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO categories (name, name_norm, slug) "
+                         "VALUES ('Фріланс', 'фріланс', 'm4')")
+    finally:
+        conn.close()
+
+
+def test_v47_migration_is_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    ids = _seed_refs(db)
+    init_database(db)
+    init_database(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 47"
+                            ).fetchone()[0] == 1
+        assert conn.execute("SELECT id FROM categories WHERE name = 'Акмекорп'"
+                            ).fetchone()[0] == ids["proj"]
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                            "AND name='categories_new'").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v47_drop_table_with_fk_on_would_null_chat_category(tmp_path: Path):
+    """Доказ пастки, заради якої міграція гасить `foreign_keys`: з увімкненими
+    FK `DROP TABLE categories` спрацьовує як DELETE і мовчки зануляє
+    `tg_monitored_chats.category_id` (`ON DELETE SET NULL`, v18). Відкат
+    транзакції лишає БД цілою — і той самий рядок далі на місці."""
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    ids = _seed_refs(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("BEGIN")
+        conn.execute("DROP TABLE categories")
+        assert conn.execute("SELECT category_id FROM tg_monitored_chats WHERE chat_id = -100"
+                            ).fetchone()[0] is None
+        conn.rollback()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT category_id FROM tg_monitored_chats WHERE chat_id = -100"
+                            ).fetchone()[0] == ids["proj"]
+    finally:
+        conn.close()
+
+
+def test_v47_fk_guard_is_defensive_on_the_init_database_path(tmp_path: Path):
+    """Запис вимірювання (хвиля 7, історія 22): гард `PRAGMA foreign_keys=OFF`
+    у v47 на чинному шляху нічого не несе.
+
+    `init_database` відкриває СИРИЙ `sqlite3.connect` (`migrations.py:139`), а
+    там `foreign_keys` за замовчуванням вимкнені; `PRAGMA foreign_keys = ON`
+    ставить `app/db/connection.py` — інше зʼєднання, не те, на якому йде
+    перебудова. Тому гард лишається захисним (на випадок виклику
+    `init_database` на FK-ON зʼєднанні), а пастку, заради якої він написаний,
+    доводить `test_v47_drop_table_with_fk_on_would_null_chat_category` на
+    зібраному руками FK-ON зʼєднанні. `init_database` заради тесту не
+    рефакторимо — ціна більша за доказ."""
+    from app.db.connection import get_db_connection
+
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+
+    raw = sqlite3.connect(db)
+    try:
+        assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0, \
+            "шлях міграції: FK і так вимкнені — гард захисний"
+    finally:
+        raw.close()
+
+    with get_db_connection(db) as conn:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1, \
+            "зʼєднання застосунку FK вмикає — але міграція йде не ним"

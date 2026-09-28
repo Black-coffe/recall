@@ -60,7 +60,7 @@
         const box = ctx.mount.querySelector('#rcHomeRecent');
         box.innerHTML = UI.skeletonList(5);
         try {
-            const cats = await UI.loadCategories();
+            await UI.loadCategories();   // warm cache — UI.catChip(id) reads Recall.state.categories itself (C9)
             const data = await R.api.history({ per_page: 6 });
             if (!ctx.isCurrent()) return;
             const rows = data.transcriptions || [];
@@ -81,7 +81,7 @@
                 return `<div class="rc-rec" data-href="${U.esc(href)}">${thumb}
                     <div class="rc-rec__body"><div class="rc-rec__title">${U.esc(t.display_name || t.source_name || ('#' + t.id))}</div>
                     <div class="rc-rec__meta">${UI.srcBadge(t.source_type)}<span>${U.fmtDate(t.created_at)}</span></div></div>
-                    <div class="rc-rec__aside">${UI.catChip(t.category_id, cats)}</div></div>`;
+                    <div class="rc-rec__aside">${UI.catChip(t.category_id)}</div></div>`;
             }).join('');
             box.querySelectorAll('.rc-rec').forEach(el => el.addEventListener('click', () => R.router.navigate(el.dataset.href)));
         } catch (err) {

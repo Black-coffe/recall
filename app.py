@@ -825,6 +825,21 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
                     **sup_kwargs,
                 )
 
+        # ADR-026 / spike-decision п.3: застосунок цілимо за PID, що тримають
+        # аудіо-сесію на будь-якому активному render-endpoint (include-tree сягає
+        # лише прямих дітей). Сесійні PID згортаються до коренів дерева exe; першим
+        # іде корінь, що звучить (story 11). Сесій нема → корені exe через psutil.
+        from app.services.recording.app_audio import session_roots
+        from app.services.recording.audio_source import AppAudioSource, resolve_root_pids
+
+        def _session_pid_resolver(exe: str) -> list:
+            return session_roots(exe, fallback=resolve_root_pids)
+
+        def _app_source_factory(spec, sample_rate: int, channels: int):
+            src = AppAudioSource(spec, sample_rate, channels, pid_resolver=_session_pid_resolver)
+            src.open()
+            return src
+
         recording_service = RecordingService(
             store=_rec_store,
             sse_broker=sse_broker,
@@ -833,6 +848,8 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
             channels=cfg.RECORDING_CHANNELS,
             finalize_callback=_recording_finalize_callback,
             video_supervisor_factory=_video_supervisor_factory,
+            max_active=cfg.RECORDING_MAX_ACTIVE,
+            app_source_factory=_app_source_factory,
         )
         _recovered = recording_service.recover_orphaned()
         if _recovered:
@@ -940,7 +957,12 @@ copilot_service = None
 if getattr(cfg, 'COPILOT_ENABLED', False):
     try:
         from app.services.copilot.service import CopilotService
-        copilot_service = CopilotService(db_path=app.config['DATABASE'])
+        # C6: копілот один на процес; «живий» запис — за RecordingService.
+        copilot_service = CopilotService(
+            db_path=app.config['DATABASE'],
+            is_recording_active=(recording_service.is_active
+                                 if recording_service is not None else None),
+        )
         logger.info("CopilotService готовий (model_local=%s)",
                     getattr(cfg, 'LOCAL_LLM_MODEL', '?'))
     except Exception as e:

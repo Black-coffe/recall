@@ -14,6 +14,7 @@ import re
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app.services import research
+from app.services.categories import parse_date, parse_filter, parse_tags
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,20 @@ research_bp = Blueprint('research', __name__)
 
 def _db() -> str:
     return current_app.config['DATABASE']
+
+
+def _parse_axes(source) -> tuple:
+    """C4: (category_id, tags, since, until) з query-параметрів/JSON-тіла.
+
+    `source` — будь-що з `.get(key)` (`request.args` або розпарсений JSON).
+    Кидає `ValueError` на кривому значенні — виклики огортають у 400.
+    """
+    return (
+        parse_filter(source.get('category_id')),
+        parse_tags(source.get('tags')),
+        parse_date(source.get('since')),
+        parse_date(source.get('until')),
+    )
 
 
 def _filename(terms: list[str], suffix: str, display=None) -> str:
@@ -52,8 +67,12 @@ def preview():
     q, display = _resolve_query(request.args)
     if not q:
         return jsonify({"success": False, "error": "Порожній запит"}), 400
-    category_id = research._parse_category(request.args.get('category_id'))
-    collected = research.collect(_db(), q, category_id, display=display)
+    try:
+        category_id, tags, since, until = _parse_axes(request.args)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    collected = research.collect(_db(), q, category_id, display=display,
+                                 tags=tags, since=since, until=until)
     # Легкий прев'ю-список (без важких фрагментів) — для UI.
     sample = [{
         "id": r["id"], "source_type": r["source_type"], "title": r["title"],
@@ -72,9 +91,13 @@ def originals():
     q, display = _resolve_query(data)
     if not q:
         return jsonify({"success": False, "error": "Порожній запит"}), 400
-    category_id = research._parse_category(data.get('category_id'))
+    try:
+        category_id, tags, since, until = _parse_axes(data)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     base_url = request.host_url  # напр. http://localhost:5050/
-    collected = research.collect(_db(), q, category_id, display=display)
+    collected = research.collect(_db(), q, category_id, display=display,
+                                 tags=tags, since=since, until=until)
     markdown = research.render_originals_md(collected, base_url)
     return jsonify({
         "success": True,
@@ -91,13 +114,18 @@ def summary():
     q, display = _resolve_query(data)
     if not q:
         return jsonify({"success": False, "error": "Порожній запит"}), 400
-    category_id = research._parse_category(data.get('category_id'))
+    try:
+        category_id, tags, since, until = _parse_axes(data)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     model = data.get('model')
     db_path = _db()
 
     def generate():
         try:
-            yield from research.summarize_stream(db_path, q, category_id, model, display=display)
+            yield from research.summarize_stream(
+                db_path, q, category_id, model, display=display,
+                tags=tags, since=since, until=until)
         except Exception as e:
             logger.error("[research] summary generator failed: %s", e, exc_info=True)
             yield research._sse("error", {"error": "Помилка саммарі."})

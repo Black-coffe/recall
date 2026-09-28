@@ -79,7 +79,7 @@ def test_list_recent_exposes_meta(db):
     with_title = _add(db, source_name="call_a.mp3", title="Нарада з Іваном",
                       description="Про бюджет")
     without_title = _add(db, source_name="call_b.mp3")
-    items = {i["id"]: i for i in m.list_recent(limit=20)}
+    items = {i["id"]: i for i in m.list_recent(limit=20)["items"]}
 
     assert items[with_title]["display_name"] == "Нарада з Іваном"
     assert items[with_title]["title"] == "Нарада з Іваном"

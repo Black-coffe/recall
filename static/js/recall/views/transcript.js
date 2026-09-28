@@ -25,6 +25,7 @@
             <div class="rc-skel" style="height:80px;width:100%"></div></div></div>`;
 
         cats = await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         let t;
         try { t = await R.api.transcript(id); }
         catch (err) {
@@ -75,6 +76,7 @@
                         <button class="rc-iconbtn" id="rcMetaEditBtn" aria-label="Редагувати назву й опис" title="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
                     </div>
                     ${t.description ? `<p class="rc-record__desc" id="rcRecordDesc">${U.esc(t.description)}</p>` : ''}
+                    <div id="rcRecTax"></div>
                     ${provenanceHTML(t)}
                 </div>
                 <div class="rc-record__actions">
@@ -186,6 +188,7 @@
         if (cmBtn) cmBtn.addEventListener('click', () => toggleComments(ctx, id));
         updateCmCount(ctx, id);
         bindCategoryEditor(ctx, id, t);
+        renderTaxonomy(ctx, id, t);
 
         // polish + summarize (existing endpoints, native)
         ctx.mount.querySelector('#rcPolish').addEventListener('click', () => doPolish(ctx, id));
@@ -896,7 +899,11 @@
         box.querySelector('#rcCatSuggest').addEventListener('click', () => suggestCat(ctx, id, t));
     }
     async function applyCategory(ctx, id, t, cid) {
-        try { await R.api.setCategory(id, cid); t.category_id = cid; data.category_id = cid; UI.toast(cid ? 'Напрямок змінено' : 'Напрямок знято', 'success'); }
+        try {
+            await R.api.setCategory(id, cid); t.category_id = cid; data.category_id = cid;
+            renderTaxonomy(ctx, id, t);   // шлях під заголовком іде за напрямком
+            UI.toast(cid ? 'Напрямок змінено' : 'Напрямок знято', 'success');
+        }
         catch (e) { UI.toast(e.message || 'Не вдалося', 'error'); }
     }
     const _CAT_REASON = {
@@ -918,6 +925,73 @@
             UI.toast(`За схожими записами: «${r.suggestion.name}» (${Math.round((r.suggestion.confidence || 0) * 100)}%)`, 'success');
         } catch (e) { UI.toast(e.message || 'Помилка підказки', 'error'); }
         finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i>'; } }
+    }
+
+    // ---- шлях «Напрямок → Проєкт» + теги запису + підказки Claude ----
+    // Теги редагуються тут і ніде більше (у списках вони читальні): відповідь
+    // PUT /tags і POST /tags/suggestions несе свіжі `tags`/`suggested_tags`,
+    // тож перемальовуємо з неї, без перезавантаження сторінки.
+    function renderTaxonomy(ctx, id, t) {
+        const box = ctx.mount.querySelector('#rcRecTax');
+        if (!box) return;
+        box.innerHTML = '';
+        box.style.cssText = 'margin:8px 0 14px;display:flex;flex-direction:column;gap:8px';
+
+        const path = UI.catPath ? UI.catPath(t.category_id) : '';
+        box.appendChild(U.el('div', { class: 'rc-mono', style: 'font-size:var(--rc-t-xs);color:var(--rc-ink-3)' },
+            path ? `<i class="fa-solid fa-folder-tree"></i> ${U.esc(path)}` : '<i class="fa-solid fa-folder-tree"></i> Без напрямку'));
+
+        const row = U.el('div', { class: 'rc-tags' });
+        (t.tags || []).forEach((tag) => {
+            row.appendChild(UI.tagChip(tag, { onRemove: (tg) => changeTags(ctx, id, t, { remove: [tg.name] }) }));
+        });
+        const add = U.el('span', { style: 'display:inline-flex;gap:4px;align-items:center' },
+            `<input class="rc-input rc-select--sm" placeholder="Додати тег…" style="width:150px" maxlength="40" autocomplete="off">
+             <button class="rc-btn rc-btn--sm" type="button"><i class="fa-solid fa-plus"></i></button>`);
+        const inp = add.querySelector('input');
+        const submit = () => {
+            const name = (inp.value || '').trim();
+            if (!name) return;
+            inp.value = '';
+            changeTags(ctx, id, t, { add: [name] });
+        };
+        add.querySelector('button').addEventListener('click', submit);
+        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+        row.appendChild(add);
+        box.appendChild(row);
+
+        const sugg = (t.suggested_tags || []).filter(Boolean);
+        if (sugg.length) {
+            const sbox = U.el('div', { class: 'rc-tags' },
+                `<span class="rc-mono" style="font-size:var(--rc-t-xs);color:var(--rc-ink-3)">Claude пропонує:</span>`);
+            sugg.forEach((name) => {
+                const chip = U.el('span', { class: 'rc-tag' },
+                    `${U.esc(name)}
+                     <button type="button" class="rc-tag__x" data-act="accept" title="Прийняти тег" aria-label="Прийняти тег ${U.esc(name)}"><i class="fa-solid fa-check"></i></button>
+                     <button type="button" class="rc-tag__x" data-act="dismiss" title="Відхилити" aria-label="Відхилити тег ${U.esc(name)}">&times;</button>`);
+                chip.querySelector('[data-act="accept"]').addEventListener('click',
+                    () => resolveSuggestion(ctx, id, t, { accept: [name] }));
+                chip.querySelector('[data-act="dismiss"]').addEventListener('click',
+                    () => resolveSuggestion(ctx, id, t, { dismiss: [name] }));
+                sbox.appendChild(chip);
+            });
+            box.appendChild(sbox);
+        }
+    }
+    function _applyTagResponse(ctx, id, t, r) {
+        t.tags = r.tags || [];
+        t.suggested_tags = r.suggested_tags || [];
+        if (data && data.id === t.id) { data.tags = t.tags; data.suggested_tags = t.suggested_tags; }
+        if (UI.bustTags) UI.bustTags();   // словник міг поповнитись новим тегом
+        renderTaxonomy(ctx, id, t);
+    }
+    async function changeTags(ctx, id, t, body) {
+        try { _applyTagResponse(ctx, id, t, await R.api.setRecordTags(id, body)); }
+        catch (e) { UI.toast((e && e.message) || 'Не вдалося змінити теги', 'error'); }
+    }
+    async function resolveSuggestion(ctx, id, t, body) {
+        try { _applyTagResponse(ctx, id, t, await R.api.resolveTagSuggestions(id, body)); }
+        catch (e) { UI.toast((e && e.message) || 'Не вдалося застосувати підказку', 'error'); }
     }
 
     // ---- related / connections ----

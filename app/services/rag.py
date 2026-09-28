@@ -302,7 +302,7 @@ def _build_request_kwargs(question: str, chunks: list[dict], model: Optional[str
 def _resolve_project(db_path: str, project: Optional[str]) -> Optional[list[int]]:
     """Назви проєктів/людей → id сутностей для звуження пошуку (Трек 2).
 
-    Другий шар скоупу: категорії недостатньо, бо «Робота» — більша частина корпусу.
+    Другий шар скоупу: категорії недостатньо, бо «Фонд Робота» — більша частина корпусу.
     Порожній результат (назви не знайдено) НЕ звужує пошук до нуля — повертаємо
     None, тобто «шукай скрізь»: краще ширша відповідь, ніж мовчання через друкарську
     помилку в назві проєкту.
@@ -327,10 +327,17 @@ def answer_question(
     project: Optional[str] = None,
     explain: bool = False,
     channel: str = "ui",
+    tags: Optional[list[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> dict:
-    """Відповісти на питання по архіву з цитатами. category_id — обмежити напрямком.
+    """Відповісти на питання по архіву з цитатами. category_id — обмежити напрямком
+    (id напрямку захоплює і його проєкти — `categories.filter_sql`).
     explain — Історія 05: прокидається у `retrieval.search`, `why` кожного
     чанка виживає до `sources` крізь `order_citables`/`attach_thread_context`.
+    tags/since/until — directions-projects-tags-03 (контракт C5): прокидаються
+    у `retrieval.search` як є (OR по тегах, ISO-дати включно); розбір фрази
+    «за тиждень» робить викликач, не Recall.
 
     Returns {"answer", "sources": [chunks], "model", "found", token usage}.
     """
@@ -343,7 +350,8 @@ def answer_question(
                            scope_tids=scope_tids,
                            rerank=_RERANK_ENABLED,
                            rewrite=_QUERY_REWRITE_ENABLED,
-                           explain=explain)
+                           explain=explain,
+                           tags=tags, since=since, until=until)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     if not chunks:
         return {
@@ -476,9 +484,13 @@ def answer_question_stream(
     project: Optional[str] = None,
     explain: bool = False,
     channel: str = "ui",
+    tags: Optional[list[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> Iterator[str]:
     """Стрім-версія answer_question. category_id — обмежити напрямком. explain —
     Історія 05, те саме, що в answer_question (не міняє формат SSE-подій).
+    tags/since/until — ті самі осі, що в answer_question (контракт C5).
     Yields SSE-кадри:
       event: sources — {sources, found, vector_available} (одразу після retrieval)
       event: delta   — {text} (токени відповіді по мірі надходження)
@@ -495,7 +507,8 @@ def answer_question_stream(
                            scope_tids=scope_tids,
                            rerank=_RERANK_ENABLED,
                            rewrite=_QUERY_REWRITE_ENABLED,
-                           explain=explain)
+                           explain=explain,
+                           tags=tags, since=since, until=until)
     chunks = retrieval.attach_thread_context(db_path, res["chunks"])
     attached = retrieval.attach_comments(db_path, chunks)
     # Той самий порядок, що й у контексті: клієнт резолвить [n] як sources[n-1],

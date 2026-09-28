@@ -87,8 +87,8 @@
                     <i class="fa-solid fa-compass"></i> Початок роботи з Recall
                     <button class="rc-iconbtn rc-onb__x" id="rcOnbClose" type="button" aria-label="Закрити"><i class="fa-solid fa-xmark"></i></button>
                 </div>
-                <p class="rc-onb__lede">Чотири кроки — і архів готовий до першого дзвінка. Усе опційне й повертається пізніше: іконка <i class="fa-solid fa-graduation-cap"></i> у шапці відкриває це вікно знову.</p>
-                <div class="rc-onb__list" id="rcOnbList">${UI.skeletonList(4)}</div>
+                <p class="rc-onb__lede">Пʼять кроків — і архів готовий до першого дзвінка. Усе опційне й повертається пізніше: іконка <i class="fa-solid fa-graduation-cap"></i> у шапці відкриває це вікно знову.</p>
+                <div class="rc-onb__list" id="rcOnbList">${UI.skeletonList(5)}</div>
                 <div class="rc-modal__actions">
                     <button class="rc-btn rc-btn--sm" id="rcOnbSkip">Пропустити</button>
                 </div>
@@ -123,11 +123,11 @@
         const list = overlayEl && overlayEl.querySelector('#rcOnbList');
         if (!list) return;
 
-        // Kick off all three status checks in parallel — independent, each
-        // degrades to "unknown/pending" on its own failure so one dead
-        // endpoint doesn't blank the whole checklist.
-        const [modelDone, keyDone, tgDone] = await Promise.all([
-            checkModelDownloaded(), checkKeyConfigured(), checkTelegramOptedIn(),
+        // Kick off all status checks in parallel — independent, each degrades
+        // to "unknown/pending" on its own failure so one dead endpoint
+        // doesn't blank the whole checklist.
+        const [modelDone, keyDone, tgDone, projectsDone] = await Promise.all([
+            checkModelDownloaded(), checkKeyConfigured(), checkTelegramOptedIn(), checkHasProjects(),
         ]);
         if (!overlayEl) return; // closed while awaiting
         const micStatus = await checkMicPermission(); // best-effort, permissions API optional
@@ -162,6 +162,12 @@
                 status: tgDone ? 'done' : 'pending',
                 actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="telegram">${tgDone ? 'Керувати' : 'Підключити'}</button>`,
             }),
+            stepRow({
+                id: 'projects', icon: 'fa-solid fa-sitemap', title: 'Розкладіть напрямки по проєктах', optional: true,
+                descHTML: 'Напрямок можна поділити на проєкти — «Фонд Робота» → «Акмекорп», «NOVA», «Speak Easy»… Необовʼязково: без проєктів усе працює як плаский список напрямків.',
+                status: projectsDone ? 'done' : 'pending',
+                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="projects">${projectsDone ? 'Керувати' : 'Розкласти'}</button>`,
+            }),
         ].join('');
 
         list.querySelectorAll('[data-onb-go]').forEach(btn => {
@@ -170,6 +176,7 @@
                 if (step === 'model') goTo('/settings', 'rcSetModels');
                 else if (step === 'key') goTo('/settings', 'rcSetAiKey');
                 else if (step === 'telegram') goTo('/telegram', 'rcTgStatus');
+                else if (step === 'projects') goTo('/settings', 'rcSetCats');
             });
         });
         const micBtn = list.querySelector('#rcOnbMic');
@@ -191,6 +198,14 @@
         try {
             const s = await R.api.get('/api/telegram/status');
             return !!(s && s.alive && Array.isArray(s.monitored) && s.monitored.length > 0);
+        } catch (_) { return false; }
+    }
+    // Виконано, коли в дереві напрямків є хоча б один проєкт (не сам факт
+    // існування напрямків — вони можуть лишатись плоским списком назавжди).
+    async function checkHasProjects() {
+        try {
+            const cats = await UI.loadCategories();
+            return (cats.list || []).some(c => c.level === 'project');
         } catch (_) { return false; }
     }
     // Permissions API support for 'microphone' is inconsistent (Firefox

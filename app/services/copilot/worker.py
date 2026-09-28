@@ -29,40 +29,13 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from app.services import embeddings, local_llm
+from app.services.categories import CategoryError
 from app.services.copilot.dispatcher import Dispatcher
 from app.services.copilot.escalate import Escalator
 from app.services.copilot.topics import TopicTracker
 
 
 logger = logging.getLogger(__name__)
-
-
-def _scope_entity_ids(ws, db_path: Optional[str]) -> Optional[list]:
-    """Сутності (проєкт/учасники) поточної сесії — тонкий скоуп пошуку (Трек 2).
-
-    Резолвимо ОДИН раз на сесію і кешуємо у стані воркера: під час дзвінка кожен
-    зайвий запит до БД їсть той самий бюджет часу, що й корисна робота. Порожній
-    список = скоупу нема, пошук іде як раніше (по категорії).
-    """
-    cached = getattr(ws, "_scope_ids", None)
-    if cached is not None:
-        return cached or None
-    names = (ws.config or {}).get("scope_projects") or []
-    ids: list = []
-    if names:
-        try:
-            from app.services import scope as scope_svc
-            ids = scope_svc.scope_filter_ids(db_path, names) if db_path else []
-        except Exception as exc:
-            logger.warning("[copilot] не вдалось розібрати скоуп %s: %s", names, exc)
-            ids = []
-        if names and not ids:
-            logger.info("[copilot] скоуп %s не знайдено у графі — шукаю без звуження", names)
-    try:
-        ws._scope_ids = ids
-    except Exception:
-        logger.debug("[copilot] стан сесії не кешує скоуп (dataclass із slots?)")
-    return ids or None
 
 
 @dataclass
@@ -85,6 +58,7 @@ class _WS:
     last_card_ts: float = 0.0                        # time.monotonic останньої картки
     cards_suppressed: int = 0                        # скільки притишено (йдуть у пост-бриф)
     budget_notice_sent: bool = False
+    scope_ambiguous_notice_sent: bool = False         # тезка-скоуп: попередити оператора один раз на сесію
     # --- Крок 3: диспетчер-LLM (триаж + RAG + інсайти) ---
     transcript: str = ""                             # ковзний буфер реплік для диспетчера
     summary: str = ""                                # rolling-summary сесії (in-memory)
@@ -503,6 +477,81 @@ class CopilotWorker:
             })
         return out
 
+    def _scope_entity_ids(self, ws: _WS, db_path: Optional[str]) -> Optional[list]:
+        """Сутності (проєкт/учасники) поточної сесії — тонкий скоуп пошуку (Трек 2).
+
+        Резолвимо ОДИН раз на сесію і кешуємо у стані воркера: під час дзвінка кожен
+        зайвий запит до БД їсть той самий бюджет часу, що й корисна робота. Порожній
+        список = скоупу нема, пошук іде як раніше (по категорії).
+
+        Тезка (`CategoryError('ambiguous')` з `resolve_node`, v47) — окремий випадок
+        від «не знайдено»: скоуп реально існує, просто в кількох напрямках, тож
+        тихо звужувати на одного з тезок означало б підмінити відповідь. Пошук іде
+        БЕЗ звуження (як і при not-found), але оператора попереджаємо один раз на
+        сесію — інакше «Маркетинг» мовчки розширюється на весь архів на всю сесію
+        і ніхто про це не дізнається.
+        """
+        cached = getattr(ws, "_scope_ids", None)
+        if cached is not None:
+            return cached or None
+        names = (ws.config or {}).get("scope_projects") or []
+        ids: list = []
+        if names:
+            candidates: list = []
+            try:
+                from app.services import scope as scope_svc
+                ids = scope_svc.scope_filter_ids(db_path, names) if db_path else []
+            except CategoryError as exc:
+                if exc.code == "ambiguous":
+                    candidates = list(exc.candidates or [])
+                    logger.warning("[copilot] скоуп %s неоднозначний: %s", names, candidates)
+                else:
+                    logger.warning("[copilot] не вдалось розібрати скоуп %s: %s", names, exc)
+                ids = []
+            except Exception as exc:
+                logger.warning("[copilot] не вдалось розібрати скоуп %s: %s", names, exc)
+                ids = []
+            if candidates:
+                if not ws.scope_ambiguous_notice_sent:
+                    ws.scope_ambiguous_notice_sent = True
+                    self._notify_scope_ambiguous(ws, names, candidates)
+            elif not ids:
+                logger.info("[copilot] скоуп %s не знайдено у графі — шукаю без звуження", names)
+        try:
+            ws._scope_ids = ids
+        except Exception:
+            logger.debug("[copilot] стан сесії не кешує скоуп (dataclass із slots?)")
+        return ids or None
+
+    def _notify_scope_ambiguous(self, ws: _WS, names: list, candidates: list) -> None:
+        """Тезка-скоуп: попередити оператора наявним каналом інсайту (Раунд 6
+        мажор 1), не окремим ``copilot_status``. Персист через ``log_event`` +
+        публікація ``copilot_insight`` з ``shown=true`` — так попередження і
+        рендериться карткою у віджеті, і лежить у ``copilot_events`` (історія
+        сесії, `get_state()`/MCP `get_live_copilot`, таймлайн). Навмисно поза
+        `_card_gate` і лічильником `cards_shown` — бюджет уваги стосується
+        інсайтів диспетчера, не системних попереджень."""
+        scope_label = ", ".join(str(n) for n in names)
+        text = (f"Скоуп «{scope_label}» є в кількох напрямках — шукаю без "
+                "звуження, уточніть скоуп повним шляхом:")
+        event_id = None
+        try:
+            event_id = self._svc.log_event(
+                ws.copilot_session_id, "insight_local",
+                ts_offset_sec=ws.last_offset,
+                topic_id=ws.topic_db_ids.get(ws.tracker.current), source="local",
+                payload={"kind": "scope_notice", "text": text,
+                         "candidates": candidates, "evidence": [], "shown": True},
+            )
+        except Exception as e:
+            logger.debug("[copilot] persist scope notice failed: %s", e)
+        self._publish(ws, "copilot_insight", {
+            "id": event_id, "kind": "scope_notice", "text": text,
+            "candidates": candidates, "evidence": [], "confidence": None,
+            "source": "local", "topic_index": ws.tracker.current,
+            "ts_offset_sec": ws.last_offset,
+        })
+
     def _gather_chunks(self, ws: _WS, disp: Dispatcher, cur: int,
                        triage: dict) -> list[dict]:
         """RAG-чанки для аналізу: reuse кешу при поверненні теми, інакше пошук."""
@@ -526,7 +575,7 @@ class CopilotWorker:
             res = disp.retrieve(triage["retrieval_query"],
                                 top_k=int(ws.config.get("top_k") or 7),
                                 category_id=ws.config.get("category_id"),
-                                scope_tids=_scope_entity_ids(ws, self._db_path))
+                                scope_tids=self._scope_entity_ids(ws, self._db_path))
             chunks = res.get("chunks") or []
         except Exception as e:
             logger.warning("[copilot] RAG пошук збій: %s", e)

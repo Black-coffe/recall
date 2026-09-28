@@ -1276,6 +1276,40 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 }
 .rc-rec-vid-banner[hidden] { display: none; }
 
+/* ---- parallel recordings: tabs, system-source switcher, warnings ---- */
+.rc-rectabs { display: flex; flex-wrap: wrap; gap: var(--rc-2); margin-top: var(--rc-5); border-bottom: 1px solid var(--rc-hairline); }
+.rc-rectabs[hidden] { display: none; }
+.rc-rectabs__tab {
+    display: inline-flex; align-items: center; gap: var(--rc-2); padding: var(--rc-2) var(--rc-3);
+    background: none; border: 1px solid transparent; border-bottom: none; border-radius: var(--rc-r-2) var(--rc-r-2) 0 0;
+    font: inherit; font-size: var(--rc-t-sm); color: var(--rc-ink-2); cursor: pointer; margin-bottom: -1px;
+}
+.rc-rectabs__tab:hover { color: var(--rc-ink); }
+.rc-rectabs__tab.is-active { background: var(--rc-surface); border-color: var(--rc-hairline); color: var(--rc-ink); font-weight: 600; }
+.rc-rectabs__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rc-ink-3); }
+.rc-rectabs__tab.is-rec .rc-rectabs__dot { background: var(--rc-err); animation: rc-recpulse 1.4s var(--rc-ease) infinite; }
+.rc-rectabs__time, .rc-rectabs__state { font-size: var(--rc-t-xs); color: var(--rc-ink-3); font-feature-settings: 'tnum' 1; }
+.rc-rectabs__tab--new { color: var(--rc-accent-deep); }
+.rc-recsrc { margin: var(--rc-2) 0 var(--rc-3); display: grid; gap: var(--rc-2); }
+.rc-recsrc--prompt { border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-2); padding: var(--rc-3) var(--rc-4); }
+.rc-recsrc__head { font-weight: 600; }
+.rc-recsrc__row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--rc-3); }
+.rc-recsrc__lbl { font-size: var(--rc-t-xs); color: var(--rc-ink-3); width: 44px; }
+.rc-recsrc__muted { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-recsrc__pick { display: grid; gap: var(--rc-2); padding: var(--rc-3); background: var(--rc-surface-2); border-radius: var(--rc-r-2); }
+.rc-recsrc__pick[hidden] { display: none; }
+.rc-recsrc__app { display: grid; gap: var(--rc-1, 4px); padding: var(--rc-2) 0; border-top: 1px solid var(--rc-hairline); }
+.rc-recsrc__app:first-child { border-top: none; }
+.rc-recsrc__appname { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--rc-2); }
+.rc-recsrc__badge { font-size: var(--rc-t-xs); padding: 1px var(--rc-2); border-radius: 999px; background: var(--rc-err-tint); color: var(--rc-err); }
+.rc-recwarn {
+    display: grid; gap: var(--rc-2); font-size: var(--rc-t-xs); color: var(--rc-ink-2);
+    background: rgba(176, 122, 22, 0.10); border-left: 3px solid var(--rc-warn); border-radius: var(--rc-r-1);
+    padding: var(--rc-2) var(--rc-3); margin-bottom: var(--rc-3);
+}
+.rc-recwarn i { color: var(--rc-warn); margin-right: 4px; }
+.rc-recwarn--ask { display: flex; flex-wrap: wrap; align-items: center; gap: var(--rc-2); font-size: var(--rc-t-sm); color: var(--rc-ink); }
+
 /* ---- Co-pilot widget (Phase 19, Крок 4) ---- */
 .rc-rec-active--cp { max-width: 1180px; display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: var(--rc-6); align-items: start; }
 .rc-rec-active--cp .rc-rec-main { min-width: 0; }
@@ -1435,12 +1469,59 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 /* «＋ Новий напрямок…» опція у будь-якому селекті напрямку */
 .rc-opt-new { color: var(--rc-accent-deep, var(--rc-accent)); font-weight: 600; }
 
-/* напрямки: рядок керування у Налаштуваннях */
+/* напрямки: рядок керування у Налаштуваннях (флет-список — теги) */
 .rc-catrow { display: flex; align-items: center; gap: var(--rc-3); padding: var(--rc-2) 0; border-bottom: 1px solid var(--rc-hairline); }
 .rc-catrow__color { width: 30px; height: 30px; padding: 0; border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); background: none; cursor: pointer; flex: none; }
 .rc-catrow__name { flex: 1; max-width: 360px; }
 .rc-catrow__count { color: var(--rc-ink-3); font-size: var(--rc-t-xs); white-space: nowrap; flex: none; }
 .rc-catrow__actions { display: flex; gap: var(--rc-1); flex: none; }
+
+/* напрямки: дерево двох рівнів (09) — той самий рядок, що .rc-catrow, лише
+   з відступом для проєктів і селектом reparent замінюючи довільний блок */
+.rc-tree { border-top: 1px solid var(--rc-hairline); }
+.rc-tree__node { display: flex; align-items: center; gap: var(--rc-3); padding: var(--rc-2) 0; border-bottom: 1px solid var(--rc-hairline); }
+.rc-tree__node--project { padding-left: 34px; position: relative; }
+.rc-tree__node--project::before {
+    content: "—"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    color: var(--rc-ink-3);
+}
+
+/* теги — чіп (запис/Налаштування) і мультиселект словника (09) */
+.rc-tag {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px;
+    background: var(--rc-surface-2); border: 1px solid var(--rc-hairline-2);
+    font-size: var(--rc-t-xs); color: var(--rc-ink-2);
+}
+.rc-tag__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--rc-ink-3); }
+.rc-tag__x {
+    border: none; background: none; cursor: pointer; color: var(--rc-ink-3);
+    font-size: 13px; line-height: 1; padding: 0; margin-left: 2px;
+}
+.rc-tag__x:hover { color: var(--rc-err); }
+.rc-tagsel { min-height: 76px; padding: var(--rc-2); }
+
+/* пікер тегів чіпами (21): прихований select лишається джерелом істини
+   (selectedOptions/change для шести sync()-екранів і рядка Telegram),
+   видимий шар — перемикачі поверх .rc-chip. Без фіксованої висоти й
+   min-height — у рядку Telegram (.rc-tgrow) не рве рядок, лише переносить
+   чіпи (flex-wrap). */
+.rc-tagpick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rc-tagpick .rc-tagsel { display: none; }
+.rc-tagpick__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Натиснутий стан — .rc-chip.is-active (413), той самий клас, що інші чіпи-
+   фільтри; окреме правило на атрибуті aria-pressed прибрано (24, дублювало). */
+.rc-tagpick__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--tag-color, var(--rc-ink-3)); }
+.rc-tagpick__empty { font-size: var(--rc-t-xs); color: var(--rc-ink-3); margin: 0; }
+.rc-tagpick__empty a { color: var(--rc-accent-deep); }
+/* Збій UI.loadTags (24) — не «тегів немає», окремий стан з «повторити». */
+.rc-tagpick__error { display: flex; align-items: center; gap: 8px; font-size: var(--rc-t-xs); color: var(--rc-err); }
+
+/* згорнута підказка «Що це?» біля нового фільтра/контролу (09) */
+.rc-hint { font-size: var(--rc-t-xs); color: var(--rc-ink-3); margin: 0 0 var(--rc-3); }
+.rc-hint > summary { cursor: pointer; color: var(--rc-ink-2); }
+.rc-hint > summary:hover { color: var(--rc-accent-deep); }
+.rc-hint[open] > summary { color: var(--rc-accent-deep); margin-bottom: 4px; }
 
 /* загальна модалка (створення напрямку, перенесення) */
 .rc-modal-ov { position: fixed; inset: 0; z-index: 1000; background: rgba(20, 22, 28, .42); display: flex; align-items: center; justify-content: center; padding: var(--rc-4); }

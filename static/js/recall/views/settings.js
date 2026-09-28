@@ -41,8 +41,17 @@
                     <h2 class="rc-set__h" style="margin:0">Напрямки</h2>
                     <button class="rc-btn rc-btn--sm" id="rcCatAdd"><i class="fa-solid fa-plus"></i> Новий напрямок</button>
                 </div>
-                <p class="rc-mono" style="color:var(--rc-ink-3);margin:0 0 12px;font-size:var(--rc-t-xs)">Напрямки звужують RAG, ко-пілота й пошук під окремі проєкти. Унікальність регістронезалежна (кирилиця теж) — дублі неможливі. Колір і назву можна змінювати; «перенести/обʼєднати» перекидає всі записи напрямку в інший.</p>
+                <p class="rc-mono" style="color:var(--rc-ink-3);margin:0 0 4px;font-size:var(--rc-t-xs)">Напрямки звужують RAG, ко-пілота й пошук під окремі проєкти. Унікальність регістронезалежна (кирилиця теж) — дублі неможливі. Напрямок можна поділити на проєкти («Фонд Робота» → «Акмекорп», «NOVA», «Speak Easy»…) — селект «Напрямок» на кожному рядку переносить вузол; напрямок із проєктами не можна ані видалити, ані самого зробити проєктом, доки в нього є проєкти.</p>
+                ${UI.hint('<p>Записи «Фонду Робота» — це і його власні записи, і записи всіх його проєктів разом. Записи «Акмекорп» бачить лише сам «Акмекорп». Так само і в пошуку/RAG: обрати напрямок = включити всі його проєкти, обрати проєкт = звузити лише до нього.</p>').outerHTML}
                 <div id="rcSetCats">${UI.skeletonList(3)}</div>
+            </section>
+            <section class="rc-set">
+                <div class="rc-pagehead__row" style="margin-bottom:8px">
+                    <h2 class="rc-set__h" style="margin:0">Теги</h2>
+                    <button class="rc-btn rc-btn--sm" id="rcTagAdd"><i class="fa-solid fa-plus"></i> Новий тег</button>
+                </div>
+                <p class="rc-mono" style="color:var(--rc-ink-3);margin:0 0 12px;font-size:var(--rc-t-xs)">Теги ріжуть архів поперек напрямків — один запис може нести кілька. Зручно для тем чи клієнтів, які не вписуються в дерево напрямків.</p>
+                <div id="rcSetTags">${UI.skeletonList(2)}</div>
             </section>
             <section class="rc-set">
                 <div class="rc-pagehead__row" style="margin-bottom:12px">
@@ -58,6 +67,7 @@
 
         ctx.mount.querySelector('#rcSpkAdd').addEventListener('click', () => toggleAddSpeaker(ctx));
         ctx.mount.querySelector('#rcCatAdd').addEventListener('click', () => addCategory(ctx));
+        ctx.mount.querySelector('#rcTagAdd').addEventListener('click', () => addTag(ctx));
         ctx.mount.querySelector('#rcDiagExport').addEventListener('click', () => exportDiagnosticPackage(ctx));
         loadSystem(ctx);
         loadAiKey(ctx);
@@ -65,7 +75,16 @@
         loadModels(ctx);
         loadCopilot(ctx);
         loadCategories(ctx);
+        loadTags(ctx);
         loadSpeakers(ctx);
+    }
+
+    // Витягти повідомлення для тосту з помилки API: 409 has_projects несе
+    // короткий код у .message (err.body.error === 'has_projects'), а
+    // людський текст зі списком проєктів — у err.body.message; решта кодів
+    // (two_levels/self_parent/bad_parent/duplicate) уже людські в .message.
+    function apiErrMsg(e, fallback) {
+        return (e && e.body && e.body.message) || (e && e.message) || fallback || 'Не вдалося';
     }
 
     // ---- AI / Claude API-ключ (T5.1) ---------------------------------------
@@ -147,7 +166,7 @@
         });
     }
 
-    // ---- напрямки: керування (CRUD + перенесення/обʼєднання) ----------------
+    // ---- напрямки: керування (дерево, CRUD + reparent + перенесення/обʼєднання) ----
     let _cats = [];
     async function loadCategories(ctx) {
         const box = ctx.mount.querySelector('#rcSetCats');
@@ -157,57 +176,87 @@
             if (!ctx.isCurrent()) return;
             _cats = d.categories || [];
             if (!_cats.length) { box.innerHTML = UI.empty('Напрямків ще немає', 'Створіть перший — наприклад «Фонд» чи «Проєкт Альфа».', 'fa-folder-tree'); return; }
-            box.innerHTML = `<div class="rc-list">` + _cats.map(catRowHTML).join('')
+            box.innerHTML = `<div class="rc-tree" id="rcCatTree">` + _cats.map(treeNodeHTML).join('')
                 + (d.uncategorized ? `<div class="rc-mono" style="color:var(--rc-ink-3);margin-top:10px;font-size:var(--rc-t-xs)">Без напрямку: ${d.uncategorized} зап.</div>` : '')
                 + `</div>`;
             bindCategories(ctx, box);
         } catch (err) { box.innerHTML = UI.error(err && err.message); }
     }
 
-    function catRowHTML(c) {
+    function treeNodeHTML(c) {
         const color = c.color || '#6c757d';
-        return `<div class="rc-catrow" data-id="${c.id}">
-            <input type="color" class="rc-catrow__color" value="${U.esc(color)}" title="Колір напрямку">
-            <input class="rc-input rc-catrow__name" value="${U.esc(c.name)}" maxlength="60" aria-label="Назва напрямку">
-            <span class="rc-catrow__count rc-mono">${c.count || 0} зап.</span>
+        const isProject = c.level === 'project';
+        const count = isProject ? `${c.items || 0} зап.`
+            : `${c.items_total != null ? c.items_total : (c.count || 0)} зап.`;
+        return `<div class="rc-tree__node${isProject ? ' rc-tree__node--project' : ''}" data-id="${c.id}">
+            <input type="color" class="rc-catrow__color" value="${U.esc(color)}" title="Колір">
+            <input class="rc-input rc-catrow__name" value="${U.esc(c.name)}" maxlength="60" aria-label="Назва">
+            <span class="rc-catrow__count rc-mono">${count}</span>
+            <select class="rc-select rc-select--sm" data-reparent="${c.id}" aria-label="Напрямок">${reparentOptions(c)}</select>
             <div class="rc-catrow__actions">
                 <button class="rc-iconbtn" data-act="merge" title="Перенести / обʼєднати в інший напрямок"><i class="fa-solid fa-code-merge"></i></button>
-                <button class="rc-iconbtn" data-act="delete" title="Видалити напрямок"><i class="fa-solid fa-trash"></i></button>
+                <button class="rc-iconbtn" data-act="delete" title="Видалити"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>`;
     }
 
+    // Опції reparent-селекта одного вузла: усі ІНШІ напрямки + «без напрямку»
+    // (= сам стає/лишається напрямком). Проєкти як цілі не пропонуються —
+    // третього рівня в дереві нема (сервер однаково відхилить, це лише щоб
+    // не показувати завідомо криву опцію).
+    function reparentOptions(c) {
+        const cur = c.parent_id == null ? '' : String(c.parent_id);
+        const directions = _cats.filter((x) => x.level !== 'project' && x.id !== c.id);
+        return `<option value=""${cur === '' ? ' selected' : ''}>— без напрямку —</option>`
+            + directions.map((d) => `<option value="${d.id}"${String(d.id) === cur ? ' selected' : ''}>${U.esc(d.name)}</option>`).join('');
+    }
+
     function bindCategories(ctx, box) {
-        box.querySelectorAll('.rc-catrow').forEach(row => {
+        box.querySelectorAll('.rc-tree__node').forEach(row => {
             const id = Number(row.dataset.id);
             const c = _cats.find(x => x.id === id) || {};
             const nameEl = row.querySelector('.rc-catrow__name');
             const colorEl = row.querySelector('.rc-catrow__color');
+            const reparentEl = row.querySelector('[data-reparent]');
 
             const rename = async () => {
                 const next = nameEl.value.trim();
                 if (!next || next === c.name) { nameEl.value = c.name; return; }
                 try {
-                    await R.api.categoryUpdate(id, { name: next });
+                    await R.api.updateCategory(id, { name: next });
                     c.name = next; await UI.bustCategories();
                     UI.toast('Напрямок перейменовано', 'success');
-                } catch (e) { UI.toast(e.message || 'Не вдалося', 'error'); nameEl.value = c.name; }
+                } catch (e) { UI.toast(apiErrMsg(e), 'error'); nameEl.value = c.name; }
             };
             nameEl.addEventListener('blur', rename);
             nameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } else if (e.key === 'Escape') { nameEl.value = c.name; nameEl.blur(); } });
             colorEl.addEventListener('change', async () => {
-                try { await R.api.categoryUpdate(id, { color: colorEl.value }); c.color = colorEl.value; await UI.bustCategories(); UI.toast('Колір змінено', 'success'); }
-                catch (e) { UI.toast(e.message || 'Не вдалося', 'error'); }
+                try { await R.api.updateCategory(id, { color: colorEl.value }); c.color = colorEl.value; await UI.bustCategories(); UI.toast('Колір змінено', 'success'); }
+                catch (e) { UI.toast(apiErrMsg(e), 'error'); }
+            });
+            reparentEl.addEventListener('change', async () => {
+                const val = reparentEl.value;
+                const parent_id = val ? Number(val) : null;
+                reparentEl.disabled = true;
+                try {
+                    await R.api.updateCategory(id, { parent_id });
+                    await UI.bustCategories();
+                    UI.toast('Напрямок перенесено', 'success');
+                    loadCategories(ctx);
+                } catch (e) {
+                    UI.toast(apiErrMsg(e), 'error');
+                    reparentEl.innerHTML = reparentOptions(c); reparentEl.disabled = false;
+                }
             });
             row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
                 const ok = await UI.confirmModal({
                     title: 'Видалити напрямок?',
-                    message: `Видалити напрямок «${c.name}»? ${c.count ? c.count + ' записів' : 'Записи'} стануть «без напрямку» (самі записи НЕ видаляються).`,
+                    message: `Видалити «${c.name}»? ${c.count ? c.count + ' записів' : 'Записи'} стануть «без напрямку» (самі записи НЕ видаляються).`,
                     confirmLabel: 'Видалити',
                 });
                 if (!ok) return;
                 try { await R.api.categoryDelete(id); await UI.bustCategories(); UI.toast('Напрямок видалено', 'success'); loadCategories(ctx); }
-                catch (e) { UI.toast(e.message || 'Не вдалося', 'error'); }
+                catch (e) { UI.toast(apiErrMsg(e), 'error'); }
             });
             row.querySelector('[data-act="merge"]').addEventListener('click', () => mergeCategory(ctx, c));
         });
@@ -253,7 +302,115 @@
                 UI.toast(`Перенесено записів: ${r.moved}${del ? ' · напрямок обʼєднано' : ''}`, 'success');
                 loadCategories(ctx);
             } catch (e) {
-                const errEl = ov.querySelector('#rcMergeErr'); errEl.textContent = e.message || 'Не вдалося';
+                const errEl = ov.querySelector('#rcMergeErr'); errEl.textContent = apiErrMsg(e);
+                go.disabled = false;
+            }
+        });
+    }
+
+    // ---- теги: словник (CRUD + злиття) -------------------------------------
+    let _tags = [];
+    async function loadTags(ctx) {
+        const box = ctx.mount.querySelector('#rcSetTags');
+        if (!box) return;
+        try {
+            const d = await R.api.getTags();
+            if (!ctx.isCurrent()) return;
+            _tags = d.tags || [];
+            if (!_tags.length) { box.innerHTML = UI.empty('Тегів ще немає', 'Створіть перший — наприклад «важливо» чи «клієнт X».', 'fa-tags'); return; }
+            box.innerHTML = `<div class="rc-list">` + _tags.map(tagRowHTML).join('') + `</div>`;
+            bindTags(ctx, box);
+        } catch (err) { box.innerHTML = UI.error(err && err.message); }
+    }
+
+    function tagRowHTML(t) {
+        const color = t.color || '#6c757d';
+        return `<div class="rc-catrow" data-id="${t.id}">
+            <input type="color" class="rc-catrow__color" value="${U.esc(color)}" title="Колір тега">
+            <input class="rc-input rc-catrow__name" value="${U.esc(t.name)}" maxlength="40" aria-label="Назва тега">
+            <span class="rc-catrow__count rc-mono">${t.items || 0} зап.</span>
+            <div class="rc-catrow__actions">
+                <button class="rc-iconbtn" data-act="merge" title="Обʼєднати з іншим тегом"><i class="fa-solid fa-code-merge"></i></button>
+                <button class="rc-iconbtn" data-act="delete" title="Видалити тег"><i class="fa-solid fa-trash"></i></button>
+            </div>
+        </div>`;
+    }
+
+    function bindTags(ctx, box) {
+        box.querySelectorAll('.rc-catrow').forEach(row => {
+            const id = Number(row.dataset.id);
+            const t = _tags.find(x => x.id === id) || {};
+            const nameEl = row.querySelector('.rc-catrow__name');
+            const colorEl = row.querySelector('.rc-catrow__color');
+
+            const rename = async () => {
+                const next = nameEl.value.trim();
+                if (!next || next === t.name) { nameEl.value = t.name; return; }
+                try {
+                    await R.api.updateTag(id, { name: next });
+                    t.name = next; await UI.bustTags();
+                    UI.toast('Тег перейменовано', 'success');
+                } catch (e) { UI.toast(apiErrMsg(e), 'error'); nameEl.value = t.name; }
+            };
+            nameEl.addEventListener('blur', rename);
+            nameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } else if (e.key === 'Escape') { nameEl.value = t.name; nameEl.blur(); } });
+            colorEl.addEventListener('change', async () => {
+                try { await R.api.updateTag(id, { color: colorEl.value }); t.color = colorEl.value; await UI.bustTags(); UI.toast('Колір змінено', 'success'); }
+                catch (e) { UI.toast(apiErrMsg(e), 'error'); }
+            });
+            row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+                const ok = await UI.confirmModal({
+                    title: 'Видалити тег?',
+                    message: `Видалити тег «${t.name}»? Він зникне з усіх ${t.items || 0} записів (самі записи НЕ видаляються).`,
+                    confirmLabel: 'Видалити',
+                });
+                if (!ok) return;
+                try { await R.api.deleteTag(id); await UI.bustTags(); UI.toast('Тег видалено', 'success'); loadTags(ctx); }
+                catch (e) { UI.toast(apiErrMsg(e), 'error'); }
+            });
+            row.querySelector('[data-act="merge"]').addEventListener('click', () => mergeTag(ctx, t));
+        });
+    }
+
+    async function addTag(ctx) {
+        const name = await UI.promptModal({ title: 'Новий тег', label: 'Назва тега', required: true, maxlength: 40 });
+        if (name == null || !name) return;
+        try { await R.api.createTag({ name }); await UI.bustTags(); UI.toast(`Тег «${name}» створено`, 'success'); loadTags(ctx); }
+        catch (e) { UI.toast(apiErrMsg(e), 'error'); }
+    }
+
+    // Обʼєднати тег з іншим (усі записи src переходять на keep, src зникає).
+    function mergeTag(ctx, src) {
+        const others = _tags.filter(x => x.id !== src.id);
+        if (!others.length) { UI.toast('Немає іншого тега для обʼєднання', 'info'); return; }
+        const ov = U.el('div', { class: 'rc-modal-ov' });
+        const opts = others.map(o => `<option value="${o.id}">${U.esc(o.name)}</option>`).join('');
+        ov.innerHTML = `
+            <div class="rc-modal" role="dialog" aria-modal="true" aria-label="Обʼєднати тег">
+                <div class="rc-modal__h"><i class="fa-solid fa-code-merge"></i> Обʼєднати «${U.esc(src.name)}»</div>
+                <p class="rc-mono" style="color:var(--rc-ink-3);margin:0 0 10px;font-size:var(--rc-t-xs)">Усі ${src.items || 0} записів тега «${U.esc(src.name)}» отримають вибраний тег; «${U.esc(src.name)}» зникне.</p>
+                <label class="rc-field__label" for="rcTagMergeTarget">Обʼєднати з</label>
+                <select class="rc-select" id="rcTagMergeTarget">${opts}</select>
+                <div class="rc-modal__err" id="rcTagMergeErr"></div>
+                <div class="rc-modal__actions">
+                    <button class="rc-btn rc-btn--sm" id="rcTagMergeCancel">Скасувати</button>
+                    <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcTagMergeGo">Обʼєднати</button>
+                </div>
+            </div>`;
+        document.body.appendChild(ov);
+        const close = () => ov.remove();
+        ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+        ov.querySelector('#rcTagMergeCancel').addEventListener('click', close);
+        ov.querySelector('#rcTagMergeGo').addEventListener('click', async () => {
+            const keep_id = Number(ov.querySelector('#rcTagMergeTarget').value);
+            const go = ov.querySelector('#rcTagMergeGo'); go.disabled = true;
+            try {
+                await R.api.mergeTags(keep_id, src.id);
+                await UI.bustTags(); close();
+                UI.toast('Теги обʼєднано', 'success');
+                loadTags(ctx);
+            } catch (e) {
+                const errEl = ov.querySelector('#rcTagMergeErr'); errEl.textContent = apiErrMsg(e);
                 go.disabled = false;
             }
         });

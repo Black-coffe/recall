@@ -31,7 +31,7 @@ from typing import Callable, Optional
 
 from app.db.connection import get_db_connection
 from app.repositories import transcriptions as tx_repo
-from app.services import commitments, embeddings, models, pricing, text_polishing
+from app.services import categories, commitments, embeddings, models, pricing, text_polishing
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 ENRICHMENT_VERSION = 1
 
 _VALID_ENTITY_TYPES = ("person", "project", "org", "topic")
+
+# Підказки тегів (історія 06): межі окремі від `categories.parse_tags` (те саме
+# strip+дедуп, але довжина і виключення вже підтверджених — рішення саме цього
+# шляху, не загальне правило тегів).
+_MAX_SUGGESTED_TAG_LEN = 40
+_MAX_SUGGESTED_TAGS = 5
 
 
 # ============================================================
@@ -251,6 +257,33 @@ def _diarized_text_for(c, transcription_id: int, segments_json: Optional[str]) -
 
 
 # ============================================================
+# Підказки тегів (історія 06)
+# ============================================================
+
+def _filter_suggested_tags(raw_tags, existing_names: list[str]) -> list[str]:
+    """`card["tags"]` (сирий вивід Claude) → готовий список для `suggested_tags_json`.
+
+    strip + дедуп по `categories.norm_name` (через `parse_tags`), відкидає
+    задовгі (>40 символів) і ті, що вже підтверджені в `record_tags` цього
+    запису, обрізає до 5. Не пише `record_tags` і не створює тег у словнику —
+    те й інше робить прийняття (історія 07); тут лише підказка.
+    """
+    if not isinstance(raw_tags, list) or not raw_tags:
+        return []
+    existing_norm = {categories.norm_name(n) for n in existing_names}
+    out: list[str] = []
+    for name in categories.parse_tags(raw_tags):
+        if len(name) > _MAX_SUGGESTED_TAG_LEN:
+            continue
+        if categories.norm_name(name) in existing_norm:
+            continue
+        out.append(name)
+        if len(out) >= _MAX_SUGGESTED_TAGS:
+            break
+    return out
+
+
+# ============================================================
 # Запис картки
 # ============================================================
 
@@ -286,6 +319,17 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
             meeting_date,
             transcription_id,
         ),
+    )
+
+    # --- підказки тегів: не record_tags, лише suggested_tags_json (історія 06) ---
+    existing_tag_names = [
+        t["name"] for t in categories.tags_for(c, [transcription_id]).get(transcription_id, [])
+    ]
+    suggested_tags = _filter_suggested_tags(card.get("tags"), existing_tag_names)
+    c.execute(
+        "UPDATE transcriptions SET suggested_tags_json = ? WHERE id = ?",
+        (json.dumps(suggested_tags, ensure_ascii=False) if suggested_tags else None,
+         transcription_id),
     )
 
     # --- сутності: зібрати старі лінки (для перерахунку), стерти, перезаписати ---
@@ -470,6 +514,7 @@ def _enrich_card(
         diarized = _diarized_text_for(c, transcription_id, row["segments"])
         created_at = row["created_at"]
         existing_meeting_date = row["meeting_date"]
+        tag_vocabulary = [t["name"] for t in categories.list_tags(conn)]
 
     # --- Claude call (поза БД-зʼєднанням — довга мережева операція) ---
     # T6.3: раніше НЕ було try/except тут — збій одного транскрипту (мережа,
@@ -482,6 +527,7 @@ def _enrich_card(
         card = text_polishing.extract_meeting_card(
             body_text, diarized_text=diarized, model=model, effort=effort,
             meeting_date=(existing_meeting_date or (str(created_at)[:10] if created_at else None)),
+            tag_vocabulary=tag_vocabulary,
         )
     except Exception as e:
         logger.warning("[enrich] tx=%s card-фаза збій (retry_needed): %s", transcription_id, e)

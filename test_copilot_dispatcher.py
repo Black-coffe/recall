@@ -726,7 +726,9 @@ def test_operator_actions():
         from app.services.copilot.escalate import cost_estimate
         c = cost_estimate("claude-sonnet-4-6", 1000, 500, 2000)
         check(abs(c - 0.0111) < 1e-6, "cost_estimate: sonnet 1k→500 (+2k cache) = $0.0111")
-        svc2 = CopilotService(db_path=path)
+        # rec_e лишається активною в БД; без чекера сервіс консервативно вважає її
+        # живою (C6) — тут жодна з записів не йде, тож кажемо про це явно.
+        svc2 = CopilotService(db_path=path, is_recording_active=lambda s: False)
         r2 = svc2.start(settings={"importance": "medium", "budget_usd": 0.01},
                         recording_session_id="rec_u")
         s2 = r2["copilot_session_id"]

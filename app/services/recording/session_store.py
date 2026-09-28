@@ -108,8 +108,14 @@ class SessionStore:
         mic_device_name: Optional[str] = None,
         system_device_name: Optional[str] = None,
         auto_name: Optional[str] = None,
+        system_source: Optional[dict] = None,
     ) -> dict:
         """Створює нову сесію. Повертає створений manifest.
+
+        ``system_source`` (``SystemSpec.to_dict()``) пишеться у
+        ``streams.system.source`` разом із порожнім ``source_events``, коли
+        системний потік існує; такий потік ``enabled`` навіть без імені девайса
+        (include/exclude-джерело не має endpoint'а).
 
         Якщо session_id вже існує — кидає :class:`SessionStoreError`.
         Валідація session_id (path traversal protection) — у
@@ -146,7 +152,8 @@ class SessionStore:
                     'device': system_device_name,
                     'bytes': 0,
                     'error': None,
-                    'enabled': system_device_name is not None,
+                    'enabled': (system_device_name is not None
+                                or system_source is not None),
                     'sample_rate': None,
                     'channels': None,
                 },
@@ -163,6 +170,9 @@ class SessionStore:
             'name': None,
             'auto_name': auto_name or _default_auto_name(),
         }
+        if system_source is not None:
+            manifest['streams'][STREAM_SYSTEM]['source'] = dict(system_source)
+            manifest['streams'][STREAM_SYSTEM]['source_events'] = []
         self._write_manifest(session_dir, manifest)
         return manifest
 
@@ -335,6 +345,39 @@ class SessionStore:
             mf['streams'][stream]['sample_rate'] = int(sample_rate)
             mf['streams'][stream]['channels'] = int(channels)
         self.modify(session_id, _m)
+
+    def set_stream_source(
+        self,
+        session_id: str,
+        stream: str,
+        source: dict,
+        event: Optional[dict] = None,
+    ) -> None:
+        """Поточне джерело стріму + (опційно) одна мітка в ``source_events``.
+
+        Additive-ключі без bump'у ``MANIFEST_VERSION``: finalize і recovery
+        читають лише байти, тож старі читачі їх не помічають.
+        """
+        if stream not in (STREAM_MIC, STREAM_SYSTEM):
+            raise ValueError(f"Невідомий stream: {stream!r}")
+        def _m(mf: dict) -> None:
+            st = mf['streams'][stream]
+            st['source'] = dict(source)
+            if event is not None:
+                st.setdefault('source_events', []).append(dict(event))
+        self.modify(session_id, _m)
+
+    @staticmethod
+    def stream_source(manifest: dict, stream: str) -> dict:
+        """Джерело стріму з manifest'у; manifest до SystemSpec (нема ``source``) → ``all``."""
+        src = ((manifest.get('streams') or {}).get(stream) or {}).get('source')
+        if not isinstance(src, dict):
+            return {'mode': 'all', 'apps': [], 'device_index': None}
+        return {
+            'mode': src.get('mode') or 'all',
+            'apps': list(src.get('apps') or []),
+            'device_index': src.get('device_index'),
+        }
 
     def add_video_track(self, session_id: str, track: dict) -> None:
         """Додати запис відео-треку до manifest['streams']['video'].

@@ -109,6 +109,23 @@ class TestRegistryCompleteness:
         )
 
 
+class TestParallelRecordingSettings:
+    """ADR-026 C8: ліміт одночасних записів у реєстрі; семафор whisper лишається 1."""
+
+    def test_recording_max_active_registered(self):
+        s = settings.by_name()["RECORDING_MAX_ACTIVE"]
+        assert s.kind == "int" and int(s.default) == 2
+        assert s.profile == "desktop" and "RECORDING_ENABLED" in s.gates
+
+    def test_env_example_and_config_expose_max_active(self):
+        assert "RECORDING_MAX_ACTIVE=2" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        import config
+        assert config.Config.RECORDING_MAX_ACTIVE == max(1, settings.env_int("RECORDING_MAX_ACTIVE"))
+
+    def test_whisper_max_parallel_default_stays_one(self):
+        assert int(settings.by_name()["WHISPER_MAX_PARALLEL"].default) == 1
+
+
 class TestRegistryGates:
     def test_no_empty_gates(self):
         """config-registry-fix-05, знахідка 3: `gates` — обовʼязкова фраза, що

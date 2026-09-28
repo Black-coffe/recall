@@ -504,6 +504,10 @@ class WasapiRecorder:
         """Повертає виключення з audio thread, якщо було. Не очищає."""
         return self._callback_error
 
+    def drain_events(self) -> list[dict]:
+        """AudioSource protocol (ADR-026): an endpoint stream has no source events."""
+        return []
+
     # ---------- context manager
 
     def __enter__(self) -> "WasapiRecorder":

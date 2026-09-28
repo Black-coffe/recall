@@ -47,9 +47,43 @@
   `embeddings._load_prefix_meta`, `mcp_server.py` (list_recent/get_transcript/search_archive/
   ask_archive/експорт), коментарі (`target_name`).*
 
+## Таксономія архіву: напрямок→проєкт + теги (Tier 4, `directions-projects-tags`, 4.6.0, 22-23.09.2026)
+- **categories.py** — єдиний SQL-модуль для дерева `categories` (рівно 2 рівні через
+  `parent_id`: `NULL` = напрямок, інакше — проєкт) і словника тегів (`tags`/`record_tags`/
+  `tg_chat_tags`); лише stdlib + `app.db.connection` (без torch/anthropic/flask на рівні
+  модуля — безпечно імпортувати зі stdio-MCP). `parse_filter(raw)`/`filter_sql(column,
+  value)` — id напрямку розкривається в піддерево (`IN (SELECT id … WHERE id=? OR
+  parent_id=?)`), `'none'`/`None`/int; `parse_tags`/`tags_sql` (OR по `name_norm`);
+  `parse_date`/`date_sql` (`since`/`until`, включно, ValueError з українським текстом —
+  єдине джерело помилки для HTTP і MCP). `norm_name` (NFKC+strip+casefold) — єдиний ключ
+  до `name_norm`; `name_keys(name, name_norm)` — набір ключів збігу назви (той самий
+  хелпер кличе `scope.py`). `split_path`/`PATH_SEP = "→"` — єдиний парсер «Напрямок →
+  Проєкт»; `resolve_node(conn, text)` — спершу точний канонічний шлях (унікальний за
+  побудовою — старшинство), потім гола назва (один збіг → він, кілька →
+  `CategoryError('ambiguous')` з `.candidates = [шляхи]`, нуль → `None`); ніколи «перший
+  збіг». `list_tree(conn)` — кожен вузол несе `path` («Напрямок → Проєкт» | «Напрямок»,
+  той самий роздільник, що в `build_context_prefix`) — інваріант `resolve_node(path) ==
+  id` для кожного елемента. `CategoryError` (`ValueError`) коди:
+  `not_found|two_levels|self_parent|has_projects|duplicate|bad_parent|bad_name|
+  not_suggested|ambiguous`. Письменники (`create_category`/`update_category`/
+  `delete_category`/`merge_categories`/`set_category`/`ensure_tag`/`update_tag`/
+  `delete_tag`/`merge_tags`/`set_tags`/`apply_chat_tags`) повертають **id живих записів,
+  чиї дані реально змінились** — це і йде в `reembed.schedule_records_reembed`; більшість
+  мають `commit: bool = True` (Хвиля 8, історія 26) — `commit=False` пише в транзакцію
+  викликача, не фіксує сама, для одного писального шляху (dry-run = той самий прохід із
+  `conn.rollback()` замість `conn.commit()`, окремої гілки плану немає).
+  *Назва вузла унікальна СЕРЕД БРАТІВ (`idx_categories_parent_name` на `(COALESCE(
+  parent_id,0), name_norm)`, migration v47 — перша неаддитивна міграція спеки, перебудова
+  таблиці під `PRAGMA foreign_keys=OFF`), не по всій таблиці — «Маркетинг» під Фондом і
+  під Фрілансом співіснують. Назва вузла з `→` (`PATH_SEP`) → `bad_name` до запису.
+  `reparent` (зміна `parent_id`) ставить усе піддерево в re-embed, як і `rename` (шлях
+  у префіксі змінюється). Глобальна унікальність лишається лише для `tags.name_norm`.*
+
 ## RAG (пошук + чат)
 - **embeddings.py** — модель/версія з реєстру (`EMBED_MODEL` env, дефолт лишається
-  `intfloat/multilingual-e5-large`; `EMBED_VERSION` int-env, дефолт лишається `2`; Хвиля B, історія 04):
+  `intfloat/multilingual-e5-large`; `EMBED_VERSION` int-env, дефолт лишається `2` — ADR-016
+  не переглянуто; бойова епоха задається строго вище в `.env` — `EMBED_VERSION=5` з
+  22-23.09.2026 після `directions-projects-tags`, 4.6.0; Хвиля B, історія 04):
   `embed_text()`/`embed_query()`, три чанкери: `_chunk_from_segments()` (аудіо), `_chunk_from_blocks()`
   (документи, page/section), `_chunk_from_text()` (плоский текст). *T6.5: межа аудіо-чанку — зміна
   спікера або пауза ≥1.5s при наборі ≥350 СВОЇХ символів, `_MAX_CHARS`=1000 лише страховка,
@@ -75,6 +109,24 @@
   якщо `transcriptions.description` задано — обрізано до `_PREFIX_DESCRIPTION_MAX=300` символів,
   переноси → пробіли (повторюється в КОЖНОМУ чанку запису, довгий опис витіснив би текст із вікна
   ембедера). `_load_prefix_meta` читає `title`/`description` з `transcriptions` у тому самому SELECT.*
+  *`directions-projects-tags`-03 (4.6.0, контракт C5): шлях «Напрямок → Проєкт» тепер у рядку 1 для
+  ВСІХ типів записів (раніше — лише дзвінки), стоїть ПЕРЕД хвостом типу (`нитка: …`/`стор. N`); окремий
+  рядок «теги: a, b, c» (≤5 за `name_norm`, увесь рядок ≤60 символів — обрізка по цілому тегу) — одразу
+  після рядка 1, до `опис:`. Без напрямку сегмент шляху пропускається; запис без напрямку й тегів дає
+  префікс, побайтово рівний попередньому формату (епоха 2). `_load_prefix_meta` бере `category.name`
+  + `parent.name` + `GROUP_CONCAT(tags.name, char(31))` (роздільник U+001F, НЕ кома — кома дозволена в
+  назві тега) одним SELECT.*
+  *`directions-projects-tags`-17 (4.6.0, контракт C3): `PREFIX_FORMAT = 2` (факт КОДУ, не налаштування;
+  1 = формат до цієї спеки) + таблиця `embedding_epochs(model, version, prefix_format)` (migration v46,
+  бекфіл — усе, що було в БД до v46, стемпиться форматом 1) памʼятають, яким форматом побудована КОЖНА
+  пара `(model, version)`. `epoch_status(conn) -> {"ok","reason","pair","db_format"}` (`reason`:
+  `ok`/`format_mismatch`/`new_epoch`); `chunk_and_embed_transcription` перед першим записом чанка при
+  `format_mismatch` — `logger.error` і ВІДМОВА писати (запис лишається без чанків до підняття епохи), а
+  не тихе змішування форматів в одній вибірці; `new_epoch` → `register_epoch()` у тій самій транзакції,
+  що перші чанки. CLI `python -m app.services.reembed epoch-check [--db PATH]` — read-only (`mode=ro`),
+  друкує пари з `transcriptions`/`embedding_epochs`, поточну пару й вердикт; exit 0 (`ok`/`new_epoch`)
+  або 1 (`format_mismatch`). Читає `EMBED_VERSION` з ОТОЧЕННЯ ПРОЦЕСУ, не з `.env` напряму — рунбук
+  ставить `$env:EMBED_VERSION` у тій самій оболонці перед перевіркою.*
 - **summaries.py** (Хвиля B, історія 02) — сводка TG-нитки Claude з провенансом: `summarize_thread()`
   (один абзац ≤600 симв., превʼю кожного повідомлення в промпті, стеля `TG_SUMMARY_MAX_CHARS`=20000;
   нитка з сирим текстом <300 симв. не кличе модель — `summary_model='verbatim'`), `backfill_candidates()`/
@@ -101,6 +153,18 @@
   `_pending_ids` — друга задача не ставиться; id знімається з набору на СТАРТІ тіла задачі, до
   читання рядка — інакше виклик, що отримав `"pending"`, міг покладатись на задачу зі старою метою),
   `"skipped"` (mute-mode/нема черги). Викликається з `record_meta.after_meta_update`.*
+  *`directions-projects-tags`-01/15/17 (4.6.0, контракт C3): `schedule_records_reembed(ids, *, db_path,
+  reason) -> {"mode": "point"|"batch"|"none", "count", "stale"}` — планує СПИСОК записів (письменники
+  `categories.py` повертають id реально змінених рядків). ≤20 живих id → по одному через
+  `schedule_record_reembed`; >20 → одна задача `reembed_batch` (`_batch_reembed_job`) з
+  `optimize_chunk_index()` рівно раз наприкінці (лише якщо `done>0`); id зі старою парою епохи
+  відсіюються як `stale` (їх бере масовий `run`). `_batch_reembed_job` знімає кожен id з `_pending_ids`
+  ПЕРЕД читанням його рядка; `finally` відпускає з `_pending_ids` хвіст, що лишився при скасуванні або
+  будь-якому винятку з циклу, і логує його `WARNING`-ом СПИСКОМ id — інакше ці id застрягли б у
+  `_pending_ids` до рестарту процесу і `schedule_record_reembed` для них назавжди повертав би
+  `"pending"`. `_submit_batch_reembed` відкладає весь батч таймером на час живого запису (той самий
+  `_DEFER_SECONDS`, що й точковий шлях). «Живий запис» = непорожній `active_session_ids()`
+  (4.7.0; `active_session_id` при двох записах дає None і пустив би re-embed).*
 - **query_rewrite.py** (Хвиля B, історія 07, контракт C7) — `rewrite_query(question, max_variants=3,
   model=None) -> list[str]`: 1-3 альтернативних пошукових формулювання від Claude (`RAG_QUERY_REWRITE_MODEL`,
   дефолт Haiku 4.5), `[]` на порожній/односкладовий запит або будь-який збій API/JSON (best-effort,
@@ -191,6 +255,9 @@
 - **archive_import.py** — bulk-імпорт `meeting_archive/MM_YYYY/*.md` у transcriptions. *Ідемпотентно по source_url=abs-path.*
 - **research.py** — `find_mentions()`, `export_originals()` (0 токенів), `export_summary()` (map-reduce Haiku
   по фрагментах). *FTS5+substring; ±2 сегменти / ±400 символів; ≤12 фрагментів/запис; батч 40k символів.*
+  *`directions-projects-tags`-02 (4.6.0, C4): `category_id`/`tags`/`since`/`until` через
+  `app/blueprints/research.py:_parse_axes` (`categories.parse_filter/parse_tags/parse_date`) — колишня
+  власна копія `_parse_category` замінена імпортом з `categories.py`.*
 
 ## Зобовʼязання і скоуп (Треки 1-2, 24-25.07.2026)
 - **commitments.py** — нормалізація дедлайнів і зводи. `parse_due(raw, anchor)` розгортає сиру
@@ -221,6 +288,11 @@
   злиття сутностей (`entity_dedup merge`) усі написання людини переїжджають в аліаси —
   без цієї гілки злиття робить гірше: «що на Мельнику» давало 0 при живих даних, тепер 204. Підрядок навмисне: «Андрій» ловить і тезок (294), звузити можна
   повним імʼям.*
+  *`directions-projects-tags`-12/16 (4.6.0, C6): `commitments_coverage(..., tags=None, since=None,
+  until=None)` і `list_commitments`/`_commitments_filter` тепер читають `category_id`/`tags`/`since`/
+  `until` через один хелпер `_scope_clauses(category_id, tags, since, until, alias="t")` — обидва
+  читачі (`coverage`, `items`) споживають ті самі фрагменти C2, знаменник покриття рахується по ТІЙ
+  САМІЙ множині, що `items`/`window_matched` (раніше розходились — критичне ревʼю раунду 3).*
 - **scope.py** — двошаровий скоуп архіву. `apply_chat_categories()` розкладає Telegram-чати по
   напрямках за локальною картою (`data/chat_categories.local.json`, поза git);
   `label_uncategorized()` — автопозначення решти трьома сигналами (назва запису → k-NN з
@@ -230,6 +302,16 @@
   зріз мовчки ховав решту. Порівняння напрямків — за `name_norm`, бо SQLite LOWER() не згортає кирилицю.
   Волна 4.5: `_expand_to_threads()` розширює зріз до цілих ниток — назва проєкту в переписці звучить
   раз, а рішення по ньому в сусідніх репліках без назви.*
+  *`directions-projects-tags`-05/22/26 (4.6.0, контракти C7): `apply_chat_categories(...,
+  dry_run=False)` резолвить кожен рядок `chat_categories.local.json` (`{chat_id, title, category,
+  parent?, tags?}`) парою `(norm_name(parent), norm_name(category))`, НІКОЛИ за голою `category` —
+  два рядки з однією назвою під різними `parent` дають два вузли, кожен чат до свого; рядок без
+  `parent` іде через `categories.resolve_node` (канонічний шлях старший за голу назву). **Один
+  писальний шлях (історія 26):** `dry_run` не має окремої гілки плану — прохід виконує той самий
+  код на тому самому зʼєднанні (письменники `categories.*` кличуться з `commit=False`) і
+  закінчується `conn.rollback()` замість `conn.commit()`; `stats` dry-run == реального (крім
+  `reembed_scheduled`). `scope_filter_ids(project=…)` пропускає `CategoryError('ambiguous')`
+  нагору (не ковтає — викликач, зокрема копілот, бачить тезку, а не тиху порожню видачу).*
 
 ## Нитки переписки (Волна 4.5, 07.08.2026)
 - **tg_threads.py** — одиниця сенсу в Telegram це **нитка всередині чату**, не чат і не окреме

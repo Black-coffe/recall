@@ -1,7 +1,7 @@
 ---
 domain: entity-graph
 tags: [entities, telegram, dedup, provenance]
-related: [map/services.md, adr/001-token-exclusivity-exact-vs-morph-match.md, adr/002-comments-link-entities-exact-match-only.md]
+related: [map/services.md, adr/001-token-exclusivity-exact-vs-morph-match.md, adr/002-comments-link-entities-exact-match-only.md, taxonomy-tree-and-tags]
 last-verified: 2026-08-21
 ---
 

@@ -47,11 +47,20 @@
     // Скільки рядків уже завантажено у кожному відрі + чи воно розгорнуте.
     let shown = {}, opened = {}, windows = {}, owners = [];
 
+    // C9: той самий фільтр-бар, що на Бібліотеці/Медіатеці/Графі, дубльований
+    // навмисно (09 — лише спільні хелпери, не спільний компонент фільтр-бару).
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
+        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+
     async function render(ctx) {
         cats = await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         state = {
             status: ctx.query.status || 'open',
             category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+            since: ctx.query.since || '',
+            until: ctx.query.until || '',
             period: ctx.query.period || 'all',
             owner: ctx.query.owner || '',
         };
@@ -60,6 +69,7 @@
         shown = {}; opened = {}; windows = {}; owners = [];
 
         const catOpts = UI.catOptions(state.category_id, { first: 'all' });
+        const tagSel = UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-select rc-select--sm" disabled></select>';
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
@@ -71,6 +81,12 @@
                 <div class="rc-filterbar rc-toolbar__grow" id="rcTaskFilters"></div>
                 <select class="rc-select rc-catsel" id="rcTaskCat" data-cat-first="all">${catOpts}</select>
             </div>
+            <div class="rc-toolbar" id="rcTaskTagPeriod">
+                <div id="rcTaskTagsWrap">${tagSel}</div>
+                <input type="date" class="rc-input rc-select--sm" id="rcTaskSince" value="${U.esc(state.since)}" title="Записи з дати">
+                <input type="date" class="rc-input rc-select--sm" id="rcTaskUntil" value="${U.esc(state.until)}" title="Записи по дату">
+            </div>
+            <div id="rcTaskHint"></div>
             <div class="rc-periodrow">
                 <span class="rc-periodrow__lbl rc-mono"><i class="fa-regular fa-clock"></i> Період</span>
                 <div class="rc-period" id="rcTaskPeriod"></div>
@@ -101,6 +117,20 @@
         catSel.value = state.category_id;
         catSel.addEventListener('change', () => { state.category_id = catSel.value; reset(); sync(); load(ctx); });
 
+        const tagSelEl = ctx.mount.querySelector('#rcTaskTagsWrap select');
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) tagSelEl.addEventListener('change', () => {
+            state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
+            reset(); sync(); load(ctx);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcTaskSince');
+        const untilEl = ctx.mount.querySelector('#rcTaskUntil');
+        sinceEl.addEventListener('change', () => { state.since = sinceEl.value; reset(); sync(); load(ctx); });
+        untilEl.addEventListener('change', () => { state.until = untilEl.value; reset(); sync(); load(ctx); });
+
+        const hintBox = ctx.mount.querySelector('#rcTaskHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
+
         ctx.mount.querySelector('#rcTaskOwners').addEventListener('click', (e) => {
             const b = e.target.closest('[data-owner]'); if (!b) return;
             const v = b.dataset.owner;
@@ -117,6 +147,9 @@
         const p = new URLSearchParams();
         if (state.status !== 'open') p.set('status', state.status);
         if (state.category_id) p.set('category_id', state.category_id);
+        if (state.tags.length) p.set('tags', state.tags.join(','));
+        if (state.since) p.set('since', state.since);
+        if (state.until) p.set('until', state.until);
         if (state.period && state.period !== 'all') p.set('period', state.period);
         if (state.owner) p.set('owner', state.owner);
         const qs = p.toString();
@@ -127,6 +160,9 @@
         return Object.assign({
             status: state.status,
             category_id: state.category_id || undefined,
+            tags: state.tags.length ? state.tags.join(',') : undefined,
+            since: state.since || undefined,
+            until: state.until || undefined,
             period: state.period && state.period !== 'all' ? state.period : undefined,
             owner: state.owner || undefined,
         }, extra);
@@ -301,12 +337,21 @@
     //   1. звужений фільтр/статус → «розширте фільтр»
     //   2. дефолт + архів без записів → CTA додати перший запис
     //   3. дефолт + записи є → справді «все під контролем»
+    function filterExplain() {
+        const bits = [];
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
+        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
+        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (!bits.length) return null;
+        return 'Немає задач ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період — і спробуйте ширше.';
+    }
+
     async function renderEmpty(ctx) {
-        const narrowed = !!(state.category_id || state.owner || (state.period && state.period !== 'all'));
+        const narrowed = !!(state.category_id || state.tags.length || state.since || state.until || state.owner || (state.period && state.period !== 'all'));
         const nonDefaultStatus = state.status !== 'open';
         if (narrowed || nonDefaultStatus) {
             listEl.innerHTML = UI.empty('Задач немає',
-                'Немає задач за цим фільтром — спробуйте розширити напрямок/період/власника або змінити статус.', 'fa-clipboard-check');
+                filterExplain() || 'Немає задач за цим фільтром — спробуйте розширити напрямок/період/власника або змінити статус.', 'fa-clipboard-check');
             return;
         }
         let hasRecords = true;

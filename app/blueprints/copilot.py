@@ -6,6 +6,7 @@
 - ``POST /api/copilot/start``          — нова копілот-сесія (body: settings + recording_session_id?).
 - ``GET  /api/copilot/<id>/state``     — snapshot сесії.
 - ``POST /api/copilot/<id>/stop``      — завершити сесію.
+- ``POST /api/copilot/move``           — перенести копілот із запису A на запис B.
 - ``GET  /api/copilot/availability``   — чи увімкнено + чи доступний локальний LLM (для UI-панелі).
 
 Якщо ``state.copilot_service is None`` (COPILOT_ENABLED=False) — 503.
@@ -23,6 +24,7 @@ from app import state
 from app.db.connection import get_db_connection
 from app.services import live_ask, local_llm
 from app.services.copilot import export as cp_export
+from app.services.copilot.service import CopilotBusyError
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,42 @@ def _service_unavailable():
 def _require_service():
     if state.copilot_service is None:
         return _service_unavailable()
+    return None
+
+
+def _busy_response(e: CopilotBusyError):
+    return jsonify({
+        'success': False,
+        'error': 'Ко-пілот уже працює на іншому записі',
+        'error_code': 'COPILOT_BUSY',
+        'owner_session_id': e.owner_session_id,
+    }), 409
+
+
+def end_for_recording(recording_session_id: str) -> Optional[str]:
+    """Завершити копілот-сесію, прив'язану до запису (якщо є): зупинити фоновий
+    воркер, тоді закрити рядок. М'яко — помилки лише логуються.
+
+    Returns id завершеної копілот-сесії (рядком) або None, якщо активної не було.
+    """
+    # Спершу зупинити фоновий топік-трекер (Крок 2), тоді закрити сесію.
+    if state.copilot_worker is not None:
+        try:
+            state.copilot_worker.stop(recording_session_id, wait=False)
+        except Exception:
+            logger.debug(
+                "copilot_worker.stop failed for %s (best-effort, не блокує stop/discard)",
+                recording_session_id, exc_info=True,
+            )
+    if state.copilot_service is None:
+        return None
+    try:
+        cs = state.copilot_service.get_by_recording(recording_session_id)
+        if cs and cs.get('status') != 'ended':
+            state.copilot_service.end(cs['id'])
+            return str(cs['id'])
+    except Exception as e:
+        logger.warning("copilot end failed for %s: %s", recording_session_id, e)
     return None
 
 
@@ -122,6 +160,19 @@ def _parse_top_k(raw: Any) -> tuple[Optional[int], Optional[str]]:
     return min(int(raw), _MAX_TOP_K), None
 
 
+def _active_recording_ids() -> list:
+    """Живі сесії запису (C4 `active_session_ids()`); фолбек на
+    `active_session_id`, поки RecordingService старий (історія 04 не злита)."""
+    rs = state.recording_service
+    if rs is None:
+        return []
+    ids_fn = getattr(rs, 'active_session_ids', None)
+    if callable(ids_fn):
+        return list(ids_fn() or [])
+    sid = getattr(rs, 'active_session_id', None)
+    return [sid] if sid else []
+
+
 @copilot_bp.route('/api/copilot/live-ask', methods=['POST'])
 def live_ask_endpoint():
     """C2 (`docs/specs/mcp-live-call/plan.md`): питання агента → локальна
@@ -153,14 +204,20 @@ def live_ask_endpoint():
     # Історія 08: режим (raw під час запису / generated поза ним) визначається
     # ЛИШЕ наявністю активної сесії запису на сервері, а не тілом запиту —
     # агент не отримує параметра, яким міг би форсувати генерацію (non-goals).
-    recording_active = bool(
-        state.recording_service is not None
-        and state.recording_service.active_session_id
-    )
+    live_sids = _active_recording_ids()
+    recording_active = bool(live_sids)
 
     session_id = data.get('session_id') or None
-    if not session_id and state.recording_service is not None:
-        session_id = state.recording_service.active_session_id
+    if not session_id:
+        if len(live_sids) > 1:
+            return jsonify({
+                'success': False,
+                'error': 'Активних записів кілька — вкажіть session_id',
+                'error_code': 'AMBIGUOUS_SESSION',
+                'sessions': [{'session_id': s} for s in live_sids],
+            }), 409
+        if live_sids:
+            session_id = live_sids[0]
 
     transcript_text = None
     if scope in ('call', 'both'):
@@ -187,10 +244,64 @@ def start():
     rec_sid = data.get('recording_session_id')
     try:
         res = state.copilot_service.start(settings=data, recording_session_id=rec_sid)
+    except CopilotBusyError as e:
+        return _busy_response(e)
     except Exception as e:
         logger.exception("copilot start failed: %s", e)
         return jsonify({'success': False, 'error': str(e), 'error_code': 'INTERNAL'}), 500
     return jsonify({'success': True, **res})
+
+
+@copilot_bp.route('/api/copilot/move', methods=['POST'])
+def move():
+    """Перенести копілот із запису A на живий запис B (C6).
+
+    Body: ``{from_session_id, to_session_id, settings?}``; без ``settings``
+    береться конфіг сесії на A. Не атомарно: A завершується першим, провал
+    старту на B → 200 ``COPILOT_MOVE_FAILED`` з ``ended_from: true``.
+    """
+    err = _require_service()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    from_sid = data.get('from_session_id')
+    to_sid = data.get('to_session_id')
+    if not from_sid or not to_sid:
+        return jsonify({'success': False, 'error': 'Потрібні from_session_id і to_session_id',
+                        'error_code': 'BAD_REQUEST'}), 400
+    rs = state.recording_service
+    is_active = getattr(rs, 'is_active', None) if rs is not None else None
+    if callable(is_active) and not is_active(to_sid):
+        return jsonify({'success': False, 'error': 'Запис не знайдено або він не активний',
+                        'error_code': 'NOT_FOUND'}), 404
+    prev = state.copilot_service.get_by_recording(from_sid)
+    if not prev or prev.get('status') == 'ended':
+        return jsonify({'success': False, 'error': 'На цьому записі ко-пілот не працює',
+                        'error_code': 'NO_COPILOT'}), 404
+    settings = data.get('settings')
+    if settings is None:
+        try:
+            settings = json.loads(prev.get('config_json') or '{}')
+        except (ValueError, TypeError):
+            settings = {}
+    end_for_recording(from_sid)
+    try:
+        res = state.copilot_service.start(settings=settings, recording_session_id=to_sid)
+        cs_id = res.get('copilot_session_id')
+        if cs_id and state.copilot_worker is not None:
+            state.copilot_worker.start(
+                copilot_session_id=cs_id,
+                recording_session_id=to_sid,
+                config=res.get('config'),
+            )
+    except Exception as e:
+        logger.warning("copilot move %s -> %s: start failed: %s", from_sid, to_sid, e)
+        reason = ('COPILOT_BUSY' if isinstance(e, CopilotBusyError)
+                  else 'Не вдалося запустити ко-пілот на новому записі')
+        return jsonify({'success': False, 'error_code': 'COPILOT_MOVE_FAILED',
+                        'ended_from': True, 'reason': reason})
+    return jsonify({'success': True, 'ended_from': True,
+                    'copilot_session_id': cs_id, 'recording_session_id': to_sid})
 
 
 @copilot_bp.route('/api/copilot/sessions', methods=['GET'])

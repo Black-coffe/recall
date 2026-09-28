@@ -256,12 +256,13 @@ class TestSearchEndpoints:
         for tx in r.get_json()["transcriptions"]:
             assert tx["category_id"] == cid
 
-    def test_history_filter_category_invalid_falls_back_to_all(self, client):
-        # Не-цифра і не 'none'/'all' → ігнорується, повертаються усі (як без фільтра).
-        r1 = client.get("/api/history?category_id=garbage&per_page=5")
-        r2 = client.get("/api/history?per_page=5")
-        assert r1.status_code == 200 and r2.status_code == 200
-        assert r1.get_json()["total"] == r2.get_json()["total"]
+    def test_history_filter_category_invalid_is_400(self, client):
+        # Спека directions-projects-tags (02): category_id тепер іде через
+        # categories.parse_filter — не-цифра і не 'none'/'all' більше НЕ
+        # ігнорується мовчки (був би тихий filter_leak), а падає 400.
+        r = client.get("/api/history?category_id=garbage&per_page=5")
+        assert r.status_code == 400
+        assert r.get_json()["success"] is False
 
     def test_history_search_punctuation_only(self, client):
         # _sanitize_fts_query для "..." повертає '' → backend має повертати 0 результатів

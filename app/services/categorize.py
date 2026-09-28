@@ -47,16 +47,39 @@ def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict
       {"suggestion": {"category_id", "name", "confidence"},
        "candidates": [{"category_id","name","score"}...], "neighbors": int}
       або {"suggestion": None, "reason": <code>, ...} якщо підказати не можна.
+
+    **Гард епохи (ADR-017, історія 05).** `chunks` не тримає власного
+    `embedding_model`/`embedding_version` — ці поля живуть на батьківському
+    `transcriptions` (одна пара на весь запис, атомарно з DELETE+INSERT чанків
+    у `chunk_and_embed_transcription`). Обидві вибірки — власні чанки запису й
+    розмічений корпус — тому фільтруються за поточною парою
+    (`embeddings.EMBED_MODEL`, `embeddings.EMBED_VERSION`) через `JOIN
+    transcriptions`: інакше під час переходу на нову епоху (`EMBED_VERSION`
+    2→3) функція мовчки порахувала б косинус між векторами різних епох —
+    геометрично безглузде число без жодної помилки. Якщо запис має власні
+    чанки, але не в поточній епосі, — `reason: "epoch_mixed"` замість тихого
+    сміття.
     """
     if not embeddings.is_available():
         return {"suggestion": None, "reason": "embeddings_unavailable"}
 
+    epoch = (embeddings.EMBED_MODEL, embeddings.EMBED_VERSION)
+
     with get_db_connection(db_path) as conn:
         my_chunks = conn.execute(
-            "SELECT embedding FROM chunks WHERE transcription_id = ? "
-            "AND embedding IS NOT NULL", (transcription_id,),
+            "SELECT ch.embedding FROM chunks ch JOIN transcriptions t "
+            "ON t.id = ch.transcription_id WHERE ch.transcription_id = ? "
+            "AND ch.embedding IS NOT NULL "
+            "AND t.embedding_model = ? AND t.embedding_version = ?",
+            (transcription_id, *epoch),
         ).fetchall()
         if not my_chunks:
+            any_chunks = conn.execute(
+                "SELECT 1 FROM chunks WHERE transcription_id = ? "
+                "AND embedding IS NOT NULL LIMIT 1", (transcription_id,),
+            ).fetchone()
+            if any_chunks:
+                return {"suggestion": None, "reason": "epoch_mixed"}
             return {"suggestion": None, "reason": "not_embedded"}
 
         # T4.6: не голосуємо embedding'ами soft-deleted транскриптів (undo-вікно
@@ -65,7 +88,9 @@ def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict
             "SELECT ch.transcription_id AS tid, t.category_id AS cat, ch.embedding AS emb "
             "FROM chunks ch JOIN transcriptions t ON t.id = ch.transcription_id "
             "WHERE t.category_id IS NOT NULL AND t.deleted_at IS NULL "
-            "AND ch.transcription_id != ? AND ch.embedding IS NOT NULL", (transcription_id,),
+            "AND ch.transcription_id != ? AND ch.embedding IS NOT NULL "
+            "AND t.embedding_model = ? AND t.embedding_version = ?",
+            (transcription_id, *epoch),
         ).fetchall()
         cat_names = {r["id"]: r["name"]
                      for r in conn.execute("SELECT id, name FROM categories").fetchall()}

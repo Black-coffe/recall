@@ -205,6 +205,8 @@ class Config:
     RECORDING_ENABLED = False
     RECORDING_DIR = BASE_DIR / 'recordings' / 'sessions'
     RECORDING_CHUNK_SECONDS = settings.env_int('RECORDING_CHUNK_SECONDS')
+    # ADR-026: скільки записів одночасно (мінімум 1).
+    RECORDING_MAX_ACTIVE = max(1, settings.env_int('RECORDING_MAX_ACTIVE'))
     RECORDING_SAMPLE_RATE = settings.env_int('RECORDING_SAMPLE_RATE')
     RECORDING_CHANNELS = settings.env_int('RECORDING_CHANNELS')
     RECORDING_MP3_BITRATE = settings.env('RECORDING_MP3_BITRATE')

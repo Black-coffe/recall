@@ -772,6 +772,10 @@ _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає тр
    {"name": "канонічна назва", "aliases": ["варіанти написання"]}
 6. "orgs" — організації/компанії/фонди. Формат як у projects.
 7. "topics" — 3-8 загальних тем/категорій розмови (короткі фрази 1-3 слова).
+8. "tags" — до 5 коротких тегів (1-3 слова) для обʼєднання записів поперек напрямків і
+   проєктів (напр. "AI"). Словник наявних тегів, якщо є, дано в повідомленні користувача —
+   бери назви звідти, якщо підходять; нову назву додавай лише якщо жодна наявна не пасує.
+   Якщо словник порожній або не дано — запропонуй власні короткі назви.
 
 КРИТИЧНО ВАЖЛИВО:
 - Не вигадуй. Якщо чогось немає — порожній список. Не додавай фактів, яких немає у транскрипті.
@@ -789,7 +793,8 @@ _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає тр
   "people": [{"name": "...", "role": null, "aliases": []}],
   "projects": [{"name": "...", "aliases": []}],
   "orgs": [{"name": "...", "aliases": []}],
-  "topics": ["...", "..."]
+  "topics": ["...", "..."],
+  "tags": ["...", "..."]
 }"""
 
 
@@ -841,6 +846,7 @@ def extract_meeting_card(
     timeout: float = 300.0,
     effort: str = "medium",
     meeting_date: Optional[str] = None,
+    tag_vocabulary: Optional[list[str]] = None,
 ) -> dict:
     """Комбінований екстрактор картки мітингу (Phase 13) — один Claude-виклик.
 
@@ -853,6 +859,11 @@ def extract_meeting_card(
         meeting_date: дата зустрічі 'YYYY-MM-DD' — точка відліку для дедлайнів
             (Трек 1). Без неї модель не може порахувати «завтра» в абсолютну
             дату, і `due_date` лишиться null (парсер добере на стороні БД).
+        tag_vocabulary: наявні назви тегів (`categories.list_tags`, лише
+            "name") — модель бере теги звідси, нову назву пропонує лише якщо
+            жодна не підходить (історія 06). Динамічний словник іде в
+            повідомлення користувача, а не в system prompt, щоб не рвати
+            prompt-caching статичного system prompt.
 
     Returns:
         {
@@ -863,6 +874,7 @@ def extract_meeting_card(
             "projects": list[{"name","aliases"}],
             "orgs": list[{"name","aliases"}],
             "topics": list[str],
+            "tags": list[str],
             "model": str,
             "input_tokens","output_tokens","cache_read_tokens","cache_creation_tokens": int,
         }
@@ -875,7 +887,7 @@ def extract_meeting_card(
     body = (diarized_text or text or "").strip()
     empty = {
         "summary": "", "key_points": [], "action_items": [],
-        "people": [], "projects": [], "orgs": [], "topics": [],
+        "people": [], "projects": [], "orgs": [], "topics": [], "tags": [],
         "model": "", "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_creation_tokens": 0,
     }
@@ -888,9 +900,14 @@ def extract_meeting_card(
 
     date_line = (f"Дата цієї зустрічі: {meeting_date}. Усі відносні терміни "
                  f"(«завтра», «до кінця тижня») рахуй від неї.\n\n") if meeting_date else ""
+    vocab_line = (
+        "Наявний словник тегів (до 5 у полі \"tags\" — обирай звідси, якщо підходить; "
+        "нову назву додавай лише якщо жодна не пасує): "
+        + ", ".join(tag_vocabulary) + "\n\n"
+    ) if tag_vocabulary else ""
     user_message = (
         "Побудуй картку мітингу (JSON за схемою вище) з наступного транскрипту. "
-        f"{date_line}"
+        f"{date_line}{vocab_line}"
         "Транскрипт у тегах <transcript>:\n\n"
         f"<transcript>\n{body}\n</transcript>"
     )
@@ -933,6 +950,7 @@ def extract_meeting_card(
         "projects": _list("projects"),
         "orgs": _list("orgs"),
         "topics": [t for t in _list("topics") if isinstance(t, str) and t.strip()][:8],
+        "tags": [t for t in _list("tags") if isinstance(t, str) and t.strip()],
         "model": result.model,
         "input_tokens": getattr(usage, "input_tokens", 0) or 0,
         "output_tokens": getattr(usage, "output_tokens", 0) or 0,

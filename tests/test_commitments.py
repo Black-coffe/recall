@@ -386,6 +386,104 @@ def test_coverage_counts_under_the_same_owner_filter(db: str):
     assert everyone["total"] == 3
 
 
+def test_coverage_counts_subtree_not_just_own_category(db: str):
+    """`category_id=<напрямок>` рахує задачі напрямку І його проєктів через
+    `categories.filter_sql` — інакше `commitments_coverage` рахувало лише
+    власні рядки напрямку (`t.category_id = ?`), тоді як `list_commitments`/
+    `count_commitments` уже розкривали дерево: MCP `list_action_items(
+    category_id=<Фонд>)` показувало задачі проєкту Акмекорп в `items`, а
+    `coverage.total` про них мовчало (ревʼю раунду 2, п.2: на scratch-БД
+    `count_commitments=1`, `commitments_coverage.total=0` на тій самій
+    вибірці)."""
+    with get_db_connection(db) as conn:
+        fond = conn.execute(
+            "SELECT id FROM categories WHERE name = 'Фонд Робота'").fetchone()[0]
+        bar = conn.execute(
+            "INSERT INTO categories (name, name_norm, parent_id) VALUES (?, ?, ?)",
+            ("Акмекорп", "акмекорп", fond)).lastrowid
+        conn.execute(
+            "INSERT INTO transcriptions (id, source_type, source_name, category_id, "
+            "meeting_date, created_at) VALUES (3, 'recording', 'Акмекорп синк', ?, "
+            "'2026-05-14', '2026-05-14 10:00:00')", (bar,))
+        conn.execute(
+            "INSERT INTO action_items (transcription_id, task, status) "
+            "VALUES (3, 'Надіслати терміни раунду', 'open')")
+        conn.commit()
+
+    matched = cm.count_commitments(db, window="all", category_id=fond)
+    assert matched == 1
+
+    cov_fond = cm.commitments_coverage(db, category_id=fond)
+    assert cov_fond["total"] == matched == 1
+
+    cov_bar = cm.commitments_coverage(db, category_id=bar)
+    assert cov_bar["total"] == 1
+
+    cov_none = cm.commitments_coverage(db, category_id="none")
+    assert cov_none["total"] == 0
+
+
+def test_coverage_denominator_matches_tag_filter(db: str):
+    """Знаменник рахує ТУ САМУ множину, що й `items`/`window_matched` (ремонт
+    п.1 раунду 3): до цього `commitments_coverage` ігнорував `tags`, тож
+    `list_action_items(tags="AI")` віддавав відфільтрований `items` поруч з
+    архівним `coverage.total`/`note` («3 із 3 задач дати не мають» при одній
+    задачі з тегом) — та сама брехня, що й у памʼятці
+    `derived-claims-need-second-source`."""
+    _seed(db, [
+        {"task": "З тегом ШІ", "tid": 1, "due": None},
+        {"task": "Без тега перший", "tid": 2, "due": None},
+        {"task": "Без тега другий", "tid": 2, "due": None},
+    ])
+    with get_db_connection(db) as conn:
+        tag_id = conn.execute(
+            "INSERT INTO tags (name, name_norm) VALUES (?, ?)", ("ШІ", "ші")).lastrowid
+        conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (1, ?)", (tag_id,))
+        conn.commit()
+
+    cov = cm.commitments_coverage(db, tags=["ШІ"])
+    assert cov["total"] == 1
+    assert cov["total"] == cm.count_commitments(db, window="all", tags=["ШІ"])
+    assert "3 із 3" not in cov["note"]
+
+
+def test_coverage_denominator_matches_since_until(db: str):
+    """`since`/`until` звужують знаменник так само, як `count_commitments` з
+    тими самими межами."""
+    _seed(db, [
+        {"task": "Свіжа", "tid": 1, "due": None},
+        {"task": "Стара перша", "tid": 2, "due": None},
+        {"task": "Стара друга", "tid": 2, "due": None},
+    ], meeting_date="2026-05-14")
+
+    cov = cm.commitments_coverage(db, since="2026-05-01", until="2026-05-31")
+    assert cov["total"] == 1
+    assert cov["total"] == cm.count_commitments(
+        db, window="all", since="2026-05-01", until="2026-05-31")
+
+
+def test_coverage_tags_and_category_intersect(db: str):
+    """`tags` разом із `category_id` — перетин, як і в `list_commitments`."""
+    _seed(db, [
+        {"task": "А з тегом", "tid": 1, "due": None},
+        {"task": "Б з тегом", "tid": 2, "due": None},
+    ])
+    with get_db_connection(db) as conn:
+        cat_a = conn.execute(
+            "INSERT INTO categories (name, name_norm) VALUES (?, ?)",
+            ("Напрямок А", "напрямок а")).lastrowid
+        conn.execute("UPDATE transcriptions SET category_id = ? WHERE id = 1", (cat_a,))
+        tag_id = conn.execute(
+            "INSERT INTO tags (name, name_norm) VALUES (?, ?)", ("ШІ", "ші")).lastrowid
+        conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (1, ?)", (tag_id,))
+        conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (2, ?)", (tag_id,))
+        conn.commit()
+
+    cov = cm.commitments_coverage(db, tags=["ШІ"], category_id=cat_a)
+    assert cov["total"] == 1
+    assert cov["total"] == cm.count_commitments(db, window="all", tags=["ШІ"], category_id=cat_a)
+
+
 # ============================================================
 # Правдивість зводу (обкатка на живому архіві 08.08.2026)
 # ============================================================

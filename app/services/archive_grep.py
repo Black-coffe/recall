@@ -51,6 +51,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.db.connection import get_db_connection
+from app.services import categories
 
 # COALESCE — Telegram-повідомлення часто без явної meeting_date, тоді дата
 # зустрічі відсутня і датою слугує дата запису в архів (як у retrieval.py).
@@ -176,6 +177,8 @@ def grep(
     source_type: str | None = None,
     transcription_id: int | None = None,
     days: int | None = None,
+    category_id: int | None = None,
+    tags: list[str] | None = None,
     max_scan: int = 200_000,
 ) -> dict[str, Any]:
     """Буквальний або regex-пошук по `chunks`, з метаданими і ±context сусідами.
@@ -203,6 +206,12 @@ def grep(
 
     Регістр (`ignore_case=True`) згортається в Python (`str.casefold`) для
     обох режимів — НІКОЛИ в SQL (`SQLite lower()` не згортає кирилицю).
+
+    `category_id` — id напрямку або проєкту (`list_categories`): напрямок
+    розкривається у себе й усі свої проєкти, проєкт — лише в себе.
+    `tags` — назви тегів (OR); разом із `category_id` — перетин (AND). Обидва
+    фільтруються в SQL ДО сканування, через `app.services.categories.filter_sql/
+    tags_sql` (C6, ADR-023 §C) — єдине джерело цього підзапиту.
 
     Порожній чи пробільний `pattern` — помилка (`ValueError`), а не весь
     архів.
@@ -234,6 +243,12 @@ def grep(
         where.append(f"{_MEETING_DATE_EXPR} >= ?")
         params.append(cutoff)
 
+    where_tail = ""
+    frag, p = categories.filter_sql("t.category_id", category_id)
+    where_tail += frag; params += p
+    frag, p = categories.tags_sql("ch.transcription_id", tags or [])
+    where_tail += frag; params += p
+
     # Навмисно БЕЗ ORDER BY і без текстового предиката в SQL (Plan deltas D1):
     # і фільтр по тексту (regex/casefold), і фінальне сортування — у Python
     # нижче, щоб max_scan обмежував саме роботу сканування.
@@ -242,7 +257,7 @@ def grep(
         "ch.speaker, ch.start_time, t.source_type, t.source_name, "
         f"t.tg_chat_title, t.tg_link, {_MEETING_DATE_EXPR} AS meeting_date "
         "FROM chunks ch JOIN transcriptions t ON t.id = ch.transcription_id "
-        f"WHERE {' AND '.join(where)}"
+        f"WHERE {' AND '.join(where)}{where_tail}"
     )
 
     deadline = time.monotonic() + _DEFAULT_DEADLINE_SECONDS

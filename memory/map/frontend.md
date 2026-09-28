@@ -19,6 +19,19 @@
   `UI.editMetaModal({title, description, titleRequired=false}) -> Promise<{title, description} | null>`
   (`editable-title-description`-05, 4.5.0) — спільна модалка «Назва + Опис» для олівця на сторінці
   запису, рядка Бібліотеки й картки Аудіотеки; `null` = скасовано. CSS-клас `.rc-textarea`.
+  **`directions-projects-tags` (4.6.0):** `UI.catOptions(selected, {first, newOpt})` →
+  `<optgroup label="Напрямок">` дерева з проєктами з відступом; `UI.catPath(id)`/`UI.catLabel(id) ->
+  {text, title}` (`text` = імʼя, або повний шлях якщо є тезка деінде в дереві; `title` = повний шлях
+  завжди) — будь-яка текстова мітка напрямку в екранах бере `text`/`title` звідси, ніколи `c.name`
+  напряму; `UI.catChip(id)` малює чіп. `UI.loadTags()`/`Recall.state.tags`/`UI.bustTags()`;
+  `UI.tagChip(tag, {onRemove?})`; `UI.tagOptions(selectedNames)` → `.rc-tagpick` = прихований
+  `select.rc-tagsel` (джерело істини) + чіпи-перемикачі `.rc-tagpick__chip` (клік ловить глобальний
+  делегований слухач, перемикає `option.selected` + `change`); порожній словник →
+  `.rc-tagpick__empty` з посиланням на `/settings#rcSetTags`; помилка завантаження →
+  `.rc-tagpick__error` + «Повторити» (не «тегів ще немає»). `UI.syncTagPicker(selectEl)` —
+  перемальовує чіпи з `option.selected` (кличуть `library.js`/`telegram.js` після `applySaved`/відкату).
+  `UI.hint(html) -> HTMLElement` — `<details class="rc-hint">`. CSS: `.rc-tree`, `.rc-tag`,
+  `.rc-tagpick`, `.rc-hint` (грепнути перед новим класом, gotcha 3).
 - **util.js** (110) — escape(XSS), кирилиця→ASCII слаг, parseId, формат дат/тривалості/байтів, `el()`, debounce.
 - **cmdk.js** (119) — ⌘K палітра: nav-роути + debounce-пошук транскриптів (220ms) + «Запитати архів».
 - **research_export.js** (84) — спільний SSE-драйвер для /research та картки сутності (originals 0-ток + AI-summary).
@@ -40,10 +53,10 @@
 | `/documents` | documents | PDF/DOCX/...→ multipart → дедуп по хешу → /transcript |
 | `/telegram` | telegram | Панель слухача: dialogs, toggle-моніторинг, категорія, backfill |
 | `/settings` | settings | System info, каталог моделей, **ко-пілот config**, категорії CRUD/merge, спікери |
-| `/record` | record | Рекордер: SSE level+сегменти (fetch), setup→active→stop-name→transcribe, мега-панель ко-пілота |
+| `/record` | record | Рекордер: таби паралельних сесій (reattach до всіх з `/api/recordings/active`, SSE на кожну), setup→active→stop-name→transcribe, вибір системного звуку увесь/include/exclude з `/api/recording/apps`, retarget наживо (`/system-source`, подія `source_changed`), 409 `SESSION_LIMIT` ховає «+ Новий запис», перенос ко-пілота між табами; після стопу сусідам зі звуженим звуком пропонує повернути `all` (`auto_restore`, без відповіді = «так») |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v64`** (`editable-title-description`-06, 4.5.0). Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v69`** (`parallel-recordings-app-audio`, 4.7.0, sw.js:113). Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas
@@ -52,7 +65,10 @@ CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуютьс�
 3. **CSS-колізії** — грепни `\.rc-<name>\b` перед новим класом (короткі імена перевикористані; `recall_css_class_collision`).
 4. **Глобальний catsel-перехоплювач** — `.rc-catsel` на `UI.CAT_NEW` ловиться на capture-фазі; view не бачить.
 5. **Render-seq guard** — асинх-рендер після навігації відкидається, якщо `!ctx.isCurrent()`.
-6. **URL-driven state** — library/audio/entities/tasks/research тримають фільтри в query-params (deep-link).
+6. **URL-driven state** — library/audio/entities/tasks/research/ask тримають фільтри в query-params
+   (deep-link): `category_id` (тепер дерево), `tags` (через кому), `since`/`until` —
+   `directions-projects-tags` (4.6.0) додав три останні поруч зі старим `category_id` на всіх шести
+   екранах + сторінці запису/панелі Telegram, кожен фільтр супроводжує згорнута `UI.hint()`-підказка.
 7. **`[hidden]` і власний `display`** — глобальне `.rc-app [hidden]{display:none!important}` тепер є в
    `recall.css`. До нього кожен компонент із власним `display:flex` перебивав браузерний дефолт і
    лишався видимим під `hidden` (порожня `.rc-bulkbar` висіла внизу Бібліотеки завжди).

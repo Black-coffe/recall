@@ -30,6 +30,9 @@ from typing import Iterator, Optional
 from app.db.connection import get_db_connection
 from app.repositories import transcriptions as tx_repo
 from app.services import text_polishing
+from app.services.categories import (
+    date_sql, filter_sql, parse_date, parse_filter, parse_tags, tags_sql,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -93,18 +96,6 @@ def _fts_query(terms: list[str]) -> str:
     return " OR ".join(parts)
 
 
-def _parse_category(raw) -> "int | str | None":
-    """Дзеркало memory._parse_category: '5'→5, 'none'→'none', ''/'all'/None→None."""
-    if raw is None:
-        return None
-    s = str(raw).strip().lower()
-    if not s or s == "all":
-        return None
-    if s == "none":
-        return "none"
-    return int(s) if s.isdigit() else None
-
-
 def entity_terms(db_path: str, entity_id: int) -> "tuple[str, list[str]] | None":
     """Сутність → (канонічне ім'я, [канон + усі псевдоніми]) для лексичного
     пошуку згадок. None, якщо сутності немає. Псевдоніми = «варіанти написання»,
@@ -125,19 +116,22 @@ def entity_terms(db_path: str, entity_id: int) -> "tuple[str, list[str]] | None"
     return name, terms
 
 
-def _candidate_ids(conn, fts_q: str, category_id) -> list[int]:
-    """ID транскриптів-кандидатів через FTS5, з фільтром напрямку.
+def _candidate_ids(conn, fts_q: str, category_id, *,
+                   tags: "list[str] | None" = None,
+                   since: "str | None" = None, until: "str | None" = None) -> list[int]:
+    """ID транскриптів-кандидатів через FTS5, з фільтром напрямку/тегів/періоду.
 
     T4.6: soft-deleted виключаємо завжди (не лише коли задано category_id).
+    Напрямок id розкривається на нього і його проєкти (`categories.filter_sql`);
+    теги — OR по назвах; період — включно по обох межах.
     """
+    cat_frag, cat_params = filter_sql("category_id", category_id)
+    tags_frag, tags_params = tags_sql("id", tags or [])
+    date_frag, date_params = date_sql("COALESCE(meeting_date, created_at)", since, until)
     sql = ("SELECT rowid FROM transcriptions_fts WHERE transcriptions_fts MATCH ? "
-           "AND rowid IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL)")
-    params: list = [fts_q]
-    if category_id == "none":
-        sql += " AND rowid IN (SELECT id FROM transcriptions WHERE category_id IS NULL)"
-    elif category_id is not None:
-        sql += " AND rowid IN (SELECT id FROM transcriptions WHERE category_id = ?)"
-        params.append(category_id)
+           "AND rowid IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL"
+           + cat_frag + tags_frag + date_frag + ")")
+    params: list = [fts_q, *cat_params, *tags_params, *date_params]
     rows = conn.execute(sql, params).fetchall()
     return [int(r["rowid"]) for r in rows]
 
@@ -324,9 +318,13 @@ def _abs_path(file_path: Optional[str]) -> Optional[str]:
         return None
 
 
-def collect(db_path: str, q: str, category_id=None, display=None) -> dict:
+def collect(db_path: str, q: str, category_id=None, display=None, *,
+           tags: "list[str] | None" = None,
+           since: "str | None" = None, until: "str | None" = None) -> dict:
     """Знайти всі згадки і витягти фрагменти (БЕЗ AI). display — гарна назва
-    для заголовків (напр. канонічне ім'я сутності). Returns dict з records
+    для заголовків (напр. канонічне ім'я сутності). `tags`/`since`/`until` —
+    ті самі осі C4, що й в /api/history (напрямок id вже розкритий на проєкти
+    викликачем через `categories.parse_filter`). Returns dict з records
     (за датою спадно), terms, display і stats. Кожен record:
       {id, source_type, title, date_display, date_sort, who, category_name,
        file_path(abs|None), mentions, fragments[str], title_only}."""
@@ -340,7 +338,7 @@ def collect(db_path: str, q: str, category_id=None, display=None) -> dict:
     with get_db_connection(db_path) as conn:
         cat_names = {r["id"]: r["name"] for r in
                      conn.execute("SELECT id, name FROM categories").fetchall()}
-        ids = _candidate_ids(conn, fts_q, category_id)
+        ids = _candidate_ids(conn, fts_q, category_id, tags=tags, since=since, until=until)
         if len(ids) > MAX_RECORDS:
             logger.warning("[research] %d кандидатів > MAX_RECORDS=%d — зрізаю", len(ids), MAX_RECORDS)
             ids = ids[:MAX_RECORDS]
@@ -596,9 +594,12 @@ def _cost(model: str, inp: int, outp: int) -> float:
 
 
 def summarize_stream(db_path: str, q: str, category_id=None,
-                     model: Optional[str] = None, display=None) -> Iterator[str]:
+                     model: Optional[str] = None, display=None, *,
+                     tags: "list[str] | None" = None,
+                     since: "str | None" = None, until: "str | None" = None) -> Iterator[str]:
     """SSE: огляд по бренду через map-reduce (тільки фрагменти, дешева модель).
-    display — гарна назва для заголовка (напр. ім'я сутності).
+    display — гарна назва для заголовка (напр. ім'я сутності). `tags`/`since`/
+    `until` — прокидаються в `collect` без переосмислення.
     Події: start → progress* → done{markdown,...} | error."""
     terms = parse_terms(q)
     if not terms:
@@ -608,7 +609,8 @@ def summarize_stream(db_path: str, q: str, category_id=None,
         yield _sse("error", {"error": "ANTHROPIC_API_KEY не налаштовано"})
         return
 
-    collected = collect(db_path, q, category_id, display=display)
+    collected = collect(db_path, q, category_id, display=display,
+                       tags=tags, since=since, until=until)
     records = collected["records"]
     blocks = _summary_blocks(records)
     if not blocks:

@@ -25,6 +25,7 @@ from werkzeug.utils import secure_filename
 
 from app import state
 from app.repositories import transcriptions as tx_repo
+from app.services import categories as cat_svc
 from app.services import dedup_audio, record_meta, text_polishing
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
@@ -635,14 +636,21 @@ def get_history():
     language_filter = request.args.get('language')
     search_query = request.args.get('search', '')
     speaker_id_filter = request.args.get('speaker_id', type=int)  # Phase 12.7
-    # Phase 15D: '' | 'all' → усі; 'none' → IS NULL; число → category_id = N.
-    category_raw = (request.args.get('category_id') or '').strip().lower()
     # Контекстні фасет-фільтри (зʼявляються в UI під конкретне джерело):
     # Telegram — відправник + чат/група/канал; YouTube — автор/канал. LIKE по
     # метаданих (не транскрипту), тому доповнюють, а не замінюють FTS-пошук.
     tg_sender_q = (request.args.get('tg_sender') or '').strip()
     tg_chat_q = (request.args.get('tg_chat') or '').strip()
     yt_author_q = (request.args.get('yt_author') or '').strip()
+    # C4: напрямок (з розкриттям на проєкти), теги (OR), період — спільний
+    # набір осей фільтра усіх спискових поверхонь (`app/services/categories.py`).
+    try:
+        category_value = cat_svc.parse_filter(request.args.get('category_id'))
+        tag_names = cat_svc.parse_tags(request.args.get('tags'))
+        since_val = cat_svc.parse_date(request.args.get('since'))
+        until_val = cat_svc.parse_date(request.args.get('until'))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
     with _get_db() as conn:
         c = conn.cursor()
@@ -655,11 +663,6 @@ def get_history():
             where_clauses.append('source_type = ?'); params.append(source_filter)
         if language_filter:
             where_clauses.append('language = ?'); params.append(language_filter)
-        if category_raw and category_raw != 'all':
-            if category_raw == 'none':
-                where_clauses.append('category_id IS NULL')
-            elif category_raw.isdigit():
-                where_clauses.append('category_id = ?'); params.append(int(category_raw))
         if speaker_id_filter:
             # Phase 12.7: фільтр по speaker_id — JOIN з map'ом, distinct щоб не
             # дублювати при кількох raw_label з тим же speaker_id (рідкісно, але буває).
@@ -706,8 +709,19 @@ def get_history():
                 where_clauses.append('1 = 0')
 
         where_sql = 'WHERE ' + ' AND '.join(where_clauses) if where_clauses else ''
-        count_sql = f'SELECT COUNT(*) FROM transcriptions {where_sql}'
-        total = c.execute(count_sql, params).fetchone()[0]
+        # C4-осі напрямку/тегів/періоду — окремі фрагменти (кожен починається
+        # з " AND "), додаються ПІСЛЯ .replace() нижче, щоб `category_id IN
+        # (SELECT id FROM …)` не постраждав від того рядкового хака (він шукає
+        # підрядок `id IN`, а не якір на початку клаузи).
+        cat_frag, cat_params = cat_svc.filter_sql('t.category_id', category_value)
+        tags_frag, tags_params = cat_svc.tags_sql('t.id', tag_names)
+        date_frag, date_params = cat_svc.date_sql(
+            'COALESCE(t.meeting_date, t.created_at)', since_val, until_val)
+        extra_sql = cat_frag + tags_frag + date_frag
+        extra_params = cat_params + tags_params + date_params
+
+        count_sql = f'SELECT COUNT(*) FROM transcriptions t {where_sql}{extra_sql}'
+        total = c.execute(count_sql, params + extra_params).fetchone()[0]
 
         offset = (page - 1) * per_page
         # Phase 12.2: коли search активний, використовуємо FTS5 snippet()
@@ -739,12 +753,13 @@ def get_history():
                         FROM transcriptions_fts
                         WHERE transcriptions_fts MATCH ? AND rowid = t.id) as transcript_preview
                 FROM transcriptions t
-                {where_sql.replace('id IN', 't.id IN')}
+                {where_sql.replace('id IN', 't.id IN')}{extra_sql}
                 ORDER BY t.created_at DESC
                 LIMIT ?
                 OFFSET ?
             '''
-            transcriptions = c.execute(select_sql, [fts_query] + params + [per_page, offset]).fetchall()
+            transcriptions = c.execute(
+                select_sql, [fts_query] + params + extra_params + [per_page, offset]).fetchall()
         else:
             # Аліас `t` обов'язковий і тут: без нього `ai.transcription_id = id`
             # у підзапиті звʼязався б з action_items.id, а не з транскриптом.
@@ -753,17 +768,24 @@ def get_history():
                 SELECT {cols},
                        SUBSTR(t.transcript_text, 1, 200) as transcript_preview
                 FROM transcriptions t
-                {where_sql}
+                {where_sql}{extra_sql}
                 ORDER BY t.created_at DESC
                 LIMIT ?
                 OFFSET ?
             '''
-            transcriptions = c.execute(select_sql, params + [per_page, offset]).fetchall()
+            transcriptions = c.execute(
+                select_sql, params + extra_params + [per_page, offset]).fetchall()
+
+        ids = [row['id'] for row in transcriptions]
+        tags_map = cat_svc.tags_for(conn, ids)
+        suggested_map = {tid: cat_svc.suggested_tags(conn, tid) for tid in ids}
 
     items = []
     for t in transcriptions:
         item = dict(t)
         item['display_name'] = record_meta.display_name(item)
+        item['tags'] = tags_map.get(item['id'], [])
+        item['suggested_tags'] = suggested_map.get(item['id'], [])
         items.append(item)
 
     return jsonify({
@@ -810,6 +832,8 @@ def get_transcription(transcription_id):
             WHERE transcription_id = ?
             ORDER BY (status = 'open') DESC, created_at ASC
         ''', (transcription_id,)).fetchall()
+        record_tags = cat_svc.tags_for(conn, [transcription_id]).get(transcription_id, [])
+        record_suggested = cat_svc.suggested_tags(conn, transcription_id)
     result = dict(transcription)
     result['segments'] = json.loads(result['segments']) if result['segments'] else []
     result['speakers'] = [
@@ -824,6 +848,8 @@ def get_transcription(transcription_id):
     ]
     result['entities'] = [dict(r) for r in entity_rows]
     result['action_items'] = [dict(r) for r in action_item_rows]
+    result['tags'] = record_tags
+    result['suggested_tags'] = record_suggested
     # title/description приходять із SELECT * (v44); display_name — похідне поле.
     result['display_name'] = record_meta.display_name(result)
     return jsonify(result)

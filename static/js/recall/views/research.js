@@ -18,10 +18,21 @@
 
     let state = null, abortCtl = null, lastPreview = null;
 
+    // C9: напрямок/проєкт/тег — три різні осі; той самий текст, що на решті
+    // екранів (09 дає спільні хелпери, не спільний компонент фільтр-бару).
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. '
+        + 'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: '
+        + 'лишається те, що підходить під усі обрані фільтри. Період — за датою запису-джерела.';
+
     async function render(ctx) {
+        await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         state = {
             q: ctx.query.q || '',
             category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(x => x.trim()).filter(Boolean),
+            since: ctx.query.since || '',
+            until: ctx.query.until || '',
             model: ctx.query.model || 'haiku',
         };
         lastPreview = null;
@@ -40,8 +51,17 @@
 
                 <div class="rc-research__row">
                     <div class="rc-research__field">
-                        <label class="rc-research__lbl">Напрямок</label>
-                        <select class="rc-select rc-catsel" id="rcResCat" data-cat-first="all"><option value="">Усі напрямки</option></select>
+                        <label class="rc-research__lbl">Напрямок / проєкт</label>
+                        <select class="rc-select rc-catsel" id="rcResCat" data-cat-first="all">${UI.catOptions(state.category_id, { first: 'all' })}</select>
+                    </div>
+                    <div class="rc-research__field">
+                        <label class="rc-research__lbl">Теги</label>
+                        ${UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-tagsel"></select>'}
+                    </div>
+                    <div class="rc-research__field">
+                        <label class="rc-research__lbl">Період</label>
+                        <input type="date" class="rc-input rc-select--sm" id="rcResSince" value="${U.esc(state.since)}" title="Записи з дати">
+                        <input type="date" class="rc-input rc-select--sm" id="rcResUntil" value="${U.esc(state.until)}" title="Записи по дату">
                     </div>
                     <div class="rc-research__field">
                         <label class="rc-research__lbl">Модель саммарі</label>
@@ -51,44 +71,67 @@
                     </div>
                     <button class="rc-btn rc-btn--primary" id="rcResFind"><i class="fa-solid fa-magnifying-glass"></i> Знайти згадки</button>
                 </div>
+                <div id="rcResHint"></div>
             </section>
 
             <div id="rcResOut"></div>`;
 
-        loadCategories(ctx);
+        const hintBox = ctx.mount.querySelector('#rcResHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
+
         const qEl = ctx.mount.querySelector('#rcResQ');
         const find = ctx.mount.querySelector('#rcResFind');
         find.addEventListener('click', () => preview(ctx));
         qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); preview(ctx); } });
         ctx.mount.querySelector('#rcResModel').addEventListener('change', (e) => { state.model = e.target.value; sync(); });
-        ctx.mount.querySelector('#rcResCat').addEventListener('change', (e) => { state.category_id = e.target.value; sync(); });
+        const catSel = ctx.mount.querySelector('#rcResCat');
+        catSel.value = state.category_id || '';
+        catSel.addEventListener('change', (e) => { state.category_id = e.target.value; sync(); if (state.q.trim()) preview(ctx); });
+        const tagSel = ctx.mount.querySelector('.rc-tagsel');
+        if (tagSel) tagSel.addEventListener('change', () => {
+            state.tags = Array.from(tagSel.selectedOptions).map(o => o.value).filter(Boolean);
+            sync(); if (state.q.trim()) preview(ctx);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcResSince');
+        const untilEl = ctx.mount.querySelector('#rcResUntil');
+        sinceEl.addEventListener('change', () => { state.since = sinceEl.value; sync(); if (state.q.trim()) preview(ctx); });
+        untilEl.addEventListener('change', () => { state.until = untilEl.value; sync(); if (state.q.trim()) preview(ctx); });
         qEl.focus();
 
         if (state.q.trim()) preview(ctx);
-    }
-
-    async function loadCategories(ctx) {
-        const sel = ctx.mount.querySelector('#rcResCat');
-        if (!sel) return;
-        try {
-            const d = await R.api.categories();
-            if (!ctx.isCurrent()) return;
-            const cats = d.categories || [];
-            sel.innerHTML = `<option value="">Усі напрямки</option>`
-                + cats.map(c => `<option value="${c.id}">${U.esc(c.name)}${c.count != null ? ` (${c.count})` : ''}</option>`).join('')
-                + (d.uncategorized ? `<option value="none">Без напрямку (${d.uncategorized})</option>` : '')
-                + `<option value="${UI.CAT_NEW}" class="rc-opt-new">＋ Новий напрямок…</option>`;
-            sel.value = state.category_id || '';
-        } catch (_) { /* лишаємо тільки «Усі напрямки» */ }
     }
 
     function sync() {
         const p = new URLSearchParams();
         if (state.q) p.set('q', state.q);
         if (state.category_id) p.set('category_id', state.category_id);
+        if (state.tags.length) p.set('tags', state.tags.join(','));
+        if (state.since) p.set('since', state.since);
+        if (state.until) p.set('until', state.until);
         if (state.model && state.model !== 'haiku') p.set('model', state.model);
         const s = p.toString();
         R.router.replace('/research' + (s ? '?' + s : ''));
+    }
+
+    // C4: спільні осі фільтра для preview і обох експортів — один список,
+    // щоб нова вісь не загубилась в одному з трьох викликів.
+    function axes() {
+        return {
+            category_id: state.category_id || undefined,
+            tags: state.tags.length ? state.tags.join(',') : undefined,
+            since: state.since || undefined,
+            until: state.until || undefined,
+        };
+    }
+    // Порожня видача з активними фільтрами — пояснити, ЩО саме звужує.
+    function filterExplain() {
+        const bits = [];
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
+        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
+        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (!bits.length) return null;
+        return 'Нічого ' + bits.join(' ') + '. Напрямок тягне свої проєкти, проєкт — лише себе, тег ріже впоперек: '
+            + 'зніміть напрямок/проєкт, тег або період — і спробуйте ширше.';
     }
 
     async function preview(ctx) {
@@ -99,7 +142,7 @@
         if (!state.q) { out.innerHTML = UI.empty('Введіть бренд або тему', 'Напр.: Horeca, хорека, HoReCa', 'fa-magnifying-glass'); return; }
         out.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю згадки по всьому архіву…</div>`;
         try {
-            const data = await R.api.researchPreview({ q: state.q, category_id: state.category_id || undefined });
+            const data = await R.api.researchPreview(Object.assign({ q: state.q }, axes()));
             if (!ctx.isCurrent()) return;
             lastPreview = data;
             renderResults(ctx, data);
@@ -119,7 +162,9 @@
         const st = data.stats || { records: 0, mentions: 0, by_source: {} };
         if (!st.records) {
             out.innerHTML = UI.empty('Згадок не знайдено',
-                `За «${U.esc((data.terms || []).join(', '))}» нічого. Спробуйте інші варіанти написання або зніміть фільтр напрямку.`, 'fa-ghost');
+                filterExplain()
+                || `За «${U.esc((data.terms || []).join(', '))}» нічого. Спробуйте інші варіанти написання або зніміть фільтр напрямку.`,
+                'fa-ghost');
             return;
         }
         const terms = (data.terms || []).join(', ');
@@ -182,7 +227,7 @@
         if (btn) btn.disabled = true;
         try {
             await R.researchExport.runOriginals(
-                { q: state.q, category_id: state.category_id || undefined }, box, ctx);
+                Object.assign({ q: state.q }, axes()), box, ctx);
         } catch (_) { /* помилка вже відрендерена у box */ }
         finally { if (btn) btn.disabled = false; }
     }
@@ -195,7 +240,7 @@
         abortCtl = new AbortController();
         try {
             await R.researchExport.runSummary(
-                { q: state.q, category_id: state.category_id || undefined, model: state.model },
+                Object.assign({ q: state.q, model: state.model }, axes()),
                 box, ctx, abortCtl.signal, state.q);
         } finally { if (btn) btn.disabled = false; }
     }

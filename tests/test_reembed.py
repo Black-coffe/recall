@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 
@@ -413,8 +414,14 @@ class FakeQueue:
 
 
 class FakeRecorder:
+    """Живі сесії — `sids`; `active_session_id` навмисно відсутній: при двох
+    записах він None, тож прапорець мусить читати `active_session_ids()`."""
+
     def __init__(self, active=False):
-        self.active_session_id = "sess-1" if active else None
+        self.sids = ["sess-1"] if active else []
+
+    def active_session_ids(self):
+        return list(self.sids)
 
 
 @pytest.fixture
@@ -459,7 +466,7 @@ def test_schedule_record_reembed_defers_while_recording(db, scheduler_env, monke
     monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
                         lambda path, tid, force=False: calls.append(tid)
                         or {"status": "embedded"})
-    recorder.active_session_id = "sess-live"
+    recorder.sids = ["sess-live"]
     tid = _add_tx(db)
 
     assert reembed.schedule_record_reembed(tid, db_path=db) == "deferred"
@@ -467,13 +474,23 @@ def test_schedule_record_reembed_defers_while_recording(db, scheduler_env, monke
     # другий виклик під час очікування не плодить другої задачі
     assert reembed.schedule_record_reembed(tid, db_path=db) == "pending"
 
-    recorder.active_session_id = None
+    recorder.sids = []
     deadline = time.time() + 3.0
     while not queue.calls and time.time() < deadline:
         time.sleep(0.02)
     assert [c["meta"]["transcription_id"] for c in queue.calls] == [tid]
     assert calls == [tid]
     assert tid not in reembed._pending_ids
+
+
+def test_recording_active_with_two_live_sessions(scheduler_env):
+    """ADR-022 відкладення: два живі записи — теж «запис триває»."""
+    _, recorder = scheduler_env
+    assert reembed._recording_active() is False
+    recorder.sids = ["rec_a", "rec_b"]
+    assert reembed._recording_active() is True
+    recorder.sids = []
+    assert reembed._recording_active() is False
 
 
 def test_schedule_record_reembed_skips_without_torch(db, scheduler_env, monkeypatch):
@@ -555,3 +572,399 @@ def test_pending_is_released_when_job_starts_not_at_submit(db, scheduler_env, mo
 
     assert reembed.schedule_record_reembed(tid, db_path=db) == "queued"
     assert len(queue.jobs) == 1
+
+
+# ============================================================
+# directions-projects-tags-01: точковий re-embed СПИСКУ (C3)
+# ============================================================
+
+def _make_current(path, tid):
+    """Перевести запис у поточну епоху і дати йому чанк (інакше він `stale`)."""
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE transcriptions SET embedding_model = ?, embedding_version = ? "
+                 "WHERE id = ?", (embeddings.EMBED_MODEL, embeddings.EMBED_VERSION, tid))
+    conn.execute("INSERT INTO chunks (transcription_id, chunk_index, text) "
+                 "VALUES (?, 0, 'кошторис')", (tid,))
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def _add_current(path, **kw):
+    return _make_current(path, _add_tx(path, **kw))
+
+
+def test_schedule_records_reembed_queues_one_task_per_record(db, scheduler_env, monkeypatch):
+    queue, _ = scheduler_env
+    seen = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: seen.append((path, tid, force))
+                        or {"status": "embedded"})
+    ids = [_add_current(db) for _ in range(3)]
+
+    res = reembed.schedule_records_reembed(ids, db_path=db, reason="category_bulk")
+    assert res == {"mode": "point", "count": 3, "stale": 0}
+    assert [c["kind"] for c in queue.calls] == ["reembed_record"] * 3
+    assert [c["meta"]["transcription_id"] for c in queue.calls] == ids
+    assert seen == [(db, tid, True) for tid in ids]
+
+
+def test_schedule_records_reembed_skips_ids_from_another_epoch(db, scheduler_env, monkeypatch):
+    queue, _ = scheduler_env
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+    live = _add_current(db)
+    old_pair = _add_tx(db, model="старий/ембедер", version=1)
+    never_embedded = _add_tx(db, model=embeddings.EMBED_MODEL,
+                             version=embeddings.EMBED_VERSION)   # пара є, чанків немає
+
+    res = reembed.schedule_records_reembed([live, old_pair, never_embedded],
+                                           db_path=db, reason="tags_changed")
+    assert res == {"mode": "point", "count": 1, "stale": 2}
+    assert [c["meta"]["transcription_id"] for c in queue.calls] == [live]
+
+
+def test_schedule_records_reembed_batches_above_threshold(db, scheduler_env,
+                                                          optimize_calls, monkeypatch):
+    queue, _ = scheduler_env
+    seen = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: seen.append((tid, force))
+                        or {"status": "embedded"})
+    ids = [_add_current(db) for _ in range(reembed._BATCH_THRESHOLD + 1)]
+
+    res = reembed.schedule_records_reembed(ids, db_path=db, reason="category_tree_changed")
+    assert res == {"mode": "batch", "count": len(ids), "stale": 0}
+    assert [c["kind"] for c in queue.calls] == ["reembed_batch"]      # рівно одна задача
+    assert queue.calls[0]["meta"]["ids"] == ids
+    assert queue.calls[0]["meta"]["db_path"] == db
+    assert queue.calls[0]["meta"]["reason"] == "category_tree_changed"
+    assert [tid for tid, _ in seen] == ids
+    # масовий DELETE+INSERT по chunks кришить chunks_fts — optimize рівно раз
+    assert optimize_calls == [db]
+    assert not (set(ids) & reembed._pending_ids)
+
+
+def test_batch_releases_each_pending_id_before_reading_its_row(db, scheduler_env,
+                                                               optimize_calls, monkeypatch):
+    """Id знімається з `_pending_ids` ДО читання рядка — інакше виклик, що
+    отримав «уже заплановано», спирався б на задачу зі старими даними."""
+    from app import state
+
+    queue = SlowQueue()
+    monkeypatch.setattr(state, "job_queue", queue, raising=False)
+    pending_at_read = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: pending_at_read.append(
+                            (tid, tid in reembed._pending_ids)) or {"status": "embedded"})
+    ids = [_add_current(db) for _ in range(reembed._BATCH_THRESHOLD + 1)]
+
+    reembed.schedule_records_reembed(ids, db_path=db, reason="category_bulk")
+    assert set(ids) <= reembed._pending_ids          # поки задача не стартувала
+    assert pending_at_read == []
+
+    queue.run_next()
+    assert pending_at_read == [(tid, False) for tid in ids]
+    assert not (set(ids) & reembed._pending_ids)
+
+
+# ============================================================
+# directions-projects-tags-15: `_pending_ids` відпускається при скасуванні/
+# винятку; батч не дублює вже заплановані id
+# ============================================================
+
+class CancelAfterN:
+    """`is_cancelled()` каже «ні» перші `n` разів, далі — «так»."""
+
+    def __init__(self, n):
+        self.n = n
+        self.calls = 0
+
+    def is_cancelled(self):
+        self.calls += 1
+        return self.calls > self.n
+
+
+def test_batch_job_cancellation_releases_pending_tail(db, scheduler_env, optimize_calls,
+                                                       monkeypatch):
+    seen = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: seen.append(tid)
+                        or {"status": "embedded"})
+    ids = [_add_tx(db) for _ in range(25)]
+    reembed._pending_ids.update(ids)
+
+    result = reembed._batch_reembed_job(CancelAfterN(3), ids, db, "category_bulk")
+
+    assert seen == ids[:3]
+    assert result["done"] == 3
+    assert optimize_calls == [db]
+    assert reembed._pending_ids == set()
+
+    # рестарту процесу не треба: наступний точковий виклик для необробленого
+    # (4-го) id одразу створює задачу, а не повертає "pending"
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+    assert reembed.schedule_record_reembed(ids[3], db_path=db) == "queued"
+
+
+def test_batch_job_survives_one_broken_record_and_releases_pending(db, scheduler_env,
+                                                                    optimize_calls, monkeypatch):
+    ids = [_add_tx(db) for _ in range(5)]
+    reembed._pending_ids.update(ids)
+    seen = []
+
+    def _fake(path, tid, force=False):
+        seen.append(tid)
+        if tid == ids[1]:
+            raise RuntimeError("boom")
+        return {"status": "embedded"}
+
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription", _fake)
+
+    result = reembed._batch_reembed_job(FakeJob("reembed_batch", {}), ids, db, "category_bulk")
+
+    assert seen == ids                      # поганий запис не зупиняє решту
+    assert result["done"] == 4 and result["failed"] == 1
+    assert optimize_calls == [db]
+    assert reembed._pending_ids == set()
+
+
+def test_batch_job_releases_pending_tail_on_iteration_exception(db, scheduler_env,
+                                                                 optimize_calls, monkeypatch):
+    """Виняток не з `chunk_and_embed_transcription`, а з самого механізму
+    циклу (тут — перевірка скасування) — `finally` усе одно відпускає хвіст."""
+    ids = [_add_tx(db) for _ in range(5)]
+    reembed._pending_ids.update(ids)
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+
+    class PoisonedJob:
+        def __init__(self):
+            self.calls = 0
+
+        def is_cancelled(self):
+            self.calls += 1
+            if self.calls == 3:
+                raise RuntimeError("queue fault")
+            return False
+
+    with pytest.raises(RuntimeError):
+        reembed._batch_reembed_job(PoisonedJob(), ids, db, "category_bulk")
+
+    assert reembed._pending_ids == set()
+    assert optimize_calls == []             # виняток вийшов раніше за optimize
+
+
+def test_schedule_records_reembed_batch_excludes_already_pending_ids(db, scheduler_env,
+                                                                      monkeypatch):
+    """5 з 25 живих id уже чекають на власну точкову задачу — батч бере лише
+    решту 20, дубля точковій задачі не ставить."""
+    from app import state
+
+    queue = SlowQueue()
+    monkeypatch.setattr(state, "job_queue", queue, raising=False)
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+    ids = [_add_current(db) for _ in range(reembed._BATCH_THRESHOLD + 5)]
+    already_pending = ids[:5]
+    reembed._pending_ids.update(already_pending)
+
+    res = reembed.schedule_records_reembed(ids, db_path=db, reason="category_bulk")
+    assert res == {"mode": "batch", "count": 20, "stale": 0}
+    assert len(queue.jobs) == 1
+    submitted_ids = queue.jobs[0][2][0]
+    assert submitted_ids == ids[5:]
+    assert reembed._pending_ids == set(ids)          # кожен id рівно один раз
+
+
+def test_schedule_records_reembed_batch_none_when_all_already_pending(db, scheduler_env,
+                                                                       monkeypatch):
+    queue, _ = scheduler_env
+    ids = [_add_current(db) for _ in range(reembed._BATCH_THRESHOLD + 1)]
+    reembed._pending_ids.update(ids)
+
+    res = reembed.schedule_records_reembed(ids, db_path=db, reason="category_bulk")
+    assert res == {"mode": "none", "count": 0, "stale": 0}
+    assert queue.calls == []
+    assert reembed._pending_ids == set(ids)          # нічого не чіпали
+
+
+def test_schedule_records_reembed_defers_batch_while_recording(db, scheduler_env, monkeypatch):
+    queue, recorder = scheduler_env
+    calls = []
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: calls.append(tid)
+                        or {"status": "embedded"})
+    recorder.sids = ["sess-live"]
+    ids = [_add_current(db) for _ in range(reembed._BATCH_THRESHOLD + 1)]
+
+    res = reembed.schedule_records_reembed(ids, db_path=db, reason="category_bulk")
+    assert res["mode"] == "batch"
+    assert queue.calls == [] and calls == []          # слот черги не зайнятий
+
+    recorder.sids = []
+    deadline = time.time() + 3.0
+    while not queue.calls and time.time() < deadline:
+        time.sleep(0.02)
+    assert [c["kind"] for c in queue.calls] == ["reembed_batch"]
+    assert calls == ids
+
+
+def test_schedule_records_reembed_is_quiet_without_ids_or_embeddings(db, scheduler_env,
+                                                                     monkeypatch):
+    queue, _ = scheduler_env
+    none = {"mode": "none", "count": 0, "stale": 0}
+    assert reembed.schedule_records_reembed([], db_path=db, reason="x") == none
+
+    monkeypatch.setattr(embeddings, "is_available", lambda: False)
+    monkeypatch.setattr(embeddings, "unavailability_reason", lambda: "torch не встановлено")
+    assert reembed.schedule_records_reembed([_add_current(db)], db_path=db,
+                                            reason="x") == none
+    assert queue.calls == []
+
+
+def test_schedule_records_reembed_requires_db_path(db, scheduler_env):
+    """Дефолту «None = бойова БД» немає — як і в одиночного планувальника."""
+    queue, _ = scheduler_env
+    with pytest.raises(TypeError):
+        reembed.schedule_records_reembed([_add_current(db)], reason="x")
+    assert queue.calls == []
+
+
+# ============================================================
+# directions-projects-tags-17: гард формату префікса + epoch-check + хвіст батчу
+# ============================================================
+
+def _stamp_epoch(path, model, version, prefix_format):
+    """Рядок, який лишає по собі бекфіл v46 (наявні пари = формат 1)."""
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT OR REPLACE INTO embedding_epochs (model, version, prefix_format) "
+                 "VALUES (?, ?, ?)", (model, version, prefix_format))
+    conn.commit()
+    conn.close()
+
+
+def test_run_refuses_older_format_epoch_without_scanning(db, fake_embedder, optimize_calls,
+                                                          monkeypatch):
+    """Пара збігається, формат — ні: `stale_ids` віддав би 0, тож прохід не
+    стартує взагалі (і `--dry-run` теж), а не робить вигляд, що роботи немає."""
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    _add_tx(db)
+
+    def _boom(*a, **kw):
+        raise AssertionError("stale_ids не має викликатись при format_mismatch")
+
+    monkeypatch.setattr(reembed, "stale_ids", _boom)
+
+    dry = reembed.run(db, dry_run=True)
+    assert dry["status"] == "epoch_mismatch" and dry["reason"] == "format_mismatch"
+    assert dry["total"] == 0
+    assert reembed.run(db)["status"] == "epoch_mismatch"
+    assert optimize_calls == [] and fake_embedder == []
+
+
+def test_run_proceeds_when_epoch_is_new_and_stamps_format(db, fake_embedder, optimize_calls,
+                                                           monkeypatch):
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 5)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    _add_tx(db)
+
+    assert reembed.run(db)["done"] == 1
+    conn = sqlite3.connect(db)
+    rows = conn.execute("SELECT version, prefix_format FROM embedding_epochs "
+                        "ORDER BY version").fetchall()
+    conn.close()
+    assert rows == [(4, 1), (5, embeddings.PREFIX_FORMAT)]
+
+
+def test_cli_run_returns_nonzero_on_format_mismatch(db, fake_embedder, monkeypatch, capsys):
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    _add_tx(db)
+
+    assert reembed.main(["run", "--db", db]) == 1
+    assert "Відмова" in capsys.readouterr().err
+
+
+def test_epoch_check_reports_mismatch_with_exit_1(db, monkeypatch, capsys):
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    _add_tx(db, model=embeddings.EMBED_MODEL, version=4)
+
+    assert reembed.main(["epoch-check", "--db", db]) == 1
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "format_mismatch" in output
+    assert f"{embeddings.EMBED_MODEL} / v4" in output      # перелік пар архіву
+    assert f"PREFIX_FORMAT={embeddings.PREFIX_FORMAT}" in output
+
+
+def test_epoch_check_is_read_only_and_passes_on_new_epoch(db, monkeypatch, capsys):
+    monkeypatch.setattr(embeddings, "EMBED_VERSION", 5)
+    _stamp_epoch(db, embeddings.EMBED_MODEL, 4, 1)
+    _add_tx(db, model=embeddings.EMBED_MODEL, version=4)
+
+    assert reembed.main(["epoch-check", "--db", db]) == 0
+    assert "new_epoch" in capsys.readouterr().out
+
+    conn = sqlite3.connect(db)
+    try:
+        # перевірка нічого не записала: епоха 5 зʼявиться лише з першими чанками
+        assert conn.execute("SELECT COUNT(*) FROM embedding_epochs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_epoch_check_missing_db_returns_2(tmp_path, capsys):
+    assert reembed.main(["epoch-check", "--db", str(tmp_path / "nope.db")]) == 2
+    assert "не знайдено" in capsys.readouterr().err
+
+
+def test_batch_cancellation_logs_remaining_ids_as_a_list(db, scheduler_env, optimize_calls,
+                                                          monkeypatch, caplog):
+    """Скасований хвіст у чергу НЕ повертається — тож лог мусить назвати кожен
+    id, який лишився непереембедженим (мінор 7)."""
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+    ids = [_add_tx(db) for _ in range(25)]
+    reembed._pending_ids.update(ids)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.reembed"):
+        reembed._batch_reembed_job(CancelAfterN(3), ids, db, "category_bulk")
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "cancelled" in message
+    assert str(sorted(ids[3:])) in message            # усі 22 — списком
+    assert len(ids[3:]) == 22
+    assert reembed._pending_ids == set()
+
+
+def test_batch_exception_names_its_cause_in_the_tail_warning(db, scheduler_env,
+                                                              optimize_calls,
+                                                              monkeypatch, caplog):
+    ids = [_add_tx(db) for _ in range(5)]
+    reembed._pending_ids.update(ids)
+    monkeypatch.setattr(embeddings, "chunk_and_embed_transcription",
+                        lambda path, tid, force=False: {"status": "embedded"})
+
+    class PoisonedJob:
+        def __init__(self):
+            self.calls = 0
+
+        def is_cancelled(self):
+            self.calls += 1
+            if self.calls == 3:
+                raise RuntimeError("queue fault")
+            return False
+
+    with caplog.at_level(logging.WARNING, logger="app.services.reembed"):
+        with pytest.raises(RuntimeError):
+            reembed._batch_reembed_job(PoisonedJob(), ids, db, "category_bulk")
+
+    message = [r for r in caplog.records if r.levelno == logging.WARNING][0].getMessage()
+    assert "RuntimeError" in message
+    assert str(sorted(ids[2:])) in message

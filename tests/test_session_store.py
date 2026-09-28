@@ -481,3 +481,42 @@ class TestSelfHealingPaths:
         with caplog.at_level(logging.DEBUG):
             store.read('rec_healthy')
         assert not any('self-healing' in r.message for r in caplog.records)
+
+
+# ------------------------------------------- system source (ADR-026, story 04)
+
+def test_create_writes_system_source_when_stream_exists(store: SessionStore):
+    src = {'mode': 'exclude', 'apps': ['zoom.exe'], 'device_index': None}
+    mf = store.create('rec_src', 48000, 2, system_source=src)
+    sys_mf = mf['streams'][STREAM_SYSTEM]
+    assert sys_mf['enabled'] is True  # include/exclude не має імені endpoint'а
+    assert sys_mf['source'] == src
+    assert sys_mf['source_events'] == []
+    assert mf['version'] == MANIFEST_VERSION
+
+
+def test_create_without_system_stream_has_no_source(store: SessionStore):
+    mf = store.create('rec_mic', 48000, 2, mic_device_name='Mic')
+    assert 'source' not in mf['streams'][STREAM_SYSTEM]
+    assert mf['streams'][STREAM_SYSTEM]['enabled'] is False
+
+
+def test_set_stream_source_appends_event(store: SessionStore):
+    store.create('rec_src', 48000, 2, system_device_name='S',
+                 system_source={'mode': 'all', 'apps': [], 'device_index': 3})
+    new = {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None}
+    store.set_stream_source('rec_src', STREAM_SYSTEM, new, {'reason': 'user', 'gap_ms': 5.0})
+    store.set_stream_source('rec_src', STREAM_SYSTEM, new, {'reason': 'pid_change'})
+    sys_mf = store.read('rec_src')['streams'][STREAM_SYSTEM]
+    assert sys_mf['source'] == new
+    assert [e['reason'] for e in sys_mf['source_events']] == ['user', 'pid_change']
+    with pytest.raises(ValueError):
+        store.set_stream_source('rec_src', 'video', new)
+
+
+def test_stream_source_defaults_to_all_on_pre_spec_manifest(store: SessionStore):
+    mf = store.create('rec_old', 48000, 2, system_device_name='Speakers')
+    assert 'source' not in mf['streams'][STREAM_SYSTEM]
+    assert SessionStore.stream_source(mf, STREAM_SYSTEM) == {
+        'mode': 'all', 'apps': [], 'device_index': None}
+    assert SessionStore.stream_source({}, STREAM_SYSTEM)['mode'] == 'all'

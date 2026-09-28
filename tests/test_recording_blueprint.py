@@ -41,6 +41,7 @@ def fake_service():
     ]
     svc.start.return_value = 'rec_test123'
     svc.active_session_id = None
+    svc.active_session_ids.return_value = []
     svc.get_state.return_value = {
         'session_id': 'rec_test123', 'status': 'recording', 'is_active': True,
         'is_paused': False, 'elapsed_seconds': 1.5, 'last_chunk_ts': 0,
@@ -141,16 +142,70 @@ def test_start_without_streams_returns_400(client, fake_service):
     assert r.get_json()['error_code'] == 'NO_STREAMS'
 
 
-def test_start_conflict_returns_409(client, fake_service):
+def test_start_twice_then_session_limit(client, fake_service):
+    """Дві сесії стартують; третя — 409 SESSION_LIMIT з переліком і лімітом."""
     from app.services.recording.service import SessionConflictError
-    fake_service.start.side_effect = SessionConflictError("active already")
-    fake_service.active_session_id = 'rec_other'
+    fake_service.start.side_effect = [
+        'rec_a', 'rec_b',
+        SessionConflictError("limit", active=['rec_a', 'rec_b'], limit=2),
+    ]
+    sids = [client.post('/api/recording/start', json={'mic_device_index': 1}).get_json()['session_id']
+            for _ in range(2)]
+    assert sids == ['rec_a', 'rec_b']
 
     r = client.post('/api/recording/start', json={'mic_device_index': 1})
     assert r.status_code == 409
     body = r.get_json()
-    assert body['error_code'] == 'SESSION_CONFLICT'
-    assert body['active_session_id'] == 'rec_other'
+    assert body['error_code'] == 'SESSION_LIMIT'
+    assert body['active'] == ['rec_a', 'rec_b']
+    assert body['limit'] == 2
+    assert 'WRONG_SESSION' not in r.get_data(as_text=True)
+
+
+def test_start_invalid_system_source_400_before_service(client, fake_service):
+    r = client.post('/api/recording/start', json={
+        'mic_device_index': 1,
+        'system_source': {'mode': 'exclude', 'apps': ['Zoom.exe', 'x.exe']},
+    })
+    assert r.status_code == 400
+    assert r.get_json()['error_code'] == 'UNSUPPORTED_SOURCE_SPEC'
+    fake_service.start.assert_not_called()
+
+
+def test_start_include_enables_system_without_device(client, fake_service):
+    """include/exclude вмикає системний потік і без system_device_index."""
+    r = client.post('/api/recording/start', json={
+        'system_source': {'mode': 'include', 'apps': ['Zoom.exe']},
+    })
+    assert r.status_code == 200
+    spec = fake_service.start.call_args.kwargs['system_source']
+    assert spec.mode == 'include' and spec.apps == ('zoom.exe',)
+    assert r.get_json()['system_source']['apps'] == ['zoom.exe']
+
+
+def test_start_system_source_all_keeps_device_path(client, fake_service):
+    r = client.post('/api/recording/start', json={
+        'system_device_index': 2, 'system_source': {'mode': 'all'},
+    })
+    assert r.status_code == 200
+    kw = fake_service.start.call_args.kwargs
+    assert kw['system_source'] is None and kw['system_device_index'] == 2
+    assert r.get_json()['system_source'] == {'mode': 'all', 'apps': [], 'device_index': 2}
+
+
+def test_start_copilot_busy_keeps_recording(client, fake_service, monkeypatch):
+    from app.services.copilot.service import CopilotBusyError
+    cp = MagicMock()
+    cp.start.side_effect = CopilotBusyError('A')
+    monkeypatch.setattr(state, 'copilot_service', cp)
+    monkeypatch.setattr(state, 'copilot_worker', None)
+
+    r = client.post('/api/recording/start', json={'mic_device_index': 1, 'copilot': {}})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['session_id'] == 'rec_test123'
+    assert body['copilot'] == {'started': False, 'error_code': 'COPILOT_BUSY',
+                               'owner_session_id': 'A'}
 
 
 def test_start_recording_error_returns_400(client, fake_service):
@@ -385,22 +440,138 @@ def test_live_transcript_seq_cursor_survives_stream_race(client, fake_service):
 # ---------------------------------------------------------------- /active
 
 def test_active_session_when_idle(client, fake_service):
-    fake_service.active_session_id = None
+    fake_service.active_session_ids.return_value = []
     r = client.get('/api/recordings/active')
     assert r.status_code == 200
     body = r.get_json()
     assert body['active'] is False
+    assert body['count'] == 0
+    assert body['sessions'] == []
     assert body['session_id'] is None
 
 
 def test_active_session_when_recording(client, fake_service):
-    fake_service.active_session_id = 'rec_active'
+    fake_service.active_session_ids.return_value = ['rec_active']
     r = client.get('/api/recordings/active')
     assert r.status_code == 200
     body = r.get_json()
     assert body['active'] is True
+    assert body['count'] == 1
     assert body['session_id'] == 'rec_active'
-    assert 'state' in body
+    assert body['state']['status'] == 'recording'
+
+
+def test_active_sessions_two_live(client, fake_service, monkeypatch):
+    fake_service.active_session_ids.return_value = ['rec_a', 'rec_b']
+
+    def _state(sid):
+        return {'session_id': sid, 'status': 'recording', 'elapsed_seconds': 3.0,
+                'name': None, 'auto_name': f'Запис {sid}',
+                'streams': {'mic': {'enabled': sid == 'rec_b'}, 'system': {'enabled': True}},
+                'system_source': {'mode': 'all', 'apps': [], 'device_index': 2}}
+    fake_service.get_state.side_effect = _state
+    cp = MagicMock()
+    cp.get_by_recording.side_effect = (
+        lambda sid: {'id': 1, 'status': 'active'} if sid == 'rec_a' else None)
+    monkeypatch.setattr(state, 'copilot_service', cp)
+
+    body = client.get('/api/recordings/active').get_json()
+    assert body['count'] == 2
+    assert body['session_id'] is None and body['state'] is None
+    a, b = body['sessions']
+    assert a['session_id'] == 'rec_a' and b['session_id'] == 'rec_b'
+    assert a['streams'] == {'mic': False, 'system': True}
+    assert b['streams'] == {'mic': True, 'system': True}
+    assert a['system_source']['mode'] == 'all'
+    assert a['copilot_active'] is True and b['copilot_active'] is False
+
+
+def test_state_carries_system_source(client, fake_service):
+    fake_service.get_state.return_value = {
+        'status': 'recording',
+        'system_source': {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None},
+    }
+    body = client.get('/api/recording/rec_test123/state').get_json()
+    assert body['state']['system_source']['mode'] == 'include'
+
+
+# ---------------------------------------------------------------- /system-source
+
+def test_system_source_retarget(client, fake_service):
+    fake_service.retarget_system.return_value = {
+        'session_id': 'rec_a', 'stream': 'system',
+        'source': {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None},
+        'event': {'reason': 'user', 'gap_ms': 12.0}, 'applied_on_resume': False,
+    }
+    r = client.post('/api/recording/rec_a/system-source',
+                    json={'mode': 'include', 'apps': ['zoom.exe']})
+    assert r.status_code == 200
+    sid, spec, reason = fake_service.retarget_system.call_args.args
+    assert sid == 'rec_a' and spec.mode == 'include' and spec.apps == ('zoom.exe',)
+    assert reason == 'user'
+    body = r.get_json()
+    assert body['source']['apps'] == ['zoom.exe']
+    assert body['event']['gap_ms'] == 12.0
+    assert body['applied_on_resume'] is False
+
+
+def test_system_source_auto_restore_passed_through(client, fake_service):
+    fake_service.retarget_system.return_value = {'source': {}, 'event': {}}
+    r = client.post('/api/recording/rec_a/system-source',
+                    json={'mode': 'all', 'reason': 'auto_restore'})
+    assert r.status_code == 200
+    assert fake_service.retarget_system.call_args.args[2] == 'auto_restore'
+
+
+def test_system_source_bad_reason_400(client, fake_service):
+    r = client.post('/api/recording/rec_a/system-source', json={'mode': 'all', 'reason': 'guess'})
+    assert r.status_code == 400
+    fake_service.retarget_system.assert_not_called()
+
+
+def test_system_source_errors(client, fake_service):
+    from app.services.recording.service import NoSystemStreamError, SessionNotFoundError
+    fake_service.retarget_system.side_effect = SessionNotFoundError('nope')
+    r = client.post('/api/recording/rec_x/system-source', json={'mode': 'all'})
+    assert r.status_code == 404 and r.get_json()['error_code'] == 'NOT_FOUND'
+
+    fake_service.retarget_system.side_effect = NoSystemStreamError('no system')
+    r = client.post('/api/recording/rec_a/system-source', json={'mode': 'all'})
+    assert r.status_code == 409 and r.get_json()['error_code'] == 'NO_SYSTEM_STREAM'
+
+    r = client.post('/api/recording/rec_a/system-source',
+                    json={'mode': 'exclude', 'apps': ['a.exe', 'b.exe']})
+    assert r.status_code == 400 and r.get_json()['error_code'] == 'UNSUPPORTED_SOURCE_SPEC'
+
+
+# ---------------------------------------------------------------- /apps
+
+def test_apps_marks_recorded_by_live_sessions(client, fake_service, monkeypatch):
+    from app.services.recording import app_audio
+    fake_service.active_session_ids.return_value = ['rec_a', 'rec_b']
+    specs = {'rec_a': {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None},
+             'rec_b': {'mode': 'exclude', 'apps': ['zoom.exe'], 'device_index': None}}
+    fake_service.get_state.side_effect = lambda sid: {'system_source': specs[sid]}
+    real = app_audio.list_sounding_apps
+    rows = [(100, 'active', 'Speakers', 'Zoom.exe'), (200, 'active', 'Speakers', 'chrome.exe')]
+    monkeypatch.setattr(app_audio, 'list_sounding_apps', lambda live_specs=None: real(
+        live_specs, enumerate_sessions=lambda: rows, own_pid=1))
+
+    body = client.get('/api/recording/apps').get_json()
+    assert body['success'] is True and body['available'] is True
+    by = {a['exe']: a['recorded_by'] for a in body['apps']}
+    assert by == {'zoom.exe': ['rec_a'], 'chrome.exe': ['rec_b']}
+
+
+def test_apps_enumerator_failure_is_200_unavailable(client, fake_service, monkeypatch):
+    from app.services.recording import app_audio
+
+    def _boom(live_specs=None):
+        raise RuntimeError('COM exploded')
+    monkeypatch.setattr(app_audio, 'list_sounding_apps', _boom)
+    r = client.get('/api/recording/apps')
+    assert r.status_code == 200
+    assert r.get_json()['available'] is False
 
 
 # ---------------------------------------------------------------- /recovered (Phase 9.10)

@@ -20,7 +20,7 @@ import pytest
 
 from app.db.connection import get_db_connection
 from app.db.migrations import init_database
-from app.services import enrichment, text_polishing
+from app.services import categories, enrichment, text_polishing
 
 
 # ============================================================
@@ -787,3 +787,169 @@ def test_cli_model_override_reaches_extract_meeting_card(db_path, monkeypatch):
     assert enrichment.main(
         ["--db", db_path, "backfill-cards", "--model", "claude-haiku-4-5-20251001"]) == 0
     assert calls == ["claude-haiku-4-5-20251001"]
+
+
+# ============================================================
+# Історія 06: підказки тегів → suggested_tags_json
+# ============================================================
+
+def _card_with_tags(tags):
+    card = _sample_card()
+    card["tags"] = tags
+    return card
+
+
+def test_filter_suggested_tags_dedup_length_and_cap():
+    """Акцептанс: casefold-дублі схлопуються, задовга назва (>40) відкидається,
+    результат обрізаний до рівно 5."""
+    long_name = "x" * 50
+    tags = ["AI", " ai ", "Інвестори", long_name, "a", "b", "c", "d"]
+    result = enrichment._filter_suggested_tags(tags, existing_names=[])
+    assert result == ["AI", "Інвестори", "a", "b", "c"]
+    assert len(result) == 5
+    assert long_name not in result
+
+
+def test_filter_suggested_tags_excludes_existing_record_tags():
+    tags = ["AI", "Інвестори"]
+    result = enrichment._filter_suggested_tags(tags, existing_names=["ai"])
+    assert result == ["Інвестори"]
+
+
+def test_persist_card_missing_tags_key_leaves_suggestions_null(db_path):
+    tid = _insert_transcription(db_path)
+    with get_db_connection(db_path) as conn:
+        c = conn.cursor()
+        enrichment._persist_card(c, tid, _sample_card(), "текст",
+                                 created_at="2026-05-12 10:00:00", existing_meeting_date=None)
+        conn.commit()
+        row = c.execute("SELECT suggested_tags_json FROM transcriptions WHERE id=?",
+                        (tid,)).fetchone()
+    assert row["suggested_tags_json"] is None
+
+
+def test_persist_card_writes_filtered_suggested_tags(db_path):
+    tid = _insert_transcription(db_path)
+    long_name = "x" * 50
+    card = _card_with_tags(["AI", " ai ", "Інвестори", long_name, "a", "b", "c", "d"])
+    with get_db_connection(db_path) as conn:
+        c = conn.cursor()
+        enrichment._persist_card(c, tid, card, "текст",
+                                 created_at="2026-05-12 10:00:00", existing_meeting_date=None)
+        conn.commit()
+        row = c.execute("SELECT suggested_tags_json FROM transcriptions WHERE id=?",
+                        (tid,)).fetchone()
+    import json
+    assert json.loads(row["suggested_tags_json"]) == ["AI", "Інвестори", "a", "b", "c"]
+
+
+def test_persist_card_excludes_names_already_in_record_tags(db_path):
+    tid = _insert_transcription(db_path)
+    with get_db_connection(db_path) as conn:
+        categories.set_tags(conn, tid, add=["AI"], source="manual")
+    card = _card_with_tags(["AI", "Інвестори"])
+    with get_db_connection(db_path) as conn:
+        c = conn.cursor()
+        enrichment._persist_card(c, tid, card, "текст",
+                                 created_at="2026-05-12 10:00:00", existing_meeting_date=None)
+        conn.commit()
+        row = c.execute("SELECT suggested_tags_json FROM transcriptions WHERE id=?",
+                        (tid,)).fetchone()
+    import json
+    assert json.loads(row["suggested_tags_json"]) == ["Інвестори"]
+
+
+def test_enrich_card_passes_tag_vocabulary_to_extract_meeting_card(db_path, monkeypatch):
+    tid = _insert_transcription(db_path)
+    with get_db_connection(db_path) as conn:
+        categories.ensure_tag(conn, "Інвестори")
+        categories.ensure_tag(conn, "AI")
+    captured = {}
+    monkeypatch.setattr(
+        enrichment.text_polishing, "extract_meeting_card",
+        lambda *a, **k: captured.update(k) or _sample_card(),
+    )
+    enrichment._enrich_card(db_path, tid)
+    assert sorted(captured["tag_vocabulary"]) == ["AI", "Інвестори"]
+
+
+def test_backfill_cards_writes_suggested_tags_same_path(db_path, monkeypatch):
+    tid = _insert_transcription(db_path)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: _card_with_tags(["AI", "Інвестори"]))
+    enrichment.backfill_cards(db_path)
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT suggested_tags_json FROM transcriptions WHERE id=?",
+                           (tid,)).fetchone()
+    import json
+    assert json.loads(row["suggested_tags_json"]) == ["AI", "Інвестори"]
+
+
+def test_backfill_cards_dry_run_does_not_write_suggested_tags(db_path, monkeypatch):
+    tid = _insert_transcription(db_path)
+    monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
+                        lambda *a, **k: _card_with_tags(["AI"]))
+    assert enrichment.main(["--db", db_path, "backfill-cards", "--dry-run"]) == 0
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT suggested_tags_json FROM transcriptions WHERE id=?",
+                           (tid,)).fetchone()
+    assert row["suggested_tags_json"] is None
+
+
+# ============================================================
+# Історія 06: словник тегів у промпті extract_meeting_card
+# ============================================================
+
+class _FakeCardBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _FakeCardUsage:
+    def __init__(self):
+        self.input_tokens = 10
+        self.output_tokens = 5
+        self.cache_read_input_tokens = 0
+        self.cache_creation_input_tokens = 0
+
+
+class _FakeCardResult:
+    def __init__(self, payload: dict):
+        import json
+        self.content = [_FakeCardBlock(json.dumps(payload, ensure_ascii=False))]
+        self.model = "claude-test"
+        self.usage = _FakeCardUsage()
+
+
+def test_extract_meeting_card_prompt_contains_tag_vocabulary(monkeypatch):
+    captured = {}
+
+    def fake_stream(client, timeout, request_kwargs, what="polish"):
+        captured["kwargs"] = request_kwargs
+        return _FakeCardResult({"summary": "s", "tags": ["AI"]})
+
+    monkeypatch.setattr(text_polishing, "_get_client", lambda: object())
+    monkeypatch.setattr(text_polishing, "_stream_with_retry", fake_stream)
+
+    text_polishing.extract_meeting_card("текст", tag_vocabulary=["Інвестори", "AI"])
+
+    user_msg = captured["kwargs"]["messages"][0]["content"]
+    assert "Інвестори" in user_msg
+    assert "AI" in user_msg
+
+
+def test_extract_meeting_card_empty_vocabulary_still_asks_for_tags(monkeypatch):
+    captured = {}
+
+    def fake_stream(client, timeout, request_kwargs, what="polish"):
+        captured["kwargs"] = request_kwargs
+        return _FakeCardResult({"summary": "s"})
+
+    monkeypatch.setattr(text_polishing, "_get_client", lambda: object())
+    monkeypatch.setattr(text_polishing, "_stream_with_retry", fake_stream)
+
+    text_polishing.extract_meeting_card("текст", tag_vocabulary=[])
+
+    system_text = captured["kwargs"]["system"][0]["text"]
+    assert '"tags"' in system_text

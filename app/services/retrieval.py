@@ -34,7 +34,7 @@ import numpy as np
 
 from app.core import settings as _settings
 from app.db.connection import get_db_connection
-from app.services import embeddings, record_meta, reranker
+from app.services import categories, embeddings, record_meta, reranker
 
 
 logger = logging.getLogger(__name__)
@@ -190,10 +190,36 @@ def _term_match_counts(conn, words: list[str], rowids: list[int]) -> dict[int, i
     return counts
 
 
+def _record_axes_sql(category_id=None, tags: Optional[list[str]] = None,
+                     since: Optional[str] = None,
+                     until: Optional[str] = None) -> tuple[str, list]:
+    """Осі фільтра, що живуть на рівні ЗАПИСУ, — одним хвостом WHERE.
+
+    Фрагмент розрахований на підзапит по `transcriptions` БЕЗ аліаса
+    (`SELECT id FROM transcriptions WHERE …`), тож колонки без префікса.
+    Семантику кожної осі тримає `app.services.categories` (контракт C2) —
+    retrieval сам `category_id = ?` більше не пише: напрямок мусить
+    розкриватись у свої проєкти скрізь однаково.
+
+    Усі три осі накладаються на SQL-рівні ДО RRF/реранку (обидві гілки і
+    гілка коментарів): пост-фільтр після ранжування віддавав би менше k
+    результатів і конкурував за слоти реранку.
+    """
+    sql, params = "", []
+    for frag, frag_params in (
+        categories.filter_sql("category_id", category_id),
+        categories.tags_sql("id", categories.parse_tags(tags)),
+        categories.date_sql("COALESCE(meeting_date, created_at)", since, until),
+    ):
+        sql += frag
+        params += frag_params
+    return sql, params
+
+
 def _scope_sql(scope_tids: Optional[list[int]]) -> tuple[str, list]:
     """Фрагмент WHERE, що звужує пошук до заданого списку записів.
 
-    Другий шар скоупу (Трек 2): категорія 1:1 не рятує, бо «Робота» —
+    Другий шар скоупу (Трек 2): категорія 1:1 не рятує, бо «Фонд Робота» —
     це ~більша частина корпусу, а всередині живуть різні проєкти. Сам список рахує
     `app.services.scope.scope_filter_ids` (граф сутностей ∪ текстова згадка) —
     retrieval навмисно не знає про граф, він лише фільтрує за id.
@@ -206,7 +232,10 @@ def _scope_sql(scope_tids: Optional[list[int]]) -> tuple[str, list]:
 
 def _vector_search(db_path: str, query: str, candidate_k: int,
                    category_id: Optional[int] = None,
-                   scope_tids: Optional[list[int]] = None) -> list[tuple[int, float]]:
+                   scope_tids: Optional[list[int]] = None,
+                   tags: Optional[list[str]] = None,
+                   since: Optional[str] = None,
+                   until: Optional[str] = None) -> list[tuple[int, float]]:
     """Top-N чанків за cosine. Returns [(chunk_id, score)] спадно."""
     if not embeddings.is_available():
         return []
@@ -219,17 +248,12 @@ def _vector_search(db_path: str, query: str, candidate_k: int,
     # embedding_version). Vector-хіти рахуємо ТІЛЬКИ по чанках поточної пари —
     # інакше зміна EMBED_MODEL/EMBED_VERSION мовчки мішала б косинуси різних
     # моделей/нарізок (BLOB того самого розміру не означає ту саму модель).
+    axes_sql, axes_params = _record_axes_sql(category_id, tags, since, until)
     sql = ("SELECT ch.id, ch.embedding FROM chunks ch WHERE ch.embedding IS NOT NULL "
            "AND ch.transcription_id IN (SELECT id FROM transcriptions "
            "WHERE deleted_at IS NULL AND duplicate_of IS NULL "
-           "AND embedding_model = ? AND embedding_version = ?)")
-    params: list = [embeddings.EMBED_MODEL, embeddings.EMBED_VERSION]
-    if category_id == 'none':
-        sql += " AND ch.transcription_id IN (SELECT id FROM transcriptions WHERE category_id IS NULL)"
-    elif category_id is not None:
-        sql += (" AND ch.transcription_id IN "
-                "(SELECT id FROM transcriptions WHERE category_id = ?)")
-        params.append(category_id)
+           "AND embedding_model = ? AND embedding_version = ?" + axes_sql + ")")
+    params: list = [embeddings.EMBED_MODEL, embeddings.EMBED_VERSION] + axes_params
     scope_sql, scope_params = _scope_sql(scope_tids)
     sql += scope_sql
     params += scope_params
@@ -265,7 +289,10 @@ def _vector_search(db_path: str, query: str, candidate_k: int,
 
 def _fts_search(db_path: str, query: str, candidate_k: int,
                 category_id: Optional[int] = None,
-                scope_tids: Optional[list[int]] = None) -> list[tuple[int, float]]:
+                scope_tids: Optional[list[int]] = None,
+                tags: Optional[list[str]] = None,
+                since: Optional[str] = None,
+                until: Optional[str] = None) -> list[tuple[int, float]]:
     """Top-N чанків за BM25. Returns [(chunk_id, -rank)] кращі першими."""
     words = _fts_words(query)
     fts_q = " OR ".join(f'"{w}"' for w in words) if words else ""
@@ -273,18 +300,12 @@ def _fts_search(db_path: str, query: str, candidate_k: int,
         return []
     # T4.6: як і у _vector_search — soft-deleted виключаємо завжди, не лише
     # коли задано category_id.
+    axes_sql, axes_params = _record_axes_sql(category_id, tags, since, until)
     sql = ("SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ? "
            "AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
            "(SELECT id FROM transcriptions WHERE deleted_at IS NULL "
-           "AND duplicate_of IS NULL))")
-    params: list = [fts_q]
-    if category_id == 'none':
-        sql += (" AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
-                "(SELECT id FROM transcriptions WHERE category_id IS NULL))")
-    elif category_id is not None:
-        sql += (" AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
-                "(SELECT id FROM transcriptions WHERE category_id = ?))")
-        params.append(category_id)
+           "AND duplicate_of IS NULL" + axes_sql + "))")
+    params: list = [fts_q] + axes_params
     if scope_tids:
         ph_s = ",".join("?" * len(scope_tids))
         sql += (" AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
@@ -331,7 +352,10 @@ def _is_comment_key(key: int) -> bool:
     return key < 0
 
 
-def _comment_scope_sql(category_id, scope_tids: Optional[list[int]]) -> tuple[str, list]:
+def _comment_scope_sql(category_id, scope_tids: Optional[list[int]],
+                       tags: Optional[list[str]] = None,
+                       since: Optional[str] = None,
+                       until: Optional[str] = None) -> tuple[str, list]:
     """Звуження індексу коментарів під той самий скоуп, що й транскрипти.
 
     Коментар прикріплений до КАРТКИ, а скоуп заданий списком транскриптів. Тому
@@ -339,40 +363,43 @@ def _comment_scope_sql(category_id, scope_tids: Optional[list[int]]) -> tuple[st
     — транскрипт із цього скоупу. Коментарі на інших типах карток (файл
     Медіатеки, задача, сутність) під скоупом НЕ показуємо: довести їх належність
     до зрізу нічим, а тихо протягнути повз фільтр — гірше, ніж не показати.
-    Без скоупу беруться всі.
+    Без скоупу беруться всі. Теги і період діють тут так само, як на
+    транскриптах: вони описують ЦІЛЬОВИЙ запис коментаря (сам коментар тегів
+    і дати зустрічі не має), тож коментар до чужого запису відсікається тими
+    ж осями, що й сам запис.
     """
-    if category_id is None and not scope_tids:
+    axes_sql, axes_params = _record_axes_sql(category_id, tags, since, until)
+    if not axes_sql and not scope_tids:
         return "", []
-    sub = ("SELECT id FROM transcriptions WHERE deleted_at IS NULL")
-    params: list = []
-    if category_id == 'none':
-        sub += " AND category_id IS NULL"
-    elif category_id is not None:
-        sub += " AND category_id = ?"
-        params.append(category_id)
+    sub = "SELECT id FROM transcriptions WHERE deleted_at IS NULL" + axes_sql
+    params: list = list(axes_params)
     if scope_tids:
         sub += f" AND id IN ({','.join('?' * len(scope_tids))})"
         params += list(scope_tids)
     return (f" AND c.target_type = 'transcription' AND c.target_id IN ({sub})", params)
 
 
-def _comment_base_where(category_id, scope_tids) -> tuple[str, list]:
+def _comment_base_where(category_id, scope_tids, tags=None,
+                        since=None, until=None) -> tuple[str, list]:
     """WHERE-хвіст, спільний для векторного і лексичного пошуку коментарів."""
     sql = " AND c.deleted_at IS NULL"
-    scope_sql, params = _comment_scope_sql(category_id, scope_tids)
+    scope_sql, params = _comment_scope_sql(category_id, scope_tids, tags, since, until)
     return sql + scope_sql, params
 
 
 def _comment_vector_search(db_path: str, query: str, candidate_k: int,
                            category_id=None,
-                           scope_tids: Optional[list[int]] = None
+                           scope_tids: Optional[list[int]] = None,
+                           tags: Optional[list[str]] = None,
+                           since: Optional[str] = None,
+                           until: Optional[str] = None
                            ) -> list[tuple[int, float]]:
     if not embeddings.is_available():
         return []
     qvec = embeddings.embed_query(query)
     if not np.any(qvec):
         return []
-    where, params = _comment_base_where(category_id, scope_tids)
+    where, params = _comment_base_where(category_id, scope_tids, tags, since, until)
     sql = ("SELECT cc.id, cc.embedding FROM comment_chunks cc "
            "JOIN comments c ON c.id = cc.comment_id "
            "WHERE cc.embedding IS NOT NULL" + where)
@@ -396,13 +423,16 @@ def _comment_vector_search(db_path: str, query: str, candidate_k: int,
 
 def _comment_fts_search(db_path: str, query: str, candidate_k: int,
                         category_id=None,
-                        scope_tids: Optional[list[int]] = None
+                        scope_tids: Optional[list[int]] = None,
+                        tags: Optional[list[str]] = None,
+                        since: Optional[str] = None,
+                        until: Optional[str] = None
                         ) -> list[tuple[int, float]]:
     words = _fts_words(query)
     if not words:
         return []
     fts_q = " OR ".join(f'"{w}"' for w in words)
-    where, params = _comment_base_where(category_id, scope_tids)
+    where, params = _comment_base_where(category_id, scope_tids, tags, since, until)
     sql = ("SELECT f.rowid AS rid, f.rank AS rank FROM comment_chunks_fts f "
            "JOIN comment_chunks cc ON cc.id = f.rowid "
            "JOIN comments c ON c.id = cc.comment_id "
@@ -687,8 +717,15 @@ def search(db_path: str, query: str, top_k: int = 8,
            comment_weight: Optional[float] = None,
            comment_share: Optional[float] = None,
            explain: bool = False,
-           rewrite: Optional[bool] = None) -> dict:
-    """Гібридний пошук. category_id — обмежити одним напрямком (None = усі).
+           rewrite: Optional[bool] = None,
+           *,
+           tags: Optional[list[str]] = None,
+           since: Optional[str] = None,
+           until: Optional[str] = None) -> dict:
+    """Гібридний пошук. category_id — обмежити вузлом дерева напрямків
+    (None = усі): id напрямку розкривається в нього самого ТА його проєкти,
+    id проєкту дає лише його, 'none' — записи без напрямку
+    (`app.services.categories.filter_sql`).
     scope_tids — звузити до конкретних записів (другий шар скоупу поверх
     категорії); список рахує `app.services.scope.scope_filter_ids`.
     recency_weight/max_per_meeting — override дефолтів (для тестів/тюнінгу).
@@ -702,6 +739,14 @@ def search(db_path: str, query: str, top_k: int = 8,
     компактний `why` на кожному результаті, True — додає `why["stages"]` з
     позицією і сирим скором на кожній стадії, де кандидат зустрівся. Не
     впливає на ранжування чи порядок видачі.
+    tags/since/until — directions-projects-tags-03 (контракт C5), keyword-only:
+    `tags` — назви тегів (список або рядок через кому), OR між ними, з
+    `category_id` — AND; невідома назва звужує видачу до порожньої (фільтр
+    ніколи не «ігнорується»). `since`/`until` — абсолютні ISO-дати
+    `YYYY-MM-DD`, ОБИДВІ межі включно, по `COALESCE(meeting_date, created_at)`
+    запису (крива дата → ValueError з `categories.parse_date`). Усі три
+    накладаються на SQL-рівні ДО RRF/реранку в обох гілках і в гілці
+    коментарів — не пост-фільтром після ранжування.
     rewrite — production-rag-wave-b-07: `None` (дефолт) читає гарячий env
     `RAG_QUERY_REWRITE`; `False`/вимкнений env — `query_rewrite.rewrite_query`
     НЕ викликається взагалі, видача побайтово як без прапорця. `True` — 1-3
@@ -721,8 +766,9 @@ def search(db_path: str, query: str, top_k: int = 8,
         rewrite = _settings.env_bool("RAG_QUERY_REWRITE")
 
     candidate_k = candidate_k or max(top_k * 5, 40)
-    vec_hits = _vector_search(db_path, query, candidate_k, category_id, scope_tids)
-    fts_hits = _fts_search(db_path, query, candidate_k, category_id, scope_tids)
+    axes = {"tags": tags, "since": since, "until": until}
+    vec_hits = _vector_search(db_path, query, candidate_k, category_id, scope_tids, **axes)
+    fts_hits = _fts_search(db_path, query, candidate_k, category_id, scope_tids, **axes)
 
     lists = [vec_hits, fts_hits]
     labels = ["vector", "fts"]
@@ -737,9 +783,11 @@ def search(db_path: str, query: str, top_k: int = 8,
         from app.services import query_rewrite
         rewrite_variants = query_rewrite.rewrite_query(query)
         for variant in rewrite_variants:
-            lists.append(_vector_search(db_path, variant, candidate_k, category_id, scope_tids))
+            lists.append(_vector_search(db_path, variant, candidate_k, category_id,
+                                        scope_tids, **axes))
             labels.append("vector")
-            lists.append(_fts_search(db_path, variant, candidate_k, category_id, scope_tids))
+            lists.append(_fts_search(db_path, variant, candidate_k, category_id,
+                                     scope_tids, **axes))
             labels.append("fts")
 
     if include_comments:
@@ -749,8 +797,8 @@ def search(db_path: str, query: str, top_k: int = 8,
         ck = min(candidate_k, _COMMENT_CANDIDATE_CAP)
         try:
             comment_lists = [
-                _comment_vector_search(db_path, query, ck, category_id, scope_tids),
-                _comment_fts_search(db_path, query, ck, category_id, scope_tids),
+                _comment_vector_search(db_path, query, ck, category_id, scope_tids, **axes),
+                _comment_fts_search(db_path, query, ck, category_id, scope_tids, **axes),
             ]
         except sqlite3.OperationalError as exc:
             # Стара БД без міграції v37 (індекс коментарів) — відкидаємо ЛИШЕ

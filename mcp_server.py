@@ -101,6 +101,10 @@ except ImportError:
 from config import Config
 from app.db.connection import get_db_connection
 from app.services import record_meta
+# `categories` — лише stdlib + app.db.connection (памʼятка mcp-stdio-no-heavy-models),
+# безпечний на рівні модуля: єдине джерело SQL-фрагментів фільтра напрямок/теги/період
+# для direct-DB тулзів (C6, ADR-023).
+from app.services import categories
 
 import httpx
 from fastmcp import FastMCP
@@ -302,6 +306,64 @@ def _row(r) -> dict:
     return {k: r[k] for k in r.keys()}
 
 
+def _where_clause(conditions: list, params: list, *fragments: tuple) -> tuple:
+    """Склеює прості умови (`'col = ?'`, ...) із фрагментами
+    `categories.filter_sql/tags_sql/date_sql` (кожен сам несе свій ` AND `,
+    C2). Перший фрагмент, коли простих умов немає, стає `WHERE`, а не
+    висячим `AND`. Повертає (`' WHERE ...'` або `''`, параметри по порядку)."""
+    sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+    out_params = list(params)
+    for frag, p in fragments:
+        if not frag:
+            continue
+        sql = sql + frag if sql else " WHERE " + frag[len(" AND "):]
+        out_params += p
+    return sql, out_params
+
+
+def _tree_summary_line(tree: list) -> str:
+    """`categories.list_tree` → `Фонд Робота (N) → Акмекорп (n), NOVA (n); Особисте (N)`
+    для `about()` — та сама форма, що дерево в UI, але одним рядком тексту."""
+    parts: list = []
+    current: Optional[dict] = None
+    kids: list = []
+
+    def _flush() -> None:
+        if current is None:
+            return
+        if kids:
+            child_str = ", ".join(f"{c['name']} ({c['items']})" for c in kids)
+            parts.append(f"{current['name']} ({current['items_total']}) → {child_str}")
+        else:
+            parts.append(f"{current['name']} ({current['items_total']})")
+
+    for node in tree:
+        if node["level"] == "direction":
+            _flush()
+            current = node
+            kids = []
+        else:
+            kids.append(node)
+    _flush()
+    return "; ".join(parts)
+
+
+def _tags_note(conn, tag_list: list) -> Optional[str]:
+    """Пояснення для порожньої видачі, коли серед `tag_list` є назва, якої
+    нема в словнику `tags` — інакше нерозпізнаний фільтр мовчки ігнорувався б
+    (ADR-023 §C: `tags_sql` на невідомій назві просто нічого не матчить)."""
+    if not tag_list:
+        return None
+    keys = [categories.norm_name(n) for n in tag_list]
+    ph = ",".join("?" * len(keys))
+    existing = {r[0] for r in conn.execute(
+        f"SELECT name_norm FROM tags WHERE name_norm IN ({ph})", keys)}
+    missing = [n for n, k in zip(tag_list, keys) if k not in existing]
+    if not missing:
+        return None
+    return f"тег не знайдено: {', '.join(missing)}"
+
+
 def _name_key(name: Optional[str]) -> str:
     """Ключ згортання імені сутності: «AcmeCorp» і «Acmecorp» — одне.
 
@@ -462,18 +524,38 @@ def list_comments(target_type: Optional[str] = None, target_id: Optional[str] = 
 
 @mcp.tool
 def search_archive(query: str, top_k: int = 8,
-                   category_id: Optional[int] = None, explain: bool = False) -> dict:
+                   category_id: Optional[int] = None, tags: Optional[str] = None,
+                   since: Optional[str] = None, until: Optional[str] = None,
+                   explain: bool = False) -> dict:
     """Гібридний (вектор e5 + FTS5 BM25) пошук по ВСЬОМУ архіву дзвінків/документів/
     Telegram. Повертає чанки з провенансом (джерело, дата, спікер, таймкод/сторінка,
     transcription_id, chunk_id) і релевантністю. category_id — звузити до напрямку.
     Це основний інструмент: знайди тут, далі тягни деталі через get_transcript.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно.
 
     У видачі можуть бути чанки з `source_type='comment'` — це коментарі власника
     про запис (уточнення/виправлення/акценти), а не репліки з розмови. Вони мають
     ВИЩИЙ пріоритет за транскрипт: при суперечності правильний коментар, і
     `comment_kind='correction'` прямо скасовує відповідне місце запису. Поле
     `target_label` каже, до чого саме написано коментар. explain=True — додати
-    розбір релевантності (bm25/dense/rrf/recency/rerank, джерело) до кожного чанка."""
+    розбір релевантності (bm25/dense/rrf/recency/rerank, джерело) до кожного чанка.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     # Проксі на app.py (тепла e5 вже в його пам'яті) — НЕ вантажити torch/e5 у stdio-
     # процес MCP-сервера: важка нативна ініціалізація в stdio псує JSON-RPC (запис у
     # stdout) і конкурує за GPU з app.py (faster-whisper/Qwen) → зависання назавжди.
@@ -481,6 +563,12 @@ def search_archive(query: str, top_k: int = 8,
     params: dict = {"q": query, "k": int(top_k)}
     if category_id is not None:
         params["category_id"] = int(category_id)
+    if tags:
+        params["tags"] = tags
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
     if explain:
         params["explain"] = True
     res = _api("GET", "/api/memory/search", params=params)
@@ -586,13 +674,47 @@ def get_original_file(transcription_id: int, max_chars: int = 20000) -> dict:
 
 @mcp.tool
 def list_recent(limit: int = 20, source_type: Optional[str] = None,
-                category_id: Optional[int] = None) -> list:
+                category_id: Optional[int] = None, tags: Optional[str] = None,
+                since: Optional[str] = None, until: Optional[str] = None):
     """Останні записи архіву (id, дата, тип джерела, назва, мова, напрямок, розмір
     тексту). source_type: recording|youtube|document|telegram|file. Для огляду
     «що є свіжого» перед точковим пошуком.
 
     `display_name` — як запис називати людині (`title`, якщо власник його задав,
-    інакше `source_name`); `title`/`description` — сирі поля, можуть бути `null`."""
+    інакше `source_name`); `title`/`description` — сирі поля, можуть бути `null`.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно. Невалідна
+    дата повертає `{"error": ...}` замість винятку.
+
+    Конверт відповіді — завжди ОДНА форма: `{"items": [...], "note": str |
+    None}`. `note` — пояснення до порожньої/неповної видачі (наприклад, тег,
+    якого нема в словнику: `"тег не знайдено: …"`), `None` — коли пояснювати
+    нічого. Без цього агент, що індексує список за фіксованим шляхом,
+    ламався б на першому невідомому тезі, коли форма підмінялась голим
+    списком.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
+    try:
+        tag_list = categories.parse_tags(tags)
+        since_p = categories.parse_date(since)
+        until_p = categories.parse_date(until)
+    except ValueError as e:
+        return {"error": str(e)}
+
     sql = ("SELECT id, created_at, source_type, source_name, title, description, "
            "language, category_id, "
            "doc_type, meeting_date, tg_chat_id, tg_chat_title, tg_sender, tg_message_id, "
@@ -600,10 +722,13 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
     where, params = [], []
     if source_type:
         where.append("source_type = ?"); params.append(source_type)
-    if category_id is not None:
-        where.append("category_id = ?"); params.append(int(category_id))
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+    where_sql, params = _where_clause(
+        where, params,
+        categories.filter_sql("category_id", category_id),
+        categories.tags_sql("id", tag_list),
+        categories.date_sql("COALESCE(meeting_date, created_at)", since_p, until_p),
+    )
+    sql += where_sql
     sql += " ORDER BY id DESC LIMIT ?"; params.append(min(int(limit), 200))
     with get_db_connection(DB_PATH) as conn:
         rows = []
@@ -611,19 +736,26 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
             d = _row(r)
             d["display_name"] = record_meta.display_name(d)
             rows.append(d)
-        return rows
+        note = _tags_note(conn, tag_list)
+    return {"items": rows, "note": note}
 
 
 @mcp.tool
 def grep_archive(pattern: str, regex: bool = False, ignore_case: bool = True,
                  context: int = 1, limit: int = 20, source_type: Optional[str] = None,
-                 transcription_id: Optional[int] = None, days: Optional[int] = None) -> dict:
+                 transcription_id: Optional[int] = None, days: Optional[int] = None,
+                 category_id: Optional[int] = None, tags: Optional[str] = None) -> dict:
     """Буквальний або regex-пошук ТОЧНОГО РЯДКА по чанках архіву, з ±context сусідніми
     чанками. Обирай ЦЕЙ інструмент, а не `search_archive`, коли треба знайти РІВНО
     ЦЕЙ РЯДОК: ID запису, суму («1 200 000»), @нік, номер договору, точну назву —
     усе, що FTS5-токенізація і семантичний ембединг розбивають на частини або
     ховають за близьким за змістом, але неточним збігом. `search_archive` —
     навпаки, коли треба знайти ЗА ЗМІСТОМ, а не за точним написанням.
+
+    category_id — звузити скан до напрямку/проєкту; tags — назви тегів через
+    кому (OR), разом із category_id — перетин (AND). Обидва фільтрують у SQL
+    ДО сканування; тег, якого нема в словнику, дає порожню видачу з полем
+    `note` («тег не знайдено: …»), а не мовчазне ігнорування фільтра.
 
     Порядок видачі — за датою зустрічі, НЕ за релевантністю (тут немає ні
     вектора, ні BM25, ні reranker); рядки без дати — останні. `truncated=True`
@@ -643,25 +775,53 @@ def grep_archive(pattern: str, regex: bool = False, ignore_case: bool = True,
     Обмеження: пошук іде по `chunks`, не по повному тексту транскрипції —
     рядок, розрізаний швом чанкування навпіл, не знайдеться
     (`chunk_boundary_caveat` у відповіді).
-    Автономний: працює без запущеного app.py (пряме читання SQLite)."""
+    Автономний: працює без запущеного app.py (пряме читання SQLite).
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     from app.services.archive_grep import grep
     try:
-        return grep(DB_PATH, pattern, regex=regex, ignore_case=ignore_case,
-                    context=context, limit=limit, source_type=source_type,
-                    transcription_id=transcription_id, days=days)
+        tag_list = categories.parse_tags(tags)
+        res = grep(DB_PATH, pattern, regex=regex, ignore_case=ignore_case,
+                   context=context, limit=limit, source_type=source_type,
+                   transcription_id=transcription_id, days=days,
+                   category_id=category_id, tags=tag_list)
     except ValueError as e:
         return {"error": str(e)}
+    with get_db_connection(DB_PATH) as conn:
+        note = _tags_note(conn, tag_list)
+    if note:
+        res["note"] = note
+    return res
 
 
 @mcp.tool
 def list_categories() -> list:
-    """Напрямки/категорії архіву (Фонд, Особисте, AI, …) + кількість записів — для
-    звуження пошуку через category_id."""
+    """Дерево напрямків архіву: напрямок → його проєкти (ADR-023 §A), одразу за
+    кожним напрямком ідуть його проєкти. Кожен елемент — `id, name, slug, color,
+    icon, sort_order, parent_id, level` (`'direction'|'project'`), `items`
+    (власні живі записи) і `items_total` (разом із проєктами напрямку) — для
+    звуження пошуку через category_id (id напрямку розкривається у нього і всі
+    проєкти).
+
+    `path` — канонічна назва вузла («Напрямок → Проєкт» або «Напрямок»). Назва
+    унікальна лише серед братів, тож однойменні проєкти різних напрямків
+    розрізняє саме `path`: його й передавай у `project=`, коли гола назва
+    неоднозначна."""
     with get_db_connection(DB_PATH) as conn:
-        return [_row(r) for r in conn.execute(
-            "SELECT c.id, c.name, c.slug, "
-            "(SELECT COUNT(*) FROM transcriptions t WHERE t.category_id=c.id) AS items "
-            "FROM categories c ORDER BY c.sort_order, c.name")]
+        return categories.list_tree(conn)
 
 
 @mcp.tool
@@ -758,7 +918,8 @@ def get_entity(entity_id: int) -> dict:
 @mcp.tool
 def list_action_items(window: str = "this_week", owner: Optional[str] = None,
                       category_id: Optional[int] = None, status: str = "open",
-                      limit: int = 50) -> dict:
+                      limit: int = 50, tags: Optional[str] = None,
+                      since: Optional[str] = None, until: Optional[str] = None) -> dict:
     """Задачі/домовленості з дзвінків І З ПЕРЕПИСКИ за ЧАСОВИМ ВІКНОМ і виконавцем.
 
     window: this_week | next_week | overdue | soon (14 днів) | no_date | all.
@@ -792,21 +953,56 @@ def list_action_items(window: str = "this_week", owner: Optional[str] = None,
     `truncated` — чи обрізав `limit` видачу. Коли `truncated=true`, перелічені
     рядки не є всім вікном: підвищ `limit` або звузь фільтр, перш ніж робити
     висновок «ось усе, що є».
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно. Невалідна
+    дата повертає `{"error": ...}` замість винятку; тег, якого нема в
+    словнику, дає порожні `items` і поле `note` («тег не знайдено: …») —
+    не мовчазне ігнорування фільтра.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»).
     """
     from app.services import commitments
+    try:
+        tag_list = categories.parse_tags(tags)
+        since_p = categories.parse_date(since)
+        until_p = categories.parse_date(until)
+    except ValueError as e:
+        return {"error": str(e)}
     items = commitments.list_commitments(
         DB_PATH, window=window, owner=owner, category_id=category_id,
-        status=status, limit=limit)
+        status=status, limit=limit, tags=tag_list, since=since_p, until=until_p)
     matched = commitments.count_commitments(
-        DB_PATH, window=window, owner=owner, category_id=category_id, status=status)
+        DB_PATH, window=window, owner=owner, category_id=category_id, status=status,
+        tags=tag_list, since=since_p, until=until_p)
     coverage = commitments.commitments_coverage(
-        DB_PATH, owner=owner, category_id=category_id, status=status)
+        DB_PATH, owner=owner, category_id=category_id, status=status,
+        tags=tag_list, since=since_p, until=until_p)
     # Скільки в цьому вікні НАСПРАВДІ і чи обрізано видачу. Без цього знаменник
     # біля обрізаного списку шкодив: «total 1700» поруч із 50 рядками читається
     # як «ось усе вікно, решта 1650 деінде».
     coverage["window_matched"] = matched
     coverage["truncated"] = matched > len(items)
-    return {"items": items, "coverage": coverage}
+    result = {"items": items, "coverage": coverage}
+    if tag_list:
+        with get_db_connection(DB_PATH) as conn:
+            note = _tags_note(conn, tag_list)
+        if note:
+            result["note"] = note
+    return result
 
 
 @mcp.tool
@@ -904,37 +1100,73 @@ def list_open_questions(days: int = 90, limit: int = 20, window_h: float = 24.0,
 
 
 @mcp.tool
-def research_export(terms: str, category_id: Optional[int] = None) -> str:
+def research_export(terms: str, category_id: Optional[int] = None,
+                    tags: Optional[str] = None, since: Optional[str] = None,
+                    until: Optional[str] = None) -> str:
     """Зібрати ВСІ згадки терміна/бренду/сутності з усіх джерел у markdown (оригінальні
-    цитати з провенансом, без AI). terms — кома/пробіл-розділені терміни."""
+    цитати з провенансом, без AI). terms — кома/пробіл-розділені терміни.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно. Тег, якого
+    нема в словнику, дає рядок «тег не знайдено: …» перед звітом — інакше
+    порожній звіт читався б як «згадок у архіві нема».
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
+    try:
+        tag_list = categories.parse_tags(tags)
+        since_p = categories.parse_date(since)
+        until_p = categories.parse_date(until)
+    except ValueError as e:
+        return f"Помилка фільтра: {e}"
     try:
         from app.services import research
     except Exception as e:  # pragma: no cover
         return f"research-модуль недоступний: {e}"
-    collected = research.collect(DB_PATH, terms, category_id=category_id)
+    collected = research.collect(DB_PATH, terms, category_id=category_id,
+                                 tags=tag_list, since=since_p, until=until_p)
     try:
-        return research.render_originals_md(collected, "")
+        out = research.render_originals_md(collected, "")
     except TypeError:
-        return json.dumps(collected, ensure_ascii=False, indent=2)
+        out = json.dumps(collected, ensure_ascii=False, indent=2)
+    with get_db_connection(DB_PATH) as conn:
+        note = _tags_note(conn, tag_list)
+    return f"{note}\n\n{out}" if note else out
 
 
 # ====================== AI НА ВИМОГУ (Claude, HTTP-проксі на app.py) ==========
 
 @mcp.tool
 def ask_archive(question: str, k: int = 12, category_id: Optional[int] = None,
-                project: Optional[str] = None, model: Optional[str] = None,
-                explain: bool = False) -> dict:
+                project: Optional[str] = None, tags: Optional[str] = None,
+                since: Optional[str] = None, until: Optional[str] = None,
+                model: Optional[str] = None, explain: bool = False) -> dict:
     """RAG «Запитай архів»: питання → відповідь Claude ТІЛЬКИ з архіву + цитати [n].
 
     k — скільки чанків у контекст (1–20; дефолт 12 за замірами eval-харнеса:
     на k=8 частина правильних джерел стоїть одразу за межею зрізу —
     recall@8 67.9% проти recall@12 82.1%). Два рівні звуження:
-      * category_id — напрямок (грубий шар; «Робота» покриває ~більша частина архіву,
+      * category_id — напрямок (грубий шар; «Фонд Робота» покриває ~більша частина архіву,
         тож сам по собі майже не звужує);
       * project — назва проєкту або людини («Acmecorp», «Ковальчука», «Адам»):
         шукає лише в записах, де ця сутність згадана. Саме це рятує від
         змішування напрямків. Кілька назв — через кому. Невідома назва не
         обнуляє пошук, а просто не звужує.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно.
 
     Для природномовних питань («що ми вирішили по X?»); для точкового пошуку
     фрагментів бери search_archive. Нічого не змінює (працює і в read-only).
@@ -942,12 +1174,42 @@ def ask_archive(question: str, k: int = 12, category_id: Optional[int] = None,
     джерело) до цитованих чанків.
 
     Питання з відповіддю осідає в `ask_log` (channel="mcp") — сировина
-    golden-set; оцінку 👍/👎 власник ставить у веб-чаті, тулзи для неї нема."""
+    golden-set; оцінку 👍/👎 власник ставить у веб-чаті, тулзи для неї нема.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    передай у `project` повний шлях «Напрямок → Проєкт» з поля `path` у
+    `list_categories`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     body = {"question": question, "k": int(k), "category_id": category_id,
             "project": project, "model": model, "channel": "mcp"}
+    if tags:
+        body["tags"] = tags
+    if since:
+        body["since"] = since
+    if until:
+        body["until"] = until
     if explain:
         body["explain"] = True
-    return _api("POST", "/api/memory/ask", body=body, write=False, timeout=180.0)
+    res = _api("POST", "/api/memory/ask", body=body, write=False, timeout=180.0)
+    if isinstance(res, dict) and res.get("code") == "ambiguous":
+        # 409 від /api/memory/ask: назва сидить на кількох вузлах дерева.
+        # Віддаємо ноту з переліком шляхів, а не мовчазну відповідь по одному з
+        # них — вибір робить той, хто питав, і робить його явно.
+        return {"error": res.get("message") or res.get("error"),
+                "candidates": res.get("candidates", []),
+                "hint": "Передай повний шлях «Напрямок → Проєкт» "
+                        "(поле path у list_categories) у project=."}
+    return res
 
 
 @mcp.tool
@@ -960,10 +1222,29 @@ def suggest_category(transcription_id: int) -> dict:
 
 @mcp.tool
 def research_preview(q: Optional[str] = None, entity_id: Optional[int] = None,
-                     category_id: Optional[int] = None) -> dict:
+                     category_id: Optional[int] = None, tags: Optional[str] = None,
+                     since: Optional[str] = None, until: Optional[str] = None) -> dict:
     """Швидкий прев'ю згадок терміна/бренду/сутності по всьому архіву (0 токенів,
     без AI). Вкажи q (підрядок) АБО entity_id. Для повного дампу цитат —
-    research_export."""
+    research_export.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     params: dict = {}
     if q is not None:
         params["q"] = q
@@ -971,16 +1252,41 @@ def research_preview(q: Optional[str] = None, entity_id: Optional[int] = None,
         params["entity_id"] = int(entity_id)
     if category_id is not None:
         params["category_id"] = int(category_id)
+    if tags:
+        params["tags"] = tags
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
     return _api("GET", "/api/research/preview", params=params)
 
 
 @mcp.tool
 def research_summary(q: Optional[str] = None, entity_id: Optional[int] = None,
-                     category_id: Optional[int] = None,
+                     category_id: Optional[int] = None, tags: Optional[str] = None,
+                     since: Optional[str] = None, until: Optional[str] = None,
                      model: Optional[str] = None) -> dict:
     """Зведений структурований звіт по терміну/сутності (map-reduce Claude по
     витягнутих фрагментах архіву). Дорожче за research_preview (платні токени),
-    але дає готовий markdown. Вкажи q АБО entity_id. Стан не змінює."""
+    але дає готовий markdown. Вкажи q АБО entity_id. Стан не змінює.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     body: dict = {}
     if q is not None:
         body["q"] = q
@@ -988,6 +1294,12 @@ def research_summary(q: Optional[str] = None, entity_id: Optional[int] = None,
         body["entity_id"] = int(entity_id)
     if category_id is not None:
         body["category_id"] = int(category_id)
+    if tags:
+        body["tags"] = tags
+    if since:
+        body["since"] = since
+    if until:
+        body["until"] = until
     if model is not None:
         body["model"] = model
     res = _sse_collect("/api/research/summary", body, timeout=600.0)
@@ -1009,20 +1321,40 @@ def research_summary(q: Optional[str] = None, entity_id: Optional[int] = None,
 def search_history(search: Optional[str] = None, source_type: Optional[str] = None,
                    language: Optional[str] = None, category_id: Optional[int] = None,
                    speaker_id: Optional[int] = None, tg_chat: Optional[str] = None,
-                   tg_sender: Optional[str] = None, page: int = 1,
-                   per_page: int = 20) -> dict:
+                   tg_sender: Optional[str] = None, tags: Optional[str] = None,
+                   since: Optional[str] = None, until: Optional[str] = None,
+                   page: int = 1, per_page: int = 20) -> dict:
     """Список/пошук записів архіву з фільтрами (FTS по тексту через search) і
     пагінацією — повноцінний пошук+фасети як в UI Архіву.
 
     Фільтри: source_type, language, category_id, speaker_id, а для Telegram —
     tg_chat (назва чату, підрядок) і tg_sender (автор, підрядок). Саме ця пара
     дає хронологічне читання чату: `source_type='telegram'` + `tg_chat='Acmecorp'`
-    поверне переписку цього чату по порядку, а не розсипом однорядковиків."""
+    поверне переписку цього чату по порядку, а не розсипом однорядковиків.
+
+    tags — назви тегів через кому (OR); разом із category_id — перетин (AND).
+    since/until — ISO-дата по даті зустрічі, обидві межі включно.
+
+    Тезки: та сама назва живе в різних напрямках («Маркетинг» під двома) —
+    знайди потрібний вузол за полем `path` у `list_categories` і передай
+    його `id` у `category_id`.
+
+    ADR-023 §C — три параметри фільтра, дослівно:
+    `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок
+    автоматично включає всі свої проєкти, проєкт — лише себе. Це рівень
+    ієрархії архіву.
+    `project` — **не** проєкт ієрархії, а назва сутності графа або вільний
+    текст («Ковальчука», «Адам», бренд): звужує до записів, де ця назва
+    згадана. Щоб звузити до проєкту як розділу архіву — передай його id у
+    `category_id`, не назву у `project`.
+    `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з
+    `category_id` — перетин («тег AI лише в цьому напрямку»)."""
     params: dict = {"page": int(page), "per_page": int(per_page)}
     for key, val in (("search", search), ("source_type", source_type),
                      ("language", language), ("category_id", category_id),
                      ("speaker_id", speaker_id), ("tg_chat", tg_chat),
-                     ("tg_sender", tg_sender)):
+                     ("tg_sender", tg_sender), ("tags", tags),
+                     ("since", since), ("until", until)):
         if val is not None:
             params[key] = val
     return _api("GET", "/api/history", params=params)
@@ -1109,6 +1441,52 @@ def get_job_status(job_id: str) -> dict:
     return _api("GET", f"/api/jobs/{job_id}")
 
 
+_AMBIGUITY_FIELDS = ("session_id", "name", "auto_name", "elapsed_seconds", "streams",
+                     "copilot_active")
+
+
+def _live_sessions(active: dict) -> list:
+    """Список активних записів з відповіді `/api/recordings/active`. Нова форма
+    (C5) несе `count` + `sessions`; стара — лише `session_id` → 1 запис, якщо він
+    є, інакше 0."""
+    sessions = active.get("sessions")
+    if "count" in active and isinstance(sessions, list):
+        return sessions
+    sid = active.get("session_id")
+    return [{"session_id": sid}] if sid else []
+
+
+def _ambiguity_payload(sessions: list) -> dict:
+    """Відповідь «записів кілька — передай session_id» (ADR-026 D4)."""
+    return {
+        "success": False, "error_code": "AMBIGUOUS_SESSION",
+        "sessions": [{k: (s.get(k) if isinstance(s, dict) else None) for k in _AMBIGUITY_FIELDS}
+                     for s in sessions],
+        "hint": "pass session_id",
+    }
+
+
+def _resolve_live_session(session_id: Optional[str]) -> tuple:
+    """`(sid, None)` — сесію знайдено (явна або єдина активна); інакше
+    `(None, payload)`: `payload` з `error_code == 'AMBIGUOUS_SESSION'`, коли
+    активних записів кілька, або сира відповідь `/api/recordings/active`
+    (нуль записів чи збій app.py — будує свою «недоступно» відповідь сама тулза).
+    Ніколи не вгадує: при кількох записах далі жодного виклику."""
+    if session_id:
+        return session_id, None
+    active = _api("GET", "/api/recordings/active")
+    if not isinstance(active, dict) or "error" in active:
+        return None, active if isinstance(active, dict) else {"error": None}
+    sessions = _live_sessions(active)
+    if len(sessions) > 1:
+        return None, _ambiguity_payload(sessions)
+    if len(sessions) == 1:
+        sid = active.get("session_id") or (sessions[0] or {}).get("session_id")
+        if sid:
+            return sid, None
+    return None, active
+
+
 @mcp.tool
 def get_active_recording() -> dict:
     """Поточна активна сесія запису (для re-attach) + за що чіплятись, щоб
@@ -1117,11 +1495,21 @@ def get_active_recording() -> dict:
     (сесія ко-пілота ще 'active', не 'ended'), `live_transcript_available`
     (те саме поле `available`, що віддає `get_live_transcript` — не
     передивляємось сюди по `state.is_active`: доступність live-прев'ю
-    вирішує live-воркер, а не статус сесії запису, знахідка історії 01)."""
+    вирішує live-воркер, а не статус сесії запису, знахідка історії 01).
+    Завжди несе `count` і `sessions`; коли записів кілька, `session_id` = None
+    і сесію не вгадуємо — обери зі `sessions` і передавай `session_id` далі."""
     data = _api("GET", "/api/recordings/active")
-    if not isinstance(data, dict) or not data.get("active"):
+    if not isinstance(data, dict) or "error" in data:
         return data
-    sid = data.get("session_id")
+    sessions = _live_sessions(data)
+    data["count"] = len(sessions)
+    data["sessions"] = sessions
+    if len(sessions) > 1:
+        data["session_id"] = None
+        return data
+    if not data.get("active"):
+        return data
+    sid = data.get("session_id") or (sessions[0].get("session_id") if sessions else None)
     data["copilot_session_id"] = None
     data["copilot_active"] = False
     data["live_transcript_available"] = None
@@ -1204,19 +1592,19 @@ def get_live_transcript(session_id: Optional[str] = None, since_seq: Optional[in
 
     Фільтру по часу (`since_sec`) тут навмисно немає: доріжки транскрибуються
     незалежно, і опитування по часу губить сегменти повільнішої доріжки.
-    Потребує запущеного app.py."""
+    Потребує запущеного app.py. Кілька активних записів і немає `session_id` →
+    `error_code: 'AMBIGUOUS_SESSION'` зі списком `sessions`, сесію не вгадуємо."""
+    session_id, payload = _resolve_live_session(session_id)
     if not session_id:
-        active = _api("GET", "/api/recordings/active")
-        if not isinstance(active, dict) or not active.get("active"):
-            return {
-                "success": True, "session_id": None, "available": False,
-                "reason": (active.get("error") if isinstance(active, dict) else None)
-                          or "немає активної сесії запису",
-                "is_active": False, "status": None, "elapsed_seconds": 0.0,
-                "segments": [], "count": 0, "last_sec": None, "next_seq": None,
-                "truncated": False,
-            }
-        session_id = active.get("session_id")
+        if payload.get("error_code") == "AMBIGUOUS_SESSION":
+            return payload
+        return {
+            "success": True, "session_id": None, "available": False,
+            "reason": payload.get("error") or "немає активної сесії запису",
+            "is_active": False, "status": None, "elapsed_seconds": 0.0,
+            "segments": [], "count": 0, "last_sec": None, "next_seq": None,
+            "truncated": False,
+        }
     params: dict = {}
     if since_seq is not None:
         params["since_seq"] = int(since_seq)
@@ -1236,9 +1624,11 @@ def get_live_copilot(session_id: Optional[str] = None, since_event_id: Optional[
     `get_live_transcript` (через `/api/recordings/active`, коли app.py живий —
     'active': false там означає ЩО НЕМАЄ активного запису, а не «шукай щось
     старе в БД»). Якщо app.py недоступний, тулза лишається direct-DB: фолбек
-    на найновішу `copilot_sessions` зі статусом 'active' у БД — і тоді
-    зависла сесія впалого процесу МОЖЕ трапитись, про що каже поле
-    `session_resolution` у відповіді.
+    на `copilot_sessions` зі статусом 'active' у БД, лише коли вона одна — і
+    тоді зависла сесія впалого процесу МОЖЕ трапитись, про що каже поле
+    `session_resolution` у відповіді. Кілька активних записів (або кілька
+    'active' у фолбеку) і немає `session_id` → `error_code: 'AMBIGUOUS_SESSION'`
+    зі списком `sessions`, сесію не вгадуємо.
     `since_event_id` — лише події з `id >` заданого (інкрементальний опит).
     `kinds` — опційний CSV-фільтр (`"insight_local,escalation"`); порожньо —
     усі види. Невідомий вид — явна відмова з переліком `known_kinds`, а не
@@ -1273,19 +1663,19 @@ def get_live_copilot(session_id: Optional[str] = None, since_event_id: Optional[
     валить тулзу, лише вимикає точне розв'язання на користь фолбека з БД."""
     session_resolution = None
     if not session_id:
-        active = _api("GET", "/api/recordings/active")
-        if isinstance(active, dict) and "error" not in active:
-            if not active.get("active"):
+        session_id, payload = _resolve_live_session(None)
+        if not session_id:
+            if payload.get("error_code") == "AMBIGUOUS_SESSION":
+                return payload
+            if "error" not in payload:
                 return {
                     "success": True, "available": False,
                     "reason": "немає активної сесії запису",
                     "session_id": None, "copilot_session_id": None,
                     "events": [], "count": 0, "truncated": False,
                 }
-            session_id = active.get("session_id")
-        else:
             session_resolution = (
-                "app.py недоступний — сесію взято фолбеком з БД (найновіша "
+                "app.py недоступний — сесію взято фолбеком з БД (єдина "
                 "copilot_sessions зі статусом 'active'), могла лишитись від "
                 "впалого процесу")
 
@@ -1295,9 +1685,14 @@ def get_live_copilot(session_id: Optional[str] = None, since_event_id: Optional[
                 "SELECT * FROM copilot_sessions WHERE recording_session_id = ? "
                 "ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
         else:
-            csess = conn.execute(
+            active_rows = conn.execute(
                 "SELECT * FROM copilot_sessions WHERE status = 'active' "
-                "ORDER BY id DESC LIMIT 1").fetchone()
+                "ORDER BY id DESC").fetchall()
+            rec_ids = list(dict.fromkeys(r["recording_session_id"] for r in active_rows))
+            if len(rec_ids) > 1:
+                return _ambiguity_payload(
+                    [{"session_id": rid, "copilot_active": True} for rid in rec_ids])
+            csess = active_rows[0] if active_rows else None
         if csess is None:
             return {
                 "success": True, "available": False,
@@ -1373,9 +1768,17 @@ def ask_live(question: str, scope: str = "both", session_id: Optional[str] = Non
     `scope`: `'call'` — лише живий транскрипт | `'archive'` — лише архів |
     `'both'` (за замовч.) — обидва. `session_id=None` → активна сесія запису
     (розв'язується на боці app.py). Недоступність Ollama — `available: false`
-    + `reason` у відповіді, не HTTP-помилка. Потребує запущеного app.py."""
-    return _api("POST", "/api/copilot/live-ask",
-                body={"question": question, "session_id": session_id, "scope": scope})
+    + `reason` у відповіді, не HTTP-помилка. Потребує запущеного app.py.
+    Кілька активних записів і немає `session_id` → `error_code:
+    'AMBIGUOUS_SESSION'` зі списком `sessions`, питання не ставиться."""
+    resolved, payload = _resolve_live_session(session_id)
+    if payload is not None and payload.get("error_code") == "AMBIGUOUS_SESSION":
+        return payload
+    out = _api("POST", "/api/copilot/live-ask",
+               body={"question": question, "session_id": resolved, "scope": scope})
+    if isinstance(out, dict) and out.get("error_code") == "AMBIGUOUS_SESSION":
+        return _ambiguity_payload(out.get("sessions") or [])
+    return out
 
 
 @mcp.tool
@@ -1484,7 +1887,7 @@ def about() -> str:
         n_ch = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         by_src = {r["source_type"]: r["c"] for r in conn.execute(
             "SELECT source_type, COUNT(*) c FROM transcriptions GROUP BY source_type")}
-        cats = [r["name"] for r in conn.execute("SELECT name FROM categories ORDER BY sort_order")]
+        tree = categories.list_tree(conn)
     n_tools = len(_registered_tool_names())
     return (
         f"# Recall — локальний RAG-архів дзвінків (MCP: read-first ядро, {n_tools} тулзів)\n\n"
@@ -1493,7 +1896,7 @@ def about() -> str:
         "гібрид RRF з recency/diversity.\n\n"
         f"## Статистика\n- транскриптів: {n_tx}\n- чанків (векторизовано): {n_ch}\n"
         f"- за джерелом: {json.dumps(by_src, ensure_ascii=False)}\n"
-        f"- напрямки: {', '.join(cats)}\n\n"
+        f"- напрямки (напрямок → його проєкти, ADR-023 §A): {_tree_summary_line(tree)}\n\n"
         "## Як користуватись (усе нижче — лише читання, стан не змінює)\n"
         "1. `search_archive(query)` — головний пошук (поверне chunk'и з transcription_id);\n"
         "2. `get_transcript(id)`/`get_original_file(id)` — повний текст + summary/оригінал;\n"

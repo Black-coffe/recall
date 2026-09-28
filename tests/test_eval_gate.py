@@ -13,6 +13,7 @@ import pytest
 
 from app.db.connection import get_db_connection
 from app.db.migrations import init_database
+from app.services import categories
 from evals import gate, golden_io
 from evals import snapshot as ev_snapshot
 
@@ -47,12 +48,56 @@ def _golden_jsonl(tmp_path, items, name="golden.jsonl"):
     return str(path)
 
 
-def _item(item_id, tid, name, *, status="labeled", slice_="calls"):
+def _item(item_id, tid, name, *, status="labeled", slice_="calls",
+          category_id=None, tags=None):
     return {
         "id": item_id, "question": item_id, "slice": slice_, "status": status,
         "expected_transcription_ids": [tid],
         "expected_source_name_contains": [name],
+        "category_id": category_id,
+        "tags": tags or [],
     }
+
+
+@pytest.fixture
+def db_taxonomy(db):
+    """`db` (id 1/2, без напрямку/тегів) + дерево напрямок→проєкт і тег `AI`
+    (C8/filter_leak): #3 — усередині проєкту «Акмекорп» напрямку «Фонд
+    Робота», з тегом AI; #4 — поза деревом і без тегів (чуже, яке фільтр
+    не мав би пропускати у видачу)."""
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
+        "VALUES (3, 'file', 'Акмекорп дзвінок', 'x')")
+    conn.execute(
+        "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
+        "VALUES (4, 'file', 'Чужий дзвінок', 'x')")
+    conn.commit()
+    # «Фонд Робота» — один із дефолтних напрямків, які сіє сама міграція
+    # (`app/db/migrations.py`, v?? «Фонд/Особисте/AI/…») — створювати вдруге
+    # не можна (`_assert_free_name` впаде на дублі), тож беремо готовий.
+    fund_id = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Фонд Робота'").fetchone()[0]
+    fund = {"id": fund_id}
+    project = categories.create_category(conn, "Акмекорп", parent_id=fund["id"])
+    categories.set_category(conn, [3], project["id"])
+    categories.set_tags(conn, 3, add=["AI"])
+    conn.close()
+    return {"db": db, "fund_id": fund["id"], "project_id": project["id"]}
+
+
+def _leak_search(target, *, leaked=None):
+    """Ціль завжди перша (recall@k=1.0); `leaked` — опційний додатковий чанк
+    запису, якого фільтр не мав би пропустити (C8/filter_leak). БЕЗ filler-
+    чанків (на відміну від `_good_search`) — filler-id (9000+) не існує в
+    `transcriptions`, і для пунктів з `category_id`/`tags` це рахувалось би
+    витоком (запис без категорії/тегів не входить у жоден фільтр)."""
+    def _search(db_path, query, top_k=8, category_id=None, **kwargs):
+        chunks = [{"transcription_id": target[0], "source_name": target[1]}]
+        if leaked is not None:
+            chunks.append({"transcription_id": leaked[0], "source_name": leaked[1]})
+        return {"query": query, "chunks": chunks[:top_k], "vector_available": True}
+    return _search
 
 
 def _good_search(target_by_query):
@@ -1290,6 +1335,112 @@ def test_gate_rerank_recorded_in_provenance_and_verdict_line(db, tmp_path, monke
     assert "rerank=on" in line
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert payload["provenance"]["rerank"] is True
+
+
+def test_normalize_tags_stripped_and_empties_dropped():
+    item = golden_io._normalize(
+        {"id": "a", "question": "q", "tags": [" AI ", "", "  "]}, source="manual",
+        default_status="labeled")
+    assert item["tags"] == ["AI"]
+
+
+def test_normalize_without_tags_defaults_empty_list():
+    item = golden_io._normalize({"id": "a", "question": "q"}, source="manual",
+                                 default_status="labeled")
+    assert item["tags"] == []
+
+
+def test_normalize_expected_leak_nonzero_raises():
+    with pytest.raises(golden_io.GoldenSetError, match="expected_leak"):
+        golden_io._normalize({"id": "a", "question": "q", "expected_leak": 1},
+                              source="manual", default_status="labeled")
+
+
+def test_normalize_expected_leak_zero_ok():
+    item = golden_io._normalize({"id": "a", "question": "q", "expected_leak": 0},
+                                 source="manual", default_status="labeled")
+    assert item["id"] == "a"  # не впало
+
+
+# ============================================================
+# C8: filter_leak
+# ============================================================
+
+def test_gate_search_receives_category_id_and_tags(db_taxonomy, tmp_path, monkeypatch):
+    seen = {}
+
+    def _spy(db_path, query, top_k=8, category_id=None, **kwargs):
+        seen["category_id"] = category_id
+        seen["tags"] = kwargs.get("tags")
+        return {"query": query, "chunks": [{"transcription_id": 3, "source_name": "Акмекорп дзвінок"}],
+                "vector_available": True}
+
+    monkeypatch.setattr("app.services.retrieval.search", _spy)
+    golden = _golden_jsonl(tmp_path, [
+        _item("a", 3, "Акмекорп", category_id=db_taxonomy["fund_id"], tags=["AI"])])
+    gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+               "--min-recall", "2=0.5", "-q"])
+    assert seen["category_id"] == db_taxonomy["fund_id"]
+    assert seen["tags"] == ["AI"]
+
+
+def test_gate_filter_leak_zero_on_honest_category_search(db_taxonomy, tmp_path, monkeypatch):
+    golden = _golden_jsonl(tmp_path, [
+        _item("a", 3, "Акмекорп дзвінок", category_id=db_taxonomy["fund_id"])])
+    monkeypatch.setattr("app.services.retrieval.search",
+                         _leak_search((3, "Акмекорп дзвінок")))
+    rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+                     "--min-recall", "2=0.9"])
+    assert rc == 0
+
+
+def test_gate_filter_leak_category_axis_fails_despite_full_recall(db_taxonomy, tmp_path, monkeypatch,
+                                                                    capsys):
+    golden = _golden_jsonl(tmp_path, [
+        _item("a", 3, "Акмекорп дзвінок", category_id=db_taxonomy["fund_id"])])
+    # #4 не в піддереві «Фонд Робота» — чуже, що фільтр не мав би пропустити.
+    monkeypatch.setattr("app.services.retrieval.search",
+                         _leak_search((3, "Акмекорп дзвінок"), leaked=(4, "Чужий дзвінок")))
+    rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+                     "--min-recall", "2=0.9"])
+    assert rc == 1
+    assert "filter_leak" in capsys.readouterr().out
+
+
+def test_gate_filter_leak_tags_axis_fails_on_untagged_chunk(db_taxonomy, tmp_path, monkeypatch):
+    golden = _golden_jsonl(tmp_path, [
+        _item("b", 3, "Акмекорп дзвінок", tags=["AI"])])
+    # #2 (з базової `db`) не має тегу AI.
+    monkeypatch.setattr("app.services.retrieval.search",
+                         _leak_search((3, "Акмекорп дзвінок"), leaked=(2, "Дзвінок")))
+    rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+                     "--min-recall", "2=0.9"])
+    assert rc == 1
+
+
+def test_gate_filter_leak_none_without_filters(db_taxonomy, tmp_path, monkeypatch):
+    golden = _golden_jsonl(tmp_path, [_item("a", 3, "Акмекорп дзвінок")])
+    monkeypatch.setattr("app.services.retrieval.search",
+                         _leak_search((3, "Акмекорп дзвінок"), leaked=(4, "Чужий дзвінок")))
+    out_path = tmp_path / "out.local.json"
+    rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+                     "--min-recall", "2=0.5", "--json-out", str(out_path)])
+    assert rc == 0  # без category_id/tags — filter_leak не рахується, витоку немає
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["per_item"]["2"][0]["filter_leak"] is None
+
+
+def test_gate_json_out_reports_filter_leak_per_item_and_aggregate(db_taxonomy, tmp_path, monkeypatch):
+    golden = _golden_jsonl(tmp_path, [
+        _item("a", 3, "Акмекорп дзвінок", category_id=db_taxonomy["fund_id"])])
+    monkeypatch.setattr("app.services.retrieval.search",
+                         _leak_search((3, "Акмекорп дзвінок"), leaked=(4, "Чужий дзвінок")))
+    out_path = tmp_path / "out.local.json"
+    gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
+               "--min-recall", "2=0.9", "--json-out", str(out_path)])
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["per_item"]["2"][0]["filter_leak"] == 1
+    assert payload["aggregate"]["2"]["filter_leak"] == 1
 
 
 def test_gate_baseline_without_rerank_not_compared_to_rerank_run(db, tmp_path, monkeypatch, capsys):

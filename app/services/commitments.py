@@ -26,7 +26,9 @@
 **Сира фраза не переписується.** `due` лишається як є, обчислене йде в `due_date`/
 `due_precision` — у видачі показуємо обидві, щоб помилка парсера була видимою.
 
-**Залежності:** лише stdlib + `app.db.connection`. Модуль імпортується з
+**Залежності:** лише stdlib + `app.db.connection` + `app.services.categories`
+(теж без важких залежностей — фільтр напрямок/теги/період, C6 спеки
+`directions-projects-tags`, ADR-023 §C). Модуль імпортується з
 `mcp_server.py` (stdio-процес), тому НЕ тягне embeddings/torch — див.
 memory `mcp-stdio-no-heavy-models`.
 
@@ -46,6 +48,7 @@ from datetime import date, datetime, timedelta
 from typing import Iterable, Optional, Sequence
 
 from app.db.connection import get_db_connection
+from app.services import categories
 
 logger = logging.getLogger(__name__)
 
@@ -897,14 +900,45 @@ def _window_bounds(window: str, today: Optional[date] = None) -> tuple[Optional[
     return (None, None)
 
 
+def _scope_clauses(category_id: Optional[int], tags: Optional[list[str]],
+                   since: Optional[str] = None, until: Optional[str] = None,
+                   *, alias: str = "t") -> tuple[str, list]:
+    """Напрямок/теги/період — один фрагмент WHERE, спільний для `_commitments_filter`
+    і `commitments_coverage` (ремонт п.1+11 раунду 3: до цього знаменник ігнорував
+    tags/since/until, а `_commitments_filter` і coverage склеювали ці ж три фрагменти
+    двома різними способами — одна різала власний `" AND "` руками, друга додавала їх
+    як є).
+
+    Кожен фрагмент (`categories.filter_sql/tags_sql/date_sql`, C2) уже починається з
+    `" AND "` — повертаємо конкатенацію як є, ліпити до готового `WHERE ...` без
+    зрізань. `alias` — псевдонім `transcriptions` у запиті (усюди `"t"`); теги завжди
+    йдуть через `ai.transcription_id` — прив'язані лише до `action_items`.
+    """
+    sql = ""
+    params: list = []
+    frag, p = categories.filter_sql(f"{alias}.category_id", category_id)
+    sql += frag; params += p
+    frag, p = categories.tags_sql("ai.transcription_id", tags or [])
+    sql += frag; params += p
+    frag, p = categories.date_sql(f"COALESCE({alias}.meeting_date, {alias}.created_at)", since, until)
+    sql += frag; params += p
+    return sql, params
+
+
 def _commitments_filter(*, window: str, owner: Optional[str], category_id: Optional[int],
-                        status: str, include_dups: bool,
-                        today: Optional[date]) -> tuple[list[str], list]:
+                        status: str, include_dups: bool, today: Optional[date],
+                        tags: Optional[list[str]] = None, since: Optional[str] = None,
+                        until: Optional[str] = None) -> tuple[str, list]:
     """Умови вибірки задач — спільні для видачі і для лічильника.
 
     Винесено, щоб `count_commitments` рахував ТОЧНО ту саму множину, яку
     показує `list_commitments`. Дві копії умов розʼїхались би на першій же
     правці, а розбіжність тут — це «показано 50, всього 3» або навпаки.
+
+    Повертає готовий ` WHERE ...` (не список умов): `category_id`/`tags`
+    йдуть через `app.services.categories.filter_sql/tags_sql` (C6, ADR-023
+    §C) — єдине джерело SQL для розкриву «напрямок = він сам + проєкти» і
+    OR-фільтра тегів, а не друга копія того самого підзапиту тут.
     """
     where = ["t.deleted_at IS NULL"]
     params: list = []
@@ -924,9 +958,6 @@ def _commitments_filter(*, window: str, owner: Optional[str], category_id: Optio
                      "SELECT 1 FROM entity_aliases ea "
                      "WHERE ea.entity_id = e.id AND ea.alias LIKE ?))")
         params += [f"%{owner}%"] * 3
-    if category_id is not None:
-        where.append("t.category_id = ?")
-        params.append(int(category_id))
 
     if window == "no_date":
         where.append("ai.due_date IS NULL")
@@ -939,27 +970,36 @@ def _commitments_filter(*, window: str, owner: Optional[str], category_id: Optio
             where.append("ai.due_date <= ?")
             params.append(hi)
         where.append("ai.due_date IS NOT NULL")
-    return where, params
+
+    sql = " WHERE " + " AND ".join(where)
+    frag, p = _scope_clauses(category_id, tags, since, until)
+    sql += frag; params += p
+    return sql, params
 
 
 def count_commitments(db_path: str, *, window: str = "this_week", owner: Optional[str] = None,
                       category_id: Optional[int] = None, status: str = "open",
-                      include_dups: bool = False, today: Optional[date] = None) -> int:
+                      include_dups: bool = False, today: Optional[date] = None,
+                      tags: Optional[list[str]] = None, since: Optional[str] = None,
+                      until: Optional[str] = None) -> int:
     """Скільки задач у вікні НАСПРАВДІ — без ліміту видачі.
 
     Потрібне, щоб поруч із обрізаним списком стояло не лише «всього задач», а й
     «скільки в цьому вікні». Знаменник біля обрізаного списку без цього числа
     робить гірше, ніж його відсутність: читач вважає видимі рядки всім вікном.
+
+    `tags`/`since`/`until` — ті самі осі, що й `list_commitments` (C6):
+    `count_commitments` мусить рахувати ТОЧНО ту саму множину.
     """
     if window not in _WINDOWS:
         window = "this_week"
-    where, params = _commitments_filter(
+    where_sql, params = _commitments_filter(
         window=window, owner=owner, category_id=category_id, status=status,
-        include_dups=include_dups, today=today)
+        include_dups=include_dups, today=today, tags=tags, since=since, until=until)
     sql = ("SELECT COUNT(*) AS n FROM action_items ai "
            "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
            "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
-           f"WHERE {' AND '.join(where)}")
+           + where_sql)
     with get_db_connection(db_path) as conn:
         return _rows(conn, sql, params)[0]["n"]
 
@@ -967,13 +1007,19 @@ def count_commitments(db_path: str, *, window: str = "this_week", owner: Optiona
 def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional[str] = None,
                      category_id: Optional[int] = None, status: str = "open",
                      include_dups: bool = False, limit: int = 50,
-                     today: Optional[date] = None) -> list[dict]:
-    """Задачі за вікном/власником/напрямком. Повертає і сиру фразу, і дату."""
+                     today: Optional[date] = None,
+                     tags: Optional[list[str]] = None, since: Optional[str] = None,
+                     until: Optional[str] = None) -> list[dict]:
+    """Задачі за вікном/власником/напрямком. Повертає і сиру фразу, і дату.
+
+    `tags` — назви тегів (OR); разом із `category_id` — перетин (AND).
+    `since`/`until` — ISO-дата по даті зустрічі запису, обидві межі включно.
+    """
     if window not in _WINDOWS:
         window = "this_week"
-    where, params = _commitments_filter(
+    where_sql, params = _commitments_filter(
         window=window, owner=owner, category_id=category_id, status=status,
-        include_dups=include_dups, today=today)
+        include_dups=include_dups, today=today, tags=tags, since=since, until=until)
 
     sql = (
         "SELECT ai.id, ai.task, ai.due AS due_raw, ai.due_date, ai.due_precision, "
@@ -1005,7 +1051,7 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
         "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
         "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
         "LEFT JOIN categories c ON c.id = t.category_id "
-        f"WHERE {' AND '.join(where)} "
+        + where_sql + " "
         # Протерміноване сортуємо СВІЖИМ ВГОРУ: задача, що прострочена вчора,
         # ще жива, а торішня — археологія (і часто просто кривий витяг дати).
         # Решта вікон — найближчий дедлайн першим.
@@ -1027,7 +1073,9 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
 
 def commitments_coverage(db_path: str, *, owner: Optional[str] = None,
                          category_id: Optional[int] = None,
-                         status: str = "open") -> dict:
+                         status: str = "open",
+                         tags: Optional[list[str]] = None, since: Optional[str] = None,
+                         until: Optional[str] = None) -> dict:
     """Знаменник до вікон: скільки задач узагалі має дату, а скільки її не має.
 
     Вікна `this_week`/`overdue`/`soon` фільтрують по `due_date`, а він є лише в
@@ -1036,9 +1084,14 @@ def commitments_coverage(db_path: str, *, owner: Optional[str] = None,
     не потраплять. Це та сама вада, що й у `stale_topics` до перевірки текстом:
     твердження вірне про свій шар і хибне про архів.
 
-    Рахуємо ПІД ТИМИ Ж фільтрами (власник/напрямок/статус), інакше знаменник
-    говорив би про чужі задачі. `undated_share` — частка без дати; вона і є
-    відповідь на «наскільки повно вікно бачить».
+    Рахуємо ПІД ТИМИ Ж фільтрами (власник/напрямок/статус/`tags`/`since`/`until`),
+    інакше знаменник говорив би про чужі задачі: `list_action_items(tags="AI")`
+    до ремонту п.1 раунду 3 віддавав відфільтрований `items` поруч з архівними
+    `coverage.total`/`note` («3 із 3 задач дати не мають» при одній задачі з
+    тегом) — знаменник мусить рахувати ТОЧНО ту саму множину, що й `items`/
+    `window_matched` (`count_commitments`), через спільний `_scope_clauses`.
+    `undated_share` — частка без дати; вона і є відповідь на «наскільки повно
+    вікно бачить».
 
     Параметра `today` тут свідомо немає, хоча вікна його мають: знаменник — це
     стан таблиці («скільки задач узагалі має дату»), а не зріз на дату. Приймати
@@ -1055,15 +1108,14 @@ def commitments_coverage(db_path: str, *, owner: Optional[str] = None,
                      "SELECT 1 FROM entity_aliases ea "
                      "WHERE ea.entity_id = e.id AND ea.alias LIKE ?))")
         params += [f"%{owner}%"] * 3
-    if category_id is not None:
-        where.append("t.category_id = ?")
-        params.append(int(category_id))
     sql = ("SELECT COUNT(*) AS total, "
            "SUM(CASE WHEN ai.due_date IS NOT NULL THEN 1 ELSE 0 END) AS dated "
            "FROM action_items ai "
            "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
            "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
            f"WHERE {' AND '.join(where)}")
+    frag, p = _scope_clauses(category_id, tags, since, until)
+    sql += frag; params += p
     with get_db_connection(db_path) as conn:
         r = _rows(conn, sql, params)[0]
     total = r["total"] or 0

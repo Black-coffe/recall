@@ -22,6 +22,22 @@
         { v: 'en', l: 'English' }, { v: 'ru', l: 'Русский' },
     ];
 
+    // C9: спільна для екрана підказка + пояснення порожньої видачі (той самий
+    // текст, що й у library.js — дублюємо навмисно, спільний компонент фільтр-
+    // бару поза 09 не збираємо).
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
+        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+
+    function filterExplain(st) {
+        if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
+        const bits = [];
+        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push('у «' + p + '»'); }
+        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
+        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (!bits.length) return null;
+        return 'Нічого не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період фільтра.';
+    }
+
     let listEl = null, state = null, _models = null, cats = null;
     // Phase 21: фоновий статус транскрипції. activeIds — id записів, що зараз
     // транскрибуються (з /api/transcribe/active); lastActive — останній снапшот
@@ -42,10 +58,14 @@
 
     async function render(ctx) {
         cats = await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         state = {
             search: ctx.query.search || '',
             source_type: ctx.query.source_type || '',
             category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+            since: ctx.query.since || '',
+            until: ctx.query.until || '',
             // '0' — лише нетранскрибовані. Головна робота на цій сторінці:
             // знайти те, що ще не перетворене на текст.
             transcribed: ctx.query.transcribed === '0' ? '0' : '',
@@ -54,6 +74,7 @@
         loadModels();
 
         const catOpts = UI.catOptions(state.category_id, { first: 'all' });
+        const tagSel = UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-select rc-select--sm" disabled></select>';
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
@@ -69,6 +90,12 @@
                 <select class="rc-select rc-catsel" id="rcAudCat" data-cat-first="all">${catOpts}</select>
             </div>
             <div class="rc-filterbar" id="rcAudSources"></div>
+            <div class="rc-toolbar" id="rcAudTagPeriod">
+                <div id="rcAudTagsWrap">${tagSel}</div>
+                <input type="date" class="rc-input rc-select--sm" id="rcAudSince" value="${U.esc(state.since)}" title="Записи з дати">
+                <input type="date" class="rc-input rc-select--sm" id="rcAudUntil" value="${U.esc(state.until)}" title="Записи по дату">
+            </div>
+            <div id="rcAudHint"></div>
             <div class="rc-list" id="rcAudList"></div>
             <div id="rcAudPager"></div>`;
 
@@ -84,6 +111,21 @@
         const catSel = ctx.mount.querySelector('#rcAudCat');
         catSel.value = state.category_id;
         catSel.addEventListener('change', () => { state.category_id = catSel.value; state.page = 1; sync(); load(ctx); });
+
+        const tagSelEl = ctx.mount.querySelector('#rcAudTagsWrap select');
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) tagSelEl.addEventListener('change', () => {
+            state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
+            state.page = 1; sync(); load(ctx);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcAudSince');
+        const untilEl = ctx.mount.querySelector('#rcAudUntil');
+        sinceEl.addEventListener('change', () => { state.since = sinceEl.value; state.page = 1; sync(); load(ctx); });
+        untilEl.addEventListener('change', () => { state.until = untilEl.value; state.page = 1; sync(); load(ctx); });
+
+        const hintBox = ctx.mount.querySelector('#rcAudHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
+
         const search = ctx.mount.querySelector('#rcAudSearch');
         search.addEventListener('input', U.debounce(() => { state.search = search.value.trim(); state.page = 1; sync(); load(ctx); }, 280));
 
@@ -95,6 +137,9 @@
         if (state.search) p.set('search', state.search);
         if (state.source_type) p.set('source_type', state.source_type);
         if (state.category_id) p.set('category_id', state.category_id);
+        if (state.tags.length) p.set('tags', state.tags.join(','));
+        if (state.since) p.set('since', state.since);
+        if (state.until) p.set('until', state.until);
         if (state.transcribed === '0') p.set('transcribed', '0');
         if (state.page > 1) p.set('page', state.page);
         const q = p.toString();
@@ -130,18 +175,23 @@
                 search: state.search || undefined,
                 source_type: state.source_type || undefined,
                 category_id: state.category_id || undefined,
+                tags: state.tags.length ? state.tags.join(',') : undefined,
+                since: state.since || undefined,
+                until: state.until || undefined,
                 transcribed: state.transcribed === '0' ? '0' : undefined,
             });
             if (!ctx.isCurrent()) return;
             renderChips(data.counts);
             const rows = data.downloads || [];
             if (!rows.length) {
+                const explain = filterExplain(state);
                 if (state.transcribed === '0') {
                     listEl.innerHTML = UI.empty('Усе транскрибовано',
-                        'У цьому зрізі не лишилось файлів без тексту.', 'fa-circle-check');
+                        explain ? 'У цьому зрізі не лишилось файлів без тексту. ' + explain
+                                : 'У цьому зрізі не лишилось файлів без тексту.', 'fa-circle-check');
                 } else {
                     listEl.innerHTML = UI.empty('Медіатека порожня',
-                        state.search || state.source_type || state.category_id ? 'Спробуйте змінити фільтр чи пошук.' : 'Завантажте аудіо з YouTube або зробіть запис — і воно зʼявиться тут.',
+                        explain || (state.search || state.source_type ? 'Спробуйте змінити фільтр чи пошук.' : 'Завантажте аудіо з YouTube або зробіть запис — і воно зʼявиться тут.'),
                         'fa-compact-disc');
                 }
                 return;
@@ -234,8 +284,14 @@
             (st === 'youtube' && d.author) ? `<span>${U.esc(d.author)}</span>` : '',
             `<span>${U.fmtDate(d.created_at)}</span>`,
             d.transcription_id ? '' : `<span class="rc-rec__warn">без транскрипта</span>`,
-            state && state.category_id ? '' : UI.catChip(d.category_id, cats),
+            state && state.category_id ? '' : UI.catChip(d.category_id),
         ].filter(Boolean).join('<span class="sep">·</span>');
+        // d.tags — таксономічні теги (C4, з привʼязаного транскрипту), НЕ
+        // плутати з d.youtube_tags (власні ключові слова відео на YouTube).
+        const tags = d.tags || [];
+        const tagsHTML = tags.length
+            ? `<div class="rc-tags" style="margin-top:6px">${tags.map(tg => `<span class="rc-tag"${tg.color ? ` style="border-color:${U.esc(tg.color)}"` : ''}>${U.esc(tg.name)}</span>`).join('')}</div>`
+            : '';
         const tr = d.transcription_id
             ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> Транскрипт</button>`
             : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> Транскрибувати</button>`;
@@ -244,6 +300,7 @@
             <div class="rc-rec__body">
                 <div class="rc-rec__title">${U.esc(d.title || ('Аудіо #' + d.id))}</div>
                 <div class="rc-rec__meta">${meta}</div>
+                ${tagsHTML}
                 <div class="rc-aud__run" hidden></div>
             </div>
             <div class="rc-aud__actions">

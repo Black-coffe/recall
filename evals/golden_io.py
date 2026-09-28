@@ -57,11 +57,25 @@ def _normalize(item: dict, *, source: str, default_status: str,
         raise GoldenSetError(
             f"golden-set {item_id!r}: невалідний status {status!r}{_where(line_no)}")
 
+    # directions-projects-tags-08 (C8): `tags` — необовʼязкова вісь фільтра
+    # поруч з `category_id`, strip + дроп порожніх (той самий підхід, що
+    # `categories.parse_tags`, але без звернення до БД — тут лише сира
+    # нормалізація рядків golden-запису). `expected_leak` — лише документує
+    # намір пункту (мірило завжди FAIL на `filter_leak > 0` незалежно від
+    # значення), тому єдине валідне значення — `0`; інше — помилка
+    # нормалізації, а не тихий дефолт.
+    expected_leak = item.get("expected_leak")
+    if expected_leak is not None and expected_leak != 0:
+        raise GoldenSetError(
+            f"golden-set {item_id!r}: невалідний expected_leak {expected_leak!r} "
+            f"(єдине валідне значення — 0){_where(line_no)}")
+
     return {
         "id": item_id,
         "question": item["question"],
         "slice": slice_,
         "category_id": item.get("category_id"),
+        "tags": [t.strip() for t in (item.get("tags") or []) if isinstance(t, str) and t.strip()],
         "expected_transcription_ids": item.get("expected_transcription_ids") or [],
         "expected_source_name_contains": item.get("expected_source_name_contains") or [],
         "expected_facts": item.get("expected_facts") or [],

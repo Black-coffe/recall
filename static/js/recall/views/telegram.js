@@ -17,13 +17,14 @@
         { key: 'unmarked', label: 'Без розмітки' },
     ];
 
-    let dialogs = [];      // [{ id, title, type, username, monitored, category_id }]
+    let dialogs = [];      // [{ id, title, type, username, monitored, category_id, tags }]
     let filter = 'all';
     let search = '';
     let cats = null;
 
     async function render(ctx) {
         cats = await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         dialogs = []; filter = 'all'; search = '';
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
@@ -92,9 +93,10 @@
             dialogs = Object.values(saved).map(c => ({
                 id: c.chat_id, title: c.title, type: c.chat_type,
                 username: c.username, monitored: !!c.enabled, category_id: c.category_id,
+                tags: c.tags || [],
             }));
         } else {
-            for (const d of dl) { const s = saved[d.id]; if (s) { d.category_id = s.category_id; d.monitored = !!s.enabled; } }
+            for (const d of dl) { const s = saved[d.id]; if (s) { d.category_id = s.category_id; d.monitored = !!s.enabled; d.tags = s.tags || []; } }
             dialogs = dl;
         }
         if (!ctx.isCurrent()) return;
@@ -178,6 +180,7 @@
                 </label>
                 <div class="rc-tgrow__ctrl">
                     <select class="rc-select rc-select--sm rc-catsel" data-cat-first="none" data-act="category" aria-label="Напрямок чату">${catOptions(d.category_id)}</select>
+                    ${UI.tagOptions ? UI.tagOptions((d.tags || []).map(t => t.name)) : ''}
                     <button class="rc-iconbtn" data-act="backfill" title="Догрузити історію чату"><i class="fa-solid fa-clock-rotate-left"></i></button>
                 </div>
             </div>
@@ -241,6 +244,25 @@
             const chk = row.querySelector('[data-act="toggle"]');
             const sel = row.querySelector('[data-act="category"]');
             const bf = row.querySelector('[data-act="backfill"]');
+            // Теги чату: набір, який успадкує вся майбутня історія чату (C4).
+            // Компактна висота — інакше .rc-tagsel (76px) рве рядок списку.
+            const tagSel = row.querySelector('.rc-tagsel');
+            if (tagSel) {
+                tagSel.setAttribute('aria-label', 'Теги чату');
+                tagSel.style.cssText = 'min-height:0;height:52px;width:170px;padding:2px 4px;font-size:var(--rc-t-xs)';
+                tagSel.addEventListener('change', async () => {
+                    const names = Array.from(tagSel.selectedOptions).map(o => o.value).filter(Boolean);
+                    try {
+                        const r = await R.api.setChatTags(id, names);
+                        d.tags = r.tags || [];
+                        UI.toast(names.length ? 'Теги чату збережено' : 'Теги чату знято', 'success');
+                    } catch (e) {
+                        UI.toast((e && e.message) || 'Не вдалося зберегти теги', 'error');
+                        Array.from(tagSel.options).forEach(o => { o.selected = (d.tags || []).some(t => t.name === o.value); });
+                        UI.syncTagPicker(tagSel);
+                    }
+                });
+            }
 
             chk.addEventListener('change', async () => {
                 try {

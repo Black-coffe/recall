@@ -96,6 +96,34 @@
         напрямок|нитка|сторінка + рядок сводки одиниці сенсу) бере участь у
         векторі та BM25, але НЕ потрапляє в цитати — `chunks.text` лишається
         голим текстом.
+  v45 — двошарова таксономія (спека directions-projects-tags, ADR-023 §B):
+        `categories.parent_id` (NULL = напрямок, інакше — проєкт усередині
+        напрямку; рівно два рівні, перевірка в app-коді `app/services/
+        categories.py`, CHECK у схемі немає) + `tags`/`record_tags`/
+        `tg_chat_tags` (контрольований словник тегів, кріпиться ЛИШЕ до
+        transcriptions) + `transcriptions.suggested_tags_json` (підказки
+        Claude, ще не прийняті — істина живе в `record_tags`).
+        Тільки DDL: жодного переносу даних, `name_norm` не перераховується.
+  v46 — embedding_epochs (спека directions-projects-tags, історія 17): БД
+        памʼятає, яким ФОРМАТОМ контекстного префікса побудовано кожну епоху
+        (`model`, `version`) ембедингів. Номер епохи — акт конфігурації
+        (`EMBED_VERSION` у `.env`, ADR-016), тож сам по собі він не відрізняє
+        «формат змінився» від «усе гаразд»: під номером, який у БД уже є,
+        новий префікс ліг би поруч зі старими, а `reembed.stale_ids` їх ніколи
+        б не побачив (пара збігається). Бекфіл стемплює все, що існувало ДО
+        v46, форматом 1 — код оголошує свій `embeddings.PREFIX_FORMAT` і
+        ВІДМОВЛЯЄТЬСЯ писати чанки в епоху, побудовану іншим форматом
+        (ADR-017: вектор ніколи не змішує епохи). Тільки DDL + один бекфіл.
+  v47 — унікальність назви вузла — серед БРАТІВ, а не по всій таблиці (спека
+        directions-projects-tags, хвиля 6, ADR-023 §E «замінено 2026-09-22»):
+        «Маркетинг» може жити і під «Фонд Робота», і під «Фріланс», а
+        напрямок «Маркетинг» — поруч із чужим однойменним проєктом. Перша
+        НЕаддитивна міграція спеки: inline `name TEXT NOT NULL UNIQUE COLLATE
+        NOCASE` (v15) не знімається ALTER'ом, тож таблиця перебудовується
+        (CREATE new → копія з тими самими id → DROP → RENAME). Глобальний
+        UNIQUE-індекс `idx_categories_name_norm` (v20) помирає разом зі старою
+        таблицею; замість нього — `idx_categories_parent_name` UNIQUE на
+        `(COALESCE(parent_id, 0), name_norm)`. `slug UNIQUE` лишається.
 
 Запуск: init_database(db_path) на старті app.
 Idempotent — кожна міграція робить INSERT OR IGNORE у schema_versions.
@@ -579,7 +607,7 @@ def init_database(db_path: str):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
             seeds = [
-                ('Робота', 'work', '#1c7cf2', 'fa-building-columns', 1),
+                ('Фонд Робота', 'work', '#1c7cf2', 'fa-building-columns', 1),
                 ('Особисте', 'personal', '#e91e63', 'fa-user', 2),
                 ('AI / професія', 'ai', '#7c4dff', 'fa-robot', 3),
                 ('Будівництво', 'construction', '#fb8c00', 'fa-helmet-safety', 4),
@@ -595,7 +623,7 @@ def init_database(db_path: str):
             c.execute('ALTER TABLE transcriptions ADD COLUMN category_id INTEGER')
             c.execute('CREATE INDEX IF NOT EXISTS idx_transcriptions_category ON transcriptions(category_id)')
 
-        # bulk-assign: meeting_archive → Робота (рішення користувача).
+        # bulk-assign: meeting_archive → Фонд Робота (рішення користувача).
         # Лише якщо таблиця transcriptions існує (cols непорожній) — інакше UPDATE
         # падає «no such table» на БД без transcriptions (як у решті блоку — if cols).
         if cols:
@@ -681,7 +709,7 @@ def init_database(db_path: str):
     #
     # tg_monitored_chats — які чати слухати (керується з UI галочками). enabled=0
     # → слухач ігнорує. category_id → у який напрямок Recall класти записи з цього
-    # чату (фонд-чати → «Робота» автоматично). last_message_id — курсор
+    # чату (фонд-чати → «Фонд Робота» автоматично). last_message_id — курсор
     # для backfill/resume (звідки догружати історію).
     if current_version < 18:
         c.execute("PRAGMA table_info(transcriptions)")
@@ -1797,6 +1825,219 @@ def init_database(db_path: str):
                   "(44, 'transcriptions.title/description + перебудова transcriptions_fts — "
                   "власна назва й опис запису, редаговані після збереження')")
         logger.info("Міграція v44: transcriptions.title/description + перебудова transcriptions_fts")
+
+    # === v45: дерево напрямків (parent_id) + словник тегів ===================
+    # Спека directions-projects-tags, історія 01 (трасер), ADR-023 §B.
+    #
+    # `categories.parent_id` — другий (і останній) рівень тієї самої таблиці:
+    # NULL = напрямок, не-NULL = проєкт усередині напрямку. CHECK у схемі
+    # НЕМАЄ свідомо: «рівно два рівні» перевіряє app-код
+    # (`app/services/categories.py`), бо SQLite не вміє змінювати CHECK без
+    # перестворення таблиці, а майбутній третій рівень (якщо власник колись
+    # його попросить) не має впиратись у міграцію-переливання.
+    #
+    # Теги кріпляться ЛИШЕ до `transcriptions` (ADR §B): аудіо в Медіатеці
+    # показує теги свого транскрипту тим самим COALESCE-шляхом, що й напрямок.
+    # `record_tags.source` ('manual'|'claude'|'chat') потрібен для
+    # відвʼязування: зняття тега з TG-чату прибирає лише рядки source='chat',
+    # ручний тег лишається. Підказки Claude живуть окремо
+    # (`suggested_tags_json`) — фільтри читають тільки `record_tags`.
+    #
+    # Міграція аддитивна: жодного переносу даних, `name_norm` наявних напрямків
+    # НЕ перераховується (ключ `categories.norm_name` збігається зі старим).
+    if current_version < 45:
+        c.execute("PRAGMA table_info(categories)")
+        cat_cols = {row[1] for row in c.fetchall()}
+        if cat_cols and 'parent_id' not in cat_cols:
+            c.execute('ALTER TABLE categories ADD COLUMN parent_id INTEGER')
+        if cat_cols:
+            c.execute('CREATE INDEX IF NOT EXISTS idx_categories_parent '
+                      'ON categories(parent_id)')
+
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tags'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                name_norm TEXT NOT NULL UNIQUE,     -- NFKC+casefold-ключ (кирилиця теж)
+                color TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='record_tags'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE record_tags (
+                transcription_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'manual',   -- manual | claude | chat
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (transcription_id, tag_id)
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_record_tags_tag ON record_tags(tag_id)')
+
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tg_chat_tags'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE tg_chat_tags (
+                chat_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, tag_id)
+            )''')
+
+        c.execute("PRAGMA table_info(transcriptions)")
+        tx_cols = {row[1] for row in c.fetchall()}
+        if tx_cols and 'suggested_tags_json' not in tx_cols:
+            c.execute('ALTER TABLE transcriptions ADD COLUMN suggested_tags_json TEXT')
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(45, 'categories.parent_id (напрямок → проєкт) + tags/record_tags/"
+                  "tg_chat_tags + transcriptions.suggested_tags_json (ADR-023)')")
+        logger.info("Міграція v45: categories.parent_id + словник тегів створено")
+
+    # === v46: embedding_epochs — формат префікса кожної епохи =================
+    # Спека directions-projects-tags, історія 17 (ADR-023 §D, ADR-017).
+    #
+    # Рядок таблиці = «епоха (модель, версія) побудована форматом префікса N».
+    # Бекфіл ставить формат 1 усьому, що вже є в `transcriptions`: будь-яка
+    # пара, що існувала ДО цієї міграції, побудована префіксом попередньої
+    # спеки. Рядки з `embedding_version IS NULL` (ембеджено ще до v28) у
+    # таблицю не потрапляють — `INSERT OR IGNORE` мовчки пропускає їх на
+    # `NOT NULL`, а поточна пара коду NULL-версії не має ніколи.
+    #
+    # Тільки DDL + цей бекфіл: даних не переносимо, чанків не чіпаємо.
+    if current_version < 46:
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_epochs'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE embedding_epochs (
+                model TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                prefix_format INTEGER NOT NULL,     -- 1 = префікс до спеки directions-projects-tags
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (model, version)
+            )''')
+
+        # `transcriptions` може ще не існувати (штучна БД у тестах міграцій,
+        # де схему піднімають з проміжної версії) — тоді бекфілити нема з чого.
+        c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transcriptions'")
+        if c.fetchone():
+            c.execute("INSERT OR IGNORE INTO embedding_epochs (model, version, prefix_format) "
+                      "SELECT DISTINCT embedding_model, embedding_version, 1 "
+                      "FROM transcriptions WHERE embedding_model IS NOT NULL")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(46, 'embedding_epochs: формат контекстного префікса кожної епохи "
+                  "(наявні пари = формат 1, ADR-023 §D)')")
+        logger.info("Міграція v46: embedding_epochs створено")
+
+    # === v47: унікальність назви вузла — серед БРАТІВ ========================
+    # Спека directions-projects-tags, хвиля 6 (ADR-023 §E, датована заміна).
+    #
+    # До v47 назва вузла була унікальна по ВСІЙ таблиці (inline `UNIQUE COLLATE
+    # NOCASE` на `name` з v15 + UNIQUE-індекс на `name_norm` з v20), тож
+    # «Маркетинг» не міг одночасно жити під «Фонд Робота» і під «Фріланс» —
+    # а саме так розкладений живий архів. Тепер унікальність — серед братів:
+    # напрямки між собою, проєкти одного батька між собою; напрямок і чужий
+    # проєкт можуть збігатись.
+    #
+    # Inline UNIQUE не знімається ALTER'ом — це перша НЕаддитивна міграція
+    # спеки, тобто перебудова таблиці. Дві пастки, через які тут усе саме так:
+    #   1. **FK.** `tg_monitored_chats.category_id` має `FOREIGN KEY … ON DELETE
+    #      SET NULL` (v18). З увімкненими foreign_keys `DROP TABLE categories`
+    #      спрацьовує як DELETE усіх рядків і МОВЧКИ зануляє напрямок кожного
+    #      моніторенного чату. Тому `PRAGMA foreign_keys=OFF` ДО транзакції
+    #      (PRAGMA всередині транзакції — no-op), попереднє значення
+    #      повертається після, а `PRAGMA foreign_key_check` доводить, що нічого
+    #      не повисло.
+    #      **Гард ЗАХИСНИЙ, а не несучий (виміряно 22.09.2026, хвиля 7):** на
+    #      шляху, яким міграція реально йде, FK уже вимкнені — `init_database`
+    #      відкриває сирий `sqlite3.connect` (`:139`), а там `PRAGMA
+    #      foreign_keys` за замовчуванням 0. `foreign_keys=ON` вмикає
+    #      `app/db/connection.py:40`, тобто ІНШЕ зʼєднання — не це. Тримаємо на
+    #      випадок виклику `init_database` на зʼєднанні з увімкненими FK
+    #      (пастка доведена `test_v47_drop_table_with_fk_on_would_null_chat_category`
+    #      на зібраному руками FK-ON зʼєднанні; ADR-023 §E, абзац хвилі 7).
+    #   2. **Унікальність, яка може не датись.** Як і у v20: якщо в живій БД уже
+    #      є два брати з однаковим `name_norm`, міграція не валиться — індекс
+    #      лишається звичайним, а унікальність тримає app-код
+    #      (`categories._assert_free_sibling_name`, перевірка в Python ДО запису).
+    #
+    # Ідемпотентність — за ФАКТОМ схеми, не лише за номером версії: є
+    # `idx_categories_parent_name` і немає жодного глобального UNIQUE на
+    # `name`/`name_norm` → перебудова не потрібна.
+    if current_version < 47:
+        c.execute("PRAGMA table_info(categories)")
+        cat_info = c.fetchall()
+        if cat_info:
+            unique_indexes = []
+            for idx in c.execute("PRAGMA index_list(categories)").fetchall():
+                if not idx[2]:            # (seq, name, unique, origin, partial)
+                    continue
+                idx_cols = [r[2] for r in
+                            c.execute(f"PRAGMA index_info('{idx[1]}')").fetchall()]
+                unique_indexes.append((idx[1], idx_cols))
+            has_sibling_index = any(n == 'idx_categories_parent_name'
+                                    for n, _ in unique_indexes)
+            # Глобальна унікальність = UNIQUE рівно по одній колонці name/name_norm.
+            # Індекс братів у це не потрапляє: його перша колонка — вираз
+            # COALESCE(...), і PRAGMA index_info віддає для неї None.
+            global_unique = [n for n, cols in unique_indexes
+                             if cols in (['name'], ['name_norm'])]
+
+            if global_unique or not has_sibling_index:
+                conn.commit()             # PRAGMA не діє всередині транзакції
+                # Захисний (див. пастку 1 вище): на шляху init_database FK і так
+                # вимкнені, prev_fk тут 0 — гард на випадок FK-ON зʼєднання.
+                prev_fk = c.execute("PRAGMA foreign_keys").fetchone()[0]
+                c.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    col_names = [row[1] for row in cat_info]
+                    defs = []
+                    for _cid, cname, ctype, notnull, dflt, pk in cat_info:
+                        if pk:
+                            defs.append(f"{cname} INTEGER PRIMARY KEY AUTOINCREMENT")
+                            continue
+                        piece = f"{cname} {ctype or 'TEXT'}"
+                        if notnull:
+                            piece += " NOT NULL"
+                        if dflt is not None:
+                            piece += f" DEFAULT {dflt}"
+                        if cname == 'slug':
+                            piece += " UNIQUE"    # єдина унікальність, що лишається
+                        defs.append(piece)
+                    cols_sql = ", ".join(col_names)
+
+                    c.execute("BEGIN")
+                    c.execute("DROP TABLE IF EXISTS categories_new")
+                    c.execute("CREATE TABLE categories_new (\n  "
+                              + ",\n  ".join(defs) + "\n)")
+                    c.execute(f"INSERT INTO categories_new ({cols_sql}) "
+                              f"SELECT {cols_sql} FROM categories")
+                    c.execute("DROP TABLE categories")
+                    c.execute("ALTER TABLE categories_new RENAME TO categories")
+                    c.execute('CREATE INDEX IF NOT EXISTS idx_categories_parent '
+                              'ON categories(parent_id)')
+                    try:
+                        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
+                                  "idx_categories_parent_name "
+                                  "ON categories(COALESCE(parent_id, 0), name_norm)")
+                    except sqlite3.IntegrityError:
+                        logger.warning("Міграція v47: є брати з однаковим name_norm — "
+                                       "ставлю звичайний індекс, унікальність "
+                                       "контролює app-код")
+                        c.execute("CREATE INDEX IF NOT EXISTS idx_categories_parent_name "
+                                  "ON categories(COALESCE(parent_id, 0), name_norm)")
+                    conn.commit()
+                    broken = c.execute("PRAGMA foreign_key_check").fetchall()
+                    if broken:
+                        logger.warning("Міграція v47: foreign_key_check не порожній "
+                                       "(%s записів) — перевірте посилання на categories",
+                                       len(broken))
+                finally:
+                    c.execute(f"PRAGMA foreign_keys={'ON' if prev_fk else 'OFF'}")
+
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(47, 'categories: унікальність назви серед братів "
+                  "(idx_categories_parent_name) замість глобальної (ADR-023 §E)')")
+        logger.info("Міграція v47: унікальність назви вузла — серед братів")
 
     conn.commit()
     conn.close()

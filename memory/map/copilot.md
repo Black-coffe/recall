@@ -13,6 +13,9 @@
   *api_enabled=True лише якщо IMPORTANCE≥medium або форс; Opus-арбітр лише high+uncertain.*
 - **service.py** — `CopilotService`: `start()`, `get_state()`, `end()`, `link_transcription()`,
   `get_timeline()`. Тонкий persist-шар. Per-session RLock. *config_json — снапшот резолвнутих налаштувань.*
+  *Один власник на процес (4.7.0, ADR-026 D5): `start()` кидає `CopilotBusyError(owner_session_id)`,
+  якщо `active`-рядок іншого запису ще живий (`is_recording_active`, з app.py = `recording_service.is_active`);
+  active-рядки мертвих записів закриває тут же. Перенос між записами — `POST /api/copilot/move`.*
 - **topics.py** — `TopicTracker`: `apply(status,label,return_to,ts)`, `topic_list()`. LLM-driven
   (НЕ ембеддинги — embed_fn лишений для сумісності, не юзається). *Деген-вивід LLM → фолбек на continue (анти-галюцинація).*
 - **dispatcher.py** — `Dispatcher`: `triage_and_plan()` + `analyze_with_evidence()` (2 окремі
@@ -20,6 +23,11 @@
 - **worker.py** — `CopilotWorker` (singleton-демон): `_tick()` — накопичення вікна → диспетч →
   топіки → ескалація. `_WS` (per-session WorkState: rolling transcript/summary, shown_chunks, topic_chunks).
   *Wake кожні ~COPILOT_TOPIC_TICK_SEC (~6s); поважає pause; rolling summary не чиститься; дедуп чанків.*
+  *`directions-projects-tags`-25/27 (4.6.0, C10): `_scope_entity_ids` кличе `scope.scope_filter_ids` і
+  ловить `CategoryError('ambiguous')` ДО загального `except Exception` — пошук іде БЕЗ звуження
+  (`ids=[]`, як при not-found), але видимо оператору: один раз на сесію (`ws.scope_ambiguous_notice_sent`)
+  подія `log_event` + картка `kind="scope_notice"` через наявний шлях інсайту (поза `_card_gate`/
+  бюджетом карток — системне попередження, не інсайт), текст із переліком шляхів-кандидатів.*
 - **escalate.py** — `Escalator`: `verify(observation,chunks)` (verdict real/refuted/uncertain),
   `sweep(window,chunks)` (незалежний прохід). Tool-use enforced (report_verdict / report_findings).
   `cost_estimate()` з pricing.py. *Грейсфул: нема ключа → None, ко-пілот лишається локальним; prompt caching.

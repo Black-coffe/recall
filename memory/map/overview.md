@@ -26,7 +26,7 @@ Recall — це **монолітний Flask-сервер** + **2 окремі �
 3. `whisper_manager` (бекенд auto-detect: faster > openai).
 4. БД + міграції (`app/db/migrations.py`).
 5. Фонові демони: `system_monitor`, `model_updates` (staleness-gated), опц. `file_cleanup`.
-6. `recording_service` + recovery осиротілих сесій (якщо `RECORDING_ENABLED`).
+6. `recording_service` (до `RECORDING_MAX_ACTIVE` паралельних сесій) + recovery осиротілих сесій (якщо `RECORDING_ENABLED`).
 7. `live_transcribe_worker` (model='small', interval 8s) — якщо є recording_service.
 8. `copilot_service` + `copilot_worker` — якщо `COPILOT_ENABLED` + LLM доступний.
 9. `app.state.init(**singletons)` — інʼєкція всіх singleton-ів.
@@ -57,24 +57,31 @@ Recall — це **монолітний Flask-сервер** + **2 окремі �
 
 Ключові таблиці: `transcriptions` (центральна — усі джерела: file/youtube/recording/
 document/telegram/copilot/meeting_archive), `audio_downloads` (Аудіотека), `segments`/
-speaker-map, `chunks`+embeddings (RAG), `categories`/`entities`/`meeting_entities`/
-`action_items`/`entity_aliases` (граф памʼяті), `segment_bookmarks`, `saved_searches`,
-`tg_monitored_chats`, `copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань
-UI+MCP), `tg_threads` (v42 — провенанс сводки нитки), `chunks.context_prefix` (v43),
-`transcriptions.title`/`.description` (v44).
+speaker-map, `chunks`+embeddings (RAG), `categories` (дерево напрямок→проєкт, `parent_id`,
+v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (граф памʼяті),
+`tags`/`record_tags`/`tg_chat_tags` (v45), `embedding_epochs` (v46 — формат префікса кожної
+пари `(model,version)`), `segment_bookmarks`, `saved_searches`, `tg_monitored_chats`,
+`copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань UI+MCP), `tg_threads`
+(v42 — провенанс сводки нитки), `chunks.context_prefix` (v43), `transcriptions.title`/
+`.description` (v44).
 Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
-(поточна **v44**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
+(поточна **v47**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
 питання/канал/скоуп/джерела/токени/вартість/оцінка власника (Хвиля A production-RAG,
 16.09.2026); v42 `tg_threads.summary_source_ids_json`/`summary_at`/`summary_model`/
 `summary_msgs` — провенанс сводки нитки; v43 `chunks.context_prefix` + перебудова
 `chunks_fts` на `(context_prefix, text)` (Хвиля B production-RAG, 17.09.2026); v44
 `transcriptions.title`/`.description` (NULL — фолбек на `source_name`, `record_meta.
 display_name()`) + перебудова `transcriptions_fts` на обидві колонки
-(`editable-title-description`, 4.5.0, 21.09.2026)).
+(`editable-title-description`, 4.5.0, 21.09.2026); v45 `categories.parent_id` + `tags`/
+`record_tags`/`tg_chat_tags` + `transcriptions.suggested_tags_json`; v46 `embedding_epochs`
+(бекфіл наявних пар форматом 1); v47 — **перша неаддитивна міграція проєкту**: перебудова
+`categories` під `PRAGMA foreign_keys=OFF` — знімає глобальний `UNIQUE` на `name_norm`,
+ставить унікальність СЕРЕД БРАТІВ (`directions-projects-tags`, 4.6.0, 22-23.09.2026)).
 
 ## Windows-специфіка
 
-- WASAPI-запис через `pyaudiowpatch` (Linux/macOS → recording auto-disabled).
+- WASAPI-запис через `pyaudiowpatch` (Linux/macOS → recording auto-disabled); ізоляція звуку по
+  застосунку — WASAPI process loopback через comtypes/pycaw (win32-only піни в requirements.txt).
 - Forward-slash у коді; Pathlib транслює. UTF-8 reconfigure stdout у telegram-скриптах.
 - FFmpeg у PATH (відсутній → YouTube вимкнено, решта працює).
 - `os.startfile()` для QR-PNG у telegram_login (грейсфул-фолбек на іншій ОС).

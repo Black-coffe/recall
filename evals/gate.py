@@ -27,6 +27,7 @@ import math
 import os
 import random
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app.core import settings as _settings  # noqa: E402
+from app.services import categories as _categories  # noqa: E402
 from evals import golden_io  # noqa: E402
 from evals import metrics as ev_metrics  # noqa: E402
 from evals import snapshot as ev_snapshot  # noqa: E402
@@ -227,16 +229,66 @@ def _search(db_path: str, item: dict, k: int, *,
         pool_size = k * 4
         res = retrieval.search(
             db_path, item["question"], top_k=pool_size,
-            category_id=item.get("category_id"), rerank=rerank,
+            category_id=item.get("category_id"), tags=item.get("tags"), rerank=rerank,
         )
         chunks = _sabotage_pool(res["chunks"], sabotage, k)
     else:
         res = retrieval.search(
             db_path, item["question"], top_k=k,
-            category_id=item.get("category_id"), rerank=rerank,
+            category_id=item.get("category_id"), tags=item.get("tags"), rerank=rerank,
         )
         chunks = res["chunks"]
     return chunks[:k], res.get("vector_available")
+
+
+def _filter_leak(conn: sqlite3.Connection, item: dict, chunks: list[dict]) -> Optional[int]:
+    """C8: скільки чанків видачі належать запису, що фільтр мав би не пускати
+    — доводить, що `category_id`/`tags` не пропускають чуже (доповнює
+    `recall_at_k`, який ловить лише «ховає своє»). `None`, якщо пункт не
+    задає жодної осі (нема що перевіряти). Ось чому це не метод
+    `ev_metrics.evaluate_item` (`evals/metrics.py` не в `## Files` цієї
+    історії) — чиста функція над результатом пошуку й тим самим `conn`, яким
+    гейт вже читає golden-set."""
+    category_id = item.get("category_id")
+    tags = item.get("tags") or []
+    has_category_axis = isinstance(category_id, int)
+    if not has_category_axis and not tags:
+        return None
+
+    tids = sorted({ch["transcription_id"] for ch in chunks
+                   if ch.get("transcription_id") is not None})
+    if not tids:
+        return 0
+    ph = ",".join("?" * len(tids))
+
+    subtree = None
+    if has_category_axis:
+        subtree = set(_categories.subtree_ids(conn, category_id))
+
+    tag_keys = {_categories.norm_name(t) for t in tags} if tags else None
+    tags_by_tid: dict[int, set] = {}
+    if tag_keys:
+        for tid, name in conn.execute(
+                f"SELECT rt.transcription_id, tg.name FROM record_tags rt "
+                f"JOIN tags tg ON tg.id = rt.tag_id WHERE rt.transcription_id IN ({ph})",
+                tids):
+            tags_by_tid.setdefault(tid, set()).add(_categories.norm_name(name))
+
+    cat_by_tid: dict[int, Optional[int]] = {}
+    if subtree is not None:
+        cat_by_tid = {row[0]: row[1] for row in conn.execute(
+            f"SELECT id, category_id FROM transcriptions WHERE id IN ({ph})", tids)}
+
+    leak = 0
+    for ch in chunks:
+        tid = ch.get("transcription_id")
+        if tid is None:
+            continue
+        leaks_category = subtree is not None and cat_by_tid.get(tid) not in subtree
+        leaks_tags = bool(tag_keys) and not (tags_by_tid.get(tid) or set()) & tag_keys
+        if leaks_category or leaks_tags:
+            leak += 1
+    return leak
 
 
 def _item_hit(row: dict) -> Optional[bool]:
@@ -258,14 +310,20 @@ def _item_hit(row: dict) -> Optional[bool]:
 
 def _run_k(golden_items: list[dict], db_path: str, k: int, *,
            sabotage: Optional[str],
-           rerank: bool = False) -> tuple[list[dict], dict, dict, Optional[bool]]:
+           rerank: bool = False,
+           leak_conn: Optional[sqlite3.Connection] = None
+           ) -> tuple[list[dict], dict, dict, Optional[bool]]:
     """Пункти зі `status="unlabeled"` пропускаються повністю (C1); `negative`
     рахується (search запускається, лишається в per-item звіті), але не
     входить у `aggregate`/`by_slice` (recall_at_k/source_name_hit — `None`,
     `aggregate()` вже виключає `None`). Четвертий елемент — `vector_available`
     цього прогону (D5/D6, знахідка 6): береться з першого виклику search, що
     його повернув — стабільна властивість запуску (модель або є, або нема),
-    не по-пунктова."""
+    не по-пунктова.
+
+    `leak_conn` (C8) — read-only зʼєднання до тієї ж БД, що вимірюється
+    (`measure_db`): `row["filter_leak"]` — `None` для пунктів без
+    `category_id`/`tags`, інакше кількість чанків видачі поза фільтром."""
     rows = []
     vector_available: Optional[bool] = None
     for item in golden_items:
@@ -278,6 +336,8 @@ def _run_k(golden_items: list[dict], db_path: str, k: int, *,
         row["slice"] = item["slice"]
         row["status"] = item["status"]
         row["hit"] = _item_hit(row)
+        row["filter_leak"] = (_filter_leak(leak_conn, item, chunks)
+                               if leak_conn is not None else None)
         rows.append(row)
 
     labeled = [r for r in rows if r["status"] == "labeled"]
@@ -444,15 +504,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     vector_available: Optional[bool] = None
     try:
         with measure_cm as measure_db:
-            for k in ks:
-                rows, agg, by_slice, vec_avail = _run_k(
-                    golden_items, measure_db, k, sabotage=args.sabotage,
-                    rerank=args.rerank)
-                rows_by_k[k] = {r["id"]: r for r in rows}
-                agg_by_k[k] = agg
-                by_slice_by_k[k] = by_slice
-                if vector_available is None:
-                    vector_available = vec_avail
+            # C8: окреме read-only зʼєднання на тому самому файлі, що й пошук
+            # (не через retrieval.search — filter_leak рахується з готових
+            # чанків, а не всередині ранжування) — для subtree_ids/record_tags.
+            leak_conn = open_readonly(measure_db)
+            try:
+                for k in ks:
+                    rows, agg, by_slice, vec_avail = _run_k(
+                        golden_items, measure_db, k, sabotage=args.sabotage,
+                        rerank=args.rerank, leak_conn=leak_conn)
+                    rows_by_k[k] = {r["id"]: r for r in rows}
+                    agg_by_k[k] = agg
+                    by_slice_by_k[k] = by_slice
+                    if vector_available is None:
+                        vector_available = vec_avail
+            finally:
+                leak_conn.close()
     except Exception as exc:  # noqa: BLE001 — інфраструктура (модель не піднялась, знімок
         # побитий, диск повний), не вердикт якості (D3/знахідка 4): 2, не 1 і не крах.
         print(f"[gate] збій під час заміру: {exc}", file=sys.stderr)
@@ -527,8 +594,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     failures: list[str] = []
     diff_lines: list[str] = []
     unchecked_ks: list[int] = []
+    # C8: сума `filter_leak` на кожному k — незалежно від recall/baseline,
+    # найголовніший FAIL цього гейта (фільтр пропустив чуже). Пункти без
+    # `category_id`/`tags` лишають `filter_leak=None` (не беруть участі).
+    leak_totals: dict[int, int] = {}
     for k in ks:
         checked_this_k = False
+        leak_rows = [r for r in rows_by_k[k].values() if r.get("filter_leak") is not None]
+        leak_totals[k] = sum(r["filter_leak"] for r in leak_rows)
+        if leak_rows:
+            checked_this_k = True
+            if leak_totals[k] > 0:
+                failures.append(f"k={k}: filter_leak {leak_totals[k]} > 0")
+
         recall_mean = agg_by_k[k]["recall_at_k"]["mean"]
         hit_rate_mean = agg_by_k[k]["source_name_hit_rate"]["mean"]
         min_r = min_recall.get(k)
@@ -646,7 +724,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # на k=8). Рядок під `-q` єдиний, тож підпис мусить бути саме тут.
     print(f"[gate] {verdict} k={','.join(str(k) for k in ks)}"
           f" [rerank={'on' if current_provenance['rerank'] else 'off'},"
-          f" rewrite={'on' if current_provenance['rewrite'] else 'off'}]"
+          f" rewrite={'on' if current_provenance['rewrite'] else 'off'},"
+          f" filter_leak={sum(leak_totals.values())}]"
           + (f" — {'; '.join(failures)}" if failures else ""))
 
     if args.json_out:
@@ -656,7 +735,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "k": ks,
             "verdict": verdict,
             "failures": failures,
-            "aggregate": {str(k): _simplify_agg(agg_by_k[k]) for k in ks},
+            "aggregate": {str(k): {**_simplify_agg(agg_by_k[k]), "filter_leak": leak_totals[k]}
+                          for k in ks},
             "by_slice": {
                 str(k): {s: _simplify_agg(a) for s, a in by_slice_by_k[k].items()}
                 for k in ks

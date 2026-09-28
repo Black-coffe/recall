@@ -29,19 +29,43 @@
     };
     const FACET_KEYS = ['tg_sender', 'tg_chat', 'yt_author'];
 
+    // C9: напрямок/проєкт/тег — три різні осі, і підказка пояснює, як вони
+    // складаються (напрямок тягне свої проєкти, тег ріже впоперек усіх напрямків).
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
+        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+
     let listEl = null, cats = null, state = null;
     let selecting = false, selected = new Set(), curRows = [], lastData = null;
     // T5.5: cap for "select all N filtered" — beyond this a filter should be
     // narrowed first rather than firing dozens of paginated fetches.
     const SELECT_ALL_CAP = 3000;
 
+    // Порожня видача з активними фільтрами — пояснити, ЩО саме звужує
+    // результат (шлях / теги / період), а не просто «нічого не знайдено».
+    function filterExplain(st, catsCache) {
+        if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
+        const bits = [];
+        if (st.category_id && UI.catLabel) {
+            const p = UI.catLabel(Number(st.category_id)).text;
+            if (p) bits.push('у «' + p + '»');
+        }
+        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
+        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (!bits.length) return null;
+        return 'Нічого не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період фільтра — і спробуйте ширше.';
+    }
+
     async function render(ctx) {
         cats = await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         selecting = false; selected = new Set(); curRows = []; lastData = null;
         state = {
             search: ctx.query.search || '',
             source_type: ctx.query.source_type || '',
             category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+            since: ctx.query.since || '',
+            until: ctx.query.until || '',
             page: parseInt(ctx.query.page, 10) || 1,
             tg_sender: ctx.query.tg_sender || '',
             tg_chat: ctx.query.tg_chat || '',
@@ -49,6 +73,7 @@
         };
 
         const catOpts = UI.catOptions(state.category_id, { first: 'all' });
+        const tagSel = UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-select rc-select--sm" disabled></select>';
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
@@ -71,6 +96,12 @@
             </div>
             <div class="rc-filterbar" id="rcLibSources"></div>
             <div class="rc-facets" id="rcLibFacets" hidden></div>
+            <div class="rc-toolbar" id="rcLibTagPeriod">
+                <div id="rcLibTagsWrap">${tagSel}</div>
+                <input type="date" class="rc-input rc-select--sm" id="rcLibSince" value="${U.esc(state.since)}" title="Записи з дати">
+                <input type="date" class="rc-input rc-select--sm" id="rcLibUntil" value="${U.esc(state.until)}" title="Записи по дату">
+            </div>
+            <div id="rcLibHint"></div>
             <div class="rc-savedrow" id="rcLibSaved"></div>
             <div class="rc-selectbar" id="rcLibSelectBar" hidden></div>
             <div class="rc-list" id="rcLibList"></div>
@@ -99,6 +130,20 @@
         const catSel = ctx.mount.querySelector('#rcLibCat');
         catSel.value = state.category_id;
         catSel.addEventListener('change', () => { state.category_id = catSel.value; state.page = 1; selected.clear(); sync(); load(ctx); });
+
+        const tagSelEl = ctx.mount.querySelector('#rcLibTagsWrap select');
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) tagSelEl.addEventListener('change', () => {
+            state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
+            state.page = 1; selected.clear(); sync(); load(ctx);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcLibSince');
+        const untilEl = ctx.mount.querySelector('#rcLibUntil');
+        sinceEl.addEventListener('change', () => { state.since = sinceEl.value; state.page = 1; sync(); load(ctx); });
+        untilEl.addEventListener('change', () => { state.until = untilEl.value; state.page = 1; sync(); load(ctx); });
+
+        const hintBox = ctx.mount.querySelector('#rcLibHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
 
         const search = ctx.mount.querySelector('#rcLibSearch');
         search.addEventListener('input', U.debounce(() => { state.search = search.value.trim(); state.page = 1; selected.clear(); sync(); load(ctx); }, 280));
@@ -138,6 +183,9 @@
         if (state.search) q.search = state.search;
         if (state.source_type) q.source_type = state.source_type;
         if (state.category_id) q.category_id = state.category_id;
+        if (state.tags.length) q.tags = state.tags.join(',');
+        if (state.since) q.since = state.since;
+        if (state.until) q.until = state.until;
         FACET_KEYS.forEach(k => { if (state[k]) q[k] = state[k]; });
         return q;
     }
@@ -145,7 +193,9 @@
         const parts = [];
         if (q.search) parts.push('«' + q.search + '»');
         if (q.source_type) { const s = SOURCES.find(x => x.k === q.source_type); parts.push(s ? s.label : q.source_type); }
-        if (q.category_id) { const c = (cats.list || []).find(x => String(x.id) === String(q.category_id)); if (c) parts.push(c.name); }
+        if (q.category_id && UI.catLabel) { const p = UI.catLabel(Number(q.category_id)).text; if (p) parts.push(p); }
+        if (q.tags) parts.push('#' + q.tags);
+        if (q.since || q.until) parts.push((q.since || '…') + '–' + (q.until || '…'));
         return parts.join(' · ');
     }
     async function loadSaved(ctx) {
@@ -175,12 +225,19 @@
         state.search = q.search || '';
         state.source_type = q.source_type || '';
         state.category_id = q.category_id ? String(q.category_id) : '';
+        state.tags = (q.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+        state.since = q.since || '';
+        state.until = q.until || '';
         FACET_KEYS.forEach(k => { state[k] = q[k] || ''; });
         state.page = 1;
         selected.clear(); // T4.5: застосування збереженого пошуку теж міняє фільтр
         // reflect into controls
         const si = ctx.mount.querySelector('#rcLibSearch'); if (si) si.value = state.search;
         const cs = ctx.mount.querySelector('#rcLibCat'); if (cs) cs.value = state.category_id;
+        const ts = ctx.mount.querySelector('#rcLibTagsWrap select');
+        if (ts) { Array.from(ts.options).forEach(o => { o.selected = state.tags.includes(o.value); }); UI.syncTagPicker(ts); }
+        const se = ctx.mount.querySelector('#rcLibSince'); if (se) se.value = state.since;
+        const ue = ctx.mount.querySelector('#rcLibUntil'); if (ue) ue.value = state.until;
         ctx.mount.querySelectorAll('#rcLibSources .rc-chip').forEach(c => c.classList.toggle('is-active', c.dataset.src === state.source_type));
         renderFacets(ctx);
         sync(); load(ctx);
@@ -206,10 +263,29 @@
         if (state.search) p.set('search', state.search);
         if (state.source_type) p.set('source_type', state.source_type);
         if (state.category_id) p.set('category_id', state.category_id);
+        if (state.tags.length) p.set('tags', state.tags.join(','));
+        if (state.since) p.set('since', state.since);
+        if (state.until) p.set('until', state.until);
         FACET_KEYS.forEach(k => { if (state[k]) p.set(k, state[k]); });
         if (state.page > 1) p.set('page', state.page);
         const qs = p.toString();
         R.router.replace('/library' + (qs ? '?' + qs : ''));
+    }
+
+    // Спільний набір параметрів фільтра для load() і selectAllFiltered() —
+    // один список полів, щоб нова вісь не забувалась в одному з двох місць.
+    function filterParams() {
+        return {
+            search: state.search || undefined,
+            source_type: state.source_type || undefined,
+            category_id: state.category_id || undefined,
+            tags: state.tags.length ? state.tags.join(',') : undefined,
+            since: state.since || undefined,
+            until: state.until || undefined,
+            tg_sender: state.tg_sender.length >= 2 ? state.tg_sender : undefined,
+            tg_chat: state.tg_chat.length >= 2 ? state.tg_chat : undefined,
+            yt_author: state.yt_author.length >= 2 ? state.yt_author : undefined,
+        };
     }
 
     async function load(ctx) {
@@ -218,16 +294,7 @@
         const pagerEl = ctx.mount.querySelector('#rcLibPager');
         pagerEl.innerHTML = '';
         try {
-            const data = await R.api.history({
-                page: state.page, per_page: PER_PAGE,
-                search: state.search || undefined,
-                source_type: state.source_type || undefined,
-                category_id: state.category_id || undefined,
-                // Фасети застосовуємо від 2 символів (як просив користувач).
-                tg_sender: state.tg_sender.length >= 2 ? state.tg_sender : undefined,
-                tg_chat: state.tg_chat.length >= 2 ? state.tg_chat : undefined,
-                yt_author: state.yt_author.length >= 2 ? state.yt_author : undefined,
-            });
+            const data = await R.api.history(Object.assign({ page: state.page, per_page: PER_PAGE }, filterParams()));
             if (!ctx.isCurrent()) return;
             curRows = data.transcriptions || [];
             lastData = data;
@@ -243,10 +310,12 @@
         const pagerEl = ctx.mount.querySelector('#rcLibPager');
         renderSelectBar(ctx);
         if (!curRows.length) {
+            const explain = filterExplain(state, cats);
             listEl.innerHTML = UI.empty('Нічого не знайдено',
-                state.search || state.source_type || state.category_id || state.tg_sender || state.tg_chat || state.yt_author
+                explain ||
+                (state.search || state.source_type || state.tg_sender || state.tg_chat || state.yt_author
                     ? 'Спробуйте змінити фільтри або пошуковий запит.'
-                    : 'Архів поки порожній — додайте перший запис.', 'fa-box-open');
+                    : 'Архів поки порожній — додайте перший запис.'), 'fa-box-open');
             if (pagerEl) pagerEl.innerHTML = '';
             return;
         }
@@ -378,6 +447,17 @@
         };
     }
 
+    // Читальні чипи тегів рядка (без «×» — зняти тег можна лише на сторінці
+    // запису). Власна розмітка, а не UI.tagChip: тут рядок будується як
+    // рядок HTML (map+join у список), не як живий DOM-вузол.
+    function rowTags(t) {
+        const tags = t.tags || [];
+        if (!tags.length) return '';
+        return `<div class="rc-tags" style="margin-top:6px">${tags.map(tg =>
+            `<span class="rc-tag"${tg.color ? ` style="border-color:${U.esc(tg.color)}"` : ''}>${U.esc(tg.name)}</span>`
+        ).join('')}</div>`;
+    }
+
     function rowHTML(t) {
         const href = '/transcript/' + U.slug(t.id, t.display_name || t.source_name);
         const p = rowParts(t);
@@ -388,7 +468,7 @@
             .replace(/«MARK»/g, '<mark>').replace(/«\/MARK»/g, '</mark>');
         // Напрямок ховаємо, коли фільтр по ньому вже активний — тоді чип
         // однаковий на всіх рядках і не несе інформації.
-        const cat = state && state.category_id ? '' : UI.catChip(t.category_id, cats);
+        const cat = state && state.category_id ? '' : UI.catChip(t.category_id);
         const tgLink = !selecting && t.tg_link
             ? `<a class="rc-iconbtn rc-rec__ext" href="${U.esc(t.tg_link)}" target="_blank" rel="noopener"
                   title="Відкрити у Telegram" aria-label="Відкрити у Telegram"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
@@ -402,6 +482,7 @@
                 ${p.bodyLead
                     ? (preview ? `<div class="rc-rec__preview rc-rec__preview--lead">${preview}</div>` : '') + `<div class="rc-rec__meta">${p.meta}</div>`
                     : `<div class="rc-rec__meta">${p.meta}</div>` + (preview ? `<div class="rc-rec__preview">${preview}</div>` : '')}
+                ${rowTags(t)}
             </div>
             <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${tgLink}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
         </div>`;
@@ -469,15 +550,7 @@
             const pages = Math.max(1, Math.ceil(total / perPage));
             const ids = [];
             for (let p = 1; p <= pages; p++) {
-                const d = await R.api.history({
-                    page: p, per_page: perPage,
-                    search: state.search || undefined,
-                    source_type: state.source_type || undefined,
-                    category_id: state.category_id || undefined,
-                    tg_sender: state.tg_sender.length >= 2 ? state.tg_sender : undefined,
-                    tg_chat: state.tg_chat.length >= 2 ? state.tg_chat : undefined,
-                    yt_author: state.yt_author.length >= 2 ? state.yt_author : undefined,
-                });
+                const d = await R.api.history(Object.assign({ page: p, per_page: perPage }, filterParams()));
                 (d.transcriptions || []).forEach(r => ids.push(r.id));
             }
             if (!ctx.isCurrent()) return;

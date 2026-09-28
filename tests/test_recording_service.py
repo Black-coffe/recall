@@ -49,6 +49,8 @@ class FakeRecorder:
         self._is_started = False
         self._is_closed = False
         self._callback_error = None
+        self.events: list[dict] = []
+        self.drain_delay = 0.0  # імітація повільного drain (ізоляція сесій)
         FakeRecorder.instances.append(self)
 
     @classmethod
@@ -72,6 +74,8 @@ class FakeRecorder:
         self._is_closed = True
 
     def drain(self, timeout=0.0):
+        if self.drain_delay:
+            time.sleep(self.drain_delay)
         out = list(self._frames)
         self._frames.clear()
         return out
@@ -79,15 +83,33 @@ class FakeRecorder:
     def get_callback_error(self):
         return self._callback_error
 
-    def push_fake_audio(self, num_bytes: int = 1024):
+    def drain_events(self):
+        out, self.events = self.events, []
+        return out
+
+    def push_fake_audio(self, num_bytes: int = 1024, value: int = 3000,
+                        timestamp: float | None = None):
         """Імітація callback'у: додає кадр і оновлює LevelMeter."""
         # Створимо фейкові int16 семпли — синусоїда щоб level був ненульовий
         import struct
         n = num_bytes // 2
-        data = struct.pack(f'<{n}h', *([3000] * n))
-        frame = AudioFrame(data=data, timestamp=time.time(), frame_count=n)
+        data = struct.pack(f'<{n}h', *([value] * n))
+        ts = time.time() if timestamp is None else timestamp
+        frame = AudioFrame(data=data, timestamp=ts, frame_count=n)
         self._frames.append(frame)
         self.level.update(data)
+
+
+class FakeAppSource(FakeRecorder):
+    """Mock AppAudioSource: створюється через app_source_factory(spec, rate, ch)."""
+
+    app_instances: list["FakeAppSource"] = []
+
+    def __init__(self, spec, sample_rate, channels):
+        super().__init__(device_index=None, sample_rate=sample_rate, channels=channels)
+        FakeRecorder.instances.remove(self)  # system-рекордери рахуються окремо
+        self.spec = spec
+        FakeAppSource.app_instances.append(self)
 
 
 class FakeWriter:
@@ -137,8 +159,10 @@ class FakeWriter:
 @pytest.fixture(autouse=True)
 def reset_fakes():
     FakeRecorder.reset()
+    FakeAppSource.app_instances = []
     yield
     FakeRecorder.reset()
+    FakeAppSource.app_instances = []
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +202,7 @@ def service(store: SessionStore) -> RecordingService:
         channels=2,
         recorder_factory=FakeRecorder,
         writer_factory=FakeWriter,
+        app_source_factory=FakeAppSource,
     )
 
 
@@ -204,13 +229,18 @@ def test_start_without_streams_raises(service: RecordingService):
         service.start(mic_device_index=None, system_device_index=None)
 
 
-def test_second_concurrent_start_raises_conflict(service: RecordingService):
-    sid = service.start(mic_device_index=10)
+def test_start_beyond_max_active_raises_session_limit(service: RecordingService):
+    a = service.start(mic_device_index=10)
+    b = service.start(mic_device_index=11)
     try:
-        with pytest.raises(SessionConflictError):
-            service.start(mic_device_index=11)
+        with pytest.raises(SessionConflictError) as ei:
+            service.start(mic_device_index=12)
+        assert ei.value.code == 'SESSION_LIMIT'
+        assert ei.value.active == [a, b]
+        assert ei.value.limit == 2
     finally:
-        service.discard(sid)
+        service.discard(a)
+        service.discard(b)
 
 
 def test_start_with_only_mic(service: RecordingService, store: SessionStore):
@@ -293,11 +323,21 @@ def test_stop_without_active_session(service: RecordingService):
         service.stop('rec_nonexistent')
 
 
-def test_stop_wrong_session_id(service: RecordingService):
-    sid = service.start(mic_device_index=10)
+def test_unknown_sid_is_not_found_on_every_per_session_method(service: RecordingService):
+    """WRONG_SESSION зник: чужий sid при живій сесії — просто не знайдено."""
+    from app.services.recording.audio_source import SystemSpec
+    sid = service.start(mic_device_index=10, system_device_index=20)
     try:
-        with pytest.raises(SessionConflictError):
-            service.stop('rec_other_session')
+        for call in (
+            lambda: service.pause('rec_other'),
+            lambda: service.resume('rec_other'),
+            lambda: service.stop('rec_other'),
+            lambda: service.get_state('rec_other'),
+            lambda: service.retarget_system('rec_other', SystemSpec('all')),
+        ):
+            with pytest.raises(SessionNotFoundError):
+                call()
+        assert service.is_active(sid)
     finally:
         service.discard(sid)
 
@@ -373,7 +413,7 @@ def test_flush_loop_drains_audio_into_writer(
             f"manifest.bytes={last_bytes}, expected >= {4096 * 5}"
         )
 
-        active_writer = next(iter(service._active.streams.values())).writer
+        active_writer = next(iter(service._sessions[sid].streams.values())).writer
         assert active_writer.flush_count >= 1
     finally:
         service.discard(sid)
@@ -528,3 +568,303 @@ def test_recover_unfinalized_noop_without_callback(store: SessionStore):
         recorder_factory=FakeRecorder, writer_factory=FakeWriter,
     )
     assert svc.recover_unfinalized() == []
+
+
+# ------------------------------------ multi-session + SystemSpec (ADR-026, story 04)
+
+from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
+from app.services.recording.service import NoSystemStreamError
+
+_BPS = 48000 * 2 * 2  # байт/с формату 48000/2 s16le
+
+
+class _Broker:
+    def __init__(self):
+        self.events: list[tuple[str, str, dict]] = []
+        self._lock = threading.Lock()
+
+    def publish(self, channel, event, data):
+        with self._lock:
+            self.events.append((channel, event, data))
+
+    def of(self, kind):
+        with self._lock:
+            return [e for e in self.events if e[1] == kind]
+
+
+def _svc(store, **kw):
+    kw.setdefault('recorder_factory', FakeRecorder)
+    kw.setdefault('writer_factory', FakeWriter)
+    kw.setdefault('app_source_factory', FakeAppSource)
+    return RecordingService(store=store, chunk_seconds=1, **kw)
+
+
+def _written(svc, sid, stream=STREAM_SYSTEM) -> bytes:
+    w = svc._sessions[sid].streams[stream].writer
+    with w._lock:
+        return bytes(w.flushed) + bytes(w.buffer)
+
+
+def _wait(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_two_sessions_are_independent_and_stop_does_not_wait_for_neighbour(store):
+    svc = _svc(store)
+    a = svc.start(mic_device_index=10)
+    b = svc.start(mic_device_index=11)
+    rec_b = FakeRecorder.instances[1]
+    try:
+        assert svc.active_session_ids() == [a, b]
+        svc.pause(a)
+        assert store.read(a)['status'] == STATUS_PAUSED
+        assert store.read(b)['status'] == STATUS_RECORDING
+        svc.resume(a)
+        assert store.read(a)['status'] == STATUS_RECORDING
+
+        rec_b.drain_delay = 1.0  # flush-потік B «висить» у drain під lock'ом B
+        time.sleep(0.25)
+        t0 = time.perf_counter()
+        svc.stop(a)
+        took = time.perf_counter() - t0
+        assert took < 0.5, f"stop(A) чекав на B: {took:.2f}s"
+        assert svc.active_session_ids() == [b]
+        assert store.read(b)['status'] == STATUS_RECORDING
+    finally:
+        rec_b.drain_delay = 0.0
+        svc.discard(b)
+
+
+def test_active_session_id_only_when_exactly_one(service: RecordingService):
+    assert service.active_session_ids() == []
+    assert service.active_session_id is None
+    a = service.start(mic_device_index=10)
+    assert service.active_session_id == a
+    b = service.start(mic_device_index=11)
+    try:
+        assert service.active_session_ids() == [a, b]
+        assert service.active_session_id is None
+        assert service.is_active(a) and service.is_active(b)
+        assert not service.is_active('rec_nope')
+        service.stop(a)
+        assert not service.is_active(a)
+        assert service.active_session_id == b
+    finally:
+        service.discard(b)
+
+
+def test_start_all_without_spec_uses_recorder_factory_on_endpoint(service, store):
+    sid = service.start(system_device_index=3, system_device_name='Speakers')
+    try:
+        assert [r.device_index for r in FakeRecorder.instances] == [3]
+        assert FakeAppSource.app_instances == []
+        sys_mf = store.read(sid)['streams'][STREAM_SYSTEM]
+        assert sys_mf['source'] == {'mode': 'all', 'apps': [], 'device_index': 3}
+        assert sys_mf['source_events'] == []
+        state = service.get_state(sid)
+        assert state['system_source'] == {'mode': 'all', 'apps': [], 'device_index': 3}
+        assert state['source_events'] == 0
+    finally:
+        service.discard(sid)
+
+
+def test_start_exclude_uses_app_source_and_never_touches_devices(
+    service, store, monkeypatch,
+):
+    def _boom(*a, **k):
+        raise AssertionError("resolve_device_params hit for include/exclude")
+    monkeypatch.setattr('app.services.recording.service.resolve_device_params', _boom)
+    spec = SystemSpec('exclude', ('zoom.exe',))
+    sid = service.start(system_source=spec)
+    try:
+        assert FakeRecorder.instances == []
+        assert len(FakeAppSource.app_instances) == 1
+        src = FakeAppSource.app_instances[0]
+        assert (src.spec, src.sample_rate, src.channels) == (spec, 48000, 2)
+        sys_mf = store.read(sid)['streams'][STREAM_SYSTEM]
+        assert sys_mf['source'] == spec.to_dict()
+        assert sys_mf['enabled'] is True
+        assert (sys_mf['sample_rate'], sys_mf['channels']) == (48000, 2)
+    finally:
+        service.discard(sid)
+
+
+def test_start_invalid_spec_creates_nothing(service, store):
+    with pytest.raises(UnsupportedSourceSpecError):
+        service.start(system_source=SystemSpec('exclude', ('a.exe', 'b.exe')))
+    assert store.list_all() == []
+    with pytest.raises(RecordingError) as ei:
+        service.start(system_source=SystemSpec('all'))
+    assert ei.value.code == 'NO_SYSTEM_DEVICE'
+
+
+def test_app_source_start_failure_cleans_up_like_open_failure(store):
+    class FailingAppSource(FakeAppSource):
+        def start(self):
+            raise OSError("process-loopback activation failed")
+
+    svc = _svc(store, app_source_factory=FailingAppSource)
+    with pytest.raises(RecordingError):
+        svc.start(mic_device_index=3, system_source=SystemSpec('exclude', ('zoom.exe',)))
+    assert FakeRecorder.instances[0]._is_closed is True
+    assert FakeAppSource.app_instances[0]._is_closed is True
+    assert store.list_all()[0]['status'] == STATUS_CRASHED
+    assert svc.active_session_ids() == []
+
+
+def _retarget_with_hole(store, monkeypatch, recorded_seconds: float):
+    """Живий 'all' → include; старий записав recorded_seconds з 2.0 активних."""
+    broker = _Broker()
+    created: list[FakeAppSource] = []
+
+    def factory(spec, rate, ch):
+        src = FakeAppSource(spec, rate, ch)
+        # кадр, знятий новим джерелом ДО моменту заміни — має бути відкинутий
+        src.push_fake_audio(400, value=7, timestamp=time.time() - 0.001)
+        created.append(src)
+        return src
+
+    svc = _svc(store, sse_broker=broker, app_source_factory=factory)
+    monkeypatch.setattr(RecordingService, '_stream_elapsed',
+                        staticmethod(lambda active, ss: 2.0))
+    sid = svc.start(system_device_index=20, system_device_name='Speakers')
+    old = FakeRecorder.instances[0]
+    old.push_fake_audio(int(recorded_seconds * _BPS), value=1)
+    res = svc.retarget_system(sid, SystemSpec('include', ('zoom.exe',)), 'user')
+    return svc, broker, sid, old, created, res
+
+
+def test_retarget_pads_hole_and_orders_frames(store, monkeypatch):
+    svc, broker, sid, old, created, res = _retarget_with_hole(store, monkeypatch, 1.7)
+    try:
+        assert old._is_closed
+        assert len(created) == 1 and created[0]._is_started
+        created[0].push_fake_audio(1000, value=9)
+        assert _wait(lambda: _written(svc, sid).endswith(b'\x09\x00' * 500))
+
+        residual = int(1.7 * _BPS)
+        pad = int(2.0 * _BPS) - residual
+        assert _written(svc, sid) == (
+            b'\x01\x00' * (residual // 2) + bytes(pad) + b'\x09\x00' * 500
+        )
+        ev = store.read(sid)['streams'][STREAM_SYSTEM]['source_events'][-1]
+        assert ev['from'] == {'mode': 'all', 'apps': [], 'device_index': 20}
+        assert ev['to'] == {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None}
+        assert ev['gap_ms'] == pytest.approx(300, abs=1)
+        assert ev['padded_bytes'] == pad
+        assert ev['offset_bytes'] == residual + pad
+        assert ev['reason'] == 'user'
+        assert res['applied_on_resume'] is False
+        assert res['source'] == ev['to']
+        assert store.read(sid)['streams'][STREAM_SYSTEM]['source'] == ev['to']
+        assert len(broker.of('source_changed')) == 1
+        assert svc.get_state(sid)['source_events'] == 1
+    finally:
+        svc.discard(sid)
+
+
+def test_retarget_short_hole_is_not_padded(store, monkeypatch):
+    svc, _b, sid, _old, _c, res = _retarget_with_hole(store, monkeypatch, 1.99)
+    try:
+        assert res['event']['padded_bytes'] == 0
+        assert res['event']['gap_ms'] == pytest.approx(10, abs=1)
+    finally:
+        svc.discard(sid)
+
+
+def test_retarget_back_to_all_keeps_stream_format(service, store):
+    """'all'-стрім повертається на свій endpoint; include-стрім — 'all' через app source."""
+    a = service.start(system_device_index=20)
+    b = service.start(system_source=SystemSpec('include', ('zoom.exe',)))
+    try:
+        service.retarget_system(a, SystemSpec('exclude', ('zoom.exe',)))
+        service.retarget_system(a, SystemSpec('all'), 'auto_restore')
+        assert [r.device_index for r in FakeRecorder.instances] == [20, 20]
+        assert store.read(a)['streams'][STREAM_SYSTEM]['source']['device_index'] == 20
+
+        service.retarget_system(b, SystemSpec('all'))
+        last = FakeAppSource.app_instances[-1]
+        assert last.spec == SystemSpec('all')
+        assert len(FakeRecorder.instances) == 2  # endpoint для b не відкривався
+        assert store.read(b)['streams'][STREAM_SYSTEM]['source_events'][-1]['to'] == {
+            'mode': 'all', 'apps': [], 'device_index': None}
+    finally:
+        service.discard(a)
+        service.discard(b)
+
+
+def test_retarget_while_paused_applies_on_resume(service, store):
+    sid = service.start(system_device_index=20)
+    try:
+        service.pause(sid)
+        res = service.retarget_system(sid, SystemSpec('include', ('zoom.exe',)))
+        assert res['applied_on_resume'] is True
+        assert res['event']['applied_on_resume'] is True
+        assert FakeAppSource.app_instances == []
+        service.resume(sid)
+        assert len(FakeAppSource.app_instances) == 1
+        assert FakeAppSource.app_instances[0].spec == SystemSpec('include', ('zoom.exe',))
+        assert FakeAppSource.app_instances[0]._is_started
+    finally:
+        service.discard(sid)
+
+
+def test_retarget_errors_change_nothing(service, store):
+    mic_only = service.start(mic_device_index=10)
+    sysd = service.start(system_device_index=20)
+    try:
+        with pytest.raises(NoSystemStreamError) as ei:
+            service.retarget_system(mic_only, SystemSpec('all'))
+        assert ei.value.code == 'NO_SYSTEM_STREAM'
+        before = store.read(sysd)['streams'][STREAM_SYSTEM]
+        with pytest.raises(UnsupportedSourceSpecError):
+            service.retarget_system(sysd, SystemSpec('exclude', ()))
+        after = store.read(sysd)['streams'][STREAM_SYSTEM]
+        assert after['source'] == before['source']
+        assert after['source_events'] == []
+        assert FakeAppSource.app_instances == []
+        assert not FakeRecorder.instances[1]._is_closed
+    finally:
+        service.discard(mic_only)
+        service.discard(sysd)
+
+
+def test_pid_change_event_lands_in_manifest_and_sse(store):
+    broker = _Broker()
+    svc = _svc(store, sse_broker=broker)
+    sid = svc.start(system_source=SystemSpec('exclude', ('zoom.exe',)))
+    try:
+        FakeAppSource.app_instances[0].events.append({
+            'kind': 'pid_change', 'exe': 'zoom.exe',
+            'old_pids': [111], 'new_pids': [222], 'gap_ms': 40.0,
+        })
+        assert _wait(lambda: store.read(sid)['streams'][STREAM_SYSTEM]['source_events'])
+        time.sleep(0.25)
+        events = store.read(sid)['streams'][STREAM_SYSTEM]['source_events']
+        assert len(events) == 1
+        ev = events[0]
+        assert ev['reason'] == 'pid_change'
+        assert ev['gap_ms'] == 40.0
+        assert ev['exe'] == 'zoom.exe'
+        assert 'old_pids' not in ev and 'new_pids' not in ev
+        assert len(broker.of('source_changed')) == 1
+    finally:
+        svc.discard(sid)
+
+
+def test_recover_orphaned_with_source_events_unchanged(store):
+    store.create('rec_src', 48000, 2, system_device_name='S',
+                 system_source={'mode': 'all', 'apps': [], 'device_index': 20})
+    store.set_stream_source('rec_src', STREAM_SYSTEM,
+                            {'mode': 'include', 'apps': ['zoom.exe'], 'device_index': None},
+                            {'reason': 'user', 'gap_ms': 12.0, 'padded_bytes': 0})
+    finalized: list[str] = []
+    svc = _svc(store, finalize_callback=finalized.append)
+    assert svc.recover_orphaned() == ['rec_src']
+    assert store.read('rec_src')['status'] == STATUS_CRASHED
+    assert finalized == ['rec_src']

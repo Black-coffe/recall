@@ -20,11 +20,29 @@
     const ENT_PAGE = 200;
     let entRows = [], entTotal = 0;
 
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
+        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+    function filterExplain(st) {
+        if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
+        const bits = [];
+        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push('у «' + p + '»'); }
+        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
+        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (!bits.length) return null;
+        return 'Сутностей не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період.';
+    }
+
     async function renderList(ctx) {
         cats = await UI.loadCategories();
-        lstate = { type: ctx.query.type || '', q: ctx.query.q || '', category_id: ctx.query.category_id || '' };
+        if (UI.loadTags) await UI.loadTags();
+        lstate = {
+            type: ctx.query.type || '', q: ctx.query.q || '', category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+            since: ctx.query.since || '', until: ctx.query.until || '',
+        };
 
         const catOpts = UI.catOptions(lstate.category_id, { first: 'all' });
+        const tagSel = UI.tagOptions ? UI.tagOptions(lstate.tags) : '<select multiple class="rc-select rc-select--sm" disabled></select>';
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
@@ -40,6 +58,12 @@
                 <select class="rc-select rc-catsel" id="rcEntCat" data-cat-first="all">${catOpts}</select>
             </div>
             <div class="rc-filterbar" id="rcEntTypes"></div>
+            <div class="rc-toolbar" id="rcEntTagPeriod">
+                <div id="rcEntTagsWrap">${tagSel}</div>
+                <input type="date" class="rc-input rc-select--sm" id="rcEntSince" value="${U.esc(lstate.since)}" title="Записи з дати">
+                <input type="date" class="rc-input rc-select--sm" id="rcEntUntil" value="${U.esc(lstate.until)}" title="Записи по дату">
+            </div>
+            <div id="rcEntHint"></div>
             <div class="rc-list" id="rcEntList"></div>`;
 
         listEl = ctx.mount.querySelector('#rcEntList');
@@ -54,6 +78,18 @@
         const catSel = ctx.mount.querySelector('#rcEntCat');
         catSel.value = lstate.category_id;
         catSel.addEventListener('change', () => { lstate.category_id = catSel.value; syncList(); loadList(ctx); });
+        const tagSelEl = ctx.mount.querySelector('#rcEntTagsWrap select');
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) tagSelEl.addEventListener('change', () => {
+            lstate.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
+            syncList(); loadList(ctx);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcEntSince');
+        const untilEl = ctx.mount.querySelector('#rcEntUntil');
+        sinceEl.addEventListener('change', () => { lstate.since = sinceEl.value; syncList(); loadList(ctx); });
+        untilEl.addEventListener('change', () => { lstate.until = untilEl.value; syncList(); loadList(ctx); });
+        const hintBox = ctx.mount.querySelector('#rcEntHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
         const search = ctx.mount.querySelector('#rcEntSearch');
         search.addEventListener('input', U.debounce(() => { lstate.q = search.value.trim(); syncList(); loadList(ctx); }, 280));
         loadList(ctx);
@@ -63,6 +99,9 @@
         if (lstate.type) p.set('type', lstate.type);
         if (lstate.q) p.set('q', lstate.q);
         if (lstate.category_id) p.set('category_id', lstate.category_id);
+        if (lstate.tags.length) p.set('tags', lstate.tags.join(','));
+        if (lstate.since) p.set('since', lstate.since);
+        if (lstate.until) p.set('until', lstate.until);
         const qs = p.toString();
         R.router.replace('/entities' + (qs ? '?' + qs : ''));
     }
@@ -77,6 +116,8 @@
         try {
             const data = await R.api.entities({
                 type: lstate.type || undefined, q: lstate.q || undefined, category_id: lstate.category_id || undefined,
+                tags: lstate.tags.length ? lstate.tags.join(',') : undefined,
+                since: lstate.since || undefined, until: lstate.until || undefined,
                 limit: ENT_PAGE, offset: replace ? 0 : entRows.length,
             });
             if (!ctx.isCurrent()) return;
@@ -96,10 +137,10 @@
             // T5.5: "no filter narrows the result" (enrichment likely hasn't
             // run yet) needs a way forward, not just a diagnosis. A narrowed
             // filter/search gets the neutral "widen your filter" message.
-            const filtered = !!(lstate.category_id || lstate.q || lstate.type);
+            const filtered = !!(lstate.category_id || lstate.tags.length || lstate.since || lstate.until || lstate.q || lstate.type);
             if (filtered) {
                 listEl.innerHTML = UI.empty('Сутностей не знайдено',
-                    'У цьому напрямку/фільтрі немає сутностей — спробуйте розширити пошук.', 'fa-diagram-project');
+                    filterExplain(lstate) || 'У цьому напрямку/фільтрі немає сутностей — спробуйте розширити пошук.', 'fa-diagram-project');
             } else {
                 const actions = [{ label: 'Запустити збагачення', icon: 'fa-wand-magic-sparkles', primary: true, onClick: () => runEnrichment(ctx) }];
                 listEl.innerHTML = UI.empty('Сутностей не знайдено',

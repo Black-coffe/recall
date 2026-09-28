@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from app.db.migrations import init_database
-from app.services import embeddings, reranker, retrieval
+from app.services import categories, embeddings, reranker, retrieval
 
 
 def _unit(v):
@@ -804,3 +804,186 @@ def test_search_display_name_falls_back_to_source_name(db, mock_embeddings):
     hit = retrieval.search(db, "кошторис", top_k=3)["chunks"][0]
     assert hit["title"] is None
     assert hit["display_name"] == "Дзвінок з клієнтом"
+
+
+# ============================================================
+# directions-projects-tags-03: дерево напрямків, теги, період
+# ============================================================
+
+def _node(path, name, parent_id=None):
+    """id вузла дерева за назвою (частину назв init_database уже засіяв)."""
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT id FROM categories WHERE name_norm = ?",
+                       (categories.norm_name(name),)).fetchone()
+    if row:
+        cid = row["id"]
+        conn.execute("UPDATE categories SET parent_id = ? WHERE id = ?", (parent_id, cid))
+    else:
+        cid = categories.create_category(conn, name, parent_id=parent_id)["id"]
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def _tag(path, tid, *names):
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    categories.set_tags(conn, tid, add=list(names))
+    conn.commit()
+    conn.close()
+
+
+def _tids(res):
+    return {c["transcription_id"] for c in res["chunks"]}
+
+
+def test_direction_expands_into_its_projects_in_both_branches(db, mock_embeddings):
+    """id напрямку = він сам + його проєкти, і однаково в обох гілках."""
+    fond = _node(db, "Фонд Робота")
+    acmecorp = _node(db, "Акмекорп", parent_id=fond)
+    own = _add_tx(db, "Планерка фонду", category_id=fond)
+    proj = _add_tx(db, "Дзвінок Акмекорп", category_id=acmecorp)
+    other = _add_tx(db, "Особисте", category_id=_node(db, "Особисте"))
+    for tid in (own, proj, other):
+        _add_chunk(db, tid, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+
+    res = retrieval.search(db, "альфа", category_id=fond)
+    assert _tids(res) == {own, proj}
+    by = {m for c in res["chunks"] for m in c["why"]["by"]}
+    assert {"vector", "fts"} <= by
+
+
+def test_project_id_returns_only_its_own_records(db, mock_embeddings):
+    fond = _node(db, "Фонд Робота")
+    acmecorp = _node(db, "Акмекорп", parent_id=fond)
+    own = _add_tx(db, "Планерка фонду", category_id=fond)
+    proj = _add_tx(db, "Дзвінок Акмекорп", category_id=acmecorp)
+    _add_chunk(db, own, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _add_chunk(db, proj, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+
+    assert _tids(retrieval.search(db, "альфа", category_id=acmecorp)) == {proj}
+
+
+def test_scope_tids_still_narrows_alongside_tree(db, mock_embeddings):
+    """Другий шар скоупу (Трек 2) від дерева не постраждав."""
+    fond = _node(db, "Фонд Робота")
+    acmecorp = _node(db, "Акмекорп", parent_id=fond)
+    own = _add_tx(db, "Планерка фонду", category_id=fond)
+    proj = _add_tx(db, "Дзвінок Акмекорп", category_id=acmecorp)
+    _add_chunk(db, own, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _add_chunk(db, proj, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+
+    res = retrieval.search(db, "альфа", category_id=fond, scope_tids=[proj])
+    assert _tids(res) == {proj}
+
+
+def test_tags_filter_keeps_only_tagged_records(db, mock_embeddings):
+    a = _add_tx(db, "З тегом")
+    b = _add_tx(db, "Без тега")
+    _add_chunk(db, a, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _add_chunk(db, b, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _tag(db, a, "AI")
+
+    assert _tids(retrieval.search(db, "альфа", tags=["AI"])) == {a}
+
+
+def test_two_tags_are_or_not_and(db, mock_embeddings):
+    a = _add_tx(db, "AI")
+    b = _add_tx(db, "Інвестори")
+    c = _add_tx(db, "Ні те ні те")
+    for tid in (a, b, c):
+        _add_chunk(db, tid, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _tag(db, a, "AI")
+    _tag(db, b, "інвестори")
+
+    assert _tids(retrieval.search(db, "альфа", tags=["AI", "інвестори"])) == {a, b}
+
+
+def test_tag_with_category_is_and(db, mock_embeddings):
+    fond = _node(db, "Фонд Робота")
+    acmecorp = _node(db, "Акмекорп", parent_id=fond)
+    inside = _add_tx(db, "Тег у напрямку", category_id=acmecorp)
+    outside = _add_tx(db, "Тег поза напрямком", category_id=_node(db, "Особисте"))
+    plain = _add_tx(db, "Напрямок без тега", category_id=acmecorp)
+    for tid in (inside, outside, plain):
+        _add_chunk(db, tid, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _tag(db, inside, "AI")
+    _tag(db, outside, "AI")
+
+    res = retrieval.search(db, "альфа", category_id=fond, tags=["AI"])
+    assert _tids(res) == {inside}
+
+
+def test_unknown_tag_returns_nothing_not_everything(db, mock_embeddings):
+    """Невідома назва звужує видачу до порожньої — «фільтр проігноровано»
+    означало б, що фільтр мовчки протікає."""
+    a = _add_tx(db, "З тегом")
+    _add_chunk(db, a, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+    _tag(db, a, "AI")
+
+    assert retrieval.search(db, "альфа", tags=["неіснуючий"])["chunks"] == []
+
+
+def test_since_and_until_are_inclusive(db, mock_embeddings):
+    early = _add_tx(db, "Раніше", meeting_date="2026-09-01")
+    mid = _add_tx(db, "Всередині", meeting_date="2026-09-10")
+    late = _add_tx(db, "Пізніше", meeting_date="2026-09-20")
+    for tid in (early, mid, late):
+        _add_chunk(db, tid, 0, "спільне слово альфа", [1.0, 0, 0, 0])
+
+    assert _tids(retrieval.search(db, "альфа", since="2026-09-01",
+                                  until="2026-09-10")) == {early, mid}
+    assert _tids(retrieval.search(db, "альфа", since="2026-09-20")) == {late}
+    assert _tids(retrieval.search(db, "альфа", until="2026-09-01")) == {early}
+
+
+def test_bad_date_raises_instead_of_silently_widening(db, mock_embeddings):
+    with pytest.raises(ValueError):
+        retrieval.search(db, "альфа", since="минулого тижня")
+
+
+def _comment(path, tid, body):
+    from app.services import comments
+    c = comments.create(path, "transcription", tid, body, kind="note")
+    comments.index_comment(path, c["id"])
+    return c["id"]
+
+
+@pytest.fixture
+def mock_comment_index(monkeypatch):
+    """index_comment кодує текст коментаря — без фейка сюди приїхала б реальна
+    модель (2 ГБ). Той самий вектор для всіх: тест міряє ФІЛЬТР, не косинус."""
+    monkeypatch.setattr(embeddings, "embed_texts",
+                        lambda texts, batch_size=32: np.stack(
+                            [_unit([1.0, 0.0, 0.0, 0.0]) for _ in texts]))
+
+
+def test_comments_follow_the_same_tag_and_date_axes(db, mock_embeddings, mock_comment_index):
+    """Коментар до чужого запису відсікається тими самими осями, що й запис."""
+    a = _add_tx(db, "Свій", meeting_date="2026-09-10")
+    b = _add_tx(db, "Чужий", meeting_date="2026-09-20")
+    _tag(db, a, "AI")
+    _comment(db, a, "бюджет свій")
+    _comment(db, b, "бюджет чужий")
+
+    bodies = lambda res: [c["text"] for c in res["chunks"]
+                          if c["source_type"] == "comment"]
+    assert bodies(retrieval.search(db, "бюджет", top_k=5, tags=["AI"])) == ["бюджет свій"]
+    assert bodies(retrieval.search(db, "бюджет", top_k=5,
+                                   until="2026-09-10")) == ["бюджет свій"]
+    assert bodies(retrieval.search(db, "бюджет", top_k=5,
+                                   tags=["неіснуючий"])) == []
+
+
+def test_comments_of_a_project_survive_direction_filter(db, mock_embeddings, mock_comment_index):
+    fond = _node(db, "Фонд Робота")
+    acmecorp = _node(db, "Акмекорп", parent_id=fond)
+    proj = _add_tx(db, "Дзвінок Акмекорп", category_id=acmecorp)
+    other = _add_tx(db, "Особисте", category_id=_node(db, "Особисте"))
+    _comment(db, proj, "бюджет проєкту")
+    _comment(db, other, "бюджет чужий")
+
+    res = retrieval.search(db, "бюджет", top_k=5, category_id=fond)
+    assert [c["text"] for c in res["chunks"]
+            if c["source_type"] == "comment"] == ["бюджет проєкту"]

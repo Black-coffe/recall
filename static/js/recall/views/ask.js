@@ -3,12 +3,26 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
-    let abortCtl = null, busy = false;
+    let abortCtl = null, busy = false, state = null;
+
+    // C9: три різні осі фільтра — той самий текст пояснення, що й на
+    // Бібліотеці/Медіатеці/Задачах/Графі/Дослідженні.
+    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. '
+        + 'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: '
+        + 'відповідь будується лише з записів, що підходять під усі обрані фільтри. Період — за датою запису.';
 
     async function render(ctx) {
         if (abortCtl) { try { abortCtl.abort(); } catch (_) {} abortCtl = null; }
         busy = false;
+        await UI.loadCategories();
+        if (UI.loadTags) await UI.loadTags();
         const preset = ctx.query.q || '';
+        state = {
+            category_id: ctx.query.category_id || '',
+            tags: (ctx.query.tags || '').split(',').map(x => x.trim()).filter(Boolean),
+            since: ctx.query.since || '',
+            until: ctx.query.until || '',
+        };
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
                 <div class="rc-eyebrow">RAG · по всьому архіву</div>
@@ -19,16 +33,63 @@
                 <textarea id="rcAskInput" placeholder="Спитай: «що вирішили по фонду?», «які задачі на Юлю?», «де про окупність Acmecorp?»…">${U.esc(preset)}</textarea>
                 <button class="rc-btn rc-btn--primary" id="rcAskGo"><i class="fa-solid fa-paper-plane"></i> Спитати</button>
             </div>
+            <div class="rc-toolbar" id="rcAskFilters">
+                <select class="rc-select rc-catsel" id="rcAskCat" data-cat-first="all">${UI.catOptions(state.category_id, { first: 'all' })}</select>
+                <div id="rcAskTagsWrap">${UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-tagsel"></select>'}</div>
+                <input type="date" class="rc-input rc-select--sm" id="rcAskSince" value="${U.esc(state.since)}" title="Записи з дати">
+                <input type="date" class="rc-input rc-select--sm" id="rcAskUntil" value="${U.esc(state.until)}" title="Записи по дату">
+            </div>
+            <div id="rcAskHint"></div>
             <div id="rcAskOut"></div>`;
 
         const input = ctx.mount.querySelector('#rcAskInput');
         const go = ctx.mount.querySelector('#rcAskGo');
+        const catSel = ctx.mount.querySelector('#rcAskCat');
+        catSel.value = state.category_id;
+        catSel.addEventListener('change', () => { state.category_id = catSel.value; sync(input.value); });
+        const tagSel = ctx.mount.querySelector('#rcAskTagsWrap select');
+        if (tagSel) { tagSel.setAttribute('aria-label', 'Фільтр за тегами'); tagSel.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSel) tagSel.addEventListener('change', () => {
+            state.tags = Array.from(tagSel.selectedOptions).map(o => o.value).filter(Boolean);
+            sync(input.value);
+        });
+        const sinceEl = ctx.mount.querySelector('#rcAskSince');
+        const untilEl = ctx.mount.querySelector('#rcAskUntil');
+        sinceEl.addEventListener('change', () => { state.since = sinceEl.value; sync(input.value); });
+        untilEl.addEventListener('change', () => { state.until = untilEl.value; sync(input.value); });
+        const hintBox = ctx.mount.querySelector('#rcAskHint');
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
         go.addEventListener('click', () => ask(ctx, input.value));
         input.addEventListener('keydown', (e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); ask(ctx, input.value); }
         });
         input.focus();
         if (preset.trim()) ask(ctx, preset);
+    }
+
+    // Фільтри й питання живуть в URL — питання з тим самим зрізом можна
+    // переслати посиланням (deep-link відновлює і контроли, і запит).
+    function sync(question) {
+        const p = new URLSearchParams();
+        const q = (question || '').trim();
+        if (q) p.set('q', q);
+        if (state.category_id) p.set('category_id', state.category_id);
+        if (state.tags.length) p.set('tags', state.tags.join(','));
+        if (state.since) p.set('since', state.since);
+        if (state.until) p.set('until', state.until);
+        const qs = p.toString();
+        R.router.replace('/ask' + (qs ? '?' + qs : ''));
+    }
+
+    // Пояснення активного зрізу — для «нічого не знайшлось».
+    function filterExplain() {
+        const bits = [];
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
+        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
+        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (!bits.length) return null;
+        return 'Архів не дав джерел ' + bits.join(' ') + '. Напрямок тягне свої проєкти, проєкт — лише себе, '
+            + 'тег ріже впоперек: зніміть напрямок/проєкт, тег або період — і спитайте ширше.';
     }
 
     function setBusy(ctx, flag) {
@@ -44,6 +105,7 @@
         q = (q || '').trim();
         const out = ctx.mount.querySelector('#rcAskOut');
         if (!q || busy) return;   // block: a request is already in flight
+        sync(q);
 
         if (abortCtl) { try { abortCtl.abort(); } catch (_) {} }   // defensive — see T4.1/T4.2
         const myCtl = new AbortController();
@@ -62,7 +124,12 @@
         const answerEl = out.querySelector('#rcAnswer');
         let text = '';
         try {
-            await R.api.askStream({ question: q }, (event, data) => {
+            const payload = { question: q };
+            if (state.category_id) payload.category_id = state.category_id;
+            if (state.tags.length) payload.tags = state.tags.join(',');
+            if (state.since) payload.since = state.since;
+            if (state.until) payload.until = state.until;
+            await R.api.askStream(payload, (event, data) => {
                 if (myCtl.signal.aborted || !ctx.isCurrent()) return;
                 if (event === 'sources') {
                     sources.push(...(data.sources || []));
@@ -77,6 +144,16 @@
                             : (data.error || 'Помилка RAG'));
                 } else if (event === 'done') {
                     if (!text) answerEl.textContent = 'Порожня відповідь.';
+                    if (!sources.length) {
+                        const why = filterExplain();
+                        if (why) {
+                            const note = document.createElement('div');
+                            note.className = 'rc-mono';
+                            note.style.cssText = 'margin-top:10px;font-size:var(--rc-t-xs);color:var(--rc-ink-3);line-height:1.6';
+                            note.textContent = why;
+                            answerEl.appendChild(note);
+                        }
+                    }
                     renderCitations(ctx, answerEl, text, sources);
                     renderRating(ctx, data.ask_id);
                 }
@@ -159,7 +236,7 @@
         render,
         destroy() {
             if (abortCtl) { try { abortCtl.abort(); } catch (_) {} abortCtl = null; }
-            busy = false;
+            busy = false; state = null;
         },
     };
 })();

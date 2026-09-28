@@ -36,8 +36,13 @@
         const res = await fetch(url, opts);
         if (!res.ok) {
             let msg = 'HTTP ' + res.status;
-            try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
-            const e = new Error(msg); e.status = res.status; throw e;
+            let body = null;
+            try { body = await res.json(); if (body && body.error) msg = body.error; } catch (_) {}
+            // .body carries the full parsed JSON error (e.g. {error, code, message,
+            // projects}) — some endpoints overload `.error` with a short machine
+            // code (409 has_projects) and put the human message elsewhere; callers
+            // that need that detail read err.body, everyone else keeps using .message.
+            const e = new Error(msg); e.status = res.status; e.body = body; throw e;
         }
         return res.json();
     }
@@ -238,8 +243,10 @@
     A.stats = () => getJSON('/api/memory/stats');
     A.categories = () => getJSON('/api/memory/categories');
     // — Напрямки: керування (створення/редагування/видалення/обʼєднання) —
+    // `updateCategory` — контракт C9 (09); body: {name?, color?, icon?,
+    // parent_id?: int|null} — parent_id керує reparent (null = стає напрямком).
     A.categoryCreate = (body) => A.post('/api/memory/categories', body);
-    A.categoryUpdate = (cid, body) => A.patch('/api/memory/categories/' + cid, body);
+    A.updateCategory = (cid, body) => A.patch('/api/memory/categories/' + cid, body);
     A.categoryDelete = (cid) => A.del('/api/memory/categories/' + cid);
     A.categoryMerge = (cid, target_id, delete_source) =>
         A.post('/api/memory/categories/' + cid + '/merge', { target_id, delete_source });
@@ -247,6 +254,20 @@
     A.entity = (id) => getJSON('/api/memory/entities/' + id);
     A.actionItems = (params) => getJSON('/api/memory/action-items' + qs(params));
     A.setActionStatus = (id, status) => A.patch('/api/memory/action-items/' + id, { status });
+
+    // — Словник тегів (07: контракт C4, ще без живого ендпоїнта на момент 09 —
+    // budується проти контракту, перевірка Queen на стадії 05) —
+    A.getTags = () => getJSON('/api/memory/tags');
+    A.createTag = (body) => A.post('/api/memory/tags', body);
+    A.updateTag = (id, body) => A.patch('/api/memory/tags/' + id, body);
+    A.deleteTag = (id) => A.del('/api/memory/tags/' + id);
+    A.mergeTags = (keep_id, merge_id) => A.post('/api/memory/tags/merge', { keep_id, merge_id });
+    // {add: [names], remove: [names]} → {success, tags, suggested_tags, reembed}
+    A.setRecordTags = (id, body) => A.put('/api/memory/' + id + '/tags', body);
+    // {accept: [names], dismiss: [names]} → та сама відповідь, що setRecordTags
+    A.resolveTagSuggestions = (id, body) => A.post('/api/memory/' + id + '/tags/suggestions', body);
+    // Повна заміна набору тегів TG-чату (не add/remove — мультиселект у панелі).
+    A.setChatTags = (chatId, names) => A.put('/api/telegram/chats/' + chatId + '/tags', { tags: names });
 
     // ============================================================
     // SSE layer: shared frame-parser + reliability helpers

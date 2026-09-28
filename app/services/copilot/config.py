@@ -148,7 +148,7 @@ def resolve_settings(raw: Optional[dict]) -> dict:
         "budget_usd": round(budget_usd, 4),
         "category_id": _as_int(raw.get("category_id")),
         # Трек 2: тонкий скоуп дзвінка — проєкти/учасники, про яких він.
-        # Категорії мало: «Робота» покриває ~більша частина архіву, тож копілот
+        # Категорії мало: «Фонд Робота» покриває ~більша частина архіву, тож копілот
         # тягнув у підказки сусідні напрямки. Список назв («Acmecorp, Адам»)
         # резолвиться у сутності при пошуку (app.services.scope.resolve_scope).
         "scope_projects": _as_scope_list(raw.get("scope_projects")),

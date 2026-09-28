@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 from app.db.connection import get_db_connection
 from app.repositories import transcriptions as tx_repo
@@ -23,21 +23,58 @@ from app.services.copilot import config as copilot_config
 logger = logging.getLogger(__name__)
 
 
+class CopilotBusyError(Exception):
+    """Копілот уже веде інший живий запис (C6: один власник на процес)."""
+
+    def __init__(self, owner_session_id: str):
+        super().__init__(f"copilot busy on recording {owner_session_id}")
+        self.owner_session_id = owner_session_id
+
+
 class CopilotService:
     """Контролер копілот-сесій. Один інстанс на процес."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str,
+                 is_recording_active: Optional[Callable[[str], bool]] = None):
         self._db_path = db_path
         self._lock = threading.RLock()
+        # None (тести, boot без recording) → кожен active-рядок вважаємо живим.
+        self.is_recording_active = is_recording_active
+
+    def _is_live(self, recording_session_id: str) -> bool:
+        if self.is_recording_active is None:
+            return True
+        return bool(self.is_recording_active(recording_session_id))
 
     def start(self, settings: Optional[dict] = None,
               recording_session_id: Optional[str] = None) -> dict:
         """Створити копілот-сесію зі знімком резолвлених налаштувань.
 
         Returns {"copilot_session_id", "config": <resolved settings>}.
+
+        Raises CopilotBusyError, якщо активна копілот-сесія іншого запису, який
+        ще живий. Active-рядки, чий запис уже зник, закриваються тут же.
         """
         cfg = copilot_config.resolve_settings(settings)
         with self._lock, get_db_connection(self._db_path) as conn:
+            others = conn.execute(
+                "SELECT id, recording_session_id FROM copilot_sessions "
+                "WHERE status = 'active' AND recording_session_id IS NOT NULL "
+                "AND recording_session_id IS NOT ? ORDER BY id",
+                (recording_session_id,),
+            ).fetchall()
+            for row in others:
+                owner = row["recording_session_id"]
+                if self._is_live(owner):
+                    raise CopilotBusyError(owner)
+            for row in others:
+                conn.execute(
+                    "UPDATE copilot_sessions SET status = 'ended', "
+                    "ended_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'ended'",
+                    (row["id"],),
+                )
+                logger.info("[copilot] сесія %s закрита: запис %s уже не живий",
+                            row["id"], row["recording_session_id"])
             cur = conn.execute(
                 "INSERT INTO copilot_sessions "
                 "(recording_session_id, category_id, mode, importance, api_enabled, "

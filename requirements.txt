@@ -55,6 +55,12 @@ pytest>=8.0  # dev-only
 # інша частина додатку продовжить працювати.
 PyAudioWPatch>=0.2.12.6 ; sys_platform == "win32"
 
+# ADR-026: per-app system audio via WASAPI process loopback (in-process comtypes client in
+# app/services/recording/process_loopback.py) + audio-session enumeration. Versions as
+# measured by the spike (docs/specs/parallel-recordings-app-audio/spike.md).
+pycaw==20260927 ; sys_platform == "win32"
+comtypes==1.4.17 ; sys_platform == "win32"
+
 # Phase 10: speaker diarization via pyannote.audio.
 # Потребує HF_TOKEN у .env та прийнятої ліцензії pyannote/speaker-diarization-3.1
 # і pyannote/segmentation-3.0 на Hugging Face. Перше завантаження моделі ~1.5GB

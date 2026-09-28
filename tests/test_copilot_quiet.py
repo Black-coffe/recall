@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.categories import CategoryError
 from app.services.copilot import config as cp_config
 from app.services.copilot.worker import CopilotWorker, _WS
 
@@ -202,3 +203,127 @@ def test_gate_reports_reason():
     assert w._card_gate(ws) == "budget"
     ws.config["max_cards"] = 5
     assert w._card_gate(ws) == "too_soon"
+
+
+# ---------------------------------------------------------------------------
+# Історія 25: скоуп-тезка («Маркетинг» у двох напрямках) — видимо оператору,
+# не мовчки розширюємо пошук на весь архів на всю сесію.
+# ---------------------------------------------------------------------------
+
+_AMBIGUOUS_PATHS = ["Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
+
+
+def test_scope_ambiguous_notifies_operator_with_both_paths(monkeypatch, caplog):
+    """Раунд 6 мажор 1: канал — наявний шлях інсайту (log_event + copilot_insight
+    з shown=true), НЕ окремий copilot_status; поза бюджетом карток."""
+    broker, svc = _Broker(), _Svc()
+    w = _worker(broker, svc)
+    ws = _ws({"scope_projects": ["Маркетинг"]})
+
+    def _raise(db_path, names):
+        raise CategoryError("ambiguous", candidates=list(_AMBIGUOUS_PATHS))
+
+    monkeypatch.setattr("app.services.scope.scope_filter_ids", _raise)
+
+    with caplog.at_level("WARNING"):
+        result = w._scope_entity_ids(ws, "dummy.db")
+
+    assert result is None, "тезка — пошук БЕЗ звуження, як not-found"
+    assert any(all(p in rec.message for p in _AMBIGUOUS_PATHS) for rec in caplog.records)
+
+    # Жодного copilot_status зі state:quiet для цього випадку.
+    assert broker.statuses() == []
+
+    cards = broker.cards()
+    assert len(cards) == 1
+    notice = cards[0]
+    assert notice["kind"] == "scope_notice"
+    assert notice["candidates"] == _AMBIGUOUS_PATHS
+    assert "кількох напрямках" in notice["text"]
+
+    # Бюджет карток/гейт не займає (не пройшло через _card_gate/_count_card).
+    assert ws.cards_shown == 0
+
+    # Персиститься в історію сесії (get_state()/MCP get_live_copilot/таймлайн
+    # бачать її через log_event, не лише SSE).
+    assert len(svc.logged) == 1
+    logged = svc.logged[0]
+    assert logged["kind"] == "insight_local"
+    assert logged["payload"]["kind"] == "scope_notice"
+    assert logged["payload"]["shown"] is True
+    assert logged["payload"]["candidates"] == _AMBIGUOUS_PATHS
+
+
+def test_scope_ambiguous_notice_not_repeated_when_cache_does_not_save_you(monkeypatch):
+    """Мінор 7 р0: прапорець сам не дає дубля, доведено з очищеним кешем
+    ws._scope_ids — інакше тест не доводить, що рятує саме прапорець."""
+    broker, svc = _Broker(), _Svc()
+    w = _worker(broker, svc)
+    ws = _ws({"scope_projects": ["Маркетинг"]})
+
+    def _raise(db_path, names):
+        raise CategoryError("ambiguous", candidates=list(_AMBIGUOUS_PATHS))
+
+    monkeypatch.setattr("app.services.scope.scope_filter_ids", _raise)
+
+    w._scope_entity_ids(ws, "dummy.db")
+    assert len(broker.cards()) == 1
+
+    # Кеш скоупу знято — без прапорця другий тік знову дійшов би до
+    # scope_filter_ids і опублікував би другу картку.
+    ws._scope_ids = None
+    w._scope_entity_ids(ws, "dummy.db")
+
+    assert len(broker.cards()) == 1, "прапорець, а не кеш, не дає дубля"
+
+
+def test_scope_not_found_only_warns_no_notice(monkeypatch):
+    """Скоуп, якого немає в архіві (не тезка) — як раніше: WARNING без повідомлення."""
+    broker, svc = _Broker(), _Svc()
+    w = _worker(broker, svc)
+    ws = _ws({"scope_projects": ["Невідомий Проєкт"]})
+
+    monkeypatch.setattr("app.services.scope.scope_filter_ids", lambda db_path, names: [])
+
+    result = w._scope_entity_ids(ws, "dummy.db")
+
+    assert result is None
+    assert broker.statuses() == []
+    assert broker.cards() == [], "not-found не повідомляє про тезок"
+
+
+def test_scope_other_exception_behaves_as_before(monkeypatch):
+    """Інший виняток зі scope_filter_ids — як раніше: без повідомлення оператору."""
+    broker, svc = _Broker(), _Svc()
+    w = _worker(broker, svc)
+    ws = _ws({"scope_projects": ["Маркетинг"]})
+
+    def _raise(db_path, names):
+        raise RuntimeError("боляче")
+
+    monkeypatch.setattr("app.services.scope.scope_filter_ids", _raise)
+
+    result = w._scope_entity_ids(ws, "dummy.db")
+
+    assert result is None
+    assert broker.statuses() == []
+    assert broker.cards() == []
+
+
+def test_scope_notice_excluded_from_rag_reingest_digest():
+    """Реінджест у RAG (notes_digest) бере лише фіксовані групи інсайтів
+    (contradiction/fact/question/clarification) — scope_notice туди не
+    потрапляє, навіть якщо в подіях сесії він лежить поряд з ними."""
+    from app.services.copilot import export as cp_export
+
+    events = [
+        {"id": 1, "kind": "insight_local", "ts_offset_sec": 5.0, "source": "local",
+         "payload": {"kind": "scope_notice", "text": "Скоуп «Маркетинг» є в кількох напрямках",
+                     "candidates": _AMBIGUOUS_PATHS, "evidence": [], "shown": True}},
+        {"id": 2, "kind": "insight_local", "ts_offset_sec": 6.0, "source": "local",
+         "payload": {"kind": "fact", "text": "Справжній факт з архіву", "evidence": []}},
+    ]
+    digest = cp_export.notes_digest({"session": {"id": 1}, "events": events, "topics": []})
+
+    assert "Скоуп «Маркетинг»" not in digest
+    assert "Справжній факт з архіву" in digest

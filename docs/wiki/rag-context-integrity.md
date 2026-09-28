@@ -1,8 +1,8 @@
 ---
 domain: rag
-tags: [retrieval, rag, dedup, ask-log, telegram, embeddings, query-rewrite]
-related: [map/services.md, map/blueprints.md, entity-graph-provenance]
-last-verified: 2026-09-21
+tags: [retrieval, rag, dedup, ask-log, telegram, embeddings, query-rewrite, taxonomy, tags]
+related: [map/services.md, map/blueprints.md, entity-graph-provenance, taxonomy-tree-and-tags]
+last-verified: 2026-09-23
 ---
 
 # RAG context: duplicates are excluded, threads are capped, order is chronological, every answer is logged
@@ -84,13 +84,19 @@ surface.
 
 **The chunk's context prefix goes into the vector and into BM25, never into a
 citation.** `app.services.embeddings.build_context_prefix(meta, chunk)` builds a header of
-up to three lines from database fields alone: line 1 — type, title/chat, date,
-speaker/author, and a directory/thread-label/page tail; then an optional
+up to four lines from database fields alone: line 1 — type, title/chat, date,
+speaker/author, the "Напрямок → Проєкт" path, and a thread-label/page tail; then
+an optional `теги: a, b, c` line (up to 5 tag names by `name_norm`, whole line
+capped at 60 chars, truncated on a whole tag boundary); then an optional
 `опис: …` line carrying the owner's own `transcriptions.description` (flattened
 — newlines become spaces — and cut at `_PREFIX_DESCRIPTION_MAX` = 300
 characters, so a long description cannot crowd the chunk's own text out of the
 embedder's window); then `app.services.summaries.unit_summary_line()` if one
-exists. The embedder's
+exists. Spec `directions-projects-tags` (4.6.0, 22-23.09.2026) put the
+direction/project path in line 1 for **every** record type — before this spec
+it appeared only for calls — and added the tags line; a record with neither a
+direction nor tags produces a prefix byte-identical to the pre-spec format
+(epoch 2). The embedder's
 input is `prefix + "\n" + text` (the model-family style from `_style_for` layers
 on top of that); `chunks.text` stays text-only. Migration v43 adds
 `chunks.context_prefix` and rebuilds `chunks_fts` to index `(context_prefix,
@@ -114,6 +120,26 @@ embedding spaces of the same dimension — a wrong answer that looks like a
 right one. The side effect: mid-re-embed, search degrades toward FTS plus a
 growing vector share, never toward garbage.
 
+**A prefix-format change on an unchanged epoch number refuses to write, rather
+than silently mixing formats in one vector slice.** Spec
+`directions-projects-tags` (history 17, 4.6.0) split the fact in two:
+`app.services.embeddings.PREFIX_FORMAT` (an `int` constant in code, currently
+`2`; `1` = the format before this spec) is *not* configuration and does not
+move `EMBED_VERSION`'s default. Table `embedding_epochs` (migration v46,
+`(model, version) -> prefix_format`, backfilled to `1` for every pair that
+existed before v46) remembers which format actually built each epoch.
+`epoch_status(conn)` compares the two for the *current* `(EMBED_MODEL,
+EMBED_VERSION)` pair: `"ok"` (build with it), `"new_epoch"` (no row yet — free
+to register), `"format_mismatch"` (the epoch number is reused but was built by
+an older prefix format). On `format_mismatch`, `chunk_and_embed_transcription`
+logs an `ERROR` and returns **without writing chunks** — the record stays
+unembedded until the epoch number is raised — because `stale_ids()` would not
+notice a stale-format row whose `(model, version)` pair already matches.
+`reembed.run`/`dry_run` refuse at startup under the same condition. CLI
+`python -m app.services.reembed epoch-check [--db PATH]` is the read-only
+preflight (exit 0 `ok`/`new_epoch`, exit 1 `format_mismatch`) meant to run
+before raising `EMBED_VERSION` in `.env`.
+
 **Re-embedding onto a new (model, version) pair happens only on a snapshot,
 never on the live database by default.** `app.services.reembed.run(db_path,
 limit=, dry_run=)` re-runs `chunk_and_embed_transcription` for every record
@@ -131,6 +157,19 @@ resolves to `Config.DATABASE` unless `--yes-live` is passed; the intended flow
 is snapshot A (current pair) → snapshot B (candidate pair) → `evals.gate` on
 both → `evals.compare` → a human decision, before the live `.env` or live DB
 are touched at all.
+
+**A write that changes many records' direction/project/tags schedules a batch,
+not N point re-embeds.** `reembed.schedule_records_reembed(ids, *, db_path,
+reason)` (contract C3, `directions-projects-tags`) is what every
+`app.services.categories` writer calls with the ids it actually changed: ≤20
+live ids go through the point path one at a time; more become a single
+`reembed_batch` job that still calls `optimize_chunk_index()` exactly once at
+the end. `_batch_reembed_job` removes each id from `_pending_ids` *before*
+reading its row, and its `finally` releases whatever tail is left on
+cancellation or an exception out of the loop — logging that tail as a
+`WARNING` list of ids — otherwise those ids would stay stuck in
+`_pending_ids` until process restart and `schedule_record_reembed` would keep
+answering `"pending"` for them forever.
 
 **The query-rewrite flag lives in `retrieval.search`, not in `rag.py`, so the
 eval gate can measure it directly.** `app.services.query_rewrite.rewrite_query`

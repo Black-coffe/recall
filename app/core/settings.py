@@ -102,9 +102,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("WHISPER_BACKEND", "faster", "str", "Транскрипція",
             "faster (CTranslate2, дефолт) або openai (legacy fallback).",
             "Обирає бекенд у whisper_manager_new.py.", scope="config"),
-    Setting("WHISPER_MAX_PARALLEL", "2", "int", "Транскрипція",
+    Setting("WHISPER_MAX_PARALLEL", "1", "int", "Транскрипція",
             "Розмір семафора паралельних транскрипцій.",
-            "На RTX 3090: tiny/base/small=4, medium=2, large=1.", scope="config"),
+            "1 — faster-whisper не потокобезопасний на спільному handle моделі (whisper_manager_new.py); "
+            "live-ленти записів і повна транскрипція йдуть по черзі.", scope="config"),
     Setting("WHISPER_BATCH_SIZE", "8", "int", "Транскрипція",
             "batch_size для BatchedInferencePipeline на довгих файлах (faster backend).",
             "Впливає лише на faster-whisper.", scope="config"),
@@ -164,6 +165,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("RECORDING_KEEP_WAV", "False", "bool", "Запис",
             "Лишати роздільні mic.wav/system.wav після зведення у final.mp3.",
             "За дефолтом видаляються — інакше ~1ГБ/сесію мертвого місця.", scope="config"),
+    Setting("RECORDING_MAX_ACTIVE", "2", "int", "Запис",
+            "Максимум одночасних записів (мінімум 1).",
+            "Діє лише якщо RECORDING_ENABLED; ще один старт понад ліміт → 409 SESSION_LIMIT "
+            "(RecordingService(max_active=...)).", scope="config", profile="desktop"),
     Setting("RECORDING_MIN_DISK_MB", "500", "int", "Запис",
             "Мінімум вільного місця (МБ), нижче якого запис не стартує.",
             "Нижче — recording/screens.py відмовляє стартувати запис із повідомленням про нестачу диска.",
@@ -457,9 +462,12 @@ REGISTRY: tuple[Setting, ...] = (
             "Стиль префіксів запиту/пасажу (e5/qwen3/plain) embeddings.py визначає з НАЗВИ цієї моделі."),
     Setting("EMBED_VERSION", "2", "int", "Ембеддинги",
             "Версія нарізки/логіки ембедингів (T6.8) — бамп форсить re-embed архіву.",
-            "Пара для Qwen3: `Qwen/Qwen3-Embedding-0.6B` + `3` (обидва в .env, відкат — тими ж двома). "
-            "retrieval.search бере лише чанки поточної пари (EMBED_MODEL, EMBED_VERSION) — вектори іншої "
-            "епохи не порівнюються."),
+            "Змінюється ЛИШЕ в `.env` (ADR-016: дефолт коду не рухається за бойовою епохою). При зміні "
+            "формату нарізки або префікса номер беруть строго вище пари, яку тримає бойова БД "
+            "(`SELECT embedding_model, embedding_version, COUNT(*) FROM transcriptions GROUP BY 1, 2`), "
+            "і далі ганяють `reembed.run` — номер, який у БД уже є, залишив би новий формат у старій "
+            "епосі (stale_ids = 0). retrieval.search бере лише чанки поточної пари (EMBED_MODEL, "
+            "EMBED_VERSION) — вектори іншої епохи не порівнюються."),
     Setting("EMBED_MAX_SEQ", "1024", "int", "Ембеддинги",
             "Стеля довжини послідовності для моделі ембеддингів (у токенах).",
             "Діє ЛИШЕ вниз: e5 зі своїми 512 не чіпається. Потрібна для моделей без "
