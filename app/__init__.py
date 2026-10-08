@@ -3,5 +3,5 @@ Whisper UI Application
 Modular Flask application for audio transcription
 """
 
-__version__ = "4.8.1"
+__version__ = "4.8.2"
 __author__ = "Whisper UI Team"

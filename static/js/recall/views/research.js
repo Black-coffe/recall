@@ -5,7 +5,7 @@
      • Саммарі (.md)   — структурований звіт дешевою моделлю (Haiku) ПО
                           фрагментах (не по цілих стенограмах) → мінімум токенів.
 
-   Пошук лексичний: варіанти написання через кому (Horeca, хорека, HoReCa).
+   Пошук лексичний: варіанти написання через кому (Polaris, Поларіс, поларис).
    Стан (запит/напрямок) живе в URL — deep-linkable. SSE саммарі — через
    api.researchSummary (fetch-reader, НЕ EventSource — recall_sse_connection_gotcha). */
 (function () {
@@ -47,7 +47,7 @@
             <section class="rc-research__form">
                 <label class="rc-research__lbl">Бренд / тема <span class="rc-research__hint">варіанти написання через кому</span></label>
                 <input class="rc-input" id="rcResQ" type="text" autocomplete="off"
-                    placeholder="Horeca, хорека, HoReCa" value="${U.esc(state.q)}">
+                    placeholder="Polaris, Поларіс, поларис" value="${U.esc(state.q)}">
 
                 <div class="rc-research__row">
                     <div class="rc-research__field">
@@ -139,7 +139,7 @@
         state.q = (qEl.value || '').trim();
         sync();
         const out = ctx.mount.querySelector('#rcResOut');
-        if (!state.q) { out.innerHTML = UI.empty('Введіть бренд або тему', 'Напр.: Horeca, хорека, HoReCa', 'fa-magnifying-glass'); return; }
+        if (!state.q) { out.innerHTML = UI.empty('Введіть бренд або тему', 'Напр.: Polaris, Поларіс, поларис', 'fa-magnifying-glass'); return; }
         out.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю згадки по всьому архіву…</div>`;
         try {
             const data = await R.api.researchPreview(Object.assign({ q: state.q }, axes()));

@@ -11,7 +11,7 @@
                 <p class="rc-pagehead__lede">Семантичний архів — дзвінки, файли, документи, Telegram. Питай природною мовою, знаходь людей і проєкти, відстежуй домовленості.</p>
             </div>
             <div class="rc-ask__bar" style="margin-bottom:32px">
-                <textarea id="rcHomeAsk" placeholder="Спитай архів: «що вирішили по фонду?», «які задачі на Юлю?»…"></textarea>
+                <textarea id="rcHomeAsk" placeholder="Спитай архів: «що вирішили щодо запуску «Маяка»?», «які задачі на Олену?»…"></textarea>
                 <button class="rc-btn rc-btn--primary" id="rcHomeAskGo"><i class="fa-solid fa-paper-plane"></i></button>
             </div>
             <div class="rc-stats" id="rcHomeStats"></div>

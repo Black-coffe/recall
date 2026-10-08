@@ -30,7 +30,7 @@
                 <p class="rc-pagehead__lede">Відповіді будуються СУВОРО з вашого архіву, з клікабельними цитатами на конкретні записи.</p>
             </div>
             <div class="rc-ask__bar">
-                <textarea id="rcAskInput" placeholder="Спитай: «що вирішили по фонду?», «які задачі на Юлю?», «де про окупність Acmecorp?»…">${U.esc(preset)}</textarea>
+                <textarea id="rcAskInput" placeholder="Спитай: «що вирішили щодо запуску «Маяка»?», «які задачі на Олену?», «де обговорювали бюджет Polaris?»…">${U.esc(preset)}</textarea>
                 <button class="rc-btn rc-btn--primary" id="rcAskGo"><i class="fa-solid fa-paper-plane"></i> Спитати</button>
             </div>
             <div class="rc-toolbar" id="rcAskFilters">

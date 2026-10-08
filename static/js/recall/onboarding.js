@@ -164,7 +164,7 @@
             }),
             stepRow({
                 id: 'projects', icon: 'fa-solid fa-sitemap', title: 'Розкладіть напрямки по проєктах', optional: true,
-                descHTML: 'Напрямок можна поділити на проєкти — «Фонд Робота» → «Акмекорп», «NOVA», «Speak Easy»… Необовʼязково: без проєктів усе працює як плаский список напрямків.',
+                descHTML: 'Напрямок можна поділити на проєкти — «Агенція» → «Маяк», «Орбіта»… Необовʼязково: без проєктів усе працює як плаский список напрямків.',
                 status: projectsDone ? 'done' : 'pending',
                 actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="projects">${projectsDone ? 'Керувати' : 'Розкласти'}</button>`,
             }),

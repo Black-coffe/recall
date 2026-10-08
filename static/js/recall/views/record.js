@@ -284,7 +284,7 @@
                 <summary style="cursor:pointer;font-weight:600"><i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот наживо <span style="margin-left:8px;font-weight:400">${status}</span></summary>
                 <div style="margin-top:12px">
                     <div class="rc-field"><label class="rc-field__label" for="rcCpVector">Вектор (напрямок)</label><select class="rc-select rc-catsel" id="rcCpVector" data-cat-first="none">${catOpts()}</select></div>
-                    <div class="rc-field" style="margin-top:10px"><label class="rc-field__label" for="rcCpScope">Про що дзвінок — проєкти та учасники</label><input class="rc-input" id="rcCpScope" type="text" placeholder="напр. Acmecorp, Адам — через кому (не обовʼязково)"><div class="rc-rec-hint rc-mono" style="margin-top:4px">Звужує пошук у архіві до цих проєктів/людей. Без цього копілот шукає по всьому напрямку.</div></div>
+                    <div class="rc-field" style="margin-top:10px"><label class="rc-field__label" for="rcCpScope">Про що дзвінок — проєкти та учасники</label><input class="rc-input" id="rcCpScope" type="text" placeholder="напр. Маяк, Олена — через кому (не обовʼязково)"><div class="rc-rec-hint rc-mono" style="margin-top:4px">Звужує пошук у архіві до цих проєктів/людей. Без цього копілот шукає по всьому напрямку.</div></div>
                     <label class="rc-check" style="margin-top:10px"><input type="checkbox" id="rcCpLocalOnly"> <span>Лише локально (без Claude API, $0)</span></label>
                     <div class="rc-rec-hint rc-mono" id="rcCpHint" style="margin-top:10px"></div>
                     <details style="margin-top:12px">
@@ -334,7 +334,7 @@
         const vec = get('#rcCpVector');
         if (vec) cp.category_id = vec;
         const scope = (get('#rcCpScope') || '').trim();
-        if (scope) cp.scope_projects = scope;   // «Acmecorp, Адам» → зріз пошуку (Трек 2/3)
+        if (scope) cp.scope_projects = scope;   // «Маяк, Олена» → зріз пошуку (Трек 2/3)
         if (localOnly) cp.api_enabled = false;   // інакше — дефолт за важливістю (бекенд)
         const b = get('#rcCpBudget');
         if (b && !localOnly) cp.budget_usd = parseFloat(b);
