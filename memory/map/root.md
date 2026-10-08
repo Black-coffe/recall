@@ -1,6 +1,6 @@
 # root — кореневі entry points
 
-## app.py (1190)
+## app.py (1288)
 **Призначення:** головний Flask-сервер. Boot, реєстрація blueprints, фонові сервіси,
 глобальні singleton-и, HTTP-lifecycle.
 **Entry points:** `get_db_connection()`, `init_database()`, `add_process_log(pid,stage,msg,progress,status)`,
@@ -14,6 +14,11 @@ SSE-публікація поза локом. `_recording_finalize_callback` к�
 `RecordingService(max_active=cfg.RECORDING_MAX_ACTIVE, app_source_factory=_app_source_factory)` (app.py:843-853);
 фабрика будує `AppAudioSource` з резолвером `session_roots(exe, fallback=resolve_root_pids)` (app.py:832-841).
 CSP тільки на HTML.
+`_maybe_start_call_watcher()` (app.py:1189) — K2: збирає `CallWatcher` (apps/seconds/autostop з
+`RECORDING_AUTOPROMPT*`/`RECORDING_AUTOSTOP_SILENCE_MIN`, `stop_fn=blueprints.recording.stop_session`, лог
+`logs/call_watch.jsonl`) у `app.extensions['call_watcher']`. Кличеться лише під `__main__` (app.py:1285; при debug —
+лише в reloader-child `WERKZEUG_RUN_MAIN=true`), тож під pytest потік не стартує. Не Windows / нема pycaw /
+`RECORDING_AUTOPROMPT=0` / нема `recording_service` → рядок у лозі й нічого більше.
 **Профіль/headless (спек `config-registry-profiles`, S2):** при `cfg.HEADLESS` blueprint recorder
 не піднімається — `RecordingService`/`LiveTranscribeWorker`/`CopilotWorker`-гілки взагалі не
 торкаються `app.services.recording.*` (лог `"profile=headless: recorder off"`), бо `cfg.RECORDING_ENABLED`
@@ -26,7 +31,7 @@ CSP тільки на HTML.
 `whisper_preload.start_tracked_preload()` (app.py:625-626, логіка прогріву винесена в
 `app/services/whisper_preload.py`, стани `disabled|loading|ready|failed`),
 `telegram` — всередині `_maybe_launch_telegram_listener()` (лишається живим і в headless — це і є
-headless-інжест, не вимикається), `boot_finished=True` в самому кінці боту (app.py:1162).
+headless-інжест, не вимикається), `boot_finished=True` в самому кінці боту (app.py:1256).
 `RECALL_LOG_FORMAT=json` (дефолт `text`) перемикає обидва
 логер-хендлери (file+stream) на `JsonFormatter` (`app/core/logger.py`) до їх створення. Це читає
 `GET /api/ready` (blueprint `system`, див. `memory/map/blueprints.md`) — 200 коли

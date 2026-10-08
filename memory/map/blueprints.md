@@ -78,7 +78,7 @@ migration v45) + теги — `app/services/categories.py` (`memory/map/services
 `enrichment._normalize`, а не SQL `LOWER()` — той не згортає кирилицю. У MCP (`commitments.list_commitments`) правило
 інше й навмисно ширше: підрядок по канонічному, сирому та аліасах — там вільний текст, а не чипи.
 
-## recording.py (~960) — `/api/recording/*`, `/api/recordings/*`
+## recording.py (~1060) — `/api/recording/*`, `/api/recordings/*`
 Живий запис mic/loopback + finalize + recovery, до `RECORDING_MAX_ACTIVE` паралельних сесій (4.7.0, ADR-026).
 `GET /devices` (5s cache), `POST /start` (mic/system device + `system_source {mode,apps}` + language +
 copilot), `<sid>/{pause,resume,stop,save,discard,state,live-transcript,stream(SSE)}`,
@@ -93,6 +93,13 @@ name, auto_name, elapsed_seconds, streams, system_source, copilot_active}], sess
 `POST <sid>/save` (`editable-title-description`-02, 4.5.0) JSON `{"name": str, "description"?: str}`
 — `description` нормалізується (`record_meta`) і йде в маніфест сесії → `register_recording()` →
 `audio_downloads.description`.
+**K2 autoprompt (4.9.0, recording.py:542-641):** `GET /api/recording/autoprompt` → `{enabled, prompts[]}`
+(без watcher'а `enabled:false`); `POST /autoprompt/<id>/dismiss` (лише `record`-підказки; 404 `NOT_FOUND`);
+`GET /autoprompt/<token>/<action>` (`record|sources|stop|keep`) — кнопки тосту Windows, токен одноразовий
+(`watcher.consume`), відповідь = redirect на `/record[?app=&mic=]` або HTML-сторінка помилки (404/409/500).
+`record` іде тим самим `_start_session`, що `POST /start`, з `include:[exe]` + мікрофон за назвою endpoint'а
+(`_mic_for`); `stop` → `stop_session(sid)` (module-level, його ж бере watcher для автостопу).
+Мутація через GET — навмисно (протокольна активація тосту), захист = непередбачуваний токен.
 
 ## audio_library.py (~329) — `/api/audio/*`
 Аудіотека (YouTube + записи). `POST /download`, `GET /downloads` (page/filter), `DELETE /downloads/<id>`,

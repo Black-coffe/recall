@@ -8,7 +8,10 @@
   `.state` (categories, stats). Чисті глобали.
 - **router.js** (151) — History API роутер. Патерни `/transcript/:slug` → regex. Делеговане
   перехоплення `<a href="/...">`. `_seq`-лічильник проти out-of-order рендерів (`ctx.isCurrent()`). Deep-link нативно.
-- **shell.js** (93) — активна навігація, бургер, ⌘K-тригер, банер оновлення моделі, live-лічильники (library/entities/tasks).
+- **shell.js** (344) — активна навігація, бургер, ⌘K-тригер, банер оновлення моделі, live-лічильники (library/entities/tasks).
+  K2: `startCallPrompts()` опитує `GET /api/recording/autoprompt` кожні 5 с (лише видима вкладка) і малює плашку
+  `.rc-toast--call` у `#rcToasts` (кнопки = навігація на одноразовий URL дії; «Не потрібно»/× на «Записати?» →
+  `POST …/dismiss`; × на «Зупинити?» лише ховає).
 - **api.js** (230) — JSON-обгортки (get/post/patch/put/del), multipart-аплоад через XHR з progress.
   **SSE через `fetch`+`ReadableStream.getReader()`, НЕ EventSource** (`postSseStream()`/`sseStream()`,
   буфер по `\n\n`, парс `event:`/`data:`, abort через AbortController).
@@ -53,10 +56,10 @@
 | `/documents` | documents | PDF/DOCX/...→ multipart → дедуп по хешу → /transcript |
 | `/telegram` | telegram | Панель слухача: dialogs, toggle-моніторинг, категорія, backfill. 4.8.0: рядок `.rc-tgrow*` = назва/тип/@нік/телефон (`fmtPhone`), чипів тегів у рядку нема; пошук `#rcTgSearch` по назві/імені/@нік (`@` — лише нік)/телефону (`phoneHit`), клієнтський індекс `searchIndex(d)`; first_name/phone приходять лише від живого слухача |
 | `/settings` | settings | System info, каталог моделей, **ко-пілот config**, категорії CRUD/merge, спікери |
-| `/record` | record | Рекордер: таби паралельних сесій (reattach до всіх з `/api/recordings/active`, SSE на кожну), setup→active→stop-name→transcribe, вибір системного звуку увесь/include/exclude з `/api/recording/apps`, retarget наживо (`/system-source`, подія `source_changed`), 409 `SESSION_LIMIT` ховає «+ Новий запис», перенос ко-пілота між табами; після стопу сусідам зі звуженим звуком пропонує повернути `all` (`auto_restore`, без відповіді = «так») |
+| `/record` | record | Рекордер: таби паралельних сесій (reattach до всіх з `/api/recordings/active`, SSE на кожну), setup→active→stop-name→transcribe, вибір системного звуку увесь/include/exclude з `/api/recording/apps`, retarget наживо (`/system-source`, подія `source_changed`), 409 `SESSION_LIMIT` ховає «+ Новий запис», перенос ко-пілота між табами; після стопу сусідам зі звуженим звуком пропонує повернути `all` (`auto_restore`, без відповіді = «так»); `?app=<exe>&mic=<назва>` (з «Інші джерела» K2) → `presetFrom(q)` лише передвибирає форму, невалідне ігнорується |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v70`** (`k1-name-vocabulary`, 4.8.0, sw.js:116). Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v72`** (sw.js:118; K2, 4.9.0). Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas

@@ -717,3 +717,122 @@ def test_save_is_idempotent_after_auto_register(save_client):
         ).fetchall()
     assert len(rows) == 1  # без дубля
     assert rows[0]['title'] == 'Перейменовано'
+
+
+# ---------------------------------------------------------------- call autoprompt (K2)
+
+def _watcher_with_prompt(live=None):
+    """Real CallWatcher on fakes, ticked through a 31 s Zoom call → one «Записати?» prompt."""
+    from app.services.recording import call_watch as cw
+    t = [0.0]
+    snap = {'zoom.exe': {'mic': {'active': True, 'peak': 0.3, 'endpoint': 'Мікрофон (FOX)'},
+                         'out': {'active': True, 'peak': 0.3, 'endpoint': 'Навушники'}}}
+    notifier = MagicMock()
+    w = cw.CallWatcher(apps=frozenset({'zoom.exe'}), prompt_seconds=30, autostop_minutes=10,
+                       base_url='http://127.0.0.1:5050', enumerate_calls=lambda: snap,
+                       live_sessions=lambda: live or [], stop_fn=MagicMock(), notifier=notifier,
+                       clock=lambda: t[0], wall=lambda: 1_760_000_000.0 + t[0])
+    for _ in range(31):
+        w.tick()
+        t[0] += 1
+    return w, t, snap
+
+
+def _install(client, watcher):
+    client.application.extensions['call_watcher'] = watcher
+
+
+def test_autoprompt_disabled_without_watcher(client):
+    r = client.get('/api/recording/autoprompt')
+    assert r.status_code == 200
+    assert r.get_json() == {'success': True, 'enabled': False, 'prompts': []}
+
+
+def test_autoprompt_pending_lists_prompt(client):
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    body = client.get('/api/recording/autoprompt').get_json()
+    assert body['enabled'] is True
+    [p] = body['prompts']
+    assert p['kind'] == 'record' and p['exe'] == 'zoom.exe' and p['label'] == 'Zoom'
+
+
+def test_autoprompt_record_starts_app_only_with_call_mic(client, fake_service):
+    fake_service.list_devices.return_value = [
+        {'index': 1, 'name': 'TestMic', 'kind': 'mic', 'is_default': True},
+        {'index': 7, 'name': 'Мікрофон (FOX)', 'kind': 'mic', 'is_default': False},
+    ]
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    token = w.pending()[0]['id']
+    r = client.get(f'/api/recording/autoprompt/{token}/record')
+    assert r.status_code == 302 and r.headers['Location'].endswith('/record')
+    kw = fake_service.start.call_args.kwargs
+    assert kw['system_source'].mode == 'include' and kw['system_source'].apps == ('zoom.exe',)
+    assert kw['mic_device_index'] == 7 and kw['system_device_index'] is None
+    # single use: the second click (or the other button) starts nothing
+    fake_service.start.reset_mock()
+    assert client.get(f'/api/recording/autoprompt/{token}/record').status_code == 404
+    assert client.get(f'/api/recording/autoprompt/{token}/sources').status_code == 404
+    fake_service.start.assert_not_called()
+
+
+def test_autoprompt_record_falls_back_to_default_mic(client, fake_service):
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    client.get(f"/api/recording/autoprompt/{w.pending()[0]['id']}/record")
+    assert fake_service.start.call_args.kwargs['mic_device_index'] == 1
+
+
+def test_autoprompt_unknown_token_starts_nothing(client, fake_service):
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    r = client.get('/api/recording/autoprompt/forged-token/record')
+    assert r.status_code == 404 and 'не дійсне' in r.get_data(as_text=True)
+    fake_service.start.assert_not_called()
+
+
+def test_autoprompt_record_session_limit_stops_nothing(client, fake_service):
+    from app.services.recording.service import SessionConflictError
+    fake_service.start.side_effect = SessionConflictError('limit', active=['a', 'b'], limit=2)
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    r = client.get(f"/api/recording/autoprompt/{w.pending()[0]['id']}/record")
+    assert r.status_code == 409 and 'Нічого не зупинено' in r.get_data(as_text=True)
+    fake_service.stop.assert_not_called()
+
+
+def test_autoprompt_sources_redirects_with_preselection(client, fake_service):
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    r = client.get(f"/api/recording/autoprompt/{w.pending()[0]['id']}/sources")
+    assert r.status_code == 302
+    from urllib.parse import parse_qs, urlparse
+    loc = urlparse(r.headers['Location'])
+    assert loc.path == '/record'
+    assert parse_qs(loc.query) == {'app': ['zoom.exe'], 'mic': ['Мікрофон (FOX)']}
+    fake_service.start.assert_not_called()
+
+
+def test_autoprompt_stop_uses_the_stop_path(client, fake_service):
+    live = [{'sid': 'rec_test123', 'system_source': {'mode': 'all'}, 'is_paused': False,
+             'mic_peak': 0.0, 'sys_peak': 0.0}]
+    w, t, snap = _watcher_with_prompt(live)
+    snap.clear()                                  # the call ends → «Зупинити?» for rec_test123
+    for _ in range(25):
+        w.tick()
+        t[0] += 1
+    [p] = [p for p in w.pending() if p['kind'] == 'stop']
+    _install(client, w)
+    r = client.get(f"/api/recording/autoprompt/{p['id']}/stop")
+    assert r.status_code == 302
+    fake_service.stop.assert_called_once_with('rec_test123', name=None)
+
+
+def test_autoprompt_dismiss(client):
+    w, _, _ = _watcher_with_prompt()
+    _install(client, w)
+    pid = w.pending()[0]['id']
+    assert client.post(f'/api/recording/autoprompt/{pid}/dismiss').status_code == 200
+    assert client.post(f'/api/recording/autoprompt/{pid}/dismiss').status_code == 404
+    assert client.get('/api/recording/autoprompt').get_json()['prompts'] == []

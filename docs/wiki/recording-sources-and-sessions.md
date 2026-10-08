@@ -2,7 +2,7 @@
 domain: recording
 tags: [recording, audio-source, process-loopback, multi-session, copilot]
 related: [rag-context-integrity]
-last-verified: 2026-09-28
+last-verified: 2026-10-08
 ---
 
 # Recording: audio sources, parallel sessions, single copilot
@@ -38,6 +38,11 @@ Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0. Code: `app/services/reco
 - **Copilot: one owner per process.** `CopilotService.start` raises `CopilotBusyError` when another
   live recording owns an active copilot row (enforced in the service, not the blueprint). Move is
   end-then-start, not atomic (`COPILOT_MOVE_FAILED`, `ended_from: true`).
+- **Call autoprompt never records on its own (K2, 4.9.0).** `call_watch.py` only asks: «Записати?» starts
+  mic + that one app's sound (`include:[exe]`) solely on a click of a single-use token URL; «Зупинити?» after
+  the call ends, then `RECORDING_AUTOSTOP_SILENCE_MIN` of silence on both tracks stops that recording through
+  the normal stop path (finalized whole). Only apps on the `RECORDING_AUTOPROMPT_APPS` allow-list can be a
+  call; a failed session enumeration holds state rather than reading as «call ended».
 - **No guessing the session.** `/api/recordings/active` fills `session_id`/`state` only when exactly
   one session is live; MCP live tools and `/api/copilot/live-ask` without `session_id` answer
   `AMBIGUOUS_SESSION` when more than one is live.

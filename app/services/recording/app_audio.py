@@ -63,6 +63,104 @@ def _default_enumerate_sessions() -> list[tuple[int, str, str, str | None]]:
         comtypes.CoUninitialize()
 
 
+#: Endpoint id → friendly name. pycaw's ``CreateDevice`` reads the whole property store
+#: (~600 values per device) and was 92 % of a 63 ms watcher tick (K2 measurement); the name of an
+#: endpoint does not change while it exists. A rename in Windows settings shows after a restart.
+_endpoint_names: dict[str, str] = {}
+
+
+def _endpoint_name(dev, audio_utilities) -> str:
+    dev_id = dev.GetId()
+    name = _endpoint_names.get(dev_id)
+    if name is None:
+        try:
+            name = audio_utilities.CreateDevice(dev).FriendlyName or dev_id
+        except Exception:
+            logger.debug('endpoint friendly name unavailable', exc_info=True)
+            return dev_id
+        _endpoint_names[dev_id] = name
+    return name
+
+
+def _default_enumerate_call_sessions() -> list[tuple[str, int, str, str, str | None, float]]:
+    """(flow, pid, state, endpoint_name, None, peak) for every session on every active capture
+    ('mic') and render ('out') endpoint. ``peak`` is the session's own meter (0..1): the K2 spike
+    measured it per session on capture too (own mic stream 0.0069 vs the endpoint's 0.0050)."""
+    import comtypes
+    from comtypes import CLSCTX_ALL, CoCreateInstance
+    from pycaw.api.audiopolicy import IAudioSessionControl2, IAudioSessionManager2
+    from pycaw.api.endpointvolume import IAudioMeterInformation
+    from pycaw.api.mmdeviceapi import IMMDeviceEnumerator
+    from pycaw.constants import CLSID_MMDeviceEnumerator
+    from pycaw.utils import AudioUtilities
+
+    comtypes.CoInitialize()
+    try:
+        rows = []
+        en = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
+        for flow, data_flow in (('mic', 1), ('out', 0)):  # eCapture, eRender
+            coll = en.EnumAudioEndpoints(data_flow, 1)  # DEVICE_STATE_ACTIVE
+            for i in range(coll.GetCount()):
+                dev = coll.Item(i)
+                name = _endpoint_name(dev, AudioUtilities)
+                mgr = dev.Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None).QueryInterface(
+                    IAudioSessionManager2)
+                se = mgr.GetSessionEnumerator()
+                for j in range(se.GetCount()):
+                    try:
+                        sess = se.GetSession(j)
+                        ctl = sess.QueryInterface(IAudioSessionControl2)
+                        pid = int(ctl.GetProcessId())
+                        state = _STATES.get(int(ctl.GetState()), 'expired')
+                        if state == 'expired':
+                            continue
+                        peak = float(sess.QueryInterface(IAudioMeterInformation).GetPeakValue())
+                    except Exception:
+                        logger.debug('audio session vanished during enumeration', exc_info=True)
+                        continue
+                    rows.append((flow, pid, state, str(name), None, peak))
+        return rows
+    finally:
+        comtypes.CoUninitialize()
+
+
+def list_call_sessions(*, enumerate_sessions=None, own_pid: int | None = None) -> dict | None:
+    """Per-exe microphone and output state for the call watcher (K2).
+
+    ``{exe: {'mic': {'active', 'peak', 'endpoint'}, 'out': {'active', 'peak', 'endpoint'}}}`` —
+    ``active`` if any session of that exe on that flow is Active, ``peak`` the loudest Active
+    session, ``endpoint`` its device name. Recall's own process is skipped. ``None`` when the
+    enumeration itself failed (the caller must not read that as «every call ended»)."""
+    if own_pid is None:
+        own_pid = os.getpid()
+    try:
+        sessions = list((enumerate_sessions or _default_enumerate_call_sessions)())
+    except Exception as exc:
+        logger.warning('call-session enumeration failed: %s', exc, exc_info=True)
+        return None
+    out: dict[str, dict] = {}
+    for flow, pid, state, endpoint, exe, peak in sessions:
+        if pid == 0 or pid == own_pid or state not in ('active', 'inactive'):
+            continue
+        if not exe:
+            try:
+                exe = psutil.Process(pid).name()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                logger.debug('call session pid %s not resolvable, skipped', pid)
+                continue
+        exe = os.path.basename(str(exe)).lower()
+        app = out.setdefault(exe, {f: {'active': False, 'peak': 0.0, 'endpoint': None}
+                                   for f in ('mic', 'out')})
+        side = app[flow]
+        if state != 'active':
+            continue
+        if not side['active'] or peak > side['peak']:
+            side['peak'] = float(peak)
+            side['endpoint'] = endpoint
+        side['active'] = True
+    return out
+
+
 def _recorded_by(exe: str, live_specs: dict[str, dict]) -> list[str]:
     out = []
     for sid, spec in live_specs.items():

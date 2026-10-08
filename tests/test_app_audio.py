@@ -186,3 +186,34 @@ def test_vanished_session_pid_skipped_and_no_session_falls_back():
     assert _roots([(99, 'active', 'S', 'zoom.exe')]) == []
     assert _roots([(99, 'active', 'S', 'zoom.exe')], fallback=lambda exe: [7, 8]) == [7, 8]
     assert _roots([], fallback=lambda exe: [7]) == [7]
+
+
+# ---------------------------------------------------------------- list_call_sessions (K2)
+
+def _call_sessions():
+    return [
+        ('mic', 100, 'active', 'Мікрофон (FOX)', 'Zoom.exe', 0.05),
+        ('mic', 101, 'active', 'Мікрофон (USB)', 'zoom.exe', 0.20),
+        ('out', 100, 'active', 'Навушники', 'Zoom.exe', 0.30),
+        ('mic', 200, 'inactive', 'Мікрофон (USB)', 'ms-teams.exe', 0.0),
+        ('out', 300, 'active', 'Навушники', 'chrome.exe', 0.40),
+        ('mic', OWN, 'active', 'Мікрофон (USB)', 'python.exe', 0.9),
+        ('mic', 0, 'active', 'Мікрофон (USB)', 'system', 0.9),
+        ('out', 400, 'expired', 'Навушники', 'dead.exe', 0.9),
+    ]
+
+
+def test_call_sessions_per_exe_and_flow():
+    res = app_audio.list_call_sessions(enumerate_sessions=_call_sessions, own_pid=OWN)
+    assert set(res) == {'zoom.exe', 'ms-teams.exe', 'chrome.exe'}
+    zoom = res['zoom.exe']
+    assert zoom['mic'] == {'active': True, 'peak': 0.20, 'endpoint': 'Мікрофон (USB)'}   # loudest wins
+    assert zoom['out'] == {'active': True, 'peak': 0.30, 'endpoint': 'Навушники'}
+    assert res['ms-teams.exe']['mic']['active'] is False                               # open, no call
+    assert res['chrome.exe']['mic'] == {'active': False, 'peak': 0.0, 'endpoint': None}  # sound only
+
+
+def test_call_sessions_enumeration_failure_is_none_not_empty():
+    def boom():
+        raise OSError('COM failure')
+    assert app_audio.list_call_sessions(enumerate_sessions=boom, own_pid=OWN) is None

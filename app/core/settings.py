@@ -184,6 +184,27 @@ REGISTRY: tuple[Setting, ...] = (
             "Мінімум вільного місця (МБ), нижче якого запис не стартує.",
             "Нижче — recording/screens.py відмовляє стартувати запис із повідомленням про нестачу диска.",
             scope="config"),
+    Setting("RECORDING_AUTOPROMPT", "1", "bool", "Запис",
+            "Підказки дзвінка (K2, app/services/recording/call_watch.py): «Записати?», коли в застосунку "
+            "зі списку 30 с звучать і мікрофон, і звук; «Зупинити?», коли дзвінок скінчився.",
+            "1 → у процесі app.py (під __main__) щосекунди дивиться на аудіосесії і шле сповіщення Windows; "
+            "запис без натискання не стартує ніколи. 0 → потік не стартує, GET /api/recording/autoprompt "
+            "віддає enabled:false.", profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT_APPS",
+            "zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,whatsapp.exe,"
+            "chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe", "str", "Запис",
+            "Застосунки-дзвонилки для підказок K2: імена exe через кому (без регістру, «.exe» можна не писати).",
+            "Лише ці застосунки можуть викликати «Записати?»; диктовки (VoiceDrop, Wispr Flow) сюди не "
+            "додавати — їхня розмова з мікрофоном не дзвінок.", profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT_SECONDS", "30", "int", "Запис",
+            "Скільки секунд поспіль у дзвонилки мають бути активні мікрофон і звук (з голосом з обох "
+            "боків), перш ніж зʼявиться «Записати?».",
+            "Менше → підказка раніше, але більше шансів на хибну; працює лише з RECORDING_AUTOPROMPT.",
+            profile="desktop"),
+    Setting("RECORDING_AUTOSTOP_SILENCE_MIN", "10", "int", "Запис",
+            "Хвилини тиші на обох доріжках після «Зупинити?», після яких запис зупиняється сам.",
+            "Діє лише на записи, про які вже спитали «Зупинити?»; запис зберігається повністю, "
+            "на паузі тиша не рахується.", profile="desktop"),
 
     # --- Відео-запис (screen capture) ---
     Setting("RECORDING_VIDEO_ENABLED", "True", "bool", "Відео-запис",

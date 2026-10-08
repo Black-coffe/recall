@@ -17,6 +17,9 @@ Endpoints:
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
 - ``POST   /api/recording/<sid>/system-source`` — перенацілити системний звук (ADR-026 D3).
 - ``GET    /api/recording/apps``          — застосунки, що звучать зараз (C3).
+- ``GET    /api/recording/autoprompt``    — підказки дзвінка, що чекають відповіді (K2).
+- ``GET    /api/recording/autoprompt/<token>/<action>`` — кнопки сповіщення (одноразово).
+- ``POST   /api/recording/autoprompt/<id>/dismiss`` — «Не потрібно» з плашки.
 - ``GET    /api/recordings/active``       — усі живі сесії (для reattach).
 
 Якщо ``state.recording_service is None`` (RECORDING_ENABLED=False
@@ -24,12 +27,14 @@ Endpoints:
 """
 from __future__ import annotations
 
+import html
 import logging
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
-from flask import Blueprint, Response, current_app, g, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, stream_with_context
 
 from app import state
 from app.services import record_meta
@@ -254,11 +259,16 @@ def start_recording():
     - 400 якщо параметри невалідні
     - 409 якщо вже є активна сесія
     """
+    return _start_session(request.get_json(silent=True) or {})
+
+
+def _start_session(data: dict):
+    """Тіло старту — спільне для ``POST /start`` і кнопки «Записати» з підказки
+    дзвінка (K2): одна копія логіки, а не дві. Повертає те саме, що маршрут."""
     err = _require_service()
     if err:
         return err
 
-    data = request.get_json(silent=True) or {}
     mic_idx = data.get('mic_device_index')
     sys_idx = data.get('system_device_index')
     # Мова для live-preview transcribe. UI шле значення глобального
@@ -529,6 +539,128 @@ def list_apps():
     return jsonify({'success': True, **result})
 
 
+# ---------------------------------------------------------------- call autoprompt (K2)
+
+def _call_watcher():
+    """``CallWatcher`` живе в ``app.extensions`` лише в процесі, що обслуговує запити
+    (app.py під ``__main__``, RECORDING_AUTOPROMPT); інакше ``None``."""
+    return current_app.extensions.get('call_watcher')
+
+
+def _autoprompt_page(title: str, text: str, code: int):
+    """Маленька сторінка для вкладки, яку відкрила кнопка сповіщення."""
+    body = (
+        '<!doctype html><html lang="uk"><meta charset="utf-8"><title>Recall</title>'
+        '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">'
+        f'<h1 style="font-size:1.25rem">{html.escape(title)}</h1><p>{html.escape(text)}</p>'
+        '<p><a href="/record">Відкрити запис у Recall</a></p></body></html>'
+    )
+    return Response(body, status=code, mimetype='text/html')
+
+
+def _mic_for(endpoint: str | None) -> dict | None:
+    """Мікрофон, з якого захоплює сам дзвінок (імʼя endpoint'а його сесії), інакше дефолтний."""
+    try:
+        mics = [d for d in state.recording_service.list_devices() if d.get('kind') == 'mic']
+    except Exception as e:
+        logger.warning("autoprompt: device enumeration failed: %s", e, exc_info=True)
+        return None
+    if endpoint:
+        for d in mics:
+            if d.get('name') == endpoint:
+                return d
+        for d in mics:
+            name = str(d.get('name') or '')
+            if name and (name.startswith(endpoint) or endpoint.startswith(name)):
+                return d
+    for d in mics:
+        if d.get('is_default'):
+            return d
+    return mics[0] if mics else None
+
+
+@recording_bp.route('/api/recording/autoprompt', methods=['GET'])
+def autoprompt_pending():
+    """Підказки дзвінка, що чекають відповіді (для плашки у вкладці, K2)."""
+    watcher = _call_watcher()
+    if watcher is None:
+        return jsonify({'success': True, 'enabled': False, 'prompts': []})
+    return jsonify({'success': True, 'enabled': True, 'prompts': watcher.pending()})
+
+
+@recording_bp.route('/api/recording/autoprompt/<prompt_id>/dismiss', methods=['POST'])
+def autoprompt_dismiss(prompt_id: str):
+    """«Не потрібно» з плашки: підказка зникає, за цей дзвінок не повторюється."""
+    watcher = _call_watcher()
+    if watcher is None or not watcher.dismiss(prompt_id):
+        return jsonify({'success': False, 'error': 'Підказки вже немає', 'error_code': 'NOT_FOUND'}), 404
+    return jsonify({'success': True})
+
+
+@recording_bp.route('/api/recording/autoprompt/<token>/<action>', methods=['GET'])
+def autoprompt_action(token: str, action: str):
+    """Кнопки сповіщення Windows відкривають цей URL у браузері. Токен = id підказки,
+    одноразовий і живе, поки живе його дзвінок або запис: без нього нічого не
+    стартує, тож чужий сайт запис не ввімкне. ``record`` стартує мікрофон + звук
+    лише цього застосунку тим самим кодом, що ``POST /start``."""
+    watcher = _call_watcher()
+    info = watcher.consume(token, action) if watcher is not None else None
+    if info is None:
+        return _autoprompt_page('Посилання вже не дійсне',
+                                'Цю підказку вже використано, або дзвінок закінчився.', 404)
+    if action == 'sources':
+        query = {'app': info['exe']}
+        if info.get('mic_endpoint'):
+            query['mic'] = info['mic_endpoint']
+        return redirect('/record?' + urlencode(query))
+    if action == 'keep':
+        return redirect('/record')
+    if action == 'stop':
+        try:
+            stop_session(info['session_id'])
+        except SessionNotFoundError:
+            return _autoprompt_page('Запис уже зупинено', 'Нічого робити не треба.', 200)
+        except Exception as e:
+            logger.exception("autoprompt stop crashed: %s", e)
+            return _autoprompt_page('Не вдалося зупинити запис', 'Подробиці — у журналі Recall.', 500)
+        return redirect('/record')
+
+    body: dict = {'system_source': {'mode': 'include', 'apps': [info['exe']]}}
+    mic = _mic_for(info.get('mic_endpoint'))
+    if mic is not None:
+        body['mic_device_index'] = mic['index']
+        body['mic_device_name'] = mic.get('name')
+    resp = _start_session(body)
+    resp, code = resp if isinstance(resp, tuple) else (resp, resp.status_code)
+    payload = resp.get_json(silent=True) or {}
+    if payload.get('success'):
+        return redirect('/record')
+    if payload.get('error_code') == 'SESSION_LIMIT':
+        return _autoprompt_page('Запис не почато',
+                                f"Уже йде максимум записів ({payload.get('limit')}). Нічого не зупинено.", 409)
+    return _autoprompt_page('Запис не почато', payload.get('error') or 'Подробиці — у журналі Recall.', code)
+
+
+def stop_session(session_id: str, name: str | None = None) -> None:
+    """Стоп запису + live-транскрипції й копілота цього запису. Спільне для
+    ``POST /stop`` і автостопу K2, який кличе це з фонового потоку (без request-
+    контексту). ``SessionNotFoundError`` та інші помилки ``service.stop``
+    прокидаються викликачеві."""
+    state.recording_service.stop(session_id, name=name)
+
+    # Phase 12.26: Stop live transcribe worker ЦІЄЇ сесії (per-sid): живі воркери
+    # іншого запису не чекаємо. Повна транскрипція серіалізується з ними
+    # семафором WHISPER_MAX_PARALLEL=1 — їхня лента просто відстане (ADR-026, Ask 10).
+    if state.live_transcribe_worker is not None:
+        try:
+            state.live_transcribe_worker.stop(session_id, wait=True)
+        except Exception as e:
+            logger.warning("live_transcribe stop failed: %s", e)
+
+    # Phase 19: завершити копілот-сесію цього запису (якщо була).
+    _end_copilot_for(session_id)
+
+
 @recording_bp.route('/api/recording/<session_id>/stop', methods=['POST'])
 def stop_recording(session_id: str):
     """Зупинити запис. Body може містити:
@@ -546,24 +678,12 @@ def stop_recording(session_id: str):
         name = name.strip() or None
 
     try:
-        state.recording_service.stop(session_id, name=name)
+        stop_session(session_id, name=name)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
     except Exception as e:
         logger.exception("stop_recording crashed: %s", e)
         return _internal_error_response('INTERNAL')
-
-    # Phase 12.26: Stop live transcribe worker ЦІЄЇ сесії (per-sid): живі воркери
-    # іншого запису не чекаємо. Повна транскрипція серіалізується з ними
-    # семафором WHISPER_MAX_PARALLEL=1 — їхня лента просто відстане (ADR-026, Ask 10).
-    if state.live_transcribe_worker is not None:
-        try:
-            state.live_transcribe_worker.stop(session_id, wait=True)
-        except Exception as e:
-            logger.warning("live_transcribe stop failed: %s", e)
-
-    # Phase 19: завершити копілот-сесію цього запису (якщо була).
-    _end_copilot_for(session_id)
 
     return jsonify({
         'success': True,

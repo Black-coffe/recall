@@ -976,6 +976,9 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-toast__action:hover { background: var(--rc-accent-tint); color: var(--rc-accent-deep); }
 .rc-toast__x { background: none; border: none; color: var(--rc-surface); opacity: .7; font-size: 1.1rem; line-height: 1; cursor: pointer; flex: none; padding: 0 0 0 var(--rc-1); }
 .rc-toast__x:hover { opacity: 1; }
+/* K2: call prompt — up to three buttons, wraps under the text on narrow screens. */
+.rc-toast--call { max-width: 520px; flex-wrap: wrap; }
+.rc-toast__actions { display: flex; gap: var(--rc-2); flex-wrap: wrap; }
 
 /* ----------------------------------------------------------------------------
    Ask (RAG) view

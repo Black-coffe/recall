@@ -36,6 +36,19 @@ UI — клієнтський SPA «Recall»: тепла паперова ест
 
 ## 🚀 Швидкий старт
 
+### 0. Що потрібно
+
+| Що | Вимога |
+|---|---|
+| ОС | Windows 10/11. Запис звуку й екрана працює тільки на Windows; macOS і Linux не перевірялись — адаптуйте разом із Claude Code |
+| Відеокарта | NVIDIA з CUDA 12.1 (перевірено на RTX 3090). `large-v3` ≈ 10 ГБ відеопам'яті, `large-v3-turbo` ≈ 6 ГБ. Без NVIDIA — `FORCE_CPU=true` у `.env`: працює, але повільно |
+| Програми | Python 3.12, Git, FFmpeg у PATH |
+| Місце на диску | ≈ 6 ГБ на `.venv` + ≈ 4 ГБ моделей (Whisper, e5); з діаризацією ≈ 10 ГБ і більше |
+| Час | 40–90 хв на чистій машині; найдовше — завантаження ≈ 8 ГБ пакетів і моделей |
+
+> **Найпростіше — з Claude Code.** Склонуйте репозиторій, відкрийте в теці Claude Code і попросіть:
+> «Встанови Recall за README.md, запусти й покажи, що він уміє». Команди нижче — те саме, що він виконає.
+
 ### 1. Залежності
 
 ```cmd
@@ -55,22 +68,47 @@ REM версія torchaudio обов'язково з тим самим суфі�
 
 REM Решта Python-залежностей (без ізольованої збірки, щоб діяв setuptools<81)
 .venv\Scripts\python.exe -m pip install --no-build-isolation -r requirements.txt
+
+REM Налаштування: копія шаблону, далі — розділ 3
+copy .env.example .env
 ```
+
+Перевірка, що все стало як треба (`True`, `2.5.1+cu121` двічі, `av` нижче 19, `pip check` без конфліктів):
+
+```cmd
+.venv\Scripts\python.exe -c "import torch, torchaudio, av; print(torch.cuda.is_available(), torch.__version__, torchaudio.__version__, av.__version__)"
+.venv\Scripts\python.exe -m pip check
+```
+
+> `faster-whisper` закріплено на 1.1.1 свідомо; застосунок пише «update available» — **не оновлюйте**
+> (причина — коментар у `requirements.txt`).
 
 ### 2. FFmpeg (обов'язково)
 
 Потрібен для YouTube та обробки довгих аудіо.
 
 **Windows:** завантажте з [ffmpeg.org](https://ffmpeg.org/download.html), розпакуйте
-в `C:\ffmpeg`, додайте `C:\ffmpeg\bin` до PATH.
+в `C:\ffmpeg`, додайте `C:\ffmpeg\bin` до PATH. Перевірка: `ffmpeg -version`.
 
-### 3. Запуск
+### 3. `.env` — ключі й порт
+
+Усе необов'язкове: без жодного ключа працюють розшифровка, пошук і OCR. У `.env` (його створила команда
+`copy .env.example .env`) розкоментуйте потрібне:
+
+| Змінна | Навіщо | Без неї |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | картки зустрічей, відповіді по архіву, перевірка ко-пілота | ці функції тихо вимкнені |
+| `HF_TOKEN` | діаризація (хто говорить). Токен — huggingface.co/settings/tokens; спершу прийміть ліцензії [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) і [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) | розшифровка без розділення на спікерів |
+| `FLASK_PORT` | порт інтерфейсу, за замовчуванням `5050` | 5050 |
+| `FORCE_CPU` | `true` — без відеокарти | GPU, якщо є |
+
+### 4. Запуск
 
 ```cmd
-REM Через лаунчер (з очисткою старого процесу на 5050)
+REM Через лаунчер: зупиняє ВСІ запущені копії Recall (app.py) і відкриває http://localhost:5050
 Recall.bat
 
-REM Або напряму
+REM Або напряму (якщо змінили FLASK_PORT або тримаєте другу копію)
 .venv\Scripts\python.exe app.py
 ```
 
@@ -79,7 +117,15 @@ REM Або напряму
 > `app.py` — єдина точка запуску: він сам піднімає слухача Telegram як дочірній
 > процес (якщо є ключі + сесія). MCP-сервер (`mcp_server.py`) запускається окремо.
 
-### 4. (Опційно) Telegram ingestion
+### 5. Перший запуск — чого чекати
+
+- Моделі качаються при першому використанні, а не при встановленні: Whisper `large-v3-turbo` (≈ 1,5 ГБ) —
+  на першій розшифровці, e5 (≈ 2,2 ГБ) — на першому пошуку, pyannote (≈ 1,5 ГБ) — на першій діаризації.
+  Перша розшифровка й перший пошук ідуть по 2–3 хв; далі — секунди.
+- Перший пошук одразу після першої розшифровки може повернути порожньо: запис ще індексується. Повторіть
+  за хвилину.
+
+### 6. (Опційно) Telegram ingestion
 
 ```cmd
 REM Ключі api_id/api_hash з https://my.telegram.org → у .env:
@@ -90,6 +136,9 @@ REM Одноразовий QR-логін (створює telegram.session)
 ```
 
 Далі `app.py` автоматично запускає слухача; вибір чатів — у UI (таб «Telegram»).
+
+> README перевіряється тестом `tests/test_install_docs.py`: кожна команда встановлення має збігатися з
+> `requirements.txt` і `.env.example`. Змінили залежність — змініть і тут, інакше тест червоний.
 
 ## 🛠️ Технології
 

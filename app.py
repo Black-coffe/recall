@@ -1186,6 +1186,66 @@ def _maybe_launch_telegram_listener():
     atexit.register(_stop_listener)
 
 
+def _maybe_start_call_watcher():
+    """K2: підказки «Записати?» / «Зупинити?» за самим дзвінком (call_watch.py).
+
+    Лише під ``__main__`` і лише в процесі, що обслуговує запити — під pytest
+    (імпорт app.py) потік не стартує і сповіщень не шле. Вимкнений прапорець,
+    не Windows або без pycaw → один рядок у лозі й нічого більше."""
+    if recording_service is None or not _settings.env_bool('RECORDING_AUTOPROMPT'):
+        logger.info("Підказки дзвінка: вимкнено (нема запису або RECORDING_AUTOPROMPT=0)")
+        return
+    if sys.platform != 'win32':
+        logger.info("Підказки дзвінка: лише Windows — не запускаю")
+        return
+    try:
+        import pycaw  # noqa: F401 — перевірка наявності, саме перелічення ліниве
+        from app.blueprints.recording import stop_session
+        from app.services.recording.app_audio import list_call_sessions
+        from app.services.recording.call_watch import CallWatcher, ToastNotifier, parse_apps
+        from app.services.recording.service import SessionNotFoundError
+    except ImportError as e:
+        logger.info("Підказки дзвінка: нема залежності (%s) — не запускаю", e)
+        return
+
+    def _live_sessions():
+        out = []
+        for sid in recording_service.active_session_ids():
+            try:
+                st = recording_service.get_state(sid)
+            except SessionNotFoundError:
+                continue
+            streams = st.get('streams') or {}
+            out.append({
+                'sid': sid,
+                'system_source': st.get('system_source'),
+                'is_paused': bool(st.get('is_paused')),
+                'mic_peak': float((streams.get('mic') or {}).get('peak') or 0.0),
+                'sys_peak': float((streams.get('system') or {}).get('peak') or 0.0),
+            })
+        return out
+
+    _root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        os.makedirs(os.path.join(_root, 'logs'), exist_ok=True)
+        watcher = CallWatcher(
+            apps=parse_apps(_settings.env('RECORDING_AUTOPROMPT_APPS')),
+            prompt_seconds=_settings.env_int('RECORDING_AUTOPROMPT_SECONDS'),
+            autostop_minutes=_settings.env_int('RECORDING_AUTOSTOP_SILENCE_MIN'),
+            base_url=f'http://127.0.0.1:{cfg.PORT}',
+            enumerate_calls=list_call_sessions,
+            live_sessions=_live_sessions,
+            stop_fn=stop_session,
+            notifier=ToastNotifier(icon_path=os.path.join(_root, 'static', 'icon-192.png')),
+            log_path=os.path.join(_root, 'logs', 'call_watch.jsonl'),
+        )
+    except Exception as e:
+        logger.warning("Підказки дзвінка не запустились: %s", e, exc_info=True)
+        return
+    app.extensions['call_watcher'] = watcher
+    watcher.start()
+
+
 # config-registry-profiles S2: boot-послідовність модульного рівня завершена
 # (БД/міграції/JobQueue/recorder-гейт/лічильники/blueprints/auth/error-handler
 # усі вище). Telegram-слухач запускається нижче лише під `__main__` (reloader-
@@ -1220,5 +1280,9 @@ if __name__ == '__main__':
     # дублі при кожному перезавантаженні; стабільний watcher-процес запускає.
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         _maybe_launch_telegram_listener()
+    # K2: наблюдач дзвінків — у процесі, що обслуговує запити (під reloader'ом
+    # це дочірній із WERKZEUG_RUN_MAIN='true', без reloader'а — цей самий).
+    if not debug_mode or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        _maybe_start_call_watcher()
     # threaded=True для SSE: каждое соединение в своём потоке, не блокирует другие.
     app.run(debug=debug_mode, host=host, port=cfg.PORT, threaded=True)

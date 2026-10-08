@@ -44,6 +44,7 @@
         shell.loadCounts();
         shell.checkModelUpdates();
         startConnWatch();
+        startCallPrompts();
         initServiceWorker();
     };
 
@@ -194,6 +195,79 @@
         document.addEventListener('visibilitychange', () => { if (!document.hidden) pingHealth(); });
         pingHealth();
         setInterval(pingHealth, CONN_PING_INTERVAL_MS);
+    }
+
+    // ============================================================
+    // K2: підказки дзвінка («Записати?» / «Зупинити?») плашкою у вкладці.
+    // Детектор живе на сервері (call_watch.py) і шле сповіщення Windows; тут лише
+    // показуємо те саме, що віддає GET /api/recording/autoprompt, з тими ж
+    // кнопками. Кнопка = перехід на одноразовий URL дії: сервер робить дію і
+    // повертає на /record. Опитування — лише коли вкладка видима.
+    const CALL_POLL_MS = 5000;
+    const callShown = new Map();   // prompt id → element (null = закрито тут, не показувати знову)
+
+    function startCallPrompts() {
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollCallPrompts(); });
+        pollCallPrompts();
+        setInterval(pollCallPrompts, CALL_POLL_MS);
+    }
+
+    async function pollCallPrompts() {
+        if (document.hidden) return;
+        let d = null;
+        try { d = await R.api.get('/api/recording/autoprompt', { retries: 0 }); } catch (_) { return; }
+        const prompts = (d && d.enabled && Array.isArray(d.prompts)) ? d.prompts : [];
+        const live = new Set(prompts.map(p => p.id));
+        for (const [id, el] of callShown) {
+            if (!live.has(id)) { if (el) el.remove(); callShown.delete(id); }
+        }
+        for (const p of prompts) {
+            if (!callShown.has(p.id)) callShown.set(p.id, showCallPrompt(p));
+        }
+    }
+
+    function goAction(url) {
+        const u = new URL(url, window.location.origin);   // той самий origin, хоч би як відкрито Recall
+        window.location.href = u.pathname + u.search;
+    }
+
+    function showCallPrompt(p) {
+        const wrap = document.getElementById('rcToasts');
+        if (!wrap) return null;
+        const isRec = p.kind === 'record';
+        const t = document.createElement('div');
+        t.className = 'rc-toast rc-toast--action rc-toast--call';
+        t.innerHTML = '<i class="rc-ico fa-solid ' + (isRec ? 'fa-phone' : 'fa-circle-stop') + '"></i><span></span>' +
+            '<div class="rc-toast__actions"></div>' +
+            '<button type="button" class="rc-toast__x" aria-label="Закрити">&times;</button>';
+        t.querySelector('span').textContent = isRec
+            ? 'Дзвінок у ' + p.label + '. Записати?'
+            : 'Дзвінок у ' + p.label + ' закінчився. Зупинити запис?';
+        const acts = t.querySelector('.rc-toast__actions');
+        const add = (label, fn) => {
+            const b = document.createElement('button');
+            b.type = 'button'; b.className = 'rc-toast__action'; b.textContent = label;
+            b.addEventListener('click', fn);
+            acts.appendChild(b);
+        };
+        const dismiss = async () => {
+            t.remove(); callShown.set(p.id, null);
+            try { await R.api.post('/api/recording/autoprompt/' + encodeURIComponent(p.id) + '/dismiss', {}); }
+            catch (err) { console.warn('[shell] call prompt dismiss failed:', err && err.message); }
+        };
+        if (isRec) {
+            add('Записати', () => goAction(p.actions.record));
+            add('Інші джерела', () => goAction(p.actions.sources));
+            add('Не потрібно', dismiss);
+        } else {
+            add('Зупинити', () => goAction(p.actions.stop));
+            add('Продовжити', () => goAction(p.actions.keep));
+        }
+        // × на «Записати?» = «Не потрібно»; на «Зупинити?» лише ховає плашку тут
+        // (автостоп після тиші лишається — ним керує сервер).
+        t.querySelector('.rc-toast__x').addEventListener('click', isRec ? dismiss : () => { t.remove(); callShown.set(p.id, null); });
+        wrap.appendChild(t);
+        return t;
     }
 
     // ============================================================

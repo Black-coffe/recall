@@ -30,6 +30,18 @@ comtypes+pycaw для process loopback). ADR-026 (+ поправки A1-A4). Wik
   render-endpoint, дедуп по exe, `recorded_by`; ніколи не кидає → `available:false`),
   `session_pids()`, `session_roots(exe, fallback=)` (сесійні PID → корінь дерева exe, першим —
   дерево з Active-сесією). Незалежний від `audio_source.py`.
+  `list_call_sessions(enumerate_sessions=, own_pid=)` (K2) → `{exe: {mic|out: {active, peak, endpoint}}}`
+  по Active/Inactive-сесіях обох напрямків (власний PID пропущено); `None`, коли саме перелічення впало.
+- **call_watch.py** (K2, 4.9.0) — `CallWatcher` (потік `call-watch`, тік 1 с, усі залежності ін'єктовані →
+  `tick()` тестований). Дзвінок = exe зі списку, у якого mic І out Active `prompt_seconds` поспіль і кожна сторона
+  > `SPEECH_PEAK=0.02` ≥3 тіків → один тост «Записати?» (не, якщо живий запис уже захоплює exe: `captures()`).
+  Кінець дзвінка (сесії неактивні 20 с або тиша 40 с) відкликає непрочитану підказку й питає «Зупинити?» про
+  кожен живий непаузований запис, що захоплює exe; далі `autostop_minutes` тиші на обох доріжках → `stop_fn`
+  (шлях кнопки Stop, запис цілий). `pending()/consume(token,action)/dismiss(id)`: id підказки = одноразовий токен,
+  TTL 3 год. JSONL-лог рішень (без PID/мови, ротація 5 МБ → `.1`). `enumerate → None` тримає стан. `ToastNotifier`.
+- **toast.py** (K2) — тости Windows без pip-залежності: `powershell.exe -EncodedCommand` (WinRT
+  `ToastNotificationManager`, `NO_WINDOW`), AUMID `Recall.CallPrompt` у HKCU; `build_xml`, `show`, `remove`,
+  `ensure_registered`. Кнопки — protocol activation (URL у браузері). Повертає `bool`, не кидає.
 - **recorder.py** — `WasapiRecorder` (+ `drain_events()` → `[]`), `list_input_devices()`,
   `resolve_device_params()`, `LevelMeter`, `AudioFrame`.
 - **finalize.py** — `pcm_to_wav()`, `finalize_session()` (mic+system → overlay → final.mp3). Читає лише байти.
@@ -64,8 +76,11 @@ comtypes+pycaw для process loopback). ADR-026 (+ поправки A1-A4). Wik
 **Gotchas:** клієнт на мертвий PID стрімить тишу без помилки — watcher єдиний детектор смерті;
 watcher при include >4 процесів обрізає до 4 (open() у тій самій ситуації кидає); копілот — один на
 процес (`CopilotBusyError`, `memory/map/copilot.md`); reembed відкладається, поки живий хоч один запис.
+**K2:** нічого не стартує без кліку; автостоп діє лише після «Зупинити?» і не на паузі; watcher живе тільки
+під `__main__` (`app.extensions['call_watcher']`, `app.py:1189`); налаштування `RECORDING_AUTOPROMPT[_APPS|_SECONDS]`,
+`RECORDING_AUTOSTOP_SILENCE_MIN` (`app/core/settings.py:187-204`, `.env.example:120-129`); HTTP — `memory/map/blueprints.md`.
 **SSE** (`recording:{sid}`): level (10Hz), status, chunk_saved, error, source_changed.
-**Тести:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,parallel_recordings,
+**Тести:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
 recording_service,recording_blueprint,session_store}.py`. Спайк-кіт: `scripts/spikes/process_loopback/`.
 
-last-verified: 2026-09-28
+last-verified: 2026-10-08

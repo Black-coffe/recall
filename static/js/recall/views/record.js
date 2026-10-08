@@ -57,7 +57,15 @@
         for (const S of sessions.values()) haltS(S);
         sessions.clear();
         selSid = null; st = null; _letter = 0; _limitHit = false;
-        G = { devices: [], screens: [], videoAvailable: false, videoRegions: {}, exclude: null, includeFor: {} };
+        G = { devices: [], screens: [], videoAvailable: false, videoRegions: {}, exclude: null, includeFor: {}, preset: null };
+    }
+    // K2: «Інші джерела» з підказки дзвінка → /record?app=<exe>&mic=<назва мікрофона>.
+    // Лише передвибір на формі; невідомі значення мовчки ігноруються.
+    function presetFrom(q) {
+        const app = String((q && q.app) || '').trim().toLowerCase();
+        if (!/^[\w .()-]{1,80}\.exe$/.test(app)) return null;
+        const mic = String((q && q.mic) || '').trim();
+        return { app, label: app.replace(/\.exe$/, ''), mic: mic || null };
     }
     function $id(id) { return (st && st.sessionId && st.sessionId === selSid) ? document.getElementById(id) : null; }
     function withS(S, fn) { const prev = st; st = S; try { return fn(); } finally { st = prev; } }
@@ -82,6 +90,7 @@
 
     async function render(ctx) {
         reset();
+        G.preset = presetFrom(ctx.query);
         currentCtx = ctx;
         _models = _models || (await loadModels());
         _cats = await UI.loadCategories();
@@ -144,12 +153,9 @@
         }
         if (!ctx.isCurrent()) return;
         const first = sessions.keys().next();
-        if (!first.done) {
-            for (const S of sessions.values()) { connectSSE(ctx, S); startTick(ctx, S); }
-            select(ctx, first.value);
-        } else {
-            select(ctx, null);
-        }
+        for (const S of sessions.values()) { connectSSE(ctx, S); startTick(ctx, S); }
+        // З передвибором дзвінка відкриваємо форму нового запису, а не живий таб.
+        select(ctx, (!first.done && !G.preset) ? first.value : null);
     }
 
     function attachSession(e, snap) {
@@ -643,9 +649,17 @@
     function renderSetup(ctx) {
         const mics = G.devices.filter(d => d.kind === 'mic');
         const lbs = G.devices.filter(d => d.kind === 'loopback');
+        const pre = G.preset;
+        const preMic = pre && pre.mic && mics.some(d => d.name === pre.mic) ? pre.mic : null;
+        const isSel = d => (d.kind === 'mic' && preMic) ? d.name === preMic : d.is_default;
         const devOpts = (arr, empty) => arr.length
-            ? arr.map(d => `<option value="${d.index}" data-name="${U.esc(d.name)}"${d.is_default ? ' selected' : ''}>${U.esc(d.name)}${d.is_default ? ' (типовий)' : ''}</option>`).join('')
+            ? arr.map(d => `<option value="${d.index}" data-name="${U.esc(d.name)}"${isSel(d) ? ' selected' : ''}>${U.esc(d.name)}${d.is_default ? ' (типовий)' : ''}</option>`).join('')
             : `<option value="">${empty}</option>`;
+        const presetBlock = pre ? `
+                <div class="rc-recsrc rc-recsrc--prompt" id="rcRecPreset">
+                    <div class="rc-recsrc__head"><i class="fa-solid fa-phone"></i> Підказка дзвінка</div>
+                    <label class="rc-check"><input type="checkbox" id="rcRecPresetOnly" checked> <span>Системний звук — лише ${U.esc(pre.label)}</span></label>
+                </div>` : '';
         const second = liveSessions().length > 0;
 
         const body = ctx.mount.querySelector('#rcRecBody');
@@ -661,6 +675,7 @@
                         <i class="fa-solid fa-volume-high"></i> <span>Системний звук</span></label>
                     <select class="rc-select" id="rcRecSys" ${lbs.length ? '' : 'disabled'}>${devOpts(lbs, 'Немає loopback')}</select>
                 </div>
+                ${presetBlock}
                 ${videoSection()}
                 <div class="rc-field" style="max-width:260px">
                     <label class="rc-field__label" for="rcRecLang">Мова live-превʼю</label>
@@ -757,7 +772,15 @@
             const o = sysSel.options[sysSel.selectedIndex];
             payload.system_device_name = o ? o.dataset.name : null;
         }
-        if (payload.mic_device_index == null && payload.system_device_index == null) {
+        // K2: передвибір дзвінка — системний звук лише цього застосунку (include,
+        // пристрій loopback тоді не потрібен).
+        const preOnly = G.preset && ctx.mount.querySelector('#rcRecPresetOnly');
+        if (preOnly && preOnly.checked && sysEn && sysEn.checked) {
+            delete payload.system_device_index;
+            delete payload.system_device_name;
+            payload.system_source = { mode: 'include', apps: [G.preset.app] };
+        }
+        if (payload.mic_device_index == null && payload.system_device_index == null && !payload.system_source) {
             UI.toast('Оберіть хоча б один потік', 'error'); return;
         }
         const langSel = ctx.mount.querySelector('#rcRecLang');
@@ -802,7 +825,8 @@
             S.copilotSessionId = r.copilot_session_id || null;
             S.copilotActive = !!S.copilotSessionId;
             if (r.copilot && r.copilot.error_code === 'COPILOT_BUSY') S.cpOffer = r.copilot.owner_session_id || null;
-            S.hasSystem = payload.system_device_index != null;
+            S.hasSystem = payload.system_device_index != null || !!payload.system_source;
+            if (G.preset) { G.preset = null; history.replaceState(null, '', '/record'); }
             S.systemSource = r.system_source || (S.hasSystem ? (payload.system_source || { mode: 'all', apps: [] }) : null);
             // pre-populate videoTracks from the start response if video is enabled
             if (r.video && r.video.enabled && Array.isArray(r.video.tracks)) {
