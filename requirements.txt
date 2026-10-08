@@ -17,10 +17,12 @@ flask==3.0.0
 # Ref: https://github.com/SYSTRAN/faster-whisper/issues/1293
 faster-whisper==1.1.1
 ctranslate2==4.6.0
+# PyAV 19.x ламає розшифровку з faster-whisper 1.1.1 (open() got an unexpected keyword 'metadata_errors').
+av<19
 openai-whisper==20231117
 
 # PyTorch — default (CPU). For CUDA 12.1 install manually:
-#   pip install torch==2.5.1+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#   pip install torch==2.5.1+cu121 torchvision torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 torch
 torchvision
 torchaudio

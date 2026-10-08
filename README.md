@@ -43,11 +43,18 @@ REM Клонуйте репозиторій
 git clone https://github.com/Black-coffe/recall.git
 cd recall
 
-REM Встановіть Python-залежності
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+REM Створіть віртуальне оточення
+python -m venv .venv
 
-REM PyTorch з CUDA 12.1 (для GPU-прискорення)
-.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+REM Інструменти збірки: openai-whisper збирається з вихідників і потребує pkg_resources
+.venv\Scripts\python.exe -m pip install "setuptools<81" wheel
+
+REM PyTorch з CUDA 12.1 (для GPU-прискорення) — ставити ДО requirements.txt,
+REM версія torchaudio обов'язково з тим самим суфіксом +cu121
+.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+REM Решта Python-залежностей (без ізольованої збірки, щоб діяв setuptools<81)
+.venv\Scripts\python.exe -m pip install --no-build-isolation -r requirements.txt
 ```
 
 ### 2. FFmpeg (обов'язково)
@@ -169,7 +176,7 @@ REM Перевірте CUDA
 .venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
 
 REM Перевстановіть PyTorch з CUDA 12.1
-.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 ```
 
 Примусовий CPU-режим: змінна оточення `FORCE_CPU=true`.
