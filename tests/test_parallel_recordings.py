@@ -103,10 +103,12 @@ class _CopilotWorker:
 class _Whisper:
     def __init__(self):
         self.calls: list[str] = []
+        self.decode_options: list = []
 
     def transcribe_with_progress(self, audio_path, model_name='base', language='uk',
-                                 task='transcribe', progress_callback=None):
+                                 task='transcribe', progress_callback=None, **kwargs):
         self.calls.append(audio_path)
+        self.decode_options.append(kwargs.get('decode_options'))
         return {'text': 'Андрій: бюджет конференції', 'language': 'uk', 'segments': []}
 
 
@@ -414,7 +416,9 @@ def test_ask_live_passes_server_ambiguity_through(env):
     _no_legacy_codes(env)
 
 
-def test_ask10_stop_waits_only_own_live_feed_and_transcribe_not_refused(env):
+def test_ask10_stop_waits_only_own_live_feed_and_transcribe_not_refused(env, monkeypatch):
+    monkeypatch.setenv('RECALL_VOCAB_MODE', 'off')
+    monkeypatch.setenv('WHISPER_MULTILINGUAL', '0')
     A = _start(env, system_device_index=SYS_IDX).get_json()['session_id']
     B = _start(env, mic_device_index=MIC_IDX,
                system_source={'mode': 'exclude', 'apps': ['zoom.exe']}).get_json()['session_id']
@@ -440,6 +444,7 @@ def test_ask10_stop_waits_only_own_live_feed_and_transcribe_not_refused(env):
     assert r.status_code == 200, r.get_data(as_text=True)[:300]
     assert r.get_json().get('transcription_id')
     assert env.whisper.calls == [str(mp3)]
+    assert env.whisper.decode_options == [{}], 'K1: шлях запису передає опції, прапори вимкнені'
     assert env.service.active_session_ids() == [A]
     _no_legacy_codes(env)
 

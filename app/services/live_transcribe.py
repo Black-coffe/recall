@@ -79,6 +79,9 @@ class LiveTranscribeWorker:
         model_name: модель Whisper для live (default 'small' — баланс
             швидкість/якість).
         interval: seconds між transcribe passes.
+        db_path: БД графа для словника імен (K1); ``None`` → бойова
+            ``Config.BASE_DIR / Config.DATABASE``, читається лише з увімкненим
+            ``RECALL_VOCAB_MODE``.
     """
 
     def __init__(
@@ -87,11 +90,13 @@ class LiveTranscribeWorker:
         broker,
         model_name: str = 'small',
         interval: float = DEFAULT_INTERVAL,
+        db_path: Optional[str] = None,
     ):
         self._wm = whisper_manager
         self._broker = broker
         self._model_name = model_name
         self._interval = interval
+        self._db_path = db_path
         # Key = "session_id:stream_name" — кожен stream має свій worker thread
         self._streams: dict[str, _StreamState] = {}
         self._lock = threading.RLock()
@@ -105,6 +110,15 @@ class LiveTranscribeWorker:
     @staticmethod
     def _key(session_id: str, stream_name: str) -> str:
         return f"{session_id}:{stream_name}"
+
+    def _decode_options(self) -> dict:
+        """Опції декодування живого шляху (K1). Прапори вимкнені → ``{}`` без БД."""
+        from app.services import vocabulary
+        db_path = self._db_path
+        if db_path is None and vocabulary.mode() != 'off':
+            from config import Config
+            db_path = str(Config.BASE_DIR / Config.DATABASE)
+        return vocabulary.decode_options_for('live', db_path)
 
     def _alloc_seq(self, session_id: str) -> int:
         """Виділити наступний номер додавання (Story 06).
@@ -256,6 +270,7 @@ class LiveTranscribeWorker:
                 audio_path=tmp_path,
                 model_name=self._model_name,
                 language=state.language or 'auto',
+                decode_options=self._decode_options(),
             )
         finally:
             try:

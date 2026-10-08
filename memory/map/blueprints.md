@@ -9,7 +9,7 @@ Health/робота, каталог/завантаження Whisper-модел�
 `GET /` — SPA-shell (catch-all, після /api/*). `GET /sw.js` (no-cache). `GET /api/health`,
 `/api/models`, `POST /api/download_model`, `/api/models/{update-status,check-updates}`,
 `/api/system_info`, `/api/system_stats`, `/api/polish/availability` (тіри Claude), `/api/metrics` (Prometheus).
-`APP_VERSION = "4.7.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
+`APP_VERSION = "4.8.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
 `GET /api/ready` (system.py:138-177, config-registry-profiles T03) — читає `app.state.робота`
 (див. `memory/map/root.md`) + живий `_check_database_ready()` (106-136): відкриває ІСНУЮЧИЙ файл
 БД (`mode=rw`, не автостворює) і вимагає таблицю `schema_versions` з `MAX(version) >= 1`.
@@ -38,6 +38,10 @@ Health/робота, каталог/завантаження Whisper-модел�
 до початку роботи; явне значення форми має пріоритет над копією з `audio_downloads`). Експорти
 (`/api/export/<fmt>`, `bulk_export`) використовують `display_name` у заголовку й імені файлу; payload
 без `title`/`source_name`/`id` — старий нейтральний фолбек, не `Запис #None`.
+
+K1 (4.8.0): транскрипція передає `decode_options=vocabulary.decode_options_for(kind, DATABASE)` у whisper
+(transcription.py:327-331, kind = youtube|recording, решта → file; youtube дає `{}`); TG-ingest так само з
+`'telegram'` (telegram.py:562-565). Див. `services.md` → vocabulary.py.
 
 ## memory.py (~1290) — `/api/memory/*`
 Граф памʼяті + RAG. Категорії (CRUD/merge, дерево — див. нижче), `<id>/category`, `suggest-category`
@@ -113,7 +117,7 @@ OCR опц.; опис таблиць Claude. Залежить: document_parser, 
 `description` (нормалізація `record_meta`, валідація ДО парсингу файлу).
 
 ## telegram.py (~760) — `/api/telegram/*`
-`POST /ingest` (localhost+token), `GET /status`, `/dialogs`, `/coverage`, `/chats`, `POST /chats`,
+`POST /ingest` (localhost+token), `GET /status`, `/dialogs` (з 4.8.0 рядки слухача несуть `first_name/last_name/phone/bot/deleted`), `/coverage`, `/chats`, `POST /chats`,
 `/backfill`, `POST /repair`, `POST /edited`, `POST /deleted`.
 `GET /chats` (`directions-projects-tags`, 4.6.0) — фільтр `category_id`; кожен рядок несе
 `tags:[{id,name,color}]`. `PUT /api/telegram/chats/<int(signed=True):chat_id>/tags`

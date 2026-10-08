@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
-from whisper_manager_new import ModernWhisperManager
+from whisper_manager_new import FasterWhisperBackend, ModernWhisperManager
 
 
 # ============================================================
@@ -47,7 +48,8 @@ class FakeBackend:
     def supports_batched(self):
         return False
 
-    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None):
+    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None,
+                   decode_options=None):
         if self._transcribe_fn:
             return self._transcribe_fn(model_handle, audio_path, language, task, progress_callback)
         return {"text": "ok", "segments": [], "language": language}
@@ -227,3 +229,162 @@ def test_reset_cuda_clears_model_cache(manager):
     assert manager._models == {}
     assert manager.current_model is None
     assert manager.current_model_name is None
+
+
+# ============================================================
+# K1: decode_options → faster-whisper (послідовний і batched виклик)
+# ============================================================
+
+BUDGET = 448 // 2 - 1  # max_length // 2 - 1 — межа hotwords/prompt у faster-whisper
+
+
+class _FakeTokenizer:
+    """1 токен на слово: «Імʼя1, Імʼя2» → 2 токени."""
+
+    def encode(self, text, add_special_tokens=False):
+        return types.SimpleNamespace(ids=[0] * len(text.split()))
+
+
+class _FakeWhisperModel:
+    max_length = 448
+
+    def __init__(self):
+        self.hf_tokenizer = _FakeTokenizer()
+        self.calls: list[dict] = []
+
+    def transcribe(self, audio_path, **kwargs):
+        self.calls.append(kwargs)
+        return iter([]), types.SimpleNamespace(duration=1.0, language="uk")
+
+
+class _FakePipeline:
+    calls: list[dict] = []
+
+    def __init__(self, model):
+        self.model = model
+
+    def transcribe(self, audio_path, **kwargs):
+        _FakePipeline.calls.append(kwargs)
+        return iter([]), types.SimpleNamespace(duration=1.0, language="uk")
+
+
+@pytest.fixture()
+def faster(tmp_path: Path):
+    """Справжній FasterWhisperBackend із фейковою моделлю (без GPU і ваг)."""
+    backend = FasterWhisperBackend()
+    backend._BatchedInferencePipeline = _FakePipeline
+    _FakePipeline.calls = []
+    m = ModernWhisperManager(force_cpu=True)
+    m._backend = backend
+    model = _FakeWhisperModel()
+    m._models["tiny"] = model
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"\x00")
+
+    def run(duration, decode_options=None, language="uk", **kw):
+        m._get_duration_ffprobe = lambda _p: duration
+        args = {"decode_options": decode_options} if decode_options is not None else {}
+        result = m.transcribe_with_progress(str(audio), model_name="tiny", language=language, **args, **kw)
+        assert "error" not in result, result
+        return (_FakePipeline.calls if duration > 600 else model.calls)[-1]
+
+    return run
+
+
+SEQ, BATCHED = 5.0, 700.0
+
+
+@pytest.mark.parametrize("duration", [SEQ, BATCHED])
+@pytest.mark.parametrize("mode", ["hotwords", "initial_prompt"])
+def test_vocabulary_reaches_both_call_modes(faster, duration, mode):
+    other = {"hotwords": "initial_prompt", "initial_prompt": "hotwords"}[mode]
+    kwargs = faster(duration, {mode: ["Acmecorp", "Адам", "Робота Fund"]})
+    assert kwargs[mode] == "Acmecorp, Адам, Робота Fund"
+    assert other not in kwargs
+
+
+@pytest.mark.parametrize("duration", [SEQ, BATCHED])
+def test_names_cut_at_name_boundary_within_budget(faster, duration):
+    names = [f"Імʼя{i}" for i in range(300)]
+    text = faster(duration, {"hotwords": names})["hotwords"]
+    assert len(_FakeTokenizer().encode(" " + text).ids) <= BUDGET
+    kept = text.split(", ")
+    assert kept == names[:len(kept)], "лише цілі імена, порядок рангу збережено"
+    assert len(kept) == BUDGET
+
+
+def test_multilingual_and_chunk_length_reach_batched(faster):
+    kwargs = faster(BATCHED, {"multilingual": True, "chunk_length": 10}, language="auto")
+    assert kwargs["multilingual"] is True
+    assert kwargs["chunk_length"] == 10
+
+
+def test_chunk_length_never_reaches_sequential(faster):
+    kwargs = faster(SEQ, {"multilingual": True, "chunk_length": 10}, language="auto")
+    assert kwargs["multilingual"] is True
+    assert "chunk_length" not in kwargs
+
+
+@pytest.mark.parametrize("duration", [SEQ, BATCHED])
+@pytest.mark.parametrize("language", ["uk", "ru", "en"])
+def test_explicit_language_is_never_overridden_by_multilingual(faster, duration, language):
+    """4.8.1, рішення власника: «uk» означає uk. multilingual у faster-whisper перекриває задану
+    мову на кожному вікні, а заміряли його лише на змішаних дзвінках — тому тільки для «auto»."""
+    kwargs = faster(duration, {"multilingual": True}, language=language)
+    assert "multilingual" not in kwargs
+    assert kwargs["language"] == language
+
+
+@pytest.mark.parametrize("language", ["auto", ""])
+def test_multilingual_applies_when_language_not_chosen(faster, language):
+    assert faster(SEQ, {"multilingual": True}, language=language)["multilingual"] is True
+
+
+BASE_SEQ = {
+    "language": "uk", "task": "transcribe", "vad_filter": True,
+    "vad_parameters": {"min_silence_duration_ms": 500}, "beam_size": 5, "word_timestamps": False,
+}
+
+
+@pytest.mark.parametrize("decode_options", [None, {}])
+def test_without_decode_options_call_is_unchanged(faster, decode_options):
+    assert faster(SEQ, decode_options) == BASE_SEQ
+    assert faster(BATCHED, decode_options) == {**BASE_SEQ, "batch_size": 8}
+
+
+# ============================================================
+# Ремонт раунду 1: промпт hotwords + попередній контекст
+# ============================================================
+
+class _PromptTokenizer:
+    """Мінімум, який читає справжній faster_whisper get_prompt."""
+
+    sot_prev = 1
+    sot_sequence = (2, 3, 4)
+    no_timestamps = 5
+    timestamp_begin = 6
+
+    def encode(self, text):
+        return [0] * len(text.split())
+
+
+def _prompt_len(kwargs, previous_tokens):
+    from faster_whisper.transcribe import WhisperModel
+    fake_self = types.SimpleNamespace(max_length=448)
+    return len(WhisperModel.get_prompt(fake_self, _PromptTokenizer(), previous_tokens,
+                                       hotwords=kwargs.get("hotwords")))
+
+
+def test_sequential_hotwords_never_overflow_decoding_length(faster):
+    """Повний словник (223 токени) + 223 токени попереднього тексту — це 449 > 448, CTranslate2
+    падає й транскрипція губиться. Послідовний шлях із hotwords не тягне попередній текст."""
+    kwargs = faster(SEQ, {"hotwords": [f"Імʼя{i}" for i in range(300)]})
+    assert kwargs["condition_on_previous_text"] is False
+    previous = [] if kwargs["condition_on_previous_text"] is False else [0] * 223
+    assert _prompt_len(kwargs, previous) <= 448 - 200, "лишається бюджет на текст вікна"
+    assert _prompt_len(kwargs, [0] * 223) > 448, "без скидання контексту промпт переповнюється"
+
+
+def test_batched_and_initial_prompt_keep_previous_text_default(faster):
+    assert "condition_on_previous_text" not in faster(BATCHED, {"hotwords": ["Acmecorp"]})
+    assert "condition_on_previous_text" not in faster(SEQ, {"initial_prompt": ["Acmecorp"]})

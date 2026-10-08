@@ -148,6 +148,54 @@ class TestChatHelpers:
         assert L._chat_type_of(_msg(megagroup=True)) == "group"
         assert L._chat_type_of(_msg(first_name="X")) == "user"
 
+    def test_dialogs_carry_identity_from_the_same_pass(self):
+        """/dialogs віддає імʼя, прізвище, телефон і прапорці бот/видалений —
+        з тієї самої сутності iter_dialogs, без жодного get_entity на чат.
+        Без них сторінка Telegram не могла знайти людину за номером і
+        показувала видалений акаунт безіменним «Чатом»."""
+        person = _msg(first_name="Юлія", last_name="Бондаренка", username="jbondarenko",
+                      phone="380671234567", bot=False, deleted=False)
+        gone = _msg(first_name=None, last_name=None, username=None, phone=None, deleted=True)
+        channel = _msg(broadcast=True, username="kyivnews", title="Київ")   # без first_name/phone
+        rows = [
+            _msg(id=167136964, name="Юлія Бондаренка", entity=person, message=None, is_group=False),
+            _msg(id=8386421946, name="", entity=gone, message=None, is_group=False),
+            _msg(id=-1001234567890, name="Київ", entity=channel, message=None, is_group=False),
+        ]
+
+        class _DialogIter:
+            def __init__(self, items):
+                self._items = list(items)
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self._items:
+                    raise StopAsyncIteration
+                return self._items.pop(0)
+
+        class _Client:
+            def iter_dialogs(self, limit=None):
+                return _DialogIter(rows)
+            async def get_entity(self, *_a, **_k):
+                raise AssertionError("жодного запиту на чат — лише сутності з iter_dialogs")
+
+        out = asyncio.run(L._ctl_dialogs(_Client(), {"dialog_limit": 500}, lambda: {167136964}))
+        by_id = {d["id"]: d for d in out["dialogs"]}
+
+        p = by_id[167136964]
+        assert (p["first_name"], p["last_name"], p["phone"], p["username"]) == \
+            ("Юлія", "Бондаренка", "380671234567", "jbondarenko")
+        assert p["type"] == "user" and p["bot"] is False and p["deleted"] is False
+        assert p["monitored"] is True
+
+        assert by_id[8386421946]["deleted"] is True
+        assert by_id[8386421946]["phone"] is None
+
+        c = by_id[-1001234567890]
+        assert c["type"] == "channel" and c["username"] == "kyivnews"
+        assert c["first_name"] is None and c["last_name"] is None and c["phone"] is None
+        assert c["bot"] is False and c["deleted"] is False
+
 
 # ============================================================
 # Shared-secret (telegram_common.control_token)
@@ -876,6 +924,32 @@ class TestVideoNeverDownloaded:
             headers={"X-Telegram-Token": "testtoken"}).get_json()
         assert r["success"] and r.get("skipped") == "video_not_downloaded"
         assert not called["hit"]
+
+
+class TestVoiceVocabulary:
+    """K1: голосове TG іде у whisper з decode_options шляху 'telegram' і БД задачі."""
+
+    def test_voice_passes_decode_options(self, tg_app, monkeypatch):
+        from app.services import vocabulary
+        seen, calls = [], []
+        monkeypatch.setattr(vocabulary, "decode_options_for",
+                            lambda kind, db: seen.append((kind, db)) or {"hotwords": ["Acmecorp"]})
+        monkeypatch.setattr(tg.state, "whisper_manager", types.SimpleNamespace(
+            transcribe_with_progress=lambda **kw: calls.append(kw) or {"text": "голосове", "segments": []}))
+        monkeypatch.setattr(tg, "_submit_embed_only", lambda *a, **k: "skipped")
+        voice = os.path.join(tg_app.config["TELEGRAM_MEDIA_DIR"], "vocab.ogg")
+        with open(voice, "wb") as f:
+            f.write(b"\x00" * 16)
+        prov = {"chat_id": -100, "message_id": 300, "chat_title": "Fund",
+                "date": "2026-06-01T10:00:00+00:00"}
+        db = tg_app.config["DATABASE"]
+        with tg_app.app_context():
+            tid = tg._persist(db, kind="voice", text="[очікує]", prov=prov, category_id=None,
+                              file_path=None, doc_type=None, segments_json=None,
+                              model_used=None, processing_time=0.0)
+        tg._transcribe_and_finalize(tid, voice, "voice", "", prov, db, "large-v3-turbo", "uk")
+        assert seen == [("telegram", db)]
+        assert calls[0]["decode_options"] == {"hotwords": ["Acmecorp"]}
 
 
 class TestOriginalCleanup:

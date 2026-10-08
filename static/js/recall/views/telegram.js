@@ -9,7 +9,7 @@
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
 
-    const TYPE_BADGE = { user: 'Особистий', group: 'Група', channel: 'Канал', chat: 'Чат' };
+    const TYPE_BADGE = { user: 'Особа', group: 'Група', channel: 'Канал', chat: 'Чат' };
     const FILTERS = [
         { key: 'all', label: 'Усі' },
         { key: 'tracked', label: 'Відстежувані' },
@@ -17,15 +17,18 @@
         { key: 'unmarked', label: 'Без розмітки' },
     ];
 
-    let dialogs = [];      // [{ id, title, type, username, monitored, category_id, tags }]
+    // [{ id, title, type, username, first_name, last_name, phone, bot, deleted,
+    //    monitored, category_id }] — first_name…deleted віддає лише живий слухач
+    // нової версії; старий слухач і офлайн-список (з БД) їх не мають.
+    let dialogs = [];
     let filter = 'all';
-    let search = '';
+    let query = null;      // parseQuery(...) або null, коли пошук порожній
+    let live = false;      // список прийшов від живого слухача (а не з БД)
     let cats = null;
 
     async function render(ctx) {
         cats = await UI.loadCategories();
-        if (UI.loadTags) await UI.loadTags();
-        dialogs = []; filter = 'all'; search = '';
+        dialogs = []; filter = 'all'; query = null; live = false;
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
                 <div class="rc-eyebrow"><i class="fa-brands fa-telegram" style="color:var(--rc-src-telegram)"></i> Додати у архів · Telegram</div>
@@ -56,14 +59,15 @@
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
-                    <input id="rcTgSearch" type="search" placeholder="Пошук чату за назвою…">
+                    <input id="rcTgSearch" type="search" autocomplete="off"
+                        placeholder="Імʼя, @нік або телефон…" aria-label="Пошук чату за імʼям, @ніком або телефоном">
                 </div>
             </div>
             <div class="rc-filterbar" id="rcTgFilters"></div>
             <div id="rcTgList"></div>`;
 
         ctx.mount.querySelector('#rcTgSearch').addEventListener('input',
-            U.debounce((e) => { search = e.target.value.trim().toLowerCase(); paintList(ctx); }, 200));
+            U.debounce((e) => { query = parseQuery(e.target.value); paintList(ctx); }, 200));
         ctx.mount.querySelector('#rcTgReload').addEventListener('click', () => load(ctx));
         ctx.mount.querySelector('#rcTgNewCat').addEventListener('click', () => toggleNewCat(ctx));
 
@@ -93,12 +97,12 @@
             dialogs = Object.values(saved).map(c => ({
                 id: c.chat_id, title: c.title, type: c.chat_type,
                 username: c.username, monitored: !!c.enabled, category_id: c.category_id,
-                tags: c.tags || [],
             }));
         } else {
-            for (const d of dl) { const s = saved[d.id]; if (s) { d.category_id = s.category_id; d.monitored = !!s.enabled; d.tags = s.tags || []; } }
+            for (const d of dl) { const s = saved[d.id]; if (s) { d.category_id = s.category_id; d.monitored = !!s.enabled; } }
             dialogs = dl;
         }
+        live = dl !== null;
         if (!ctx.isCurrent()) return;
         paintList(ctx);
     }
@@ -132,12 +136,108 @@
         }
     }
 
-    function counts() {
+    // ---- Пошук: імʼя / @нік / телефон ---------------------------------------
+    // Імена в Telegram записані як заманеться: та сама людина буває «Julia
+    // Bondarenko» і «Юля Бондаренка». Тому, крім прямого збігу підрядка, імʼя
+    // порівнюється ще й «скелетом»: латиниця після транслітерації, де j/y→i,
+    // g→h, kh→h і подвоєні літери злиті (Юля = Julia = Yuliia = Юлія).
+    const CYR = {
+        а: 'a', б: 'b', в: 'v', г: 'h', ґ: 'g', д: 'd', е: 'e', є: 'ie', ё: 'e', ж: 'zh', з: 'z',
+        и: 'y', і: 'i', ї: 'i', й: 'i', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r',
+        с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '',
+        ы: 'y', ь: '', э: 'e', ю: 'iu', я: 'ia',
+    };
+    // toLowerCase у JS згортає кирилицю коректно (на відміну від SQLite LOWER);
+    // апострофи (', ’, ʼ) прибираємо, щоб «Мар'яна» = «Марʼяна».
+    function fold(s) {
+        return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/['’ʼ`]/g, '')
+            .replace(/\s+/g, ' ').trim();
+    }
+    function skeleton(s) {
+        let out = '';
+        for (const ch of fold(s)) out += CYR[ch] !== undefined ? CYR[ch] : ch;
+        return out.replace(/x/g, 'ks').replace(/w/g, 'v').replace(/kh/g, 'h').replace(/g/g, 'h')
+            .replace(/[jy]/g, 'i').replace(/[^a-z0-9 ]/g, '').replace(/([a-z])\1+/g, '$1');
+    }
+    const digits = (s) => String(s == null ? '' : s).replace(/\D/g, '');
+
+    // Телефон від Telethon — цифри без «+» (380671234567). Запит порівнюємо
+    // цифрами: «+380 67 123-45-67», «(067) 123 45 67», «0671234567» — один номер.
+    // Локальний запис із транковою 0/8 збігається з хвостом міжнародного.
+    function phoneHit(phone, qd) {
+        if (phone.includes(qd)) return true;
+        return qd.length >= 9 && /^[08]/.test(qd) && phone.endsWith(qd.slice(1));
+    }
+    function fmtPhone(p) {
+        const s = digits(p);
+        if (!s) return '';
+        const m = /^380(\d{2})(\d{3})(\d{2})(\d{2})$/.exec(s);
+        return m ? `+380 ${m[1]} ${m[2]} ${m[3]} ${m[4]}` : '+' + s;
+    }
+
+    function parseQuery(raw) {
+        const q = String(raw || '').trim();
+        if (!q) return null;
+        const atNick = q.startsWith('@');
+        const text = fold(atNick ? q.slice(1) : q);
+        const compact = q.replace(/\s/g, '');
+        const skel = skeleton(text).split(' ').filter(Boolean);
         return {
-            all: dialogs.length,
-            tracked: dialogs.filter(d => d.monitored).length,
-            marked: dialogs.filter(d => d.monitored && d.category_id != null).length,
-            unmarked: dialogs.filter(d => !d.monitored || d.category_id == null).length,
+            raw: q, atNick,
+            tokens: text.split(' ').filter(Boolean),
+            // скелет із 1–2 літер («й», «y») збігається майже з усім — лише шум
+            skel: skel.join('').length >= 3 ? skel : [],
+            phone: /^[+\d\s\-().]+$/.test(q) && digits(q).length >= 3 ? digits(q) : '',
+            id: /^-?\d+$/.test(compact) ? compact : '',
+        };
+    }
+
+    function searchIndex(d) {
+        const names = [d.title, d.first_name, d.last_name].filter(Boolean).join(' ');
+        return {
+            name: fold(names),
+            nick: fold(d.username),
+            skel: skeleton(names + ' ' + (d.username || '')),
+            phone: digits(d.phone),
+        };
+    }
+
+    // → null (не підходить) або { rank, by }. rank упорядковує видачу (менше —
+    // вище), by — яке поле збіглося: його підсвічуємо в рядку, бо збіг за
+    // @ніком чи телефоном з назви не видно.
+    function matchDialog(d, q) {
+        const ix = d._ix || (d._ix = searchIndex(d));
+        if (q.id && String(d.id) === q.id) return { rank: 0, by: 'id' };
+        if (q.phone && ix.phone && phoneHit(ix.phone, q.phone)) return { rank: 1, by: 'phone' };
+        if (q.atNick) {
+            const n = q.tokens.join('');
+            if (!ix.nick || !ix.nick.includes(n)) return null;
+            return { rank: ix.nick.startsWith(n) ? 0 : 1, by: 'nick' };
+        }
+        if (!q.tokens.length) return null;
+        if (q.tokens.every(t => ix.name.includes(t))) {
+            return { rank: ix.name.startsWith(q.tokens[0]) || ix.name.includes(' ' + q.tokens[0]) ? 0 : 1, by: 'name' };
+        }
+        if (q.tokens.every(t => ix.name.includes(t) || ix.nick.includes(t))) return { rank: 2, by: 'nick' };
+        if (q.skel.length && q.skel.every(t => ix.skel.includes(t))) return { rank: 3, by: 'name' };
+        return null;
+    }
+
+    // Пошук звужує список ДО фільтрів: лічильники на чипах показують, скільки
+    // знайдено в кожному фільтрі, тож «у Відстежуваних 0» видно одразу.
+    function searched() {
+        if (!query) return dialogs.map(d => ({ d, hit: null }));
+        const out = [];
+        for (const d of dialogs) { const hit = matchDialog(d, query); if (hit) out.push({ d, hit }); }
+        return out;
+    }
+
+    function counts(items) {
+        return {
+            all: items.length,
+            tracked: items.filter(x => x.d.monitored).length,
+            marked: items.filter(x => x.d.monitored && x.d.category_id != null).length,
+            unmarked: items.filter(x => !x.d.monitored || x.d.category_id == null).length,
         };
     }
     function matchFilter(d) {
@@ -148,8 +248,9 @@
     }
 
     function paintList(ctx) {
+        const items = searched();
         const fb = ctx.mount.querySelector('#rcTgFilters');
-        const c = counts();
+        const c = counts(items);
         if (fb) {
             fb.innerHTML = FILTERS.map(f =>
                 `<button class="rc-chip${filter === f.key ? ' is-active' : ''}" data-filter="${f.key}">${f.label} <span class="rc-chip__n">${c[f.key]}</span></button>`).join('');
@@ -157,31 +258,67 @@
         }
         const listEl = ctx.mount.querySelector('#rcTgList');
         if (!listEl) return;
-        let shown = dialogs.filter(matchFilter);
-        if (search) shown = shown.filter(d => (d.title || '').toLowerCase().includes(search) || String(d.id).includes(search));
-        shown.sort((a, b) => (b.monitored - a.monitored) || (a.title || '').localeCompare(b.title || ''));
-        if (!shown.length) { listEl.innerHTML = UI.empty('Немає чатів', 'Спробуйте інший фільтр або оновіть список.', 'fa-comment-slash'); return; }
-        listEl.innerHTML = `<div class="rc-tglist">` + shown.map(rowHTML).join('') + `</div>`;
+        const shown = items.filter(x => matchFilter(x.d));
+        shown.sort((a, b) => ((a.hit ? a.hit.rank : 0) - (b.hit ? b.hit.rank : 0))
+            || (b.d.monitored - a.d.monitored)
+            || displayTitle(a.d).localeCompare(displayTitle(b.d), 'uk'));
+        if (!shown.length) { listEl.innerHTML = emptyHTML(); return; }
+        listEl.innerHTML = `<div class="rc-tglist">` + shown.map(x => rowHTML(x.d, x.hit)).join('') + `</div>`;
         bindRows(ctx, listEl);
+    }
+
+    function emptyHTML() {
+        if (!query) return UI.empty('Немає чатів', 'Спробуйте інший фільтр або оновіть список.', 'fa-comment-slash');
+        let sub = 'Шукаю за імʼям, @ніком і номером телефону.';
+        if (query.phone && !dialogs.some(d => d.phone !== undefined)) {
+            sub = live
+                ? 'Цей слухач ще не віддає номери телефонів — перезапустіть слухача Telegram, щоб шукати за номером.'
+                : 'Номери телефонів видно лише з активним слухачем Telegram.';
+        }
+        return UI.empty(`Нічого не знайдено за «${query.raw}»`, sub, 'fa-magnifying-glass');
     }
 
     function catOptions(sel) {
         return UI.catOptions(sel, { first: 'none' });
     }
 
-    function rowHTML(d) {
-        const badge = TYPE_BADGE[d.type] || d.type || '';
+    function displayTitle(d) {
+        if (d.title) return d.title;
+        if (d.deleted) return 'Видалений акаунт';
+        if (d.username) return '@' + d.username;
+        return 'Без назви';
+    }
+    function typeLabel(d) {
+        if (d.bot) return 'Бот';
+        // видалений акаунт приходить без імені, і _chat_type_of бачить у ньому «chat»
+        if (d.deleted) return 'Особа';
+        return TYPE_BADGE[d.type] || d.type || '';
+    }
+
+    function rowHTML(d, hit) {
+        const by = hit ? hit.by : '';
+        const cls = (k) => (by === k ? ' is-hit' : '');
+        const title = displayTitle(d);
+        const badge = typeLabel(d);
+        const meta = [
+            badge ? `<span class="rc-tgrow__badge">${U.esc(badge)}</span>` : '',
+            d.username ? `<span class="rc-tgrow__nick${cls('nick')}">@${U.esc(d.username)}</span>` : '',
+            d.phone ? `<span class="rc-tgrow__phone${cls('phone')}">${U.esc(fmtPhone(d.phone))}</span>` : '',
+            // без назви й ніка єдине, що відрізняє рядок, — id
+            (!d.title && !d.username) || by === 'id' ? `<span class="rc-tgrow__id${cls('id')}">id ${U.esc(String(d.id))}</span>` : '',
+        ].join('');
         return `<div class="rc-tgrow-wrap" data-wrap="${d.id}">
             <div class="rc-tgrow" data-id="${d.id}">
                 <label class="rc-tgrow__check">
-                    <input type="checkbox" ${d.monitored ? 'checked' : ''} data-act="toggle">
-                    <span class="rc-tgrow__title">${U.esc(d.title || ('chat ' + d.id))}</span>
-                    ${badge ? `<span class="rc-tgrow__badge">${U.esc(badge)}</span>` : ''}
+                    <input type="checkbox" ${d.monitored ? 'checked' : ''} data-act="toggle" aria-label="Слухати чат «${U.esc(title)}»">
+                    <span class="rc-tgrow__who">
+                        <span class="rc-tgrow__title${d.title ? '' : ' is-untitled'}" title="${U.esc(title)}">${U.esc(title)}</span>
+                        <span class="rc-tgrow__meta">${meta}</span>
+                    </span>
                 </label>
                 <div class="rc-tgrow__ctrl">
                     <select class="rc-select rc-select--sm rc-catsel" data-cat-first="none" data-act="category" aria-label="Напрямок чату">${catOptions(d.category_id)}</select>
-                    ${UI.tagOptions ? UI.tagOptions((d.tags || []).map(t => t.name)) : ''}
-                    <button class="rc-iconbtn" data-act="backfill" title="Догрузити історію чату"><i class="fa-solid fa-clock-rotate-left"></i></button>
+                    <button class="rc-iconbtn" data-act="backfill" title="Догрузити історію чату" aria-label="Догрузити історію чату"><i class="fa-solid fa-clock-rotate-left"></i></button>
                 </div>
             </div>
             <div class="rc-tgbf" data-bf="${d.id}" style="display:none"></div>
@@ -193,7 +330,7 @@
     // показуємо: скільки запросили, що це фоновий процес, і посилання на
     // Архів (відфільтрований по цьому чату), де видно нові записи по мірі появи.
     function backfillPanelHTML(d) {
-        return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;font-size:var(--rc-t-xs);color:var(--rc-ink-2)">
+        return `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 0;font-size:var(--rc-t-xs);color:var(--rc-ink-2)">
             <label style="display:flex;align-items:center;gap:6px">Обсяг:
                 <input type="number" class="rc-input rc-select--sm" style="width:90px" min="20" max="2000" step="20" value="200" data-bf-limit>
                 повідомлень
@@ -244,25 +381,6 @@
             const chk = row.querySelector('[data-act="toggle"]');
             const sel = row.querySelector('[data-act="category"]');
             const bf = row.querySelector('[data-act="backfill"]');
-            // Теги чату: набір, який успадкує вся майбутня історія чату (C4).
-            // Компактна висота — інакше .rc-tagsel (76px) рве рядок списку.
-            const tagSel = row.querySelector('.rc-tagsel');
-            if (tagSel) {
-                tagSel.setAttribute('aria-label', 'Теги чату');
-                tagSel.style.cssText = 'min-height:0;height:52px;width:170px;padding:2px 4px;font-size:var(--rc-t-xs)';
-                tagSel.addEventListener('change', async () => {
-                    const names = Array.from(tagSel.selectedOptions).map(o => o.value).filter(Boolean);
-                    try {
-                        const r = await R.api.setChatTags(id, names);
-                        d.tags = r.tags || [];
-                        UI.toast(names.length ? 'Теги чату збережено' : 'Теги чату знято', 'success');
-                    } catch (e) {
-                        UI.toast((e && e.message) || 'Не вдалося зберегти теги', 'error');
-                        Array.from(tagSel.options).forEach(o => { o.selected = (d.tags || []).some(t => t.name === o.value); });
-                        UI.syncTagPicker(tagSel);
-                    }
-                });
-            }
 
             chk.addEventListener('change', async () => {
                 try {
@@ -290,7 +408,7 @@
     function paintCounts(ctx) {
         const fb = ctx.mount.querySelector('#rcTgFilters');
         if (!fb) return;
-        const c = counts();
+        const c = counts(searched());
         FILTERS.forEach(f => { const el = fb.querySelector(`[data-filter="${f.key}"] .rc-chip__n`); if (el) el.textContent = c[f.key]; });
     }
 
@@ -325,5 +443,5 @@
         });
     }
 
-    R.views.telegram = { render, destroy() { dialogs = []; filter = 'all'; search = ''; } };
+    R.views.telegram = { render, destroy() { dialogs = []; filter = 'all'; query = null; live = false; } };
 })();

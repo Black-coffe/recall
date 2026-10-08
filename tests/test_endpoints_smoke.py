@@ -244,17 +244,23 @@ class TestSearchEndpoints:
         for tx in data["transcriptions"]:
             assert tx["category_id"] is None, f"очікувано NULL, отримано {tx['category_id']}"
 
-    def test_history_filter_category_specific(self, client):
+    def test_history_filter_category_specific(self, client, app_module):
         # Якщо у БД є хоч один transcripts з category_id — перевіримо інваріант.
+        # Фільтр напрямку з таксономією включає його проєкти (cat_svc.filter_sql),
+        # тож інваріант — «у піддереві», а не строга рівність id.
+        from app.db.connection import get_db_connection
+        from app.services import categories as cat_svc
         all_resp = client.get("/api/history?per_page=100").get_json()
         labeled = [tx for tx in all_resp["transcriptions"] if tx.get("category_id")]
         if not labeled:
             pytest.skip("у БД немає розмічених транскриптів — нічого перевіряти")
         cid = labeled[0]["category_id"]
+        with get_db_connection(app_module.app.config["DATABASE"]) as conn:
+            subtree = set(cat_svc.subtree_ids(conn, cid))
         r = client.get(f"/api/history?category_id={cid}&per_page=50")
         assert r.status_code == 200
         for tx in r.get_json()["transcriptions"]:
-            assert tx["category_id"] == cid
+            assert tx["category_id"] in subtree
 
     def test_history_filter_category_invalid_is_400(self, client):
         # Спека directions-projects-tags (02): category_id тепер іде через

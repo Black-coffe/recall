@@ -117,6 +117,17 @@ REGISTRY: tuple[Setting, ...] = (
             "0 → без прогріву, перший запит транскрипції холодний."),
     Setting("RECALL_PRELOAD_WHISPER_MODEL", "large-v3-turbo", "str", "Транскрипція",
             "Яку модель прогрівати.", "Дзеркалить TELEGRAM_WHISPER_MODEL за замовчуванням."),
+    Setting("RECALL_VOCAB_MODE", "hotwords", "str", "Транскрипція",
+            "Словник «важких» імен із графа сутностей (app/services/vocabulary.py, K1): off | hotwords | initial_prompt. "
+            "Дефолт за заміром K1: імена 15 % → 35 %, +11 % часу транскрипції.",
+            "hotwords/initial_prompt → ≈50 імен (≤223 токени) іде у faster-whisper на файлах, записах, живій "
+            "транскрипції і голосових TG; YouTube ніколи. off — виклик як до K1."),
+    Setting("WHISPER_MULTILINGUAL", "1", "bool", "Транскрипція",
+            "Визначення мови на кожному вікні до 30 с мовлення (не на фразу) — faster-whisper multilingual. "
+            "Дефолт за сліпими парами K1 (7 з 10).",
+            "1 → мова визначається на кожному вікні на повній транскрипції, файлах і голосових TG, але лише "
+            "коли мову не обрано (auto); явна мова (uk/ru/en) не перекривається (4.8.1). Жива транскрипція і "
+            "YouTube не отримують."),
 
     # --- Rate limits ---
     Setting("RATE_LIMIT_TRANSCRIBE", "60/minute", "str", "Rate limits",

@@ -26,7 +26,7 @@ from werkzeug.utils import secure_filename
 from app import state
 from app.repositories import transcriptions as tx_repo
 from app.services import categories as cat_svc
-from app.services import dedup_audio, record_meta, text_polishing
+from app.services import dedup_audio, record_meta, text_polishing, vocabulary
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
 from app.utils.fts import sanitize_fts_query
@@ -323,9 +323,12 @@ def transcribe():
                 if entry is not None:
                     entry['progress'] = progress_value
 
+        # K1: словник імен і мова — на файлах і записах; YouTube отримує {}.
+        vocab_kind = source_type if source_type in ('youtube', 'recording') else 'file'
         result = state.whisper_manager.transcribe_with_progress(
             filepath, model_name, language,
             progress_callback=transcription_progress_callback,
+            decode_options=vocabulary.decode_options_for(vocab_kind, current_app.config['DATABASE']),
         )
         processing_time = time.time() - start_time
 

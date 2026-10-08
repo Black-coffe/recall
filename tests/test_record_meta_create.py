@@ -63,11 +63,13 @@ class _FakeWhisper:
 
     def __init__(self):
         self.calls = 0
+        self.decode_options = []
 
     def transcribe_with_progress(self, audio_path, model_name="base",
                                  language="uk", task="transcribe",
-                                 progress_callback=None):
+                                 progress_callback=None, **kwargs):
         self.calls += 1
+        self.decode_options.append(kwargs.get("decode_options"))
         return {"text": "Андрій: бюджет Барселони", "language": "uk", "segments": []}
 
 
@@ -350,6 +352,52 @@ def rec_env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(state, "copilot_worker", None)
 
     return app.test_client(), db_path, store, sid
+
+
+class TestVocabularyWiring:
+    """K1: кожен шлях /api/transcribe передає decode_options; YouTube — порожні."""
+
+    @pytest.fixture
+    def spy(self, monkeypatch):
+        from app.services import vocabulary
+        seen = []
+
+        def _decode_options_for(kind, db_path):
+            seen.append((kind, db_path))
+            return {"hotwords": [f"<{kind}>"]}
+
+        monkeypatch.setattr(vocabulary, "decode_options_for", _decode_options_for)
+        return seen
+
+    def test_file_path(self, tx_env, spy):
+        client, db_path, whisper, _ = tx_env
+        assert _post_file(client).status_code == 200
+        assert spy == [("file", db_path)]
+        assert whisper.decode_options == [{"hotwords": ["<file>"]}]
+
+    def test_library_recording_path(self, tx_env, spy):
+        client, db_path, whisper, tmp_path = tx_env
+        audio = tmp_path / "rec.mp3"
+        audio.write_bytes(b"fake")
+        aid = _insert_audio(db_path, audio, source_type="recording", youtube_id="rec_1")
+        r = client.post("/api/transcribe", data={
+            "source_type": "library", "audio_download_id": str(aid)})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert spy == [("recording", db_path)]
+        assert whisper.decode_options == [{"hotwords": ["<recording>"]}]
+
+    def test_youtube_gets_empty_options_even_with_flags_on(self, tx_env, monkeypatch):
+        from app.services import vocabulary
+        monkeypatch.setenv(vocabulary.ENV_MODE, "hotwords")
+        monkeypatch.setenv(vocabulary.ENV_MULTILINGUAL, "1")
+        client, db_path, whisper, tmp_path = tx_env
+        audio = tmp_path / "yt.mp3"
+        audio.write_bytes(b"fake")
+        aid = _insert_audio(db_path, audio, source_type="youtube", youtube_id="yt_1")
+        r = client.post("/api/transcribe", data={
+            "source_type": "library", "audio_download_id": str(aid)})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert whisper.decode_options == [{}]
 
 
 class TestRecordingSave:

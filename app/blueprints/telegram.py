@@ -559,8 +559,10 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
     t0 = time.time()
     if audio_fp and os.path.isfile(audio_fp):
         try:
+            from app.services import vocabulary
             result = state.whisper_manager.transcribe_with_progress(
-                audio_path=audio_fp, model_name=model, language=language)
+                audio_path=audio_fp, model_name=model, language=language,
+                decode_options=vocabulary.decode_options_for('telegram', db_path))
             if "error" in result:
                 logger.warning("[tg] whisper error на %s: %s", audio_fp, result["error"])
             else:

@@ -1560,18 +1560,40 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-onb-flash { animation: rc-onb-flash 1.6s ease; border-radius: var(--rc-r-2); }
 
 .rc-tglist { border-top: 1px solid var(--rc-hairline); }
+/* Рядок чату: ліворуч «хто це» (назва + тип/@нік/телефон), праворуч контроли.
+   Блок «хто це» забирає вільне місце й не стискається нижче flex-basis —
+   на вузькому екрані контроли переносяться під нього, а не виштовхують
+   назву в нуль (так було з чіпами тегів у рядку). */
 .rc-tgrow {
-    display: flex; align-items: center; gap: var(--rc-4); justify-content: space-between;
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--rc-2) var(--rc-4); justify-content: space-between;
     padding: var(--rc-3) 0; border-bottom: 1px solid var(--rc-hairline);
 }
-.rc-tgrow__check { display: flex; align-items: center; gap: var(--rc-3); min-width: 0; cursor: pointer; flex: 1; }
+.rc-tgrow__check { display: flex; align-items: center; gap: var(--rc-3); min-width: 0; cursor: pointer; flex: 1 1 260px; }
 .rc-tgrow__check input { width: 16px; height: 16px; accent-color: var(--rc-accent); flex: none; cursor: pointer; }
-.rc-tgrow__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--rc-t-sm); }
+.rc-tgrow__who { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.rc-tgrow__title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: var(--rc-t-sm); font-weight: 600; color: var(--rc-ink);
+}
+.rc-tgrow__title.is-untitled { font-weight: 400; font-style: italic; color: var(--rc-ink-3); }
+.rc-tgrow__meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--rc-3); min-width: 0;
+    font-size: var(--rc-t-xs); color: var(--rc-ink-2);
+}
+.rc-tgrow__meta > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-tgrow__phone, .rc-tgrow__id { font-variant-numeric: tabular-nums; }
+.rc-tgrow__id { color: var(--rc-ink-3); }
+/* поле, за яким знайшовся рядок (@нік, телефон, id), — з назви цього не видно */
+.rc-tgrow__meta .is-hit { color: var(--rc-accent-deep); font-weight: 600; }
 .rc-tgrow__badge {
     flex: none; font-family: var(--rc-mono); font-size: var(--rc-t-xs); color: var(--rc-ink-3);
     background: var(--rc-surface-2); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); padding: 1px 7px;
 }
-.rc-tgrow__ctrl { display: flex; align-items: center; gap: var(--rc-2); flex: none; }
+.rc-tgrow__ctrl { display: flex; align-items: center; gap: var(--rc-2); flex: none; margin-left: auto; }
+@media (max-width: 640px) {
+    .rc-tgrow__ctrl { flex: 1 1 100%; padding-left: calc(16px + var(--rc-3)); }
+    .rc-tgrow__ctrl .rc-select { flex: 1; min-width: 0; }
+}
 
 /* run / progress */
 .rc-run {

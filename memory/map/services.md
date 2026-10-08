@@ -12,7 +12,21 @@
   system→повна), `assign_speakers_to_whisper_segments()`. *Модель ~1.5GB lazy; HF_TOKEN потрібен;
   авто-конверт AAC/M4A/MP4→WAV. Лейбли: SELF_LABEL='self', UNKNOWN='SPEAKER_UNKNOWN'.*
 - **live_transcribe.py** — `LiveTranscribeWorker`: читає PCM-хвіст активної сесії, транскрибує
-  small-моделлю, шле сегменти по SSE. *interval ~8s; mic-only MVP; у памʼяті, не БД; фінал усе одно потрібен.*
+  small-моделлю, шле сегменти по SSE. *interval ~8s; mic-only MVP; у памʼяті, не БД; фінал усе одно потрібен.
+  K1 (4.8.0): `__init__(..., db_path=None)`; `_decode_options()` кличе `vocabulary.decode_options_for('live', db_path)`
+  (db_path None і режим ≠ off → `Config.BASE_DIR/Config.DATABASE`); `multilingual` живому не віддається.*
+- **vocabulary.py** (K1 `k1-name-vocabulary`, 4.8.0, лише читає граф `mode=ro`, без torch) — словник «важких» імен
+  для faster-whisper. `build_hard_names(db_path, limit=60)` → імена person/project/org, ранг зустрічі × аліаси-помилки
+  × буст (латиниця, складене), загальновживані (частіше з малої в аудіо-текстах) відсіяні; `hard_names()` — кеш
+  TTL 3600с на шлях БД (збій графа → `[]`, теж кешується). `phonetic_keys`/`same_name`/`is_error_alias` — відмінок,
+  переклад і транслітерація uk/ru/en НЕ помилка. `decode_options_for(source_kind, db_path)` (`file|recording|
+  telegram|live|youtube`, інакше `ValueError`): youtube → `{}`; `{<mode>: names}` + `multilingual: True`
+  (не для live). Env `RECALL_VOCAB_MODE` (`off|hotwords|initial_prompt`, дефолт `hotwords`), `WHISPER_MULTILINGUAL`
+  (дефолт `1`). CLI `python -m app.services.vocabulary show [--db]` / `check-error-pairs <json>` (exit 1, якщо серед
+  «помилок» є переклад). Виклики: `blueprints/transcription.py:327-331` (youtube|recording|інше→file),
+  `blueprints/telegram.py:562-565`. Обрізку за токенами робить `whisper_manager_new._decode_kwargs`, не цей модуль.
+- **tools/measure_vocabulary.py** — замір K1: `candidates` (фрагменти з іменами/контроль/змішані), `run`
+  (варіанти декодування; відмовляє при живому записі), `ab` (сліпі пари), `score` (звіт + `decide`).
 
 ## Дедуп аудіо/YouTube/записів (Хвиля A production-RAG, 16.09.2026)
 - **dedup_audio.py** — `hash_for(source_type, text)` (sha256 нормалізованого тексту, лише

@@ -51,12 +51,12 @@
 | `/youtube` | youtube | URL → preview → download+transcribe (polling, без live-сегментів) → /transcript |
 | `/upload` | upload | Drag-drop файл → XHR-progress → /transcript |
 | `/documents` | documents | PDF/DOCX/...→ multipart → дедуп по хешу → /transcript |
-| `/telegram` | telegram | Панель слухача: dialogs, toggle-моніторинг, категорія, backfill |
+| `/telegram` | telegram | Панель слухача: dialogs, toggle-моніторинг, категорія, backfill. 4.8.0: рядок `.rc-tgrow*` = назва/тип/@нік/телефон (`fmtPhone`), чипів тегів у рядку нема; пошук `#rcTgSearch` по назві/імені/@нік (`@` — лише нік)/телефону (`phoneHit`), клієнтський індекс `searchIndex(d)`; first_name/phone приходять лише від живого слухача |
 | `/settings` | settings | System info, каталог моделей, **ко-пілот config**, категорії CRUD/merge, спікери |
 | `/record` | record | Рекордер: таби паралельних сесій (reattach до всіх з `/api/recordings/active`, SSE на кожну), setup→active→stop-name→transcribe, вибір системного звуку увесь/include/exclude з `/api/recording/apps`, retarget наживо (`/system-source`, подія `source_changed`), 409 `SESSION_LIMIT` ховає «+ Новий запис», перенос ко-пілота між табами; після стопу сусідам зі звуженим звуком пропонує повернути `all` (`auto_restore`, без відповіді = «так») |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v69`** (`parallel-recordings-app-audio`, 4.7.0, sw.js:113). Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v70`** (`k1-name-vocabulary`, 4.8.0, sw.js:116). Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas

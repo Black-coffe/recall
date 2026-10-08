@@ -43,7 +43,7 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
 `RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
 **Реєстр (`app/core/settings.py`, спек `config-registry-profiles` S1):** єдине джерело істини для
-132 env-флагів (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
+146 env-флагів (K1 додав `RECALL_VOCAB_MODE`, `WHISPER_MULTILINGUAL` у групу «Транскрипція») (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI
 `python -m app.core.settings env-example` генерує `.env.example`). Модуль без важких залежностей
 (не імпортує `app.*`/`flask`/`torch`/`config` — памʼятка `mcp-stdio-no-heavy-models`); `config.py`
@@ -67,12 +67,18 @@ BatchedInferencePipeline для >600s) + `OpenAIWhisperBackend` (фолбек, 5
 `_models: OrderedDict` (LRU), `_load_lock`, `_inference_semaphore`.
 **Gotchas:** faster-whisper **стрімить** сегменти лениво — не споживаєш генератор → втрачаєш progress-callback.
 Каталог моделей оновлюється сам при апгрейді бібліотеки. OOM → sync GPU, CPU-фолбек, reload.
+**K1 (4.8.0):** `transcribe_with_progress(..., decode_options=None)` → `FasterWhisperBackend._decode_kwargs(handle,
+opts, batched)` (whisper_manager_new.py:227): `hotwords`/`initial_prompt` — список імен склеєний по межі імені в
+`max_length//2-1` (223) токенів; послідовний шлях з `hotwords` ставить `condition_on_previous_text=False` (інакше
+промпт >448 токенів → CTranslate2 падає); `multilingual` → kwarg; `chunk_length` лише batched. Порожні опції → `{}`
+(виклик як до K1). OpenAI-бекенд опції ігнорує (debug-лог). Джерело опцій — `app/services/vocabulary.py`.
 
 ## telegram_listener.py (560)
 **Призначення:** standalone-процес. Telethon MTProto-сесія, слухає monitored-чати, тягне медіа,
 POST-ить у Flask `/api/telegram/ingest`. + контрол-API (localhost:5051) для Flask.
 **Entry points:** `run_listener(cfg)` (async loop + refresh кожні 30s + control-API),
-control: `GET /status`, `GET /dialogs`, `POST /backfill`. CLI: `list|enable <id>|disable <id>|status`.
+control: `GET /status`, `GET /dialogs`, `POST /backfill`. `/dialogs` кожен рядок несе `_identity_fields(ent)`
+(telegram_listener.py:449): `first_name/last_name/phone/bot/deleted` (None у груп/каналів; phone — цифри без «+»). CLI: `list|enable <id>|disable <id>|status`.
 **Gotchas:** окремий процес із успадкованими stdout/stderr. Asyncio один потік — контрол-хендлери
 через `run_coroutine_threadsafe`. Дедуп по (chat_id,message_id) на боці Flask. FloodWait → throttle 0.5s.
 Telethon-сесію не відкрити двома клієнтами — Flask ходить лише по HTTP.

@@ -446,6 +446,22 @@ def _migrated_to(ent) -> int | None:
         return None
 
 
+def _identity_fields(ent) -> dict:
+    """Хто це — щоб у списку чатів людину можна було впізнати й знайти
+    (імʼя, прізвище, телефон). Усе з сутності, яку iter_dialogs уже віддав:
+    жодного запиту на чат. У груп і каналів цих атрибутів нема → None.
+    phone у Telethon — цифри без «+», None, якщо приховано приватністю.
+    deleted: видалений акаунт приходить без імені, і без прапорця рядок у UI
+    був би безіменним «Чатом»."""
+    return {
+        "first_name": getattr(ent, "first_name", None),
+        "last_name": getattr(ent, "last_name", None),
+        "phone": getattr(ent, "phone", None),
+        "bot": bool(getattr(ent, "bot", False)),
+        "deleted": bool(getattr(ent, "deleted", False)),
+    }
+
+
 async def _ctl_dialogs(client, cfg, get_monitored):
     """Діалоги акаунта + ЖИВИЙ курсор кожного (Волна 1 «Бачити»).
 
@@ -460,6 +476,7 @@ async def _ctl_dialogs(client, cfg, get_monitored):
         out.append({
             "id": d.id, "title": d.name, "type": _chat_type_of(ent, d),
             "username": getattr(ent, "username", None),
+            **_identity_fields(ent),
             "monitored": d.id in enabled,
             "last_message_id": getattr(last, "id", None),
             "last_message_date": (last.date.isoformat()

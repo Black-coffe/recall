@@ -96,6 +96,24 @@ def _repo_cached(repo: str) -> bool:
     return False
 
 
+def _join_names_within_budget(names, count_tokens: Callable[[str], int], budget: int) -> str:
+    """Склеїти імена через кому, обрізавши список за межею імені в ``budget`` токенів.
+
+    faster-whisper сам ріже ``hotwords`` до ``max_length // 2 - 1`` токенів хвостом
+    посеред імені, а ``initial_prompt`` у послідовному режимі — з голови
+    (``previous_tokens[-(max_length // 2 - 1):]``), тобто губить перші, найважливіші
+    імена. Тому список обрізаємо самі, цілими іменами, у тому ж бюджеті."""
+    kept: List[str] = []
+    for name in names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        if count_tokens(", ".join(kept + [name])) > budget:
+            break
+        kept.append(name)
+    return ", ".join(kept)
+
+
 # ============================================================================
 # Backend abstraction
 # ============================================================================
@@ -117,8 +135,11 @@ class WhisperBackend(ABC):
         language: Optional[str],
         task: str,
         progress_callback: Optional[Callable] = None,
+        decode_options: Optional[Dict] = None,
     ) -> Dict:
-        """Транскрибировать. Должен вернуть {text, segments, language}."""
+        """Транскрибировать. Должен вернуть {text, segments, language}.
+
+        ``decode_options`` — словник/мова (K1, див. ``transcribe_with_progress``)."""
 
     @abstractmethod
     def supports_batched(self) -> bool:
@@ -144,7 +165,10 @@ class OpenAIWhisperBackend(WhisperBackend):
     def load(self, model_name: str, device: str) -> Any:
         return self._whisper.load_model(model_name, device=device)
 
-    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None):
+    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None,
+                   decode_options=None):
+        if decode_options:
+            logger.debug("openai backend ігнорує decode_options %s", sorted(decode_options))
         if progress_callback:
             progress_callback({"status": "processing", "progress": 50, "message": "Transcribing audio..."})
 
@@ -199,7 +223,56 @@ class FasterWhisperBackend(WhisperBackend):
         model = self._WhisperModel(fw_name, device=device, compute_type=compute_type)
         return model
 
-    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None):
+    @staticmethod
+    def _decode_kwargs(model_handle, decode_options: Optional[Dict], batched: bool,
+                       language: Optional[str] = None) -> Dict:
+        """``decode_options`` → kwargs faster-whisper. Порожні опції → ``{}``, тобто
+        виклик байт у байт як до K1.
+
+        - ``hotwords`` / ``initial_prompt``: список імен → рядок, обрізаний за межею
+          імені в ``max_length // 2 - 1`` (223) токенів токенайзером цієї моделі;
+        - ``multilingual``: мова визначається раз на вікно (до 30 с мовлення в
+          послідовному режимі, VAD-шматок до ``chunk_length`` у batched) — лише
+          коли мову не задано (``auto``/порожньо). Явна мова («uk») — закон: у
+          faster-whisper multilingual перекрив би її на кожному вікні, а заміряли
+          його тільки на змішаних дзвінках (4.8.1, рішення власника);
+        - ``chunk_length``: лише batched (у послідовному режимі це довжина вікна
+          фіч-екстрактора, її не чіпаємо)."""
+        if not decode_options:
+            return {}
+        kwargs: Dict[str, Any] = {}
+        budget = getattr(model_handle, "max_length", 448) // 2 - 1
+        tokenizer = getattr(model_handle, "hf_tokenizer", None)
+        for key in ("hotwords", "initial_prompt"):
+            names = decode_options.get(key)
+            if not names:
+                continue
+            if tokenizer is None:
+                logger.warning("[faster-whisper] у моделі нема токенайзера — %s пропущено", key)
+                continue
+            text = _join_names_within_budget(
+                names,
+                lambda t: len(tokenizer.encode(" " + t, add_special_tokens=False).ids),
+                budget,
+            )
+            if text:
+                kwargs[key] = text
+                logger.debug("[faster-whisper] %s: %d з %d імен", key, text.count(", ") + 1, len(names))
+        if "hotwords" in kwargs and not batched:
+            # faster-whisper 1.2.1 get_prompt (transcribe.py:1542-1550) кладе hotwords ПОРЯД із
+            # previous_tokens[-223:], а не замість них: з 3-го вікна промпт 1+222+223+3 = 449 > 448,
+            # і CTranslate2 падає «maximum decoding length must be > 0» — губиться вся транскрипція.
+            # Batched-шлях сам передає condition_on_previous_text=False (:547); те саме тут
+            # (скидання контексту після кожного вікна, :1373-1383) тримає промпт ≤ 1+223+3.
+            kwargs["condition_on_previous_text"] = False
+        if decode_options.get("multilingual") and (not language or language == "auto"):
+            kwargs["multilingual"] = True
+        if batched and decode_options.get("chunk_length"):
+            kwargs["chunk_length"] = int(decode_options["chunk_length"])
+        return kwargs
+
+    def transcribe(self, model_handle, audio_path, language, task, progress_callback=None,
+                   decode_options=None):
         if progress_callback:
             progress_callback({"status": "processing", "progress": 5, "message": "Starting faster-whisper..."})
 
@@ -217,6 +290,7 @@ class FasterWhisperBackend(WhisperBackend):
             vad_parameters={"min_silence_duration_ms": 500},
             beam_size=5,
             word_timestamps=False,
+            **self._decode_kwargs(model_handle, decode_options, batched=False, language=language),
         )
 
         # info.duration — общая длительность файла в секундах.
@@ -258,7 +332,8 @@ class FasterWhisperBackend(WhisperBackend):
             "language": detected_language,
         }
 
-    def transcribe_batched(self, model_handle, audio_path, language, task, batch_size=8, progress_callback=None):
+    def transcribe_batched(self, model_handle, audio_path, language, task, batch_size=8, progress_callback=None,
+                           decode_options=None):
         """Batched inference для длинных файлов через BatchedInferencePipeline."""
         if progress_callback:
             progress_callback({"status": "processing", "progress": 5, "message": "Starting batched transcription..."})
@@ -273,6 +348,7 @@ class FasterWhisperBackend(WhisperBackend):
             vad_parameters={"min_silence_duration_ms": 500},
             beam_size=5,
             word_timestamps=False,
+            **self._decode_kwargs(model_handle, decode_options, batched=True, language=language),
         )
 
         total_duration = max(getattr(info, "duration", 0.0) or 0.0, 0.001)
@@ -635,8 +711,15 @@ class ModernWhisperManager:
         language: str = "uk",
         task: str = "transcribe",
         progress_callback: Optional[Callable] = None,
+        decode_options: Optional[Dict] = None,
     ) -> Dict:
-        """Транскрибация. Параллельная (под semaphore), не держит _load_lock."""
+        """Транскрибация. Параллельная (под semaphore), не держит _load_lock.
+
+        ``decode_options`` (K1, ``app.services.vocabulary.decode_options_for``):
+        ``hotwords`` / ``initial_prompt`` — список імен (менеджер сам склеює й
+        обрізає його за межею імені в 223 токени), ``multilingual: bool``,
+        ``chunk_length: int`` (лише batched). ``None``/``{}`` — як до K1.
+        openai-бекенд опції ігнорує."""
         try:
             if not os.path.exists(audio_path):
                 error_msg = f"File not found: {audio_path}"
@@ -666,15 +749,19 @@ class ModernWhisperManager:
                     result = self._backend.transcribe_batched(
                         local_handle, audio_path, language, task,
                         batch_size=8, progress_callback=progress_callback,
+                        decode_options=decode_options,
                     )
                 elif self._backend.name == "openai" and duration_seconds > 600:
                     # OpenAI backend на длинных файлах — старая ручная нарезка через pydub.
+                    if decode_options:
+                        logger.debug("openai backend ігнорує decode_options %s", sorted(decode_options))
                     result = self._transcribe_chunked_openai(
                         local_handle, audio_path, language, task, progress_callback,
                     )
                 else:
                     result = self._backend.transcribe(
                         local_handle, audio_path, language, task, progress_callback,
+                        decode_options=decode_options,
                     )
                 elapsed = time.time() - start
                 logger.info(f"Transcription completed in {elapsed:.1f}s ({duration_seconds / max(elapsed, 0.001):.1f}x realtime)")

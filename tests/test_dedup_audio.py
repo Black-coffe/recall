@@ -292,7 +292,7 @@ class _FakeWhisperManager:
 
     def transcribe_with_progress(self, audio_path, model_name="base",
                                   language="uk", task="transcribe",
-                                  progress_callback=None):
+                                  progress_callback=None, **kwargs):
         return {"text": self._text, "language": "uk", "segments": []}
 
 
