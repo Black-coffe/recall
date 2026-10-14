@@ -308,10 +308,10 @@ def test_about_draws_the_tree(archive):
     assert "Особисте (1)" in text
 
 
-def test_about_still_reports_35_tools(archive):
-    """Історія не додає і не прибирає тулзів (C6)."""
-    assert len(m._registered_tool_names()) == 35
-    assert "35 тулзів" in m.about()
+def test_about_still_reports_40_tools(archive):
+    """Таксономія не додає і не прибирає тулзів (C6); 35 → 40 — візуальна стрічка відео (4.10.0)."""
+    assert len(m._registered_tool_names()) == 40
+    assert "40 тулзів" in m.about()
 
 
 # ============================================================

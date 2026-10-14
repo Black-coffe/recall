@@ -2267,3 +2267,16 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-cmrow { flex-direction: column; gap: var(--rc-2); }
     .rc-cmrow__target { max-width: 100%; text-align: left; align-items: flex-start; }
 }
+
+/* recording-meta-suggest: варіанти назви й опису від локальної моделі */
+.rc-meta__suggest { margin-left: auto; }
+.rc-modal--wide .rc-input, .rc-modal--wide .rc-textarea { box-sizing: border-box; }
+.rc-meta__status { font-size: var(--rc-t-xs); color: var(--rc-ink-2); min-height: 1.1em; margin: calc(-1 * var(--rc-2)) 0 var(--rc-3); }
+.rc-meta__status.is-err { color: var(--rc-err); }
+.rc-meta__variants { display: flex; flex-wrap: wrap; gap: var(--rc-1); margin-top: var(--rc-2); }
+.rc-meta__variants:empty { display: none; }
+.rc-meta__variants--desc { flex-direction: column; }
+.rc-meta__variant { text-align: left; font: inherit; font-size: var(--rc-t-xs); line-height: 1.4; color: var(--rc-ink); background: var(--rc-surface); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); padding: 4px var(--rc-2); cursor: pointer; }
+.rc-meta__variant:hover { border-color: var(--rc-accent-deep); }
+.rc-meta__variant.is-picked { border-color: var(--rc-accent-deep); background: var(--rc-accent-tint); }
+.rc-rec__name { white-space: nowrap; }

@@ -45,6 +45,7 @@ import re
 from typing import Callable, Optional
 
 from app.utils.files import ALLOWED_DOCUMENT_EXTENSIONS
+from app.utils.proc import silence_pytesseract_console_windows
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ _ocr_unavailable_reason: Optional[str] = None
 
 class DocumentParseError(Exception):
     """Не вдалося розібрати документ (порожній / биткий / непідтримуваний)."""
+
+
+class NoTextFound(DocumentParseError):
+    """OCR відпрацював, але тексту на зображенні нема (звичайне фото). Не збій розбору."""
 
 
 class ParserUnavailable(DocumentParseError):
@@ -104,6 +109,29 @@ def _normalize_text(text: str) -> str:
 # OCR (Phase 16D) — graceful, як embeddings.is_available()
 # ============================================================
 
+_TESSERACT_DEFAULT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+def _configure_tesseract() -> None:
+    """Знайти tesseract поза PATH і мовні пакети поза Program Files.
+
+    winget-інсталяція UB-Mannheim кладе бінар у Program Files, але НЕ в PATH, і
+    несе лише eng/osd; ukr/rus без прав адміністратора туди не докласти. Тому:
+    бінар — ``OCR_TESSERACT_CMD`` або стандартний шлях інсталятора; мовні пакети —
+    ``OCR_TESSDATA_DIR`` або ``%LOCALAPPDATA%\\Recall\\tessdata`` (якщо тека є)."""
+    import shutil
+    import pytesseract
+    cmd = os.environ.get("OCR_TESSERACT_CMD", "")
+    if not cmd and not shutil.which("tesseract") and os.path.isfile(_TESSERACT_DEFAULT):
+        cmd = _TESSERACT_DEFAULT
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+    tessdata = os.environ.get("OCR_TESSDATA_DIR") or os.path.join(
+        os.environ.get("LOCALAPPDATA", ""), "Recall", "tessdata")
+    if tessdata and os.path.isdir(tessdata) and not os.environ.get("TESSDATA_PREFIX"):
+        os.environ["TESSDATA_PREFIX"] = tessdata
+
+
 def ocr_available() -> bool:
     """Чи доступний OCR: pytesseract імпортується І системний tesseract присутній."""
     global _ocr_unavailable_reason
@@ -113,6 +141,10 @@ def ocr_available() -> bool:
     except Exception as e:  # pragma: no cover
         _ocr_unavailable_reason = f"pytesseract/Pillow недоступні: {e}"
         return False
+    try:
+        _configure_tesseract()
+    except Exception:
+        logger.debug("налаштування шляхів tesseract не вдалось", exc_info=True)
     try:
         import pytesseract
         # get_tesseract_version() іде повз subprocess_args() самого pytesseract
@@ -133,18 +165,31 @@ def ocr_unavailability_reason() -> str:
 
 
 def _ocr_image_obj(img) -> str:
-    """OCR одного PIL-зображення. Пробує _OCR_LANG, з фолбеком на дефолтну мову
-    (якщо бракує мовного пакету tesseract кидає TesseractError)."""
+    """OCR одного PIL-зображення (картинка або сторінка-скан PDF). Пробує _OCR_LANG,
+    з фолбеком на дефолтну мову (якщо бракує мовного пакету tesseract кидає
+    TesseractError). Паролі й токени в розпізнаному тексті одразу маскуються
+    (ADR-030): OCR — єдина точка, через яку текст з екрана/скану входить в архів,
+    тож маска тут накриває кожного споживача (Telegram, завантаження з UI)."""
     import pytesseract
     try:
-        return pytesseract.image_to_string(img, lang=_OCR_LANG)
+        text = pytesseract.image_to_string(img, lang=_OCR_LANG)
     except pytesseract.TesseractError:
         try:
-            return pytesseract.image_to_string(img)  # дефолтна мова (eng)
+            text = pytesseract.image_to_string(img)  # дефолтна мова (eng)
         except Exception:
+            logger.debug("OCR дефолтною мовою не вдався", exc_info=True)
             return ""
     except Exception:
+        logger.debug("OCR не вдався", exc_info=True)
         return ""
+    return _mask_secrets(text)
+
+
+def _mask_secrets(text: str) -> str:
+    if not text:
+        return text
+    from app.services import screen_secrets
+    return screen_secrets.mask_text(text, screen_secrets.scan_text(text)) or ""
 
 
 def _ocr_pdf_page(page) -> str:
@@ -517,7 +562,7 @@ def parse_document(path: str, filename: Optional[str] = None) -> dict:
                 "Встановіть Tesseract OCR (+ мовні пакети ukr/rus/eng) у PATH."
             )
         if meta.get("ocr"):
-            raise DocumentParseError("OCR не знайшов тексту на зображенні.")
+            raise NoTextFound("OCR не знайшов тексту на зображенні.")
         raise DocumentParseError("Документ порожній або не містить тексту")
 
     return {

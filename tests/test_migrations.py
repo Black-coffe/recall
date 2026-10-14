@@ -1150,3 +1150,19 @@ def test_v47_fk_guard_is_defensive_on_the_init_database_path(tmp_path: Path):
     with get_db_connection(db) as conn:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1, \
             "зʼєднання застосунку FK вмикає — але міграція йде не ним"
+
+
+def test_v48_video_timeline_columns_are_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # повторний прогін — без помилок
+    conn = sqlite3.connect(db)
+    try:
+        vk = _columns(conn, 'video_keyframes')
+        for col in ('end_sec', 'frame_type', 'duplicate_of', 'change_score',
+                    'ocr_boxes_json', 'video_time_sec', 'image_path', 'ocr_text'):
+            assert col in vk, col
+        assert 'video_analysis_params' in _columns(conn, 'transcriptions')
+        assert _schema_version(conn) >= 48
+    finally:
+        conn.close()

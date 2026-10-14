@@ -491,6 +491,10 @@
     //   opts.titleRequired — block save while title is empty (default false;
     //     records fall back to source_name server-side, so it's optional there)
     //   opts.save(values) — async fn performing the actual PATCH
+    //   opts.suggest — optional async () => {titles, descriptions, basis}
+    //     (R.api.suggestMeta): adds «Запропонувати» — the local model's variants
+    //     appear under each field, a click puts one into the field for editing.
+    //   opts.autoSuggest — ask for variants right on open (needs opts.suggest).
     //     (R.api.updateRecord/updateAudio). Thrown Error.message is shown in
     //     .rc-modal__err and the modal stays open; on success the modal closes
     //     and resolves {title, description}.
@@ -499,14 +503,20 @@
         opts = opts || {};
         return new Promise((resolve) => {
             const ov = U.el('div', { class: 'rc-modal-ov' });
+            const canSuggest = typeof opts.suggest === 'function';
             ov.innerHTML = `
-                <div class="rc-modal" role="dialog" aria-modal="true" aria-label="Назва й опис">
-                    <div class="rc-modal__h"><i class="fa-solid fa-pen"></i> Назва й опис</div>
+                <div class="rc-modal${canSuggest ? ' rc-modal--wide' : ''}" role="dialog" aria-modal="true" aria-label="Назва й опис">
+                    <div class="rc-modal__h"><i class="fa-solid fa-pen"></i> Назва й опис
+                        ${canSuggest ? `<button class="rc-btn rc-btn--sm rc-meta__suggest" id="rcMetaSuggest" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати</button>` : ''}
+                    </div>
+                    ${canSuggest ? `<div class="rc-meta__status" id="rcMetaStatus" aria-live="polite"></div>` : ''}
                     <label class="rc-field__label" for="rcMetaTitle">Назва</label>
                     <input class="rc-input" id="rcMetaTitle" autocomplete="off" maxlength="200"
                            placeholder="Назва запису" value="${U.esc(opts.title || '')}">
+                    ${canSuggest ? `<div class="rc-meta__variants" id="rcMetaTitleVars"></div>` : ''}
                     <label class="rc-field__label" for="rcMetaDesc" style="margin-top:var(--rc-3)">Опис</label>
                     <textarea class="rc-textarea" id="rcMetaDesc" placeholder="Опис (необов'язково)">${U.esc(opts.description || '')}</textarea>
+                    ${canSuggest ? `<div class="rc-meta__variants rc-meta__variants--desc" id="rcMetaDescVars"></div>` : ''}
                     <div class="rc-modal__err" id="rcMetaErr"></div>
                     <div class="rc-modal__actions">
                         <button class="rc-btn rc-btn--sm" id="rcMetaCancel">Скасувати</button>
@@ -545,7 +555,58 @@
             ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(null); });
             saveB.addEventListener('click', save);
             ov.querySelector('#rcMetaCancel').addEventListener('click', () => close(null));
+
+            if (canSuggest) {
+                const sugB = ov.querySelector('#rcMetaSuggest');
+                const statusEl = ov.querySelector('#rcMetaStatus');
+                const fill = (box, values, input) => {
+                    box.innerHTML = '';
+                    (values || []).forEach(v => {
+                        const b = U.el('button', { class: 'rc-meta__variant', type: 'button' });
+                        b.textContent = v;
+                        b.addEventListener('click', () => {
+                            input.value = v; input.focus();
+                            box.querySelectorAll('.rc-meta__variant').forEach(x => x.classList.toggle('is-picked', x === b));
+                        });
+                        box.appendChild(b);
+                    });
+                };
+                const ask = async () => {
+                    sugB.disabled = true; errEl.textContent = '';
+                    statusEl.className = 'rc-meta__status';
+                    statusEl.textContent = 'Локальна модель думає… зазвичай до хвилини';
+                    try {
+                        const r = await opts.suggest();
+                        if (done) return;
+                        fill(ov.querySelector('#rcMetaTitleVars'), r.titles, titleI);
+                        fill(ov.querySelector('#rcMetaDescVars'), r.descriptions, descI);
+                        statusEl.textContent = r.basis === 'excerpts'
+                            ? 'За фрагментами транскрипту: саммарі ще нема, варіанти можуть бути загальними'
+                            : 'Оберіть варіант — він підставиться в поле, його можна поправити';
+                        sugB.innerHTML = '<i class="fa-solid fa-rotate"></i> Ще варіанти';
+                    } catch (e) {
+                        if (done) return;
+                        statusEl.className = 'rc-meta__status is-err';
+                        statusEl.textContent = (e && e.message) || 'Не вдалося отримати варіанти';
+                    } finally {
+                        if (!done) sugB.disabled = false;
+                    }
+                };
+                sugB.addEventListener('click', ask);
+                if (opts.autoSuggest) ask();
+            }
         });
+    };
+
+    // Запис без власної назви: назва досі авто-імʼя сесії («Запис 2026-10-14 08:54»
+    // або фолбек «Запис rec_…»). Дивимось на ту назву, яку бачить людина
+    // (title, інакше source_name): транскрибація з Медіатеки копіює авто-імʼя
+    // в transcriptions.title, тож «title непорожній» ще не означає власну назву.
+    const AUTO_NAME_RE = /^Запис (\d{4}-\d{2}-\d{2} \d{2}:\d{2}|rec_[0-9a-f]+)$/;
+    UI.isUnnamedRecording = function (r) {
+        if (!r || r.source_type !== 'recording') return false;
+        const shown = (r.title || '').trim() || (r.source_name || '').trim();
+        return AUTO_NAME_RE.test(shown);
     };
 
     // Sticky action-toast for undo affordances (T4.6). Unlike UI.toast, it

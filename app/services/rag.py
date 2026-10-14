@@ -317,6 +317,19 @@ def _resolve_project(db_path: str, project: Optional[str]) -> Optional[list[int]
     return ids
 
 
+def _mcp_screen_filter(db_path: str, channel: str, chunks: list) -> list:
+    """Питання з MCP: текст з екрана (speaker='екран') проходить фільтр приватного ДО
+    виклику Claude — приватні записи, стоп-слова, RECALL_MCP_VISUAL=off (spec
+    mcp-visual-privacy). Канал ui (сам інтерфейс Recall) фільтр не зачіпає."""
+    if channel != "mcp":
+        return chunks
+    from app.services import privacy
+    kept, hidden = privacy.filter_screen_chunks(db_path, chunks)
+    if hidden:
+        logger.info("[rag] mcp: %d чанк(ів) з екрана приховано фільтром приватного", hidden)
+    return kept
+
+
 def answer_question(
     db_path: str,
     question: str,
@@ -352,7 +365,8 @@ def answer_question(
                            rewrite=_QUERY_REWRITE_ENABLED,
                            explain=explain,
                            tags=tags, since=since, until=until)
-    chunks = retrieval.attach_thread_context(db_path, res["chunks"])
+    chunks = _mcp_screen_filter(db_path, channel,
+                                retrieval.attach_thread_context(db_path, res["chunks"]))
     if not chunks:
         return {
             "answer": "У архіві не знайдено релевантної інформації за цим запитом.",
@@ -509,7 +523,8 @@ def answer_question_stream(
                            rewrite=_QUERY_REWRITE_ENABLED,
                            explain=explain,
                            tags=tags, since=since, until=until)
-    chunks = retrieval.attach_thread_context(db_path, res["chunks"])
+    chunks = _mcp_screen_filter(db_path, channel,
+                                retrieval.attach_thread_context(db_path, res["chunks"]))
     attached = retrieval.attach_comments(db_path, chunks)
     # Той самий порядок, що й у контексті: клієнт резолвить [n] як sources[n-1],
     # тож підшиті коментарі мусять бути ТУТ, а не окремим полем — вони

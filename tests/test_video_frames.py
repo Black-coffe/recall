@@ -1,0 +1,266 @@
+"""Рушій ключових кадрів (spec video-visual-timeline, історія 01).
+
+Синтетичні відео генерує ffmpeg (lavfi) у tmp — реальних даних тут нема.
+Тести, що потребують ffmpeg, пропускаються без нього.
+"""
+import shutil
+import subprocess
+
+import numpy as np
+import pytest
+
+from app.services import video_frames as vf
+
+FFMPEG = shutil.which('ffmpeg')
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason='ffmpeg не в PATH')
+
+
+def _make_video(path, scenes, extra_vf=None, size='320x180'):
+    """scenes — [(колір, тривалість)] → mp4 з різкими змінами на межах."""
+    args = [FFMPEG, '-v', 'error', '-y']
+    for color, dur in scenes:
+        args += ['-f', 'lavfi', '-i', f'color=c={color}:s={size}:r=10:d={dur}']
+    n = len(scenes)
+    chain = ''.join(f'[{i}:v]' for i in range(n)) + f'concat=n={n}:v=1:a=0[v]'
+    if extra_vf:
+        chain += f';[v]{extra_vf}[v2]'
+        out = '[v2]'
+    else:
+        out = '[v]'
+    args += ['-filter_complex', chain, '-map', out, '-pix_fmt', 'yuv420p', '-g', '20', str(path)]
+    subprocess.run(args, check=True)
+    return str(path)
+
+
+def _changes(segs):
+    return [s.start for s in segs[1:]]
+
+
+@needs_ffmpeg
+def test_static_video_is_one_segment(tmp_path):
+    v = _make_video(tmp_path / 'static.mp4', [('gray', 60)])
+    for method in ('thumbs', 'bisect'):
+        res = vf.select_keyframes(v, method=method, ffmpeg=FFMPEG)
+        assert len(res['segments']) == 1, method
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize('method', ['thumbs', 'bisect'])
+def test_three_changes_found_within_one_second(tmp_path, method):
+    v = _make_video(tmp_path / 'three.mp4',
+                    [('red', 7), ('blue', 16), ('green', 18), ('white', 19)])
+    res = vf.select_keyframes(v, method=method, ffmpeg=FFMPEG)
+    found = _changes(res['segments'])
+    assert len(found) == 3, found
+    for want, got in zip((7.0, 23.0, 41.0), found):
+        assert abs(got - want) <= 1.0, (want, got)
+
+
+@needs_ffmpeg
+def test_a_b_a_inside_step_thumbs_catches_bisect_misses(tmp_path):
+    # A 0–12, B 12–15, A 15–30; крок бісекції 10 с: опори 10 і 20 обидві «A».
+    v = _make_video(tmp_path / 'aba.mp4', [('red', 12), ('blue', 3), ('red', 15)])
+    thumbs = vf.select_keyframes(v, method='thumbs', ffmpeg=FFMPEG)
+    assert len(thumbs['segments']) == 3
+    assert abs(thumbs['segments'][1].start - 12.0) <= 1.0
+    bisect = vf.select_keyframes(v, method='bisect', step=10, ffmpeg=FFMPEG)
+    assert len(bisect['segments']) == 1   # задокументована межа бісекції
+
+
+@needs_ffmpeg
+def test_flickering_clock_masked_gives_no_false_changes(tmp_path):
+    # «годинник» у правому нижньому куті перемикається щосекунди
+    clock = "drawbox=x=280:y=160:w=40:h=20:color=white:t=fill:enable='lt(mod(t,2),1)'"
+    v = _make_video(tmp_path / 'clock.mp4', [('navy', 40)], extra_vf=clock)
+    auto = vf.select_keyframes(v, method='thumbs', ffmpeg=FFMPEG)
+    assert len(auto['segments']) == 1
+    manual = vf.select_keyframes(v, method='bisect', ignore_regions=[[0.8, 0.8, 0.2, 0.2]],
+                                 ffmpeg=FFMPEG)
+    assert len(manual['segments']) == 1
+
+
+@needs_ffmpeg
+def test_audio_only_file_raises_no_video(tmp_path):
+    a = tmp_path / 'voice.m4a'
+    subprocess.run([FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=d=3', str(a)],
+                   check=True)
+    with pytest.raises(vf.NoVideoError):
+        vf.select_keyframes(str(a), ffmpeg=FFMPEG)
+
+
+def test_missing_file_raises_no_video(tmp_path):
+    with pytest.raises(vf.NoVideoError):
+        vf.probe(str(tmp_path / 'нема.mp4'))
+
+
+@needs_ffmpeg
+def test_thumbs_cache_skips_decoding(tmp_path, monkeypatch):
+    v = _make_video(tmp_path / 'c.mp4', [('red', 5), ('blue', 5)])
+    cache = tmp_path / 'cache'
+    first = vf.select_keyframes(v, cache_dir=str(cache), ffmpeg=FFMPEG)
+    calls = []
+    monkeypatch.setattr(vf, 'thumbs_pass', lambda *a, **k: calls.append(1))
+    second = vf.select_keyframes(v, cache_dir=str(cache), threshold=0.01, ffmpeg=FFMPEG)
+    assert calls == []
+    assert len(second['segments']) == len(first['segments'])
+
+
+@needs_ffmpeg
+def test_grab_frame_returns_image_without_writing(tmp_path):
+    v = _make_video(tmp_path / 'g.mp4', [('red', 3), ('blue', 3)])
+    before = set(tmp_path.iterdir())
+    img = vf.grab_frame(v, 4.0, max_width=160, ffmpeg=FFMPEG)
+    assert img.size[0] == 160
+    r, g, b = img.getpixel((10, 10))
+    assert b > 150 and r < 80
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_cap_segments_merges_shortest():
+    segs = [vf.Segment(start=float(i), end=float(i + 1 + (i % 3)), frame_time=i + 0.5,
+                       change_score=0.1) for i in range(10)]
+    capped, flag = vf.cap_segments(segs, 4)
+    assert flag and len(capped) == 4
+
+
+def test_settle_merges_burst_and_represents_settled_state():
+    bounds = [(0.0, 0.0), (10.0, 0.2), (11.0, 0.1), (12.0, 0.1), (30.0, 0.5)]
+    segs = vf._segments_from_boundaries(bounds, 40.0, settle=2.0)
+    assert [s.start for s in segs] == [0.0, 10.0, 30.0]
+    assert segs[1].frame_time == pytest.approx(12.7)
+
+
+def test_region_mask_and_diff():
+    a = np.zeros((90, 160), np.uint8)
+    b = a.copy()
+    b[80:, 140:] = 255        # змінився лише кут
+    assert vf.diff_score(a, b) > 0
+    assert vf.diff_score(a, b, vf.region_mask([[0.85, 0.85, 0.15, 0.15]])) == 0.0
+
+
+def test_duplicates_point_to_first_non_adjacent():
+    h1, h2 = 'ffff0000ffff0000', '0000ffff0000ffff'
+    segs = [vf.Segment(0, 1, .5, 0, 50, h1), vf.Segment(1, 2, 1.5, .1, 50, h2),
+            vf.Segment(2, 3, 2.5, .1, 50, h1)]
+    assert vf.mark_duplicates(segs) == [None, None, 0]
+
+
+def test_classify_heuristics():
+    s = vf.Segment(0, 10, 0.7, 0.0, std=30.0)
+    assert vf.classify(vf.Segment(0, 10, .7, 0, std=1.0), ocr_chars=0, ocr_lines=0,
+                       mean_word_h=0, frame_h=1440) == 'blank'
+    assert vf.classify(s, ocr_chars=3, ocr_lines=1, mean_word_h=10, frame_h=1440) == 'camera_only'
+    assert vf.classify(s, ocr_chars=80, ocr_lines=4, mean_word_h=60, frame_h=1440) == 'slide'
+    assert vf.classify(s, ocr_chars=900, ocr_lines=40, mean_word_h=14, frame_h=1440) == 'screen_share'
+
+
+# ---------------------------------------------------------------------------
+# конвеєр analyze_video на синтетичному записі (OCR і embeddings — фейки)
+# ---------------------------------------------------------------------------
+
+def _seed_recording(tmp_path, video_scenes):
+    import sqlite3
+    from app.db.migrations import init_database
+    db = str(tmp_path / 'recall.db')
+    init_database(db)
+    sess = tmp_path / 'rec_test'
+    sess.mkdir()
+    mp3 = sess / 'final.mp3'
+    mp3.write_bytes(b'\x00' * 64)
+    video = _make_video(sess / 'video_mon0_final.mp4', video_scenes)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, file_path, transcript_text) "
+                 "VALUES ('recording', 'Дзвінок', ?, 'текст')", (str(mp3),))
+    tid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+    conn.execute("INSERT INTO audio_downloads (youtube_url, youtube_id, title, file_path, source_type, "
+                 "recording_session_id, has_video, primary_video_path) "
+                 "VALUES ('', 'rec_test', 'Запис', ?, 'recording', 'rec_test', 1, ?)", (str(mp3), video))
+    conn.execute("INSERT INTO recording_video_tracks (recording_session_id, track_id, monitor_index, "
+                 "file_path, status, start_offset_sec) VALUES ('rec_test', 'mon0', 0, ?, 'finalized', 0.5)",
+                 (video,))
+    conn.commit()
+    conn.close()
+    return db, tid
+
+
+@pytest.fixture
+def fake_ocr(monkeypatch):
+    from app.services import document_parser, embeddings, video_analysis
+    calls = []
+
+    def _ocr(img):
+        calls.append(img.size)
+        return 'Реалізація товарів\nКонтрагент ТОВ Ромашка', [[10, 10, 80, 20, 'Реалізація']]
+    monkeypatch.setattr(document_parser, 'ocr_available', lambda: True)
+    monkeypatch.setattr(video_analysis, 'ocr_words', _ocr)
+    monkeypatch.setattr(embeddings, 'is_available', lambda: False)
+    return calls
+
+
+@needs_ffmpeg
+def test_analyze_video_writes_timeline_chunks_and_caches(tmp_path, fake_ocr, monkeypatch):
+    import sqlite3
+    from app.services import video_analysis as va
+    db, tid = _seed_recording(tmp_path, [('red', 7), ('blue', 8), ('red', 8)])
+    res = va.analyze_video(db, tid, ffmpeg=FFMPEG)
+    assert res['keyframes'] == 3 and res['method'] == 'thumbs'
+    conn = sqlite3.connect(db)
+    rows = conn.execute('SELECT ts_offset_sec, end_sec, image_path, frame_type, duplicate_of, '
+                        'ocr_boxes_json FROM video_keyframes ORDER BY ts_offset_sec').fetchall()
+    assert [round(r[0]) for r in rows] == [0, 8, 16]          # + start_offset 0.5
+    assert all(r[2] is None for r in rows)                    # зображення не зберігаються
+    assert rows[2][4] is not None                             # червоний вдруге — повтор
+    sections = [r[0] for r in conn.execute(
+        "SELECT section FROM chunks WHERE speaker='екран' ORDER BY start_time")]
+    assert sections and sections[0].startswith('кадр 00:00:00')
+    assert len(sections) == 2                                 # повтор у RAG не дублюється
+    conn.close()
+    assert not list((tmp_path / 'rec_test').glob('**/*.jpg'))
+
+    # ті самі параметри → без декодування; інші → перерахунок
+    real = va.vf.select_keyframes
+    calls = []
+    monkeypatch.setattr(va.vf, 'select_keyframes', lambda *a, **k: calls.append(1) or real(*a, **k))
+    again = va.analyze_video(db, tid, ffmpeg=FFMPEG)
+    assert again['skipped'] == 'already analyzed' and calls == []
+    redo = va.analyze_video(db, tid, threshold=0.05, ffmpeg=FFMPEG)
+    assert calls == [1] and redo['keyframes'] == 3
+
+
+def test_analyze_video_without_video_reports_no_video(tmp_path):
+    import sqlite3
+    from app.db.migrations import init_database
+    from app.services import video_analysis as va
+    db = str(tmp_path / 'r.db')
+    init_database(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO transcriptions (source_type, source_name, file_path) "
+                 "VALUES ('file', 'лише звук.mp3', 'x.mp3')")
+    conn.commit()
+    conn.close()
+    res = va.analyze_video(db, 1)
+    assert res['has_video'] is False and res['error_code'] == 'NO_VIDEO'
+
+
+@needs_ffmpeg
+def test_analyze_progress_reported_to_job(tmp_path, fake_ocr):
+    from app.services import video_analysis as va
+
+    class Job:
+        meta = {}
+        def is_cancelled(self):
+            return False
+    db, tid = _seed_recording(tmp_path, [('red', 4), ('blue', 4)])
+    job = Job()
+    va.analyze_video(db, tid, job=job, ffmpeg=FFMPEG)
+    assert job.meta['progress']['stage'] == 'done'
+
+
+def test_ocr_available_true_when_tesseract_answers(monkeypatch):
+    """Регрес 14.08–13.10.2026: ocr_available() кликав незімпортований хелпер,
+    NameError ковтався в except, і OCR документів та кадрів був мертвий."""
+    import pytesseract
+    from app.services import document_parser as dp
+    monkeypatch.setattr(dp, '_configure_tesseract', lambda: None)
+    monkeypatch.setattr(pytesseract, 'get_tesseract_version', lambda: '5.4.0')
+    assert dp.ocr_available() is True

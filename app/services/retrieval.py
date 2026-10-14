@@ -301,14 +301,18 @@ def _fts_search(db_path: str, query: str, candidate_k: int,
     # T4.6: як і у _vector_search — soft-deleted виключаємо завжди, не лише
     # коли задано category_id.
     axes_sql, axes_params = _record_axes_sql(category_id, tags, since, until)
+    # `+rowid`, а не `rowid`: голий rowid SQLite віддає у FTS5 як обмеження
+    # віртуальної таблиці (план `INDEX 32:=M2`), і FTS5 ганяє MATCH окремо на
+    # кожен id зі списку — на знімку живої БД 14 с на запит проти 0.03 с
+    # (fts-filter-pushdown). Плюс лишає фільтр поза FTS5, рядки ті самі.
     sql = ("SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ? "
-           "AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
+           "AND +rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
            "(SELECT id FROM transcriptions WHERE deleted_at IS NULL "
            "AND duplicate_of IS NULL" + axes_sql + "))")
     params: list = [fts_q] + axes_params
     if scope_tids:
         ph_s = ",".join("?" * len(scope_tids))
-        sql += (" AND rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
+        sql += (" AND +rowid IN (SELECT id FROM chunks WHERE transcription_id IN "
                 f"({ph_s}))")
         params += list(scope_tids)
     sql += " ORDER BY rank LIMIT ?"

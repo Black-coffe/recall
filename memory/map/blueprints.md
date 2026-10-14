@@ -4,12 +4,14 @@
 маршруті. Усі читають singleton-и через `from app import state as _state`. Помилки —
 JSON `{success,error}` + HTTP-код (400/401/403/404/409/500/503).
 
+last-verified: 2026-10-13 (transcription.py відео-ендпоінти, APP_VERSION); решта розділів — раніше
+
 ## system.py (~390) — `/`, `/api/health`, `/api/ready`, `/api/models/*`, `/api/system_*`, `/api/polish/*`, `/api/metrics`
 Health/робота, каталог/завантаження Whisper-моделей, системні метрики, shell-роутинг.
 `GET /` — SPA-shell (catch-all, після /api/*). `GET /sw.js` (no-cache). `GET /api/health`,
 `/api/models`, `POST /api/download_model`, `/api/models/{update-status,check-updates}`,
 `/api/system_info`, `/api/system_stats`, `/api/polish/availability` (тіри Claude), `/api/metrics` (Prometheus).
-`APP_VERSION = "4.8.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
+`APP_VERSION = "4.10.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
 `GET /api/ready` (system.py:138-177, config-registry-profiles T03) — читає `app.state.робота`
 (див. `memory/map/root.md`) + живий `_check_database_ready()` (106-136): відкриває ІСНУЮЧИЙ файл
 БД (`mode=rw`, не автостворює) і вимагає таблицю `schema_versions` з `MAX(version) >= 1`.
@@ -42,6 +44,17 @@ Health/робота, каталог/завантаження Whisper-модел�
 K1 (4.8.0): транскрипція передає `decode_options=vocabulary.decode_options_for(kind, DATABASE)` у whisper
 (transcription.py:327-331, kind = youtube|recording, решта → file; youtube дає `{}`); TG-ingest так само з
 `'telegram'` (telegram.py:562-565). Див. `services.md` → vocabulary.py.
+
+**Відео записів (`video-visual-timeline`, 4.10.0; transcription.py:2330-2723, логіка — `services.md` → video_*.py):**
+`POST /api/transcription/<id>/analyze-video` JSON `{force, method thumbs|bisect, step, min_res, threshold, settle,
+ignore_regions, max_frames, ocr=true, describe=false, vision_backend local|claude}` → job `video_analysis`
+(`{job_id}` | `{ready:true}` при тих самих параметрах | `already_running` | `NO_VIDEO` зі `success:false`, 200);
+`vision_backend` без `describe` = запит опису; поганий метод/бекенд → 400. `GET .../video` (стрім), `.../keyframes`,
+`.../keyframe/<kf_id>` (тепер кадр ріжеться на льоту, не файл), `GET .../frame?t=&size=thumb|full` (JPEG, `no-store`,
+секрети зафарбовані, заголовок `X-Recall-Redacted-Boxes`), `.../frames?t|from&to&limit(≤12)&include_camera` (base64 для MCP),
+`.../visual-timeline?from&to&limit&offset&offset_sec&with_transcript&include_camera&format=markdown`,
+`.../frames-for-text?query|segment_index&window&offset_sec`, `GET /api/video/search?q&transcription_ids&date_from&date_to&limit`.
+`TimelineError` → HTTP: `NOT_FOUND|NO_VIDEO` 404, `BAD_REQUEST` 400, `NOT_ANALYZED` 409 (`_TIMELINE_STATUS`).
 
 ## memory.py (~1290) — `/api/memory/*`
 Граф памʼяті + RAG. Категорії (CRUD/merge, дерево — див. нижче), `<id>/category`, `suggest-category`

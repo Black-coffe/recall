@@ -230,7 +230,7 @@ def get_audio_downloads():
         # transcriptions буде, не мільйони.
         query = (
             f'SELECT a.*, '
-            f'(SELECT t.id FROM transcriptions t WHERE t.file_path = a.file_path '
+            f'(SELECT t.id FROM transcriptions t WHERE t.file_path = a.file_path AND t.deleted_at IS NULL '
             f'ORDER BY t.id DESC LIMIT 1) AS transcription_id, '
             # ОКРЕМИЙ аліас: a.* вже містить власну category_id (Phase 21), тож
             # не можна аліасити COALESCE теж у 'category_id' — sqlite3.Row при
@@ -401,10 +401,26 @@ def patch_audio_download(download_id):
             )
             conn.commit()
 
+        # recording-meta-suggest-02: та сама назва в Бібліотеці й manifest
+        # сесії. Не-записи link=None — поведінка як раніше. Лениво: пакет
+        # recording тягне WASAPI/finalize.
+        linked_changed: list = []
+        if updates:
+            from app.services.recording import library as rec_library
+            link = rec_library.linked_recording(conn, audio_id=download_id)
+            if link:
+                rs = state.recording_service
+                linked_changed = rec_library.sync_recording_meta(
+                    conn, link, updates, store=getattr(rs, 'store', None) if rs else None)
+
         item = c.execute(
             'SELECT * FROM audio_downloads WHERE id = ?', (download_id,),
         ).fetchone()
 
+    for tid in linked_changed:
+        # Назва й опис ідуть у контекстний префікс чанків — переембедити.
+        record_meta.after_meta_update(tid, changed=True,
+                                      db_path=current_app.config['DATABASE'])
     return jsonify({'success': True, 'item': dict(item)})
 
 

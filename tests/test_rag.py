@@ -400,6 +400,53 @@ def test_answer_question_success_extracts_text_and_usage(monkeypatch):
     assert captured["kwargs"]["model"] == models_mod.HAIKU_4_5
 
 
+@pytest.mark.parametrize("channel,seen", [("mcp", False), ("ui", True)])
+def test_answer_question_mcp_hides_private_screen_text_before_claude(monkeypatch, channel, seen):
+    """mcp-visual-privacy-02: текст з екрана приватного запису не доходить до Claude з MCP;
+    інтерфейс Recall (ui) фільтр не зачіпає."""
+    from app.services import privacy
+    screen = {"transcription_id": 77, "chunk_id": 900, "chunk_index": 40, "speaker": "екран",
+              "section": "кадр 00:12:30", "text": "Позовна заява Петренко", "source_type": "recording",
+              "source_name": "Нарада", "meeting_date": "2026-10-01", "start_time": 750.0}
+    chunks = _sample_chunks() + [screen]
+    monkeypatch.setattr(rag.retrieval, "search",
+                        lambda db_path, q, top_k=8, category_id=None, **kw:
+                        {"chunks": [dict(c) for c in chunks], "vector_available": True})
+    monkeypatch.setattr(privacy, "private_tids", lambda db, tids: {77})
+    monkeypatch.setattr(privacy, "stop_words", lambda: [])
+    monkeypatch.setenv("RECALL_MCP_VISUAL", "images")
+    monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: object())
+    captured = {}
+
+    def fake(client, timeout, kwargs, what="polish"):
+        captured["kwargs"] = kwargs
+        return FakeFinalMessage(["ок"])
+    monkeypatch.setattr(rag.text_polishing, "_stream_with_retry", fake)
+    res = rag.answer_question(":memory:", "що з позовом?", channel=channel)
+    assert ("Позовна заява" in str(captured["kwargs"])) is seen
+    assert any(s.get("speaker") == "екран" for s in res["sources"]) is seen
+
+
+def test_answer_question_mcp_privacy_failure_hides_all_screen_text(monkeypatch):
+    from app.services import privacy
+    screen = {"transcription_id": 5, "chunk_id": 1, "chunk_index": 9, "speaker": "екран",
+              "text": "Бюджет на екрані", "source_type": "recording", "source_name": "Нарада"}
+    monkeypatch.setattr(rag.retrieval, "search",
+                        lambda db_path, q, top_k=8, category_id=None, **kw:
+                        {"chunks": _sample_chunks() + [dict(screen)], "vector_available": True})
+
+    def boom(db, tids):
+        raise privacy.PrivacyError("БД недоступна")
+    monkeypatch.setattr(privacy, "private_tids", boom)
+    monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: object())
+    captured = {}
+    monkeypatch.setattr(rag.text_polishing, "_stream_with_retry",
+                        lambda c, t, kwargs, what="polish": captured.update(k=kwargs)
+                        or FakeFinalMessage(["ок"]))
+    rag.answer_question(":memory:", "бюджет?", channel="mcp")
+    assert "Бюджет на екрані" not in str(captured["k"])
+
+
 def test_answer_question_ignores_non_text_blocks(monkeypatch):
     chunks = _sample_chunks()
     monkeypatch.setattr(

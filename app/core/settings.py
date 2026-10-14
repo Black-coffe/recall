@@ -247,13 +247,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("RECORDING_REGION_OVERLAY_COLOR", "#e5484d", "str", "Відео-запис",
             "Колір оверлея області захоплення.",
             "Діє лише коли RECORDING_REGION_OVERLAY=true.", scope="config"),
-    Setting("RECORDING_VIDEO_SCENE_THRESHOLD", "0.4", "float", "Відео-запис",
-            "Поріг зміни сцени для scene-keyframe вибірки (Phase 23B-A).",
-            "Передається в extract_scene_keyframes() як scene_threshold — вищий поріг, менше кадрів.",
-            scope="config"),
-    Setting("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES", "120", "int", "Відео-запис",
-            "Максимум кадрів на аналіз відео (OCR/vision).",
-            "Стеля кадрів, переданих у extract_scene_keyframes() — понад неї кадри взагалі не вибираються.",
+    Setting("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES", "1500", "int", "Відео-запис",
+            "Максимум ключових кадрів на один аналіз відео (MAX_FRAMES).",
+            "Понад стелю найкоротші відрізки зливаються з сусідами (захист від «мигаючого» відео); "
+            "результат позначається capped. Див. docs/video-timeline.md.",
             scope="config"),
 
     # --- Vision (опис кадрів) ---
@@ -271,6 +268,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("VIDEO_VISION_MAX_FRAMES", "120", "int", "Vision",
             "Максимум кадрів на vision-опис.",
             "Після стелі решта кадрів сесії лишаються з порожнім vision-описом (тільки OCR).", scope="config"),
+    Setting("VIDEO_VISION_KEEPALIVE", "60s", "str", "Vision",
+            "Скільки Ollama тримає локальну vision-модель у VRAM після кадру.",
+            "Дефолт local_llm — 30 хв; 60 с звільняє ~5 ГБ за хвилину після пачки кадрів, а 0 перевантажував би "
+            "модель на кожному кадрі (замір 14.10.2026: 5.5–7.6 с/кадр проти 2.3–2.5)."),
     Setting("VIDEO_VISION_TIMEOUT", "90", "float", "Vision",
             "Таймаут виклику vision-моделі (секунди).",
             "Таймаут HTTP-виклику describe_frame() до Ollama/Claude — вихід за нього best-effort лишає опис "
@@ -518,6 +519,18 @@ REGISTRY: tuple[Setting, ...] = (
             "Мовні пакети Tesseract для OCR документів.",
             "Бракує мовного пакету — pytesseract кидає TesseractError, document_parser.py фолбечить на "
             "дефолтну мову (eng)."),
+    Setting("OCR_TESSERACT_CMD", "", "str", "OCR / документи",
+            "Шлях до tesseract.exe, якщо його нема в PATH.",
+            "Порожньо — PATH, а без нього стандартний шлях інсталятора "
+            "C:\\Program Files\\Tesseract-OCR\\tesseract.exe."),
+    Setting("OCR_TESSDATA_DIR", "", "str", "OCR / документи",
+            "Тека мовних пакетів Tesseract (ukr/rus/eng).",
+            "Порожньо — %LOCALAPPDATA%\\Recall\\tessdata, якщо тека є. Потрібна, бо в Program Files "
+            "без прав адміністратора мовні пакети не докласти."),
+    Setting("OCR_TESSDATA_FAST_DIR", "", "str", "OCR / документи",
+            "Швидкі мовні пакети (tessdata_fast) для OCR кадрів відео.",
+            "Порожньо — %LOCALAPPDATA%\\Recall\\tessdata_fast, якщо тека є; інакше відео-OCR бере "
+            "звичайні пакети. Документи завжди на звичайних."),
     Setting("OCR_DPI", "200", "int", "OCR / документи",
             "DPI рендеру сторінки PDF для OCR.",
             "Передається у page.get_pixmap(dpi=...) перед OCR — вищий DPI підвищує якість ціною часу."),
@@ -567,6 +580,18 @@ REGISTRY: tuple[Setting, ...] = (
             "Таймаут виклику локальної моделі копілота (сек).",
             "Дефолтний timeout HTTP-запиту local_llm.py до Ollama, якщо виклик не передав свій.",
             scope="config"),
+    Setting("LOCAL_TITLE_MODEL", "hf.co/INSAIT-Institute/MamayLM-Gemma-3-12B-IT-v2.0-GGUF:Q5_K_M",
+            "str", "Назви записів",
+            "Локальна модель, що пропонує назву й опис запису (meta_suggest.py). Порожньо = LOCAL_LLM_MODEL.",
+            "Замір 14.10.2026 на #8677: MamayLM 12B ~40 с і три різні предметні варіанти; qwen2.5:7b за 10 с "
+            "давала майже однакові описи. Під час запису модель не кличеться взагалі (копілот)."),
+    Setting("LOCAL_TITLE_KEEPALIVE", "0", "str", "Назви записів",
+            "Ollama keep_alive для моделі назв. 0 = вивантажити одразу після відповіді.",
+            "Інакше 12B тримає VRAM ще 30 хв (LOCAL_LLM_KEEPALIVE), і дзвінок у цей час лишає копілот "
+            "і транскрипцію без місця. Ціна: кожна пропозиція з холодного старту (~45 с замість ~15)."),
+    Setting("LOCAL_TITLE_TIMEOUT", "180", "float", "Назви записів",
+            "Таймаут однієї пропозиції назви й опису (сек).",
+            "Дефолтні 60 с local_llm малі: 12B на холодному старті вантажиться у VRAM довше."),
     Setting("COPILOT_MODEL_API", "claude-sonnet-5", "str", "Копілот",
             "«Звичайна» Claude-модель верифікації важливого (local-first cascade).",
             "Читається щоразу (не кешується) у copilot/config.py — модель для звичайної (не 'гнарлі') "
@@ -615,6 +640,19 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("MCP_PORT", "5060", "int", "MCP-сервер",
             "Порт http-транспорту mcp_server.py.",
             "Діє лише з --transport http; дефолтний stdio-транспорт цей порт не використовує."),
+    Setting("RECALL_MCP_VISUAL", "images", "str", "MCP-сервер",
+            "Що з візуальної стрічки відео MCP віддає в Claude: images | text | off.",
+            "images — кадри й текст з екрана (через стоп-лист); text — лише текст, get_frame відмовляє; "
+            "off — жодного візуального, і екранні чанки зникають із search/grep/ask_archive. "
+            "Невідоме значення = off. UI Recall не зачіпає."),
+    Setting("RECALL_PRIVATE_CATEGORIES", "Юридичне,Особисте", "str", "MCP-сервер",
+            "Напрямки/проєкти, чиє візуальне не йде назовні (назви через кому).",
+            "Назва ловиться на будь-якому рівні дерева разом з нащадками; тезки ховаються всі. "
+            "Той самий стоп-лист — для MCP і бота K4."),
+    Setting("RECALL_PRIVATE_WORDS_FILE", "", "str", "MCP-сервер",
+            "Файл стоп-слів/імен (по рядку, # — коментар).",
+            "Порожньо — private.txt у корені проєкту (у .gitignore; приклад — private.example.txt). "
+            "Нема файла — стоп-слів нема; нечитабельний — візуальне ховається."),
 
     # --- Логування ---
     Setting("RECALL_LOG_TO_FILE", "0", "bool", "Логування",
@@ -692,6 +730,8 @@ IGNORED_ENV_NAMES = frozenset({
     "TMP",
     "PYTHONPATH",
     "PYTEST_CURRENT_TEST",
+    "OMP_THREAD_LIMIT",   # виставляється дочірнім tesseract на час відео-OCR
+    "TESSDATA_PREFIX",    # змінна самого tesseract; Recall бере теку з OCR_TESSDATA_DIR
 })
 
 #: Змінні, що йдуть у згенерований .env.example АКТИВНИМИ (без '#'), бо

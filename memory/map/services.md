@@ -1,5 +1,8 @@
 # services — `app/services/*` (core)
 
+last-verified: 2026-10-14 (privacy.py, video_timeline.py, rag.py MCP-фільтр); 2026-10-13 (video_*.py, screen_secrets.py); решта 2026-10-09
+(файл >80 рядків — давній борг, розбити на модулі при нагоді)
+
 Бізнес-логіка поза HTTP. Copilot та recording — окремі файли карти
 ([copilot.md](copilot.md), [recording.md](recording.md)).
 
@@ -27,6 +30,39 @@
   `blueprints/telegram.py:562-565`. Обрізку за токенами робить `whisper_manager_new._decode_kwargs`, не цей модуль.
 - **tools/measure_vocabulary.py** — замір K1: `candidates` (фрагменти з іменами/контроль/змішані), `run`
   (варіанти декодування; відмовляє при живому записі), `ab` (сліпі пари), `score` (звіт + `decide`).
+
+## Відео записів: візуальна стрічка (`video-visual-timeline`, 4.10.0, 13.10.2026)
+Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`; замір і межі — `docs/video-timeline.md`. Відео лише в записах екрана.
+- **video_frames.py** — без БД. `select_keyframes(path, method='thumbs'|'bisect', step, min_res, threshold, ignore_regions,
+  max_frames, settle, cache_dir)` → `{segments:[Segment], capped, width, height}`. thumbs: один ffmpeg-прохід 1/min_res fps
+  у 160x90 gray, порівняння з ЯКОРЕМ відрізка (`diff_score`, `PIX_DELTA=12`, дефолт `DEFAULT_THRESHOLD=0.02`), маска =
+  ignore_regions минус `flicker_mask`; кеш `thumbs.npz` у `<session>/frames_cache` (дійсний лише для тієї ж тривалості+fps).
+  `settle`=2 с зливає серію змін в один відрізок. `DEFAULT_MAX_FRAMES=1500` (`cap_segments` зливає найкоротші).
+  `grab_frame(path, t, max_width)` → PIL, ЛИШЕ в памʼяті. `mark_duplicates` (dHash ≤4 біти, несусідні), `classify` →
+  `blank|transition|camera_only|slide|screen_share`. `ALGO_VERSION=1`. `pick_sharpest` не викликається конвеєром.
+- **video_analysis.py** (переписано) — `resolve_recording_video()`, `analyze_video(db, tid, force, job, vision_backend, *,
+  method, step, min_res, threshold, settle, ignore_regions, max_frames, ocr=True, describe=False)`: відрізки → OCR пулом
+  потоків (`ocr_words` з рамками, `_VideoOcrEnv`: `OMP_THREAD_LIMIT=1` + `OCR_TESSDATA_FAST_DIR`) → `screen_secrets` →
+  (опис лише `describe`) → вектори ДО транзакції → запис `video_keyframes` + чанки `speaker='екран'` + `video_analysis_params`.
+  Ті самі `_params()` без `force` → `skipped:'already analyzed'`. Прогрес `job.meta['progress']` (frames→ocr→describe→done).
+  Нема відео → `error_code:'NO_VIDEO'`. Не кидає. Прибрано scene-detect/jpg Phase 23.
+- **screen_secrets.py** — `scan_all(text, words)`, `mask_text/mask_words` (`[🔒 секрет]`), `redact(img, boxes, w, h)`,
+  `secret_boxes(ocr_boxes_json)`, `store()` (таблиця `screen_secrets`, v49). CLI `reveal <tid>` — лише TTY + підтвердження, у файл.
+- **video_timeline.py** — `build()` (стрічка, `HIDDEN_TYPES` приховані, ліміт ≤200), `to_markdown`, `render_frame()`
+  (час стрічки → кадр із зафарбованими секретами; не-представник OCR-иться на льоту; без OCR → чорний; meta несе
+  `frame_text` — текст САМЕ цього кадру, `None` якщо OCR не було, `:185-200`), `frames()` (≤12,
+  base64), `frames_for_text()`, `search_visual()` (підрядок casefold у Python по OCR+опису). `TimelineError.code`:
+  `NOT_FOUND|NO_VIDEO|BAD_REQUEST|NOT_ANALYZED`. `_live_secret_boxes(video, t, ffmpeg)` → 4-кортеж
+  `(boxes, w, h, text)`; без OCR `text=None` (`:208-215`).
+- **privacy.py** (`mcp-visual-privacy`, 4.11.0; без torch/flask — імпортується зі stdio-MCP; його ж бере K4) — що з архіву
+  не йде назовні. `visual_mode()` (`RECALL_MCP_VISUAL` `images|text|off`, невідоме → `off`), `private_tids(db, tids)` →
+  записи в напрямках з `RECALL_PRIVATE_CATEGORIES` (дефолт `Юридичне,Особисте`; назва на будь-якому рівні + нащадки,
+  тезки ховаються всі; збій БД → `PrivacyError`), `stop_words()` (`RECALL_PRIVATE_WORDS_FILE` або `private.txt` у корені;
+  нема файла → `[]`, нечитабельний → `PrivacyError`; шаблон `private.example.txt`), `has_stop_word` (підрядок `casefold`,
+  без морфології), `screen_chunk_allowed(chunk, private, words, mode)` (лише `speaker='екран'`; `off`/приватний/стоп-слово → ні),
+  `filter_screen_chunks(db, chunks)` → `(kept, hidden)`; `PrivacyError` → усі екранні чанки прибрано (fail closed).
+  Споживачі: `rag._mcp_screen_filter` (лише `channel='mcp'`, у `answer_question[_stream]` до Claude, `rag.py:320,368,526`),
+  `mcp_server.py` (див. root.md). UI Recall фільтр не зачіпає.
 
 ## Дедуп аудіо/YouTube/записів (Хвиля A production-RAG, 16.09.2026)
 - **dedup_audio.py** — `hash_for(source_type, text)` (sha256 нормалізованого тексту, лише
@@ -191,6 +227,11 @@
   замовчуванням) — cross-encoder переранжовує топ-пул (~24) ПЕРЕД diversity cap. *>100k чанків → треба sqlite-vec.*
   *Хвиля A: обидві гілки (vector і FTS) фільтрують `duplicate_of IS NULL` поруч із
   `deleted_at IS NULL` — дубль лишається в Бібліотеці, але не в пошуку.*
+  *⚠️ fts-filter-pushdown (4.9.1): у `_fts_search` фільтр запису/скоупу поруч із `chunks_fts MATCH` — ЛИШЕ
+  `+rowid IN (…)` (`retrieval.py:308-316`), ніколи голий `rowid IN`: голий SQLite віддає у FTS5 як vtab-обмеження
+  і MATCH ганяється на кожен id окремо (13–57 с → ≤0.12 с, ті самі рядки). Та сама причина в
+  `research._candidate_ids` (`research.py:131-135`). Не «спрощувати» назад. `_term_match_counts` (`:184`) лишає
+  голий `rowid IN` — набір там ≤`candidate_k`, не фільтр архіву.*
   *Хвиля B, історія 04: векторна гілка бере ЛИШЕ чанки поточної епохи —
   `embedding_model = ? AND embedding_version = ?` (`embeddings.EMBED_MODEL`/`EMBED_VERSION`) поруч із
   `deleted_at`/`duplicate_of` — вектори різних епох ніколи не порівнюються під час нічного re-embed.*
@@ -262,7 +303,9 @@
   (`pricing.estimate_cost`) і топ-10 найдовших записів, нічого не пише.*
 - **document_parser.py** — `parse_document()` → (text, blocks). Парсери по розширенню (lazy-import):
   md/txt/docx/pdf/pptx/xlsx/csv/зображення. OCR Tesseract (≤50 стор.), таблиці→markdown(+NL-опис Claude).
-  *PyMuPDF/python-pptx/openpyxl опц. (ParserUnavailable); PARSER_VERSION → ре-парс.*
+  *PyMuPDF/python-pptx/openpyxl опц. (ParserUnavailable); PARSER_VERSION → ре-парс.
+  `_configure_tesseract()` (з `ocr_available()`): бінар = `OCR_TESSERACT_CMD` або `C:\Program Files\Tesseract-OCR`,
+  коли нема в PATH; мови = `OCR_TESSDATA_DIR` або `%LOCALAPPDATA%\Recall\tessdata`, якщо `TESSDATA_PREFIX` не заданий.*
 - **text_polishing.py** — Claude пост-процесор: `polish_text()`, `polish_diarized_text()` (стрім),
   `extract_meeting_card()`, `describe_sheets()`. *Lazy Anthropic-клієнт; prompt caching ~10% input;
   модель — `models.get_default_model()` (дефолт `claude-opus-5` з 28.07.2026, override env `CLAUDE_MODEL`; T6.2).*

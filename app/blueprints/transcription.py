@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ from werkzeug.utils import secure_filename
 from app import state
 from app.repositories import transcriptions as tx_repo
 from app.services import categories as cat_svc
-from app.services import dedup_audio, record_meta, text_polishing, vocabulary
+from app.services import dedup_audio, meta_suggest, record_meta, text_polishing, vocabulary
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
 from app.utils.fts import sanitize_fts_query
@@ -879,9 +880,20 @@ def patch_transcription_meta(transcription_id):
     if 'description' in payload:
         kwargs['description'] = payload['description']
 
+    # Лениво, як у recording.py: пакет recording тягне WASAPI/finalize.
+    from app.services.recording import library as rec_library
+
+    linked_changed: list = []
     try:
         with _get_db() as conn:
             record = record_meta.update_meta(conn, transcription_id, **kwargs)
+            # recording-meta-suggest-02: назва запису одна в Бібліотеці,
+            # Медіатеці й manifest сесії. Не-записи link=None — як раніше.
+            link = (rec_library.linked_recording(conn, transcription_id=transcription_id)
+                    if record is not None else None)
+            if link:
+                linked_changed = rec_library.sync_recording_meta(
+                    conn, link, {k: record[k] for k in kwargs}, store=_recording_store())
     except ValueError as e:
         # Контрольована помилка нормалізації (довжина) — її текст писався для людини.
         return jsonify({"success": False, "error": str(e)}), 400
@@ -894,7 +906,55 @@ def patch_transcription_meta(transcription_id):
     # нього re-embed пішов би в Config.DATABASE і переписав чанки чужої БД.
     record_meta.after_meta_update(transcription_id, changed=changed,
                                   db_path=current_app.config['DATABASE'])
+    for other_id in linked_changed:
+        if other_id != transcription_id:
+            record_meta.after_meta_update(other_id, changed=True,
+                                          db_path=current_app.config['DATABASE'])
     return jsonify({"success": True, "record": record})
+
+
+def _recording_store():
+    """SessionStore запису або None (запис вимкнено / сервіс не піднятий)."""
+    rs = state.recording_service
+    return getattr(rs, 'store', None) if rs is not None else None
+
+
+def _recording_active() -> bool:
+    """Чи йде зараз запис — за сесіями самого сервера, не за тілом запиту.
+
+    Під час запису локальна модель належить копілоту: `local_llm.generate()`
+    тримає процесний `_GEN_LOCK`, і 40 с пропозиції назви заморозили б
+    підказки в дзвінку (`docs/defects/local-llm-during-recording.md`)."""
+    rs = state.recording_service
+    if rs is None:
+        return False
+    ids_fn = getattr(rs, 'active_session_ids', None)
+    if callable(ids_fn):
+        return bool(ids_fn())
+    return bool(getattr(rs, 'active_session_id', None))
+
+
+@transcription_bp.route('/api/history/<int:transcription_id>/suggest-meta', methods=['POST'])
+def suggest_transcription_meta(transcription_id):
+    """Варіанти назви й опису від локальної моделі (спека recording-meta-suggest).
+
+    Нічого не зберігає — вибраний варіант іде звичайним PATCH. Поки йде запис,
+    модель не кличеться взагалі: 409 ``RECORDING_ACTIVE``.
+    """
+    if _recording_active():
+        return jsonify({
+            'success': False,
+            'error_code': 'RECORDING_ACTIVE',
+            'error': 'Іде запис — підказка назви буде після його завершення, '
+                     'щоб не зупиняти копілот дзвінка',
+        }), 409
+
+    try:
+        with _get_db() as conn:
+            result = meta_suggest.suggest(conn, transcription_id)
+    except meta_suggest.SuggestError as e:
+        return jsonify({'success': False, 'error': str(e)}), e.status
+    return jsonify({'success': True, **result})
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['DELETE'])
@@ -2357,51 +2417,105 @@ def _check_path_allowed(path: str) -> bool:
     return safe_path_within_any(_allowed_roots_for_media(), path) is not None
 
 
+_ANALYZE_FLOAT = ('step', 'min_res', 'threshold', 'settle')
+
+
+def _running_video_job(tid):
+    """Задача аналізу цього запису, що вже йде (щоб не ставити дубль)."""
+    if state.job_queue is None:
+        return None
+    for job in state.job_queue.list(kind='video_analysis', active_only=True):
+        if (job.meta or {}).get('transcription_id') == tid:
+            return job
+    return None
+
+
+def _max_frames_default():
+    from app.services import video_frames
+    try:
+        from app.core import settings as _s
+        return _s.env_int('RECORDING_VIDEO_ANALYSIS_MAX_FRAMES') or video_frames.DEFAULT_MAX_FRAMES
+    except Exception:
+        logger.debug("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES не прочитано", exc_info=True)
+        return video_frames.DEFAULT_MAX_FRAMES
+
+
 @transcription_bp.route('/api/transcription/<int:tid>/analyze-video', methods=['POST'])
 def analyze_video_endpoint(tid):
-    """Phase 23 B-B: Submit background video analysis job for a transcription.
+    """Нарізка запису на ключові кадри + OCR (+ опис лише при describe) фоновою задачею.
 
-    Body (JSON, optional): {"force": bool}
-    Returns {"success": false, "reason": "no video"} if no screen recording is
-    linked, or {"success": true, "job_id": "<id>"} when the job is queued.
+    Body (JSON, усе опційно): force, method ('thumbs'|'bisect'), step, min_res,
+    threshold, settle, ignore_regions ([[x, y, w, h]] частками кадру), max_frames,
+    ocr (дефолт true), describe (дефолт false), vision_backend ('local'|'claude').
+    → {"success": true, "job_id"} або {"success": true, "ready": true} (уже пораховано з
+    тими самими параметрами), або {"success": false, "error_code": "NO_VIDEO"}.
     """
     data = request.get_json(silent=True) or {}
-    force = bool(data.get('force', False))
-    # Phase 23B: optional per-run vision backend override ('local'|'claude'|'off').
     vision_backend = data.get('vision_backend')
-    if vision_backend not in ('local', 'claude', 'off', None):
-        vision_backend = None
-
+    if vision_backend not in ('local', 'claude', None):
+        return jsonify({'success': False, 'error': 'vision_backend: local або claude'}), 400
+    method = data.get('method')
+    if method not in ('thumbs', 'bisect', None):
+        return jsonify({'success': False, 'error': 'method: thumbs або bisect'}), 400
+    # Явний vision_backend без describe — запит на опис: так шле UI-чекбокс
+    # «Claude-опис» (transcript.js), і до нового конвеєра він описував кадри.
+    describe = bool(data['describe']) if 'describe' in data else vision_backend is not None
+    kwargs = {'method': method, 'ocr': bool(data.get('ocr', True)), 'describe': describe}
     try:
-        from app.services import video_analysis
-    except ImportError as exc:
-        logger.error("video_analysis service not available: %s", exc)
-        return jsonify({'success': False, 'reason': 'service_unavailable'}), 503
+        for k in _ANALYZE_FLOAT:
+            if data.get(k) is not None:
+                kwargs[k] = float(data[k])
+        if data.get('max_frames') is not None:
+            kwargs['max_frames'] = int(data['max_frames'])
+        regions = data.get('ignore_regions')
+        if regions:
+            kwargs['ignore_regions'] = [[float(v) for v in r][:4] for r in regions]
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'параметри мають бути числами'}), 400
+    force = bool(data.get('force', False))
 
+    from app.services import video_analysis
     db_path = current_app.config['DATABASE']
-
-    try:
-        video_info = video_analysis.resolve_recording_video(db_path, tid)
-    except Exception as exc:
-        logger.error("resolve_recording_video failed for tid=%s: %s", tid, exc)
-        return jsonify({'success': False, 'reason': 'resolve_error'}), 500
-
-    if video_info is None:
-        return jsonify({'success': False, 'reason': 'no video'})
-
+    if video_analysis.resolve_recording_video(db_path, tid) is None:
+        return jsonify({'success': False, 'reason': 'no video', 'error_code': 'NO_VIDEO',
+                        'error': f'у запису #{tid} немає відео'})
     if state.job_queue is None:
         return jsonify({'success': False, 'reason': 'job_queue_unavailable'}), 503
 
-    def _video_job(job, _db=db_path, _tid=tid, _force=force, _vb=vision_backend):
-        return video_analysis.analyze_video(
-            _db, _tid, force=_force, job=job, vision_backend=_vb)
+    running = _running_video_job(tid)
+    if running is not None:
+        return jsonify({'success': True, 'job_id': running.id, 'already_running': True,
+                        'progress': (running.meta or {}).get('progress')})
+    if not force:
+        try:
+            vf = video_analysis.vf
+            params = video_analysis._params(
+                method=kwargs['method'] or vf.DEFAULT_METHOD,
+                step=kwargs.get('step') or vf.DEFAULT_STEP,
+                min_res=kwargs.get('min_res') or vf.DEFAULT_MIN_RES,
+                threshold=kwargs.get('threshold', vf.DEFAULT_THRESHOLD),
+                settle=kwargs.get('settle', vf.DEFAULT_SETTLE),
+                ignore_regions=kwargs.get('ignore_regions'),
+                max_frames=kwargs.get('max_frames') or _max_frames_default(),
+                ocr=kwargs['ocr'], describe=kwargs['describe'], vision_backend=vision_backend)
+            with _get_db() as conn:
+                row = conn.execute('SELECT video_analysis_at, video_analysis_params '
+                                   'FROM transcriptions WHERE id = ?', (tid,)).fetchone()
+            if row and row['video_analysis_at'] and \
+                    json.loads(row['video_analysis_params'] or 'null') == params:
+                return jsonify({'success': True, 'ready': True})
+        except Exception:
+            logger.debug("перевірка готового аналізу tid=%s не вдалась — ставлю задачу", tid,
+                         exc_info=True)
 
-    job = state.job_queue.submit(
-        'video_analysis',
-        _video_job,
-        meta={'transcription_id': tid},
-    )
+    def _video_job(job, _db=db_path, _tid=tid, _force=force, _vb=vision_backend, _kw=kwargs):
+        return video_analysis.analyze_video(_db, _tid, force=_force, job=job,
+                                            vision_backend=_vb, **_kw)
+
+    job = state.job_queue.submit('video_analysis', _video_job,
+                                 meta={'transcription_id': tid})
     return jsonify({'success': True, 'job_id': job.id})
+
 
 
 @transcription_bp.route('/api/transcription/<int:tid>/recording-info', methods=['GET'])
@@ -2514,32 +2628,155 @@ def list_keyframes(tid):
 
 @transcription_bp.route('/api/transcription/<int:tid>/keyframe/<int:kf_id>', methods=['GET'])
 def get_keyframe_image(tid, kf_id):
-    """Phase 23 B-B: Serve a keyframe image file.
-
-    Validates that the keyframe belongs to this transcription and that the
-    image path is within allowed roots before serving.
-    """
+    """Кадр-представник відрізка. Зображення не зберігаються — ріжеться з відео
+    на льоту, рамки секретів зафарбовані."""
     try:
         with _get_db() as conn:
             row = conn.execute(
-                'SELECT image_path FROM video_keyframes '
-                'WHERE id = ? AND transcription_id = ?',
-                (kf_id, tid),
-            ).fetchone()
+                'SELECT ts_offset_sec, video_time_sec FROM video_keyframes '
+                'WHERE id = ? AND transcription_id = ?', (kf_id, tid)).fetchone()
     except Exception as exc:
         logger.error("keyframe lookup error kf_id=%s tid=%s: %s", kf_id, tid, exc)
         return jsonify({'success': False, 'error': 'Помилка бази даних'}), 500
-
     if not row:
         return jsonify({'success': False, 'error': 'Кейфрейм не знайдено'}), 404
+    from app.services import video_analysis
+    info = video_analysis.resolve_recording_video(current_app.config['DATABASE'], tid) or {}
+    t = (float(row['video_time_sec']) + float(info.get('start_offset_sec') or 0.0)) \
+        if row['video_time_sec'] is not None else float(row['ts_offset_sec'])
+    return _frame_response(tid, t, request.args.get('size', 'thumb'))
 
-    image_path = row['image_path']
-    if not image_path or not os.path.isfile(image_path):
-        return jsonify({'success': False, 'error': 'Файл зображення недоступний'}), 404
 
-    abs_path = os.path.realpath(image_path)
-    if not _check_path_allowed(abs_path):
-        logger.warning("Keyframe request blocked (path outside allowed roots): %s", abs_path)
-        return jsonify({'success': False, 'error': 'Access denied'}), 403
+_TIMELINE_STATUS = {'NOT_FOUND': 404, 'NO_VIDEO': 404, 'BAD_REQUEST': 400, 'NOT_ANALYZED': 409}
 
-    return send_file(abs_path, mimetype='image/jpeg', conditional=True)
+
+def _timeline_error(exc, extra=None):
+    body = {'success': False, 'error_code': exc.code, 'error': str(exc)}
+    body.update(extra or {})
+    return jsonify(body), _TIMELINE_STATUS.get(exc.code, 400)
+
+
+def _frame_response(tid, t, size):
+    from app.services import video_timeline as vt
+    try:
+        img, meta = vt.render_frame(current_app.config['DATABASE'], tid, t, size=size)
+    except vt.TimelineError as exc:
+        return _timeline_error(exc)
+    except Exception:
+        logger.exception("кадр tid=%s t=%s не віддано", tid, t)
+        return jsonify({'success': False, 'error': 'Кадр не вдалося вирізати'}), 500
+    buf = io.BytesIO()
+    img.save(buf, 'JPEG', quality=82)
+    buf.seek(0)
+    resp = send_file(buf, mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Recall-Redacted-Boxes'] = str(meta.get('redacted_boxes', 0))
+    return resp
+
+
+def _float_arg(name):
+    v = request.args.get(name)
+    if v in (None, ''):
+        return None
+    return float(v)
+
+
+def _video_job_status(tid):
+    job = _running_video_job(tid)
+    if job is None:
+        return None
+    return {'status': 'running', 'job_id': job.id, 'progress': (job.meta or {}).get('progress')}
+
+
+@transcription_bp.route('/api/transcription/<int:tid>/frame', methods=['GET'])
+def get_frame_image(tid):
+    """Кадр у момент t (час стрічки, с) як JPEG; size=thumb|full. Секрети зафарбовані."""
+    try:
+        t = _float_arg('t')
+    except ValueError:
+        return jsonify({'success': False, 'error': 't має бути числом'}), 400
+    if t is None:
+        return jsonify({'success': False, 'error': 'потрібен t'}), 400
+    return _frame_response(tid, t, request.args.get('size', 'thumb'))
+
+
+@transcription_bp.route('/api/transcription/<int:tid>/frames', methods=['GET'])
+def get_frames_json(tid):
+    """Кадри як base64-JPEG для MCP: один за t або представники відрізків у [from, to]."""
+    from app.services import video_timeline as vt
+    try:
+        res = vt.frames(current_app.config['DATABASE'], tid, t=_float_arg('t'),
+                        start=_float_arg('from'), end=_float_arg('to'),
+                        limit=int(request.args.get('limit', 6)),
+                        size=request.args.get('size', 'thumb'),
+                        include_camera=request.args.get('include_camera') in ('1', 'true'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 't/from/to/limit мають бути числами'}), 400
+    except vt.TimelineError as exc:
+        return _timeline_error(exc, _video_job_status(tid))
+    except Exception:
+        logger.exception("кадри tid=%s не віддано", tid)
+        return jsonify({'success': False, 'error': 'Кадри не вдалося вирізати'}), 500
+    return jsonify(res)
+
+
+@transcription_bp.route('/api/transcription/<int:tid>/visual-timeline', methods=['GET'])
+def get_visual_timeline(tid):
+    """Стрічка «кадр + фрази» з пагінацією; format=json|markdown."""
+    from app.services import video_timeline as vt
+    try:
+        res = vt.build(current_app.config['DATABASE'], tid, start=_float_arg('from'),
+                       end=_float_arg('to'),
+                       with_transcript=request.args.get('with_transcript', '1') not in ('0', 'false'),
+                       include_camera=request.args.get('include_camera') in ('1', 'true'),
+                       shift=_float_arg('offset_sec') or 0.0,
+                       limit=int(request.args.get('limit', 50)),
+                       offset=int(request.args.get('offset', 0)))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'числові параметри мають бути числами'}), 400
+    except vt.TimelineError as exc:
+        return _timeline_error(exc)
+    running = _video_job_status(tid)
+    if running:
+        res.update(running)
+    if request.args.get('format') == 'markdown':
+        return jsonify({'transcription_id': tid, 'status': res.get('status'),
+                        'next_offset': res.get('next_offset'), 'total': res.get('total'),
+                        'markdown': vt.to_markdown(res)})
+    return jsonify(res)
+
+
+@transcription_bp.route('/api/transcription/<int:tid>/frames-for-text', methods=['GET'])
+def get_frames_for_text(tid):
+    """Фраза (query) або індекс сегмента (segment_index) → кадри у вікні ±window с."""
+    from app.services import video_timeline as vt
+    try:
+        seg = request.args.get('segment_index')
+        res = vt.frames_for_text(current_app.config['DATABASE'], tid,
+                                 query=request.args.get('query'),
+                                 segment_index=int(seg) if seg not in (None, '') else None,
+                                 window=_float_arg('window') or 5.0,
+                                 shift=_float_arg('offset_sec') or 0.0)
+    except ValueError:
+        return jsonify({'success': False, 'error': 'числові параметри мають бути числами'}), 400
+    except vt.TimelineError as exc:
+        return _timeline_error(exc)
+    return jsonify(res)
+
+
+@transcription_bp.route('/api/video/search', methods=['GET'])
+def search_visual_endpoint():
+    """Пошук по OCR і описах кадрів усього архіву (текст уже замаскований)."""
+    from app.services import video_timeline as vt
+    ids = [x for x in (request.args.get('transcription_ids') or '').split(',') if x.strip()]
+    try:
+        res = vt.search_visual(current_app.config['DATABASE'], request.args.get('q', ''),
+                               transcription_ids=[int(x) for x in ids] or None,
+                               date_from=request.args.get('date_from'),
+                               date_to=request.args.get('date_to'),
+                               limit=int(request.args.get('limit', 20)))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'transcription_ids/limit мають бути числами'}), 400
+    except vt.TimelineError as exc:
+        return _timeline_error(exc)
+    return jsonify(res)

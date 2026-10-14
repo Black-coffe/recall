@@ -128,8 +128,10 @@ def _candidate_ids(conn, fts_q: str, category_id, *,
     cat_frag, cat_params = filter_sql("category_id", category_id)
     tags_frag, tags_params = tags_sql("id", tags or [])
     date_frag, date_params = date_sql("COALESCE(meeting_date, created_at)", since, until)
+    # `+rowid`: інакше список id іде у FTS5 як обмеження і MATCH ганяється на
+    # кожен id окремо (fts-filter-pushdown; 0.39 с → 0.001 с на знімку).
     sql = ("SELECT rowid FROM transcriptions_fts WHERE transcriptions_fts MATCH ? "
-           "AND rowid IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL"
+           "AND +rowid IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL"
            + cat_frag + tags_frag + date_frag + ")")
     params: list = [fts_q, *cat_params, *tags_params, *date_params]
     rows = conn.execute(sql, params).fetchall()

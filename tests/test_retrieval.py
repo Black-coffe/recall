@@ -987,3 +987,71 @@ def test_comments_of_a_project_survive_direction_filter(db, mock_embeddings, moc
     res = retrieval.search(db, "бюджет", top_k=5, category_id=fond)
     assert [c["text"] for c in res["chunks"]
             if c["source_type"] == "comment"] == ["бюджет проєкту"]
+
+
+# ============================================================
+# fts-filter-pushdown: фільтр записів не проштовхується у FTS5
+# ============================================================
+# Форма `rowid IN (SELECT …)` віддає FTS5 список rowid як обмеження віртуальної
+# таблиці (план `INDEX …:=M…`), і FTS5 ганяє MATCH окремо на кожен id: на знімку
+# живої БД 14 с на запит проти 0.03 с, коли фільтр лишається поза FTS5.
+
+def _vtab_plan(path, sql):
+    """Рядки EXPLAIN QUERY PLAN про віртуальну таблицю для SQL, що реально виконався."""
+    conn = sqlite3.connect(path)
+    try:
+        return [r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql)
+                if "VIRTUAL TABLE" in r[3]]
+    finally:
+        conn.close()
+
+
+def _fts_rowid_pushed(plan_lines):
+    """`INDEX 32:=M2` — rowid-обмеження у FTS5; `INDEX 32:M2` — лише MATCH.
+    `=`, `<`, `>` в idxStr FTS5 — обмеження по rowid, де б вони не стояли."""
+    import re
+    out = []
+    for line in plan_lines:
+        m = re.search(r"INDEX \d+:(\S*)", line)
+        if m and set(m.group(1)) & set("=<>"):
+            out.append(line)
+    return out
+
+
+def test_fts_search_keeps_record_filter_out_of_fts5(db, monkeypatch):
+    from contextlib import contextmanager
+
+    tid = _add_tx(db, "Дзвінок з інвестором")
+    _add_chunk(db, tid, 0, "Тарас підписав договір оренди", None)
+    _add_chunk(db, tid, 1, "Олена надіслала договір юристу", None)
+    seen: list[str] = []
+    real = retrieval.get_db_connection
+
+    @contextmanager
+    def tracing(path):
+        with real(path) as conn:
+            conn.set_trace_callback(seen.append)
+            yield conn
+
+    monkeypatch.setattr(retrieval, "get_db_connection", tracing)
+    hits = retrieval._fts_search(db, "договір Тарас", 10)
+    assert {h[0] for h in hits}, "фікстура мусить знаходитись"
+    sql = next(s for s in seen if "chunks_fts MATCH" in s)
+    plan = _vtab_plan(db, sql)
+    assert plan and not _fts_rowid_pushed(plan), plan
+
+
+def test_research_candidates_keep_record_filter_out_of_fts5(db):
+    from app.db.connection import get_db_connection
+    from app.services import research
+
+    tid = _add_tx(db, "Зустріч щодо оренди", transcript="Тарас підписав договір оренди")
+    _add_tx(db, "Інша зустріч", transcript="Олена говорила про бюджет")
+    seen: list[str] = []
+    with get_db_connection(db) as conn:
+        conn.set_trace_callback(seen.append)
+        ids = research._candidate_ids(conn, '"договір"', None)
+    assert ids == [tid]
+    sql = next(s for s in seen if "transcriptions_fts MATCH" in s)
+    plan = _vtab_plan(db, sql)
+    assert plan and not _fts_rowid_pushed(plan), plan

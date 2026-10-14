@@ -2039,5 +2039,48 @@ def init_database(db_path: str):
                   "(idx_categories_parent_name) замість глобальної (ADR-023 §E)')")
         logger.info("Міграція v47: унікальність назви вузла — серед братів")
 
+    # === v48: візуальна стрічка відео (spec video-visual-timeline) ============
+    # Аддитивно: відрізок кадру (end_sec), тип, повтор за змістом, оцінка зміни,
+    # рамки слів OCR (для зафарбовування секретів на льоту), час у самому відео.
+    # Зображення кадрів більше НЕ зберігаються — `image_path` лишається для старих
+    # рядків Phase 23 і NULL для нових. `transcriptions.video_analysis_params` —
+    # версія алгоритму + параметри: інші → перерахунок.
+    if current_version < 48:
+        c.execute("PRAGMA table_info(video_keyframes)")
+        vk_cols = {r[1] for r in c.fetchall()}
+        if vk_cols:
+            for col, decl in (('end_sec', 'REAL'), ('frame_type', 'TEXT'),
+                              ('duplicate_of', 'INTEGER'), ('change_score', 'REAL'),
+                              ('ocr_boxes_json', 'TEXT'), ('video_time_sec', 'REAL')):
+                if col not in vk_cols:
+                    c.execute(f'ALTER TABLE video_keyframes ADD COLUMN {col} {decl}')
+        c.execute("PRAGMA table_info(transcriptions)")
+        tx_cols = {r[1] for r in c.fetchall()}
+        if tx_cols and 'video_analysis_params' not in tx_cols:
+            c.execute('ALTER TABLE transcriptions ADD COLUMN video_analysis_params TEXT')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(48, 'video_keyframes: відрізок, тип, повтор, рамки OCR; "
+                  "transcriptions.video_analysis_params')")
+        logger.info("Міграція v48: візуальна стрічка відео")
+
+    # === v49: screen_secrets — сирі секрети з екрана ==========================
+    # Паролі/токени з OCR кадрів. У video_keyframes і chunks лежить лише маска
+    # «[🔒 секрет]»; сирі значення — тут, і читає їх ЛИШЕ локальний скрипт
+    # `python -m app.services.screen_secrets reveal` (TTY + підтвердження, у файл).
+    # Жоден HTTP-ендпоінт і жодна MCP-тулза цю таблицю не читають.
+    if current_version < 49:
+        c.execute('''CREATE TABLE IF NOT EXISTS screen_secrets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        keyframe_id INTEGER NOT NULL
+                            REFERENCES video_keyframes(id) ON DELETE CASCADE,
+                        kind TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        bbox_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_screen_secrets_kf ON screen_secrets(keyframe_id)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(49, 'screen_secrets: сирі секрети з кадрів, лише для локального reveal')")
+        logger.info("Міграція v49: screen_secrets")
+
     conn.commit()
     conn.close()

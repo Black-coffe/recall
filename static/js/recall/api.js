@@ -142,6 +142,8 @@
     A.audioUrl = (id) => '/api/transcription/' + id + '/audio';
     A.exportUrl = (fmt) => '/api/export/' + fmt;
     A.updateRecord = (id, body) => A.patch('/api/history/' + id, body);
+    // Варіанти назви й опису від локальної моделі (до ~1 хв, без таймауту; 409 RECORDING_ACTIVE під час запису).
+    A.suggestMeta = (id) => A.post('/api/history/' + id + '/suggest-meta');
 
     // — Ingest: YouTube → download → transcribe (lands in History/transcriptions) —
     A.models = () => getJSON('/api/models');

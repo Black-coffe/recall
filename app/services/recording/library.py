@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.db.connection import get_db_connection
+from app.services import record_meta
 
 logger = logging.getLogger(__name__)
 
@@ -280,3 +281,100 @@ def register_recording(
         'file_size': file_size,
         'category_id': category_id,
     }
+
+
+# ============================================================
+# Одна назва запису в Бібліотеці, Медіатеці і сесії (recording-meta-suggest-02)
+# ============================================================
+
+def linked_recording(conn, *, transcription_id: Optional[int] = None,
+                     audio_id: Optional[int] = None) -> Optional[dict]:
+    """Звʼязка запису: ``{audio_id, session_id, transcription_ids}`` або None.
+
+    None — це не запис (YouTube, файл, TG, документ): тоді PATCH поводиться,
+    як раніше. Аудіо ↔ транскрипт звʼязані за ``file_path`` (так само їх
+    зводить список Медіатеки), аудіо ↔ сесія — за ``recording_session_id``.
+    """
+    if transcription_id is not None:
+        tx = conn.execute(
+            'SELECT file_path FROM transcriptions WHERE id = ? AND deleted_at IS NULL',
+            (transcription_id,),
+        ).fetchone()
+        if tx is None or not tx['file_path']:
+            return None
+        audio = conn.execute(
+            'SELECT id, recording_session_id, file_path FROM audio_downloads '
+            'WHERE file_path = ? AND deleted_at IS NULL '
+            "AND recording_session_id IS NOT NULL AND recording_session_id != '' "
+            'ORDER BY id DESC LIMIT 1',
+            (tx['file_path'],),
+        ).fetchone()
+    elif audio_id is not None:
+        audio = conn.execute(
+            'SELECT id, recording_session_id, file_path FROM audio_downloads '
+            'WHERE id = ? AND deleted_at IS NULL',
+            (audio_id,),
+        ).fetchone()
+    else:
+        return None
+    if audio is None or not audio['recording_session_id']:
+        return None
+    tx_ids = [r['id'] for r in conn.execute(
+        'SELECT id FROM transcriptions WHERE file_path = ? AND deleted_at IS NULL',
+        (audio['file_path'],),
+    ).fetchall()] if audio['file_path'] else []
+    return {
+        'audio_id': audio['id'],
+        'session_id': audio['recording_session_id'],
+        'transcription_ids': tx_ids,
+    }
+
+
+def sync_recording_meta(conn, link: dict, updates: dict, *, store=None) -> list[int]:
+    """Розкласти вже нормалізовані ``title``/``description`` на всі боки запису.
+
+    ``updates`` — лише ті ключі, що прийшли в PATCH. ``audio_downloads.title``
+    — NOT NULL: порожня назва з Бібліотеки його не чіпає (там лишається
+    авто-імʼя), а ``manifest.name`` стає ``None`` (→ ``auto_name``).
+    Повертає id транскриптів, чия мета реально змінилась (для re-embed).
+    Збій manifest-а (сесію видалено, store вимкнено) логується і не валить PATCH:
+    база вже узгоджена, а manifest вторинний.
+    """
+    audio_set = {k: v for k, v in updates.items()
+                 if k == 'description' or (k == 'title' and v)}
+    if 'title' in updates and not updates['title'] and store is not None:
+        # Назву в Бібліотеці прибрали: у Медіатеці теж повертаємо авто-імʼя
+        # сесії, а не лишаємо стару власну (NOT NULL не дає поставити NULL).
+        try:
+            auto = (store.read(link['session_id']) or {}).get('auto_name')
+        except Exception:  # noqa: BLE001 — нема manifest-а: лишаємо як є
+            logger.warning('sync_recording_meta: %s — manifest не прочитано',
+                           link['session_id'], exc_info=True)
+            auto = None
+        if auto:
+            audio_set['title'] = auto
+    if audio_set:
+        assignments = ', '.join(f'{field} = ?' for field in audio_set)
+        conn.execute(f'UPDATE audio_downloads SET {assignments} WHERE id = ?',
+                     [*audio_set.values(), link['audio_id']])
+        conn.commit()
+
+    changed: list[int] = []
+    for tid in link['transcription_ids']:
+        res = record_meta.update_meta(conn, tid, **updates)
+        if res and res.get('changed'):
+            changed.append(tid)
+
+    if store is None:
+        logger.info('sync_recording_meta: %s — store недоступний, manifest не оновлено',
+                    link['session_id'])
+        return changed
+    try:
+        if 'title' in updates:
+            store.set_name(link['session_id'], updates['title'])
+        if 'description' in updates:
+            store.set_description(link['session_id'], updates['description'])
+    except Exception:  # noqa: BLE001 — manifest вторинний, БД уже узгоджена
+        logger.warning('sync_recording_meta: %s — manifest не оновлено',
+                       link['session_id'], exc_info=True)
+    return changed

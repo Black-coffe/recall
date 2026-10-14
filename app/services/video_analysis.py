@@ -1,51 +1,41 @@
-"""Video understanding — keyframe OCR → RAG ingestion (Phase 23, Story B-A).
+"""Video understanding — адаптивні ключові кадри → OCR → стрічка і RAG.
 
-Pipeline (all $0, no vision API):
+Phase 23 почав конвеєр (scene-detect, кадри на диску); spec video-visual-timeline
+(13.10.2026) замінив відбір кадрів на :mod:`app.services.video_frames` і прибрав
+зберігання зображень:
+
   1. resolve_recording_video(db_path, transcription_id)
-       Single source of truth for the recording's screen-video path.
-       Looks up transcription.file_path → audio_downloads (has_video=1) →
-       recording_video_tracks (start_offset_sec).
-       Returns dict or None — never raises.
+       Єдине джерело правди про відео запису (audio_downloads.has_video=1 →
+       recording_video_tracks.start_offset_sec). None, якщо відео нема.
 
-  2. extract_scene_keyframes(video_path, out_dir, ...)
-       Run ffmpeg scene-detection (-vf "select='gt(scene,{thr})',showinfo") +
-       parse pts_time from showinfo stderr.
-       Floor fallback: if scene gives fewer frames than ceil(duration/30),
-       run a second pass at fps=1/30 (long static videos still get coverage).
-       Dedupes near-identical timestamps; caps to max_frames.
-       Returns [(ts_offset_sec, image_path), ...] — empty list on any error.
+  2. analyze_video(db_path, transcription_id, ...)
+       * відбір відрізків (``video_frames.select_keyframes``, метод thumbs|bisect);
+       * кадр-представник кожного відрізка ріжеться з відео В ПАМʼЯТЬ і йде в OCR
+         (Tesseract з рамками слів) пулом потоків — на диск нічого не пишеться;
+       * тип кадру, повтор за змістом, рамки слів → ``video_keyframes``;
+       * OCR (і опис, лише при ``describe=True``) → чанки ``speaker='екран'``,
+         секція «кадр ГГ:ХХ:СС», щоб search_archive/ask_archive бачили кадри;
+       * версія алгоритму + параметри → ``transcriptions.video_analysis_params``:
+         ті самі параметри без ``force`` → готовий результат без декодування.
+       Прогрес — ``job.meta['progress']``; скасовується між кадрами.
 
-  3. analyze_video(db_path, transcription_id, force=False, job=None)
-       Orchestrates everything:
-         - Guard: skip if video_analysis_at already set (unless force).
-         - Force cleanup: DELETE prior video_keyframes + chunks WHERE speaker='екран'.
-         - OCR each frame via document_parser._ocr_image_obj (Tesseract, $0).
-         - INSERT into video_keyframes.
-         - If OCR text has enough signal: embed_texts([text]) → INSERT into chunks
-           (speaker='екран', section='екран MM:SS').  chunks_fts trigger auto-fires.
-         - UPDATE transcriptions.video_analysis_at / video_keyframes_count.
-       Cancellable: checks job.is_cancelled() between frames.
-       Best-effort: one bad frame never aborts the whole job.
-
-Config (in Config class, config.py):
-  RECORDING_VIDEO_SCENE_THRESHOLD     float  default 0.4
-  RECORDING_VIDEO_ANALYSIS_MAX_FRAMES int    default 120
+Час кадру в стрічці = час у відео + ``start_offset_sec`` доріжки.
 """
 from __future__ import annotations
 
 import datetime
-import glob
+import json
 import logging
-import math
 import os
 import re
-import subprocess
-from typing import Optional
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Sequence
 
 import numpy as np
 
 from app.db.connection import get_db_connection
-from app.utils.proc import NO_WINDOW
+from app.services import video_frames as vf
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +43,13 @@ logger = logging.getLogger(__name__)
 _MIN_OCR_SIGNAL = 8
 # Minimum non-whitespace chars in a vision description to treat it as signal.
 _MIN_VISION_SIGNAL = 12
-
-# Timestamps within this many seconds of each other are considered duplicates.
-_TS_DEDUP_GAP = 0.5
+# Скільки кадрів OCR-иться паралельно: tesseract — окремий процес на кадр, і
+# на час відео-OCR кожен однопотоковий (OMP_THREAD_LIMIT=1). Замір 13.10.2026 на
+# 28 потоках CPU, кадр 2560 px, tessdata_fast: 8 воркерів — 0.77 с/кадр, 16 — 0.59.
+_OCR_WORKERS = max(2, min(16, (os.cpu_count() or 4) // 2 + 2))
+# Ширина кадру для OCR: дрібний екранний шрифт на 2560 px читається, ширше
+# не дає тексту, лише часу.
+_OCR_MAX_WIDTH = 2560
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +99,6 @@ def resolve_recording_video(db_path: str, transcription_id: int) -> Optional[dic
 
             sid: str = ad['recording_session_id'] or ''
 
-            # start_offset_sec from the matching track row
             start_offset_sec = 0.0
             if sid:
                 track = conn.execute(
@@ -131,140 +124,7 @@ def resolve_recording_video(db_path: str, transcription_id: int) -> Optional[dic
 
 
 # ---------------------------------------------------------------------------
-# 2. extract_scene_keyframes
-# ---------------------------------------------------------------------------
-
-def _ffmpeg_bin(ffmpeg: Optional[str] = None) -> str:
-    """Resolve ffmpeg binary path (never raises)."""
-    if ffmpeg:
-        return ffmpeg
-    try:
-        from app.services.recording.video_probe import ffmpeg_path
-        return ffmpeg_path()
-    except Exception:
-        logger.debug("ffmpeg_path() resolution failed, falling back to default path", exc_info=True)
-        return r'C:\ffmpeg\bin\ffmpeg.exe'
-
-
-def _probe_duration(video_path: str, ff: str) -> float:
-    """Return video duration in seconds via ffprobe, or 0.0 on failure."""
-    ffprobe = os.path.join(os.path.dirname(ff), 'ffprobe.exe')
-    if not os.path.isfile(ffprobe):
-        ffprobe = 'ffprobe'
-    try:
-        r = subprocess.run(
-            [ffprobe, '-v', 'error',
-             '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1',
-             video_path],
-            capture_output=True, text=True, timeout=30,
-            creationflags=NO_WINDOW,
-        )
-        return float(r.stdout.strip())
-    except Exception:
-        logger.debug("ffprobe duration probe failed for %s", video_path, exc_info=True)
-        return 0.0
-
-
-def _parse_pts_times(stderr: str) -> list[float]:
-    """Extract ordered pts_time floats from showinfo filter stderr.
-
-    showinfo emits one line per frame:
-        [Parsed_showinfo_1 @ 0x...] n:  0 pts: ... pts_time:1.234 ...
-    """
-    return [float(m) for m in re.findall(r'pts_time:([\d.]+)', stderr)]
-
-
-def extract_scene_keyframes(
-    video_path: str,
-    out_dir: str,
-    scene_threshold: float = 0.4,
-    max_frames: int = 120,
-    ffmpeg: Optional[str] = None,
-) -> list[tuple[float, str]]:
-    """Extract scene-change keyframes from *video_path* into *out_dir*.
-
-    Uses ffmpeg scene detection filter.  If the resulting frame count is
-    below ``ceil(duration_sec / 30)`` (very static video), a second pass
-    samples one frame every 30 s to guarantee coverage.
-
-    Args:
-        video_path:       Source .mp4 / .mkv.
-        out_dir:          Directory for JPEG output.  Created if absent.
-        scene_threshold:  Scene-change detection sensitivity (0–1).
-        max_frames:       Hard cap; excess frames are evenly sub-sampled.
-        ffmpeg:           ffmpeg binary path (auto-resolved if None).
-
-    Returns:
-        Sorted [(ts_offset_sec, image_path)] pairs.  Empty list on failure.
-    """
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        ff = _ffmpeg_bin(ffmpeg)
-        duration = _probe_duration(video_path, ff)
-
-        # ---- Pass 1: scene detection ----------------------------------------
-        p1_pat = os.path.join(out_dir, 'sc_%05d.jpg')
-        cmd_scene = [
-            ff, '-hide_banner', '-i', video_path,
-            '-vf', f"select='gt(scene,{scene_threshold})',showinfo",
-            '-vsync', 'vfr', '-q:v', '3',
-            p1_pat,
-        ]
-        logger.debug("[video_analysis] scene cmd: %s", ' '.join(cmd_scene))
-        r1 = subprocess.run(cmd_scene, capture_output=True, text=True, timeout=600,
-                            creationflags=NO_WINDOW)
-        pts1 = _parse_pts_times(r1.stderr)
-        sc_files = sorted(glob.glob(os.path.join(out_dir, 'sc_*.jpg')))
-        pairs: list[tuple[float, str]] = list(zip(pts1, sc_files))
-
-        # ---- Pass 2: static-video floor -------------------------------------
-        floor_count = math.ceil(duration / 30) if duration > 0 else 1
-        if len(pairs) < floor_count:
-            logger.debug(
-                "[video_analysis] %d scene frames for %.0f s video (floor=%d) "
-                "— running fps=1/30 pass",
-                len(pairs), duration, floor_count,
-            )
-            p2_pat = os.path.join(out_dir, 'fp_%05d.jpg')
-            cmd_fps = [
-                ff, '-hide_banner', '-i', video_path,
-                '-vf', 'fps=1/30,showinfo',
-                '-vsync', 'vfr', '-q:v', '3',
-                p2_pat,
-            ]
-            r2 = subprocess.run(cmd_fps, capture_output=True, text=True, timeout=600,
-                                creationflags=NO_WINDOW)
-            pts2 = _parse_pts_times(r2.stderr)
-            fp_files = sorted(glob.glob(os.path.join(out_dir, 'fp_*.jpg')))
-            pairs.extend(zip(pts2, fp_files))
-
-        # ---- Sort, dedup near-identical timestamps, cap ---------------------
-        pairs.sort(key=lambda x: x[0])
-        deduped: list[tuple[float, str]] = []
-        last_ts = -_TS_DEDUP_GAP - 1
-        for ts, fpath in pairs:
-            if ts - last_ts >= _TS_DEDUP_GAP:
-                deduped.append((ts, fpath))
-                last_ts = ts
-
-        if len(deduped) > max_frames:
-            step = len(deduped) / max_frames
-            deduped = [deduped[int(i * step)] for i in range(max_frames)]
-
-        logger.info(
-            "[video_analysis] %s → %d keyframes (thr=%.2f, max=%d)",
-            os.path.basename(video_path), len(deduped), scene_threshold, max_frames,
-        )
-        return deduped
-
-    except Exception:
-        logger.exception("[video_analysis] extract_scene_keyframes failed")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# 3. analyze_video — main orchestrator
+# 2. analyze_video
 # ---------------------------------------------------------------------------
 
 def _next_chunk_index(conn, transcription_id: int) -> int:
@@ -286,38 +146,132 @@ def _load_cfg():
         return None
 
 
+def ocr_words(img) -> tuple[str, list]:
+    """OCR одного PIL-кадру з рамками слів.
+
+    → (текст по рядках, [[x, y, w, h, слово], ...] у пікселях ``img``).
+    Рамки потрібні, щоб зафарбовувати секрети на льоту."""
+    import pytesseract
+    from app.services import document_parser as _dp
+    try:
+        data = pytesseract.image_to_data(img, lang=_dp._OCR_LANG,
+                                         output_type=pytesseract.Output.DICT)
+    except pytesseract.TesseractError:
+        logger.debug("OCR з мовами %s не вдався — дефолтна мова", _dp._OCR_LANG, exc_info=True)
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    words: list = []
+    lines: dict = {}
+    for i, word in enumerate(data.get('text') or []):
+        word = (word or '').strip()
+        if not word:
+            continue
+        try:
+            if float(data['conf'][i]) < 0:
+                continue
+        except (TypeError, ValueError):
+            logger.debug("OCR conf не число: %r", data['conf'][i])
+        words.append([int(data['left'][i]), int(data['top'][i]),
+                      int(data['width'][i]), int(data['height'][i]), word])
+        key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
+        lines.setdefault(key, []).append(word)
+    text = '\n'.join(' '.join(ws) for ws in lines.values())
+    return text, words
+
+
+class _VideoOcrEnv:
+    """На час відео-OCR: однопотоковий tesseract і швидкі моделі (якщо стоять).
+
+    ``tessdata_fast`` на 2560 px читає екранну кирилицю так само, як стандартні
+    моделі, на ~30 % швидше (замір у docs/video-timeline.md). Документи лишаються
+    на стандартних — там швидкість не головне."""
+    _KEYS = ('OMP_THREAD_LIMIT', 'TESSDATA_PREFIX')
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in self._KEYS}
+        os.environ['OMP_THREAD_LIMIT'] = '1'
+        fast = os.environ.get('OCR_TESSDATA_FAST_DIR') or os.path.join(
+            os.environ.get('LOCALAPPDATA', ''), 'Recall', 'tessdata_fast')
+        if os.path.isdir(fast):
+            os.environ['TESSDATA_PREFIX'] = fast
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
+def _params(*, method, step, min_res, threshold, settle, ignore_regions, max_frames,
+            ocr, describe, vision_backend) -> dict:
+    return {
+        'algo': vf.ALGO_VERSION, 'method': method, 'step': step, 'min_res': min_res,
+        'threshold': threshold, 'settle': settle,
+        'ignore_regions': [[float(v) for v in r] for r in (ignore_regions or [])],
+        'max_frames': max_frames, 'ocr': bool(ocr), 'describe': bool(describe),
+        'vision_backend': (vision_backend or 'default') if describe else None,
+    }
+
+
+def _set_progress(job, stage: str, done: float, total: float) -> None:
+    if job is None:
+        return
+    try:
+        pct = round(100.0 * done / total, 1) if total else 0.0
+        job.meta['progress'] = {'stage': stage, 'done': int(done), 'total': int(total),
+                                'pct': pct}
+    except Exception:
+        logger.debug("job progress update failed", exc_info=True)
+
+
+def _describe(video: str, t: float, backend: Optional[str], ffmpeg: Optional[str],
+              boxes: Optional[list] = None, src_w: int = 0, src_h: int = 0) -> str:
+    """Опис кадру vision-моделлю. Кадр живе у тимчасовому файлі лише на час виклику,
+    і рамки секретів на ньому вже зафарбовані — і для локальної моделі, і для Claude."""
+    from app.services import screen_secrets as _ss
+    from app.services import video_vision as _vv
+    img = _ss.redact(vf.grab_frame(video, t, max_width=1920, ffmpeg=ffmpeg),
+                     boxes or [], src_w, src_h)
+    fd, path = tempfile.mkstemp(suffix='.jpg', prefix='recall_frame_')
+    os.close(fd)
+    try:
+        img.save(path, 'JPEG', quality=88)
+        return (_vv.describe_frame(path, backend=backend) or '').strip()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("тимчасовий кадр не видалено: %s", path, exc_info=True)
+
+
 def analyze_video(
     db_path: str,
     transcription_id: int,
     force: bool = False,
     job=None,
     vision_backend: Optional[str] = None,
+    *,
+    method: Optional[str] = None,
+    step: Optional[float] = None,
+    min_res: Optional[float] = None,
+    threshold: Optional[float] = None,
+    settle: Optional[float] = None,
+    ignore_regions: Optional[Sequence[Sequence[float]]] = None,
+    max_frames: Optional[int] = None,
+    ocr: bool = True,
+    describe: bool = False,
+    ffmpeg: Optional[str] = None,
 ) -> dict:
-    """Extract keyframes, OCR + vision-describe them, ingest into the RAG.
+    """Відібрати ключові кадри, OCR-нути (опційно описати), записати стрічку і чанки.
 
-    Each keyframe gets two text layers, both optional and degrading gracefully:
-      * OCR (Tesseract, $0) — literal on-screen text.
-      * Vision description (Phase 23B) — "what is shown" from a VL model
-        (local Qwen2.5-VL via Ollama by default, or Claude vision). See
-        :mod:`app.services.video_vision`.
-    A chunk is embedded into the RAG when EITHER layer has signal, so text-less
-    but visual frames (photos, diagrams) also become searchable.
+    ``describe`` — опис кадру vision-моделлю (дефолт вимкнено: довго і/або коштує):
+    ``vision_backend`` None/'local' — локальна модель Ollama, 'claude' — Anthropic.
 
-    Args:
-        db_path:           Path to SQLite database.
-        transcription_id:  Target transcription.
-        force:             Re-analyse even if video_analysis_at is already set.
-        job:               Optional job object supporting .is_cancelled().
-        vision_backend:    Per-run override of VIDEO_VISION_BACKEND
-                           ('local'|'claude'|'off'); None → config default.
-
-    Returns dict:
-        has_video    bool
-        skipped      str  — reason (only present when returning early)
-        keyframes    int  — rows in video_keyframes
-        chunks_added int  — new rows in chunks
-
-    Never raises — all errors are caught and logged.
+    Повертає dict: has_video, skipped (лише при ранньому виході), error_code
+    (NO_VIDEO), keyframes, chunks_added, vision_descriptions, capped, method,
+    params. Ніколи не кидає.
     """
     def _cancelled() -> bool:
         try:
@@ -326,214 +280,236 @@ def analyze_video(
             logger.debug("job.is_cancelled() check failed, assuming not cancelled", exc_info=True)
             return False
 
-    # ---- 1. Locate video ---------------------------------------------------
     info = resolve_recording_video(db_path, transcription_id)
     if info is None:
-        return {'has_video': False, 'skipped': 'no video'}
+        return {'has_video': False, 'skipped': 'no video', 'error_code': 'NO_VIDEO'}
+    video = info['primary_video_path']
+    offset = float(info.get('start_offset_sec') or 0.0)
 
-    primary_video_path = info['primary_video_path']
-    session_dir = info['session_dir']
+    cfg = _load_cfg()
+    cfg_max = vf.DEFAULT_MAX_FRAMES
+    if cfg is not None:
+        cfg_max = int(getattr(cfg, 'RECORDING_VIDEO_ANALYSIS_MAX_FRAMES', cfg_max) or cfg_max)
+    params = _params(
+        method=method or vf.DEFAULT_METHOD, step=float(step or vf.DEFAULT_STEP),
+        min_res=float(min_res or vf.DEFAULT_MIN_RES),
+        threshold=float(threshold if threshold is not None else vf.DEFAULT_THRESHOLD),
+        settle=float(settle if settle is not None else vf.DEFAULT_SETTLE),
+        ignore_regions=ignore_regions, max_frames=int(max_frames or cfg_max),
+        ocr=ocr, describe=describe, vision_backend=vision_backend)
 
-    # ---- 2. Idempotency guard ----------------------------------------------
+    # ---- готовий результат з тими самими параметрами -------------------------
     try:
         with get_db_connection(db_path) as conn:
             tx = conn.execute(
-                "SELECT video_analysis_at, video_keyframes_count "
-                "FROM transcriptions WHERE id = ?",
-                (transcription_id,),
-            ).fetchone()
-            if tx and tx['video_analysis_at'] and not force:
-                return {
-                    'has_video': True,
-                    'skipped': 'already analyzed',
-                    'keyframes': tx['video_keyframes_count'] or 0,
-                }
+                "SELECT video_analysis_at, video_keyframes_count, video_analysis_params "
+                "FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
     except Exception:
-        logger.exception("[video_analysis] idempotency check failed")
-        return {'has_video': False, 'skipped': 'db error'}
-
-    # ---- 3. Clean prior data (force re-run) --------------------------------
-    if force:
+        logger.exception("[video_analysis] читання стану аналізу не вдалось")
+        return {'has_video': True, 'skipped': 'db error'}
+    if tx and tx['video_analysis_at'] and not force:
         try:
-            with get_db_connection(db_path) as conn:
-                conn.execute(
-                    "DELETE FROM video_keyframes WHERE transcription_id = ?",
-                    (transcription_id,),
-                )
-                conn.execute(
-                    "DELETE FROM chunks WHERE transcription_id = ? AND speaker = 'екран'",
-                    (transcription_id,),
-                )
-                conn.commit()
-        except Exception:
-            logger.exception("[video_analysis] cleanup prior data failed (continuing)")
+            prev = json.loads(tx['video_analysis_params'] or 'null')
+        except ValueError:
+            logger.debug("video_analysis_params не JSON — перерахунок", exc_info=True)
+            prev = None
+        if prev == params:
+            return {'has_video': True, 'skipped': 'already analyzed',
+                    'keyframes': tx['video_keyframes_count'] or 0, 'params': params}
 
+    # ---- відбір відрізків ----------------------------------------------------
+    _set_progress(job, 'frames', 0, 1)
+    try:
+        sel = vf.select_keyframes(
+            video, method=params['method'], step=params['step'], min_res=params['min_res'],
+            threshold=params['threshold'], ignore_regions=params['ignore_regions'],
+            max_frames=params['max_frames'], settle=params['settle'],
+            cache_dir=os.path.join(info['session_dir'], 'frames_cache'), ffmpeg=ffmpeg,
+            progress=lambda f: _set_progress(job, 'frames', f * 1000, 1000))
+    except vf.NoVideoError as e:
+        logger.info("[video_analysis] tx=%d: відео не читається: %s", transcription_id, e)
+        return {'has_video': False, 'skipped': str(e), 'error_code': 'NO_VIDEO'}
+    except Exception:
+        logger.exception("[video_analysis] відбір кадрів не вдався")
+        return {'has_video': True, 'skipped': 'frame selection failed'}
+    segs = sel['segments']
     if _cancelled():
         return {'has_video': True, 'skipped': 'cancelled'}
 
-    # ---- 4. Read config values ---------------------------------------------
-    cfg = _load_cfg()
-    scene_thr = float(getattr(cfg, 'RECORDING_VIDEO_SCENE_THRESHOLD', 0.4)) if cfg else 0.4
-    max_frames = int(getattr(cfg, 'RECORDING_VIDEO_ANALYSIS_MAX_FRAMES', 120)) if cfg else 120
-    vision_max = int(getattr(cfg, 'VIDEO_VISION_MAX_FRAMES', 120)) if cfg else 120
-
-    # ---- 5. Extract keyframes ----------------------------------------------
-    kf_dir = os.path.join(session_dir, 'keyframes')
-    frames = extract_scene_keyframes(
-        primary_video_path, kf_dir,
-        scene_threshold=scene_thr,
-        max_frames=max_frames,
-    )
-
-    # ---- 6. OCR availability -----------------------------------------------
+    # ---- OCR (паралельно, кадри лише в памʼяті) ------------------------------
     from app.services import document_parser as _dp
-    ocr_ok = _dp.ocr_available()
-    if not ocr_ok:
-        logger.warning(
-            "[video_analysis] Tesseract unavailable — OCR text will be empty; "
-            "chunks will not be added but keyframe rows will still be stored"
-        )
+    ocr_ok = bool(ocr) and _dp.ocr_available()
+    if ocr and not ocr_ok:
+        logger.warning("[video_analysis] Tesseract недоступний — кадри без OCR")
 
-    from app.services import embeddings as _emb
-    emb_ok = _emb.is_available()
+    def _ocr_one(seg):
+        if _cancelled() or not ocr_ok:
+            return '', []
+        img = vf.grab_frame(video, seg.frame_time, max_width=_OCR_MAX_WIDTH, ffmpeg=ffmpeg)
+        return ocr_words(img)
 
-    # -- Vision (Phase 23B): "what is shown on screen" → RAG alongside OCR --
-    from app.services import video_vision as _vv
-    vision_model = _vv.active_model(vision_backend)
-    vision_ok, vision_reason = _vv.availability(vision_backend)
-    if vision_ok:
-        logger.info("[video_analysis] vision backend ready: %s", vision_reason)
-    else:
-        logger.info("[video_analysis] vision off/unavailable (continuing OCR-only): %s",
-                    vision_reason)
+    ocr_results: list = [('', [])] * len(segs)
+    if segs and ocr_ok:
+        with _VideoOcrEnv(), ThreadPoolExecutor(max_workers=_OCR_WORKERS) as pool:
+            futures = [pool.submit(_ocr_one, s) for s in segs]
+            for i, fut in enumerate(futures):
+                try:
+                    ocr_results[i] = fut.result()
+                except Exception:
+                    logger.debug("[video_analysis] OCR кадру %.1f с не вдався",
+                                 segs[i].frame_time, exc_info=True)
+                _set_progress(job, 'ocr', i + 1, len(segs))
+    if _cancelled():
+        return {'has_video': True, 'skipped': 'cancelled'}
 
-    # ---- 7. Process frames -------------------------------------------------
-    keyframes_stored = 0
-    chunks_added = 0
-    vision_calls = 0
-    vision_capped = False
+    # ---- секрети з екрана: маскуються ДО будь-якого запису чи опису ----------
+    from app.services import screen_secrets as _ss
+    width, height = int(sel.get('width') or 0), int(sel.get('height') or 0)
+    ocr_w = min(width, _OCR_MAX_WIDTH) if width else 0
+    ocr_h = int(height * min(1.0, _OCR_MAX_WIDTH / width)) if width else height
+    frame_secrets: list = []
+    for i, (text, words) in enumerate(ocr_results):
+        found = _ss.scan_all(text, words)
+        frame_secrets.append((found, words))
+        ocr_results[i] = (_ss.mask_text(text, found) or '', _ss.mask_words(words, found))
+    n_secrets = sum(len(f) for f, _ in frame_secrets)
+    if n_secrets:
+        logger.info("[video_analysis] tx=%d: %d секретів з екрана замасковано",
+                    transcription_id, n_secrets)
 
-    for ts, frame_path in frames:
-        if _cancelled():
-            logger.info("[video_analysis] job cancelled after %d frames", keyframes_stored)
-            break
+    # ---- опис (лише describe=True) ------------------------------------------
+    dups = vf.mark_duplicates(segs)
+    vision_texts: list[str] = [''] * len(segs)
+    vision_model = None
+    if describe:
+        from app.services import video_vision as _vv
+        vision_ok, why = _vv.availability(vision_backend)
+        vision_model = _vv.active_model(vision_backend)
+        if not vision_ok:
+            logger.info("[video_analysis] опис недоступний: %s", why)
+            # у параметри — те, що реально зроблено: повторний виклик із describe
+            # спробує ще раз, а не віддасть «готове» без описів
+            params = dict(params, describe=False, vision_backend=None)
+        else:
+            for i, s in enumerate(segs):
+                if _cancelled():
+                    break
+                if dups[i] is None:          # повтор бере опис першого — не описуємо вдруге
+                    try:
+                        found, raw_words = frame_secrets[i]
+                        boxes = [raw_words[x.word_index][:4] for x in found
+                                 if x.word_index is not None]
+                        vis = _describe(video, s.frame_time, vision_backend, ffmpeg,
+                                        boxes, ocr_w, ocr_h)
+                        vision_texts[i] = _ss.mask_text(vis, found + _ss.scan_text(vis)) or ''
+                    except Exception:
+                        logger.debug("опис кадру %.1f с не вдався", s.frame_time, exc_info=True)
+                _set_progress(job, 'describe', i + 1, len(segs))
 
-        # -- OCR --
-        ocr_text = ''
-        if ocr_ok:
-            try:
-                from PIL import Image
-                with Image.open(frame_path) as img:
-                    ocr_text = _dp._ocr_image_obj(img)
-            except Exception:
-                logger.debug(
-                    "[video_analysis] OCR failed for %s", frame_path, exc_info=True
-                )
-
-        # -- Vision description (best-effort; '' if backend off/unavailable) --
-        vision_text = ''
-        if vision_ok:
-            if vision_calls < vision_max:
-                vision_text = _vv.describe_frame(frame_path, backend=vision_backend)
-                vision_calls += 1
-            elif not vision_capped:
-                vision_capped = True
-                logger.info(
-                    "[video_analysis] vision cap reached (%d frames); remaining "
-                    "frames are OCR-only (raise VIDEO_VISION_MAX_FRAMES)", vision_max,
-                )
-
-        # -- Store keyframe row --
-        vis_clean = (vision_text or '').strip()
-        try:
-            with get_db_connection(db_path) as conn:
-                conn.execute(
-                    """INSERT INTO video_keyframes
-                         (transcription_id, ts_offset_sec, image_path, ocr_text,
-                          vision_text, vision_model, vision_at, source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'scene')""",
-                    (transcription_id, ts, frame_path, ocr_text or None,
-                     vis_clean or None,
-                     vision_model if vis_clean else None,
-                     datetime.datetime.now().isoformat(' ', 'seconds') if vis_clean else None),
-                )
-                conn.commit()
-            keyframes_stored += 1
-        except Exception:
-            logger.debug(
-                "[video_analysis] keyframe row insert failed ts=%.2f", ts, exc_info=True
-            )
-            continue  # skip chunk too — frame not persisted
-
-        # -- Embed + chunk: gate on OCR signal OR vision signal --
-        clean_ocr = ocr_text.strip()
-        has_ocr = len(re.sub(r'\s', '', clean_ocr)) >= _MIN_OCR_SIGNAL
-        has_vis = len(re.sub(r'\s', '', vis_clean)) >= _MIN_VISION_SIGNAL
+    # ---- чанки RAG і їх вектори — ДО транзакції запису --------------------
+    # Вектори рахуються довго; у відкритій транзакції це тримало б замок запису
+    # SQLite на весь прохід, і інші писачі падали б по BUSY_TIMEOUT.
+    now = datetime.datetime.now().isoformat(' ', 'seconds')
+    try:
+        from app.services import embeddings as _emb
+        emb_ok = _emb.is_available()
+    except Exception:
+        logger.debug("embeddings недоступні — чанки без векторів", exc_info=True)
+        _emb, emb_ok = None, False
+    pending_chunks: list = []                 # (t, end, текст, вектор)
+    for i, s in enumerate(segs):
+        if dups[i] is not None:               # повтор у RAG не дублюється
+            continue
+        text = (ocr_results[i][0] or '').strip()
+        vis = vision_texts[i]
+        has_ocr = len(re.sub(r'\s', '', text)) >= _MIN_OCR_SIGNAL
+        has_vis = len(re.sub(r'\s', '', vis)) >= _MIN_VISION_SIGNAL
         if not (has_ocr or has_vis):
             continue
+        parts = ([text] if has_ocr else []) + ([f'[опис кадру] {vis}'] if has_vis else [])
+        chunk_text = '\n'.join(parts)
+        blob = None
+        if emb_ok:
+            try:
+                blob = _emb.embed_texts([chunk_text])[0].astype(np.float32).tobytes()
+            except Exception:
+                logger.debug("embedding кадру не вдався", exc_info=True)
+        pending_chunks.append((s.start + offset, s.end + offset, chunk_text, blob))
 
-        # Combine layers so a single chunk carries both literal text and meaning.
-        chunk_parts = []
-        if has_ocr:
-            chunk_parts.append(clean_ocr)
-        if has_vis:
-            chunk_parts.append(f'[опис кадру] {vis_clean}')
-        chunk_text = '\n'.join(chunk_parts)
+    # ---- запис ---------------------------------------------------------------
+    chunks_added = 0
+    try:
+        with get_db_connection(db_path) as conn:
+            legacy_files = [r['image_path'] for r in conn.execute(
+                "SELECT image_path FROM video_keyframes "
+                "WHERE transcription_id = ? AND image_path IS NOT NULL", (transcription_id,))]
+            conn.execute("DELETE FROM video_keyframes WHERE transcription_id = ?",
+                         (transcription_id,))
+            conn.execute("DELETE FROM chunks WHERE transcription_id = ? AND speaker = 'екран'",
+                         (transcription_id,))
+            row_ids: list[int] = []
+            for i, s in enumerate(segs):
+                text, words = ocr_results[i]
+                lines = [ln for ln in text.split('\n') if ln.strip()]
+                mean_h = (sum(w[3] for w in words) / len(words)) if words else 0.0
+                ftype = vf.classify(s, ocr_chars=len(re.sub(r'\s', '', text)),
+                                    ocr_lines=len(lines), mean_word_h=mean_h, frame_h=ocr_h,
+                                    min_res=params['min_res'], ocr_ran=ocr_ok)
+                vis = vision_texts[i]
+                cur = conn.execute(
+                    """INSERT INTO video_keyframes
+                         (transcription_id, ts_offset_sec, end_sec, video_time_sec, image_path,
+                          ocr_text, ocr_boxes_json, scene_score, change_score, frame_type,
+                          vision_text, vision_model, vision_at, source)
+                       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (transcription_id, s.start + offset, s.end + offset, s.frame_time,
+                     text or None,
+                     json.dumps({'w': ocr_w, 'h': ocr_h,
+                                 'words': words}, ensure_ascii=False) if words else None,
+                     s.change_score, s.change_score, ftype,
+                     vis or None, vision_model if vis else None, now if vis else None,
+                     params['method']))
+                row_ids.append(cur.lastrowid)
+                found, raw_words = frame_secrets[i]
+                if found:
+                    _ss.store(conn, cur.lastrowid, found, raw_words)
+            for i, d in enumerate(dups):
+                if d is not None:
+                    conn.execute("UPDATE video_keyframes SET duplicate_of = ? WHERE id = ?",
+                                 (row_ids[d], row_ids[i]))
 
-        try:
-            embedding_blob: Optional[bytes] = None
-            if emb_ok:
-                vec = _emb.embed_texts([chunk_text])     # shape (1, 1024)
-                embedding_blob = vec[0].astype(np.float32).tobytes()
-
-            mm = int(ts // 60)
-            ss = int(ts % 60)
-            section = f'екран {mm:02d}:{ss:02d}'
-
-            with get_db_connection(db_path) as conn:
-                chunk_idx = _next_chunk_index(conn, transcription_id)
+            for t, end_t, chunk_text, blob in pending_chunks:
+                section = f'кадр {int(t // 3600):02d}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}'
                 conn.execute(
                     """INSERT OR IGNORE INTO chunks
                          (transcription_id, chunk_index, start_time, end_time,
                           speaker, text, embedding, section)
                        VALUES (?, ?, ?, ?, 'екран', ?, ?, ?)""",
-                    (
-                        transcription_id, chunk_idx,
-                        ts, ts + 0.1,
-                        chunk_text, embedding_blob,
-                        section,
-                    ),
-                )
-                conn.commit()
-            chunks_added += 1
-
-        except Exception:
-            logger.debug(
-                "[video_analysis] chunk insert failed ts=%.2f", ts, exc_info=True
-            )
-
-    # ---- 8. Update transcription marker ------------------------------------
-    try:
-        with get_db_connection(db_path) as conn:
+                    (transcription_id, _next_chunk_index(conn, transcription_id),
+                     t, end_t, chunk_text, blob, section))
+                chunks_added += 1
             conn.execute(
-                """UPDATE transcriptions
-                      SET video_analysis_at = CURRENT_TIMESTAMP,
-                          video_keyframes_count = ?
-                    WHERE id = ?""",
-                (keyframes_stored, transcription_id),
-            )
+                """UPDATE transcriptions SET video_analysis_at = CURRENT_TIMESTAMP,
+                          video_keyframes_count = ?, video_analysis_params = ? WHERE id = ?""",
+                (len(segs), json.dumps(params, ensure_ascii=False), transcription_id))
             conn.commit()
     except Exception:
-        logger.exception("[video_analysis] failed to update transcriptions marker")
+        logger.exception("[video_analysis] запис стрічки не вдався")
+        return {'has_video': True, 'skipped': 'db write failed'}
 
-    logger.info(
-        "[video_analysis] tx=%d done — %d keyframes stored, %d chunks added, "
-        "%d vision descriptions",
-        transcription_id, keyframes_stored, chunks_added, vision_calls,
-    )
-    return {
-        'has_video': True,
-        'keyframes': keyframes_stored,
-        'chunks_added': chunks_added,
-        'vision_descriptions': vision_calls,
-    }
+    # кадри старого конвеєра (Phase 23 зберігав jpg) — зображення більше не зберігаються
+    for path in legacy_files:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            logger.warning("старий кадр не видалено: %s", path, exc_info=True)
+
+    n_desc = sum(1 for v in vision_texts if v)
+    logger.info("[video_analysis] tx=%d: %d кадрів (%s), %d чанків, %d описів%s",
+                transcription_id, len(segs), params['method'], chunks_added, n_desc,
+                ' (capped)' if sel['capped'] else '')
+    _set_progress(job, 'done', 1, 1)
+    return {'has_video': True, 'keyframes': len(segs), 'chunks_added': chunks_added,
+            'vision_descriptions': n_desc, 'secrets_masked': n_secrets, 'capped': sel['capped'],
+            'method': params['method'], 'params': params}

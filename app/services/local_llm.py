@@ -268,6 +268,7 @@ def generate_json(
     model: Optional[str] = None,
     timeout: Optional[float] = None,
     retries: int = 1,
+    keep_alive: Optional[str] = None,
 ) -> dict:
     """Виклик з примусовим JSON-виводом.
 
@@ -285,6 +286,7 @@ def generate_json(
         resp = generate(
             prompt, system=system, format=fmt, max_tokens=max_tokens,
             temperature=temperature, num_ctx=num_ctx, model=model, timeout=timeout,
+            keep_alive=keep_alive,
         )
         text = (resp.get("response") or "").strip()
         try:

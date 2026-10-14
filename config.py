@@ -233,7 +233,6 @@ class Config:
     RECORDING_REGION_OVERLAY = settings.env_bool('RECORDING_REGION_OVERLAY')
     RECORDING_REGION_OVERLAY_COLOR = settings.env('RECORDING_REGION_OVERLAY_COLOR')
     # Phase 23B-A: Video understanding — scene-keyframe OCR → RAG ingestion.
-    RECORDING_VIDEO_SCENE_THRESHOLD = settings.env_float('RECORDING_VIDEO_SCENE_THRESHOLD')
     RECORDING_VIDEO_ANALYSIS_MAX_FRAMES = settings.env_int('RECORDING_VIDEO_ANALYSIS_MAX_FRAMES')
     # Phase 23B: Vision-опис кадрів («що показано на екрані») → у RAG поряд з OCR.
     # Бекенд: 'local' (Ollama VL-модель, $0/офлайн, default), 'claude' (Anthropic

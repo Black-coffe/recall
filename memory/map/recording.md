@@ -61,6 +61,12 @@ comtypes+pycaw для process loopback). ADR-026 (+ поправки A1-A4). Wik
 - Кожна зміна → запис у `streams.system.source_events` (`reason` user|pid_change|auto_restore;
   PID у маніфест не пишуться) + SSE `source_changed`.
 
+## Відеодоріжки → візуальна стрічка (4.10.0)
+Відео екрана лежить у `recording_video_tracks` (`start_offset_sec`), `audio_downloads.has_video=1` + `primary_video_path`.
+`video_analysis.resolve_recording_video()` зводить це до `{primary_video_path, session_dir, start_offset_sec}`; час кадру в
+стрічці = час у відео + `start_offset_sec`. Мініатюри кешуються в `<session_dir>/frames_cache/thumbs.npz`; зображень кадрів
+на диск більше не пишуть. Конвеєр, ендпоінти, секрети — `services.md` (video_*.py), `blueprints.md`, wiki `video-timeline-and-screen-secrets`.
+
 ## FSM (per session)
 ```
 [recording] ──pause()──> [paused] ──resume()─┐
@@ -83,4 +89,4 @@ watcher при include >4 процесів обрізає до 4 (open() у ті
 **Тести:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
 recording_service,recording_blueprint,session_store}.py`. Спайк-кіт: `scripts/spikes/process_loopback/`.
 
-last-verified: 2026-10-08
+last-verified: 2026-10-13 (розділ про відеодоріжки); решта 2026-10-08

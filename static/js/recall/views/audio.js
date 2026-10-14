@@ -295,6 +295,11 @@
         const tr = d.transcription_id
             ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> Транскрипт</button>`
             : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> Транскрибувати</button>`;
+        // Запис без власної назви, але з транскриптом — локальна модель пропонує
+        // варіанти. Без транскрипту пропозиція прийде сама після транскрибації.
+        const name = d.transcription_id && UI.isUnnamedRecording(d)
+            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" title="Локальна модель запропонує назву й опис"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати назву</button>`
+            : '';
         return `<div class="rc-aud" data-id="${d.id}">
             <span class="rc-rec__rail">${thumb}</span>
             <div class="rc-rec__body">
@@ -304,7 +309,7 @@
                 <div class="rc-aud__run" hidden></div>
             </div>
             <div class="rc-aud__actions">
-                ${tr}
+                ${name}${tr}
                 <button class="rc-iconbtn" data-act="play" title="Відтворити у системному плеєрі" aria-label="Відтворити"><i class="fa-solid fa-play"></i></button>
                 <button class="rc-iconbtn" data-act="explorer" title="Показати у Провіднику" aria-label="Показати у Провіднику"><i class="fa-solid fa-folder-open"></i></button>
                 <button class="rc-iconbtn" data-act="edit" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
@@ -332,21 +337,9 @@
             try { await R.api.audioExplorer(d.id); }
             catch (e) { UI.toast(e.message || 'Не вдалося відкрити Провідник', 'error'); }
         });
-        act('edit').addEventListener('click', async () => {
-            const res = await UI.editMetaModal({
-                title: d.title || '',
-                description: d.description || '',
-                titleRequired: true,
-                save: async (values) => {
-                    const r = await R.api.updateAudio(d.id, values);
-                    Object.assign(d, r.item || {});
-                },
-            });
-            if (!res) return;
-            const titleEl = row.querySelector('.rc-rec__title');
-            if (titleEl) titleEl.textContent = d.title || ('Аудіо #' + d.id);
-            UI.toast('Збережено', 'success');
-        });
+        act('edit').addEventListener('click', () => openAudioMeta(ctx, d, { autoSuggest: false }));
+        const sugBtn = act('suggest');
+        if (sugBtn) sugBtn.addEventListener('click', () => openAudioMeta(ctx, d, { autoSuggest: true }));
         act('delete').addEventListener('click', async () => {
             const ok = await UI.confirmModal({
                 title: 'Видалити з медіатеки',
@@ -374,6 +367,69 @@
                 UI.toast(e.message || 'Не вдалося видалити', 'error');
             }
         });
+    }
+
+    // Вікно «Назва й опис» картки Медіатеки. Пропозиції — лише коли є
+    // транскрипт (модель пише за ним); `first` — уже готові варіанти
+    // (автопропозиція після транскрибації), щоб не питати модель вдруге.
+    async function openAudioMeta(ctx, d, o) {
+        o = o || {};
+        const tid = o.transcriptionId || d.transcription_id;
+        let first = o.first || null;
+        const res = await UI.editMetaModal({
+            title: d.title || '',
+            description: d.description || '',
+            titleRequired: true,
+            suggest: tid ? () => {
+                if (first) { const r = first; first = null; return Promise.resolve(r); }
+                return R.api.suggestMeta(tid);
+            } : null,
+            autoSuggest: !!(tid && (o.autoSuggest || o.first)),
+            save: async (values) => {
+                const r = await R.api.updateAudio(d.id, values);
+                Object.assign(d, r.item || {});
+            },
+        });
+        if (!res) return;
+        if (ctx.isCurrent()) load(ctx);
+        UI.toast('Збережено', 'success');
+    }
+
+    // Після транскрибації запису без назви: чекаємо саммарі Claude (enrichment
+    // дописує його за ~1–2 хв, вхід за ним у рази точніший), стеля ~3 хв — далі
+    // варіанти з фрагментів транскрипту. Поки йде запис, сервер відповідає
+    // 409 RECORDING_ACTIVE (модель належить копілоту) — чекаємо кінця запису.
+    // Вікно відкривається вже з готовими варіантами і лише якщо власник досі
+    // на Медіатеці; для однієї картки — один раз.
+    const SUMMARY_POLL_MS = 10000, SUMMARY_WAIT_MS = 180000, RECORDING_POLL_MS = 30000;
+    const autoNamed = new Set();
+    async function autoSuggestAfterTranscribe(ctx, d, tid) {
+        if (!tid || autoNamed.has(d.id)) return;
+        autoNamed.add(d.id);
+        const deadline = Date.now() + SUMMARY_WAIT_MS;
+        while (ctx.isCurrent() && Date.now() < deadline) {
+            try {
+                const rec = await R.api.get('/api/history/' + tid);
+                if (rec && rec.summary_json) break;
+            } catch (e) { console.debug('[audio] summary poll', e); }
+            await new Promise(r => setTimeout(r, SUMMARY_POLL_MS));
+        }
+        while (ctx.isCurrent()) {
+            try {
+                const first = await R.api.suggestMeta(tid);
+                if (!ctx.isCurrent()) return;
+                openAudioMeta(ctx, d, { transcriptionId: tid, first });
+                return;
+            } catch (e) {
+                const code = e && e.body && e.body.error_code;
+                if (code !== 'RECORDING_ACTIVE') {
+                    // Модель недоступна тощо: відкриваємо вікно для ручного вводу з причиною.
+                    if (ctx.isCurrent()) openAudioMeta(ctx, d, { transcriptionId: tid, autoSuggest: true });
+                    return;
+                }
+            }
+            await new Promise(r => setTimeout(r, RECORDING_POLL_MS));
+        }
     }
 
     function openTranscribePanel(ctx, row, d) {
@@ -422,8 +478,10 @@
         fd.append('model', model);
         fd.append('language', language);
 
-        R.api.transcribe(fd).then(() => {
+        const wantName = UI.isUnnamedRecording(d);
+        R.api.transcribe(fd).then((res) => {
             UI.toast('Транскрипцію «' + (d.title || '') + '» збережено', 'success');
+            if (wantName) autoSuggestAfterTranscribe(ctx, d, res && res.transcription_id);
         }).catch((err) => {
             UI.toast((err && err.message) || 'Не вдалося транскрибувати «' + (d.title || '') + '»', 'error');
         }).finally(() => {

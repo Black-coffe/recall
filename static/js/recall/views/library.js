@@ -337,23 +337,33 @@
                 doSingleDelete(ctx, id, row && row.source_name);
             });
         });
+        const openMeta = async (id, autoSuggest) => {
+            const row = curRows.find(r => r.id === id);
+            if (!row) return;
+            const res = await UI.editMetaModal({
+                title: row.title || '',
+                description: row.description || '',
+                suggest: () => R.api.suggestMeta(id),
+                autoSuggest,
+                save: async (values) => {
+                    const r = await R.api.updateRecord(id, values);
+                    Object.assign(row, r.record || {});
+                },
+            });
+            if (!res) return;
+            renderRows(ctx);
+            UI.toast('Збережено', 'success');
+        };
         listEl.querySelectorAll('[data-act="edit"]').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
+            btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const id = parseInt(btn.dataset.id, 10);
-                const row = curRows.find(r => r.id === id);
-                if (!row) return;
-                const res = await UI.editMetaModal({
-                    title: row.title || '',
-                    description: row.description || '',
-                    save: async (values) => {
-                        const r = await R.api.updateRecord(id, values);
-                        Object.assign(row, r.record || {});
-                    },
-                });
-                if (!res) return;
-                renderRows(ctx);
-                UI.toast('Збережено', 'success');
+                openMeta(parseInt(btn.dataset.id, 10), false);
+            });
+        });
+        listEl.querySelectorAll('[data-act="suggest"]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openMeta(parseInt(btn.dataset.id, 10), true);
             });
         });
         // Коментарі: лічильники одним запитом ПІСЛЯ рендеру рядків. Не блокуємо
@@ -474,6 +484,9 @@
                   title="Відкрити у Telegram" aria-label="Відкрити у Telegram"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
         const check = selecting ? `<span class="rc-rec__check"><input type="checkbox" ${selected.has(t.id) ? 'checked' : ''} tabindex="-1"></span>` : '';
         const edit = !selecting ? `<button class="rc-iconbtn rc-rec__edit" data-act="edit" data-id="${t.id}" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>` : '';
+        // Запис без власної назви — помітна кнопка: локальна модель пропонує варіанти.
+        const name = !selecting && UI.isUnnamedRecording(t)
+            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" data-id="${t.id}" title="Локальна модель запропонує назву й опис"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати назву</button>` : '';
         const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="Видалити запис" aria-label="Видалити запис"><i class="fa-solid fa-trash"></i></button>` : '';
         return `<div class="rc-rec${selecting ? ' is-select' : ''}${selected.has(t.id) ? ' is-checked' : ''}" data-id="${t.id}" data-href="${U.esc(href)}">
             ${check}<span class="rc-rec__rail">${rail}</span>
@@ -484,7 +497,7 @@
                     : `<div class="rc-rec__meta">${p.meta}</div>` + (preview ? `<div class="rc-rec__preview">${preview}</div>` : '')}
                 ${rowTags(t)}
             </div>
-            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${tgLink}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
+            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${name}${tgLink}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
         </div>`;
     }
 

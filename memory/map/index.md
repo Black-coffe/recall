@@ -17,9 +17,9 @@ blueprint (~1600), `recall.css` (1397) — не вміщуються в один
 | [overview.md](overview.md) | Архітектура, 3 процеси (Flask + telegram_listener + mcp_server), boot/shutdown, SSE/логи/rate-limit/безпека |
 | [root.md](root.md) | Кореневі entry points: `app.py`, `config.py`, `whisper_manager_new.py`, `telegram_*`, `mcp_server.py`, `app/state.py` |
 | [blueprints.md](blueprints.md) | HTTP-шар: 14 blueprints, ~135 endpoints, де що крутиться |
-| [services.md](services.md) | `app/services/*` — транскрипція, RAG (embeddings/retrieval/rag), enrichment, документи, dba, інфра |
+| [services.md](services.md) | `app/services/*` — транскрипція, RAG (embeddings/retrieval/rag), enrichment, документи, відео-стрічка (`video_*`, `screen_secrets`), фільтр приватного для MCP (`privacy`), dba, інфра |
 | [copilot.md](copilot.md) | `app/services/copilot/*` — живий ко-пілот, local-first cascade (Qwen→Claude) |
-| [recording.md](recording.md) | `app/services/recording/*` — WASAPI-запис, FSM, finalize, recovery |
+| [recording.md](recording.md) | `app/services/recording/*` — WASAPI-запис, FSM, finalize, recovery, відеодоріжки |
 | [frontend.md](frontend.md) | SPA `static/js/recall/*` — роутер, views, SSE-через-fetch, service worker |
 
 ## Конвенції карти

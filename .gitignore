@@ -207,3 +207,6 @@ docs/specs/*/DRIVER
 # spends most of its checks preventing.
 .claude/worktrees/
 .claude/state/
+
+# стоп-лист приватного (spec mcp-visual-privacy) — реальні імена, не в git
+private.txt

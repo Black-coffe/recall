@@ -1,34 +1,20 @@
 @echo off
 chcp 65001 >nul
-set PYTHONUTF8=1
-set PYTHONIOENCODING=utf-8
 title Recall
 cd /d "%~dp0"
-rem Auto-cleanup: kill stale Recall instances (app.py / listener) before launch,
-rem so a leftover process never holds port 5050 with old code ("Recall stopped").
-rem pythonw.exe matters too: the autostart copy runs windowless, and while the filter
-rem only looked at python.exe it survived every relaunch - two instances then shared
-rem port 5050 (Windows allows it via SO_REUSEADDR) and the older code kept answering.
-echo Cleaning up stale Recall instances if any...
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and ($_.CommandLine -like '*app.py*' -or $_.CommandLine -like '*telegram_listener.py*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-timeout /t 1 >nul
-echo ============================================================
-echo.
-echo   RECALL is running.
-echo.
-echo   Open in browser:  http://localhost:5050
-echo   (the browser opens automatically in a few seconds)
-echo.
-echo   To STOP Recall - just close this window.
-echo   Detailed logs are written to files:
-echo       whisper_ui.log       (application log)
-echo       recall_console.log   (console output)
-echo.
-echo   You do NOT need to read this window - keep it minimized.
-echo ============================================================
-start "" /min powershell -WindowStyle Hidden -Command "Start-Sleep -Seconds 6; Start-Process 'http://localhost:5050'"
-rem Send the noisy output to a file so the window stays calm.
-".venv\Scripts\python.exe" app.py > "%~dp0recall_console.log" 2>&1
-echo.
-echo Recall stopped. If it closed unexpectedly, see recall_console.log
-pause >nul
+rem One launch path. Recall runs in the background as the scheduled task RecallAutostart;
+rem this button only opens it, starting the task when Recall is not up. It never starts its own
+rem python app.py and never kills processes: a second copy held port 5050 with old code after a
+rem release (13.10.2026), and killing app.py blindly would cut a live recording. Restart after a
+rem release: powershell -NoProfile -File scripts\restart-recall.ps1
+powershell -NoProfile -Command "try { Invoke-RestMethod http://127.0.0.1:5050/api/health -TimeoutSec 3 | Out-Null; exit 0 } catch { exit 1 }"
+if %errorlevel%==0 goto open
+echo Starting Recall in the background (scheduled task RecallAutostart)...
+powershell -NoProfile -Command "Start-ScheduledTask -TaskName RecallAutostart; $d=(Get-Date).AddSeconds(240); while ((Get-Date) -lt $d) { try { Invoke-RestMethod http://127.0.0.1:5050/api/health -TimeoutSec 3 | Out-Null; exit 0 } catch { Start-Sleep -Seconds 2 } }; exit 1"
+if errorlevel 1 (
+    echo Recall did not answer within 4 minutes - see whisper_ui.log
+    pause
+    exit /b 1
+)
+:open
+start "" http://localhost:5050

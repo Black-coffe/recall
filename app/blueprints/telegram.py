@@ -262,23 +262,33 @@ def _finalize_media(db_path: str, tid: int, *, kind: str, text: str, prov: dict,
         conn.commit()
 
 
+PARSE_FAILED = "parse_failed"
+
+
 def _parse_media(file_path: str, caption: str, kind: str):
     """photo/document → document_parser (OCR для фото). М'яка деградація: якщо
-    парсер недоступний/впав — лишаємо caption (повідомлення не губиться).
-    Returns (text, doc_type, structure_json)."""
+    парсер недоступний/впав — лишаємо caption (повідомлення не губиться), АЛЕ
+    запис позначається ``model_used = PARSE_FAILED`` і видний у coverage: так
+    862 фото роками лежали без тексту, і цього ніхто не бачив.
+    Текст із картинки маскується від паролів/токенів (ADR-030).
+    Returns (text, doc_type, structure_json, failed)."""
     from app.services import document_parser
     caption = (caption or "").strip()
     try:
         parsed = document_parser.parse_document(file_path, filename=os.path.basename(file_path))
-        body = (parsed.get("text") or "").strip()
+        body = (parsed.get("text") or "").strip()      # OCR-текст уже замаскований (document_parser)
         text = f"{caption}\n\n{body}".strip() if caption else body
         blocks = parsed.get("blocks")
         structure = json.dumps(blocks, ensure_ascii=False) if blocks else None
-        return text, parsed.get("doc_type"), structure
+        return text, parsed.get("doc_type"), structure, False
+    except document_parser.NoTextFound:
+        # звичайне фото без тексту — розбір вдався, позначати нема чого
+        return caption or f"[{_KIND_LABEL.get(kind, kind)} без тексту]", kind, None, False
     except Exception as e:
-        logger.info("[tg] парсинг %s не вдався (%s) — лишаю caption", kind, e)
+        logger.warning("[tg] розбір %s не вдався (%s) — лишаю caption, запис позначено %s",
+                       kind, e, PARSE_FAILED)
         fallback = caption or f"[{_KIND_LABEL.get(kind, kind)} без тексту]"
-        return fallback, kind, None
+        return fallback, kind, None, True
 
 
 def _link_entities(db_path: str, transcription_id: int) -> None:
@@ -451,10 +461,11 @@ def ingest():
         if not file_path or not os.path.isfile(file_path):
             return jsonify({"success": False,
                             "error": "file_path відсутній або поза telegram_media/"}), 400
-        text, doc_type, structure = _parse_media(file_path, caption, kind)
+        text, doc_type, structure, failed = _parse_media(file_path, caption, kind)
         tid = _persist(db_path, kind=kind, text=text, prov=prov, category_id=category_id,
                        file_path=file_path, doc_type=doc_type, segments_json=None,
-                       model_used=None, processing_time=0.0, structure_json=structure)
+                       model_used=PARSE_FAILED if failed else None, processing_time=0.0,
+                       structure_json=structure)
         try:
             state.metrics.inc("whisper_telegram_total", kind=kind)
         except Exception:
@@ -900,9 +911,19 @@ def tg_coverage():
         entry["status"] = _coverage_verdict(row, live, listed) if ok else "unknown"
         out.append(entry)
 
+    try:
+        with _conn(_db_path()) as conn:
+            media_unparsed = conn.execute(
+                "SELECT COUNT(*) FROM transcriptions WHERE source_type = 'telegram' "
+                "AND model_used = ? AND deleted_at IS NULL", (PARSE_FAILED,)).fetchone()[0]
+    except Exception:
+        logger.warning("[tg] coverage: лічильник нерозпізнаних медіа не прочитано", exc_info=True)
+        media_unparsed = None
+
     return jsonify({
         "success": True,
         "live": ok,
+        "media_unparsed": media_unparsed,
         "listener": None if ok else data.get("error"),
         "dialogs_seen": len(live_by_id) if ok else None,
         "dialog_limit": data.get("limit") if ok else None,

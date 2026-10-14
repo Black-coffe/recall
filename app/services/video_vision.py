@@ -35,6 +35,10 @@ VISION_BACKEND = os.environ.get("VIDEO_VISION_BACKEND", "local").strip().lower()
 VISION_MODEL_LOCAL = os.environ.get("VIDEO_VISION_MODEL_LOCAL", "qwen2.5vl:7b")
 VISION_MODEL_CLAUDE = os.environ.get("VIDEO_VISION_MODEL_CLAUDE", "claude-haiku-4-5")
 VISION_TIMEOUT = float(os.environ.get("VIDEO_VISION_TIMEOUT", "90"))
+# Скільки Ollama тримає VL-модель у VRAM після кадру. Дефолт local_llm — 30 хв, і другі
+# ~5 ГБ поруч із копілотом лишали дзвінок без місця. 60 с, а не 0: кадри йдуть пачкою, і
+# з 0 модель перевантажувалась би на кожному (замір 14.10.2026: 5.5–7.6 с/кадр проти 2.3–2.5).
+VISION_KEEPALIVE = os.environ.get("VIDEO_VISION_KEEPALIVE", "60s")
 
 # Коротка стеля на вихід — опис кадру має бути 1–3 речення, не есе.
 _MAX_TOKENS = 220
@@ -131,6 +135,7 @@ def _describe_local(image_path: str, *, timeout: Optional[float]) -> str:
         max_tokens=_MAX_TOKENS,
         temperature=0.0,
         timeout=timeout or VISION_TIMEOUT,
+        keep_alive=VISION_KEEPALIVE,
     )
     return _clean(resp.get("response") or "")
 

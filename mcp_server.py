@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -572,13 +573,17 @@ def search_archive(query: str, top_k: int = 8,
     if explain:
         params["explain"] = True
     res = _api("GET", "/api/memory/search", params=params)
-    chunks = res.get("chunks") or []
-    return {
+    # текст з екрана (speaker='екран') іде через фільтр приватного (mcp-visual-privacy)
+    chunks, hidden = _privacy.filter_screen_chunks(DB_PATH, res.get("chunks") or [])
+    out = {
         "query": res.get("query", query),
         "vector_available": res.get("vector_available"),
         "count": len(chunks),
         "chunks": chunks,
     }
+    if hidden:
+        out["private_hidden"] = hidden
+    return out
 
 
 @mcp.tool
@@ -804,7 +809,52 @@ def grep_archive(pattern: str, regex: bool = False, ignore_case: bool = True,
         note = _tags_note(conn, tag_list)
     if note:
         res["note"] = note
+    _grep_hide_screen(res)
     return res
+
+
+def _grep_hide_screen(res: dict) -> None:
+    """Текст з екрана в grep — і в збігах, і в сусідніх чанках контексту (у них нема
+    speaker, тож екранні індекси беруться з БД). Фільтр приватного, fail closed."""
+    matches = res.get("matches") or []
+    tids = sorted({m_.get("transcription_id") for m_ in matches if m_.get("transcription_id")})
+    if not tids:
+        return
+    try:
+        with get_db_connection(DB_PATH) as conn:
+            screen = {(r[0], r[1]): r[2] for r in conn.execute(
+                "SELECT transcription_id, chunk_index, text FROM chunks WHERE speaker = ? "
+                f"AND transcription_id IN ({','.join('?' * len(tids))})",
+                [_privacy.SCREEN_SPEAKER, *tids])}
+        mode, words = _privacy.visual_mode(), _privacy.stop_words()
+        private = _privacy.private_tids(DB_PATH, tids)
+        # (запис, індекс) екранних чанків, які віддавати не можна
+        blocked = {key for key, text in screen.items() if not _privacy.screen_chunk_allowed(
+            {"speaker": _privacy.SCREEN_SPEAKER, "transcription_id": key[0], "text": text},
+            private, words, mode)}
+    except Exception:  # noqa: BLE001 — перевірка не вдалась: екранне не віддаємо
+        logger.warning("grep_archive: приватність не перевірено — текст з екрана приховано",
+                       exc_info=True)
+        blocked = None
+    kept = []
+    for m_ in matches:
+        tid = m_.get("transcription_id")
+        if blocked is None:
+            # не знаємо, які сусіди екранні, — контекст не віддаємо зовсім
+            if m_.get("speaker") == _privacy.SCREEN_SPEAKER:
+                continue
+            m_["context_before"], m_["context_after"] = [], []
+        else:
+            if (tid, m_.get("chunk_index")) in blocked:
+                continue
+            for side in ("context_before", "context_after"):
+                m_[side] = [c for c in (m_.get(side) or [])
+                            if (tid, c.get("chunk_index")) not in blocked]
+        kept.append(m_)
+    if len(kept) != len(matches):
+        res["matches"] = kept
+        res["count"] = len(kept)
+        res["private_hidden"] = len(matches) - len(kept)
 
 
 @mcp.tool
@@ -1441,6 +1491,288 @@ def get_job_status(job_id: str) -> dict:
     return _api("GET", f"/api/jobs/{job_id}")
 
 
+# ---------------------------------------------------------------------------
+# Візуальна стрічка відеозапису (spec video-visual-timeline). Усе — проксі на
+# app.py: декодування відео, OCR і кадри живуть там, а не в stdio-процесі.
+# Секрети з екрана (паролі, токени) у тексті замасковані «[🔒 секрет]», на кадрах
+# зафарбовані; сирих значень жодна тулза не віддає.
+#
+# Фільтр приватного (spec mcp-visual-privacy): усе візуальне йде звідси в Claude, тож
+# фільтр стоїть тут, а не в app.py — UI Recall бачить усе. Без моделі, fail closed:
+# приватний напрямок (RECALL_PRIVATE_CATEGORIES) → відмова; слово з private.txt →
+# відрізок/кадр/хіт прибрано (лічильник private_hidden); RECALL_MCP_VISUAL text|off.
+# ---------------------------------------------------------------------------
+from app.services import privacy as _privacy  # noqa: E402
+
+
+def _visual_refusal(transcription_id: Optional[int], *, images: bool = False) -> Optional[dict]:
+    mode = _privacy.visual_mode()
+    if mode == 'off':
+        return {"error_code": "MCP_VISUAL_OFF",
+                "error": "Візуальне через MCP вимкнено (RECALL_MCP_VISUAL=off). Дивись у Recall."}
+    if images and mode != 'images':
+        return {"error_code": "MCP_VISUAL_TEXT_ONLY",
+                "error": "Кадри через MCP вимкнено (RECALL_MCP_VISUAL=text) — лише текст: "
+                         "get_visual_timeline / get_frames_for_text."}
+    if transcription_id is None:
+        return None
+    try:
+        private = _privacy.private_tids(DB_PATH, [transcription_id])
+    except _privacy.PrivacyError:
+        return {"error_code": "PRIVACY_CHECK_FAILED",
+                "error": "Не вдалося перевірити, чи запис приватний, — візуальне не віддаю."}
+    if private:
+        return {"error_code": "PRIVATE",
+                "error": f"Запис #{transcription_id} у приватному напрямку — його кадри й текст "
+                         f"з екрана через MCP не віддаються. Дивись у Recall."}
+    return None
+
+
+def _stop_words() -> Optional[list]:
+    """Стоп-слова; None — файл не прочитався (тоді ховати все, що перевіряли)."""
+    try:
+        return _privacy.stop_words()
+    except _privacy.PrivacyError:
+        logger.warning("private.txt не прочитався — візуальне з текстом ховається", exc_info=True)
+        return None
+
+
+def _visual_text_hidden(item: dict, words: Optional[list], *keys: str) -> bool:
+    if words is None:
+        return True
+    return any(_privacy.has_stop_word(item.get(k), words) for k in keys)
+
+
+@mcp.tool
+def video_analyze(transcription_id: int, method: Optional[str] = None,
+                  step: Optional[float] = None, min_res: Optional[float] = None,
+                  threshold: Optional[float] = None, settle: Optional[float] = None,
+                  ignore_regions: Optional[list] = None, max_frames: Optional[int] = None,
+                  ocr: bool = True, describe: bool = False,
+                  vision_backend: Optional[str] = None, force: bool = False) -> dict:
+    """Розкласти відеозапис на ключові кадри («нарізка») і розпізнати текст на них.
+
+    Коли кликати: «розклади запис #N по кадрах», «що було на екрані», перед
+    get_visual_timeline / get_frame з from/to, якщо стрічки ще нема.
+
+    Ставить ФОНОВУ задачу і одразу повертає `job_id` — стан і прогрес через
+    `get_job_status(job_id)` (meta.progress: stage frames→ocr→describe→done, pct).
+    Якщо запис уже нарізано з тими самими параметрами — `{"ready": true}` без задачі;
+    якщо задача вже йде — її `job_id` з `already_running`.
+
+    Скільки йде: 2-годинний запис ≈ 2 хв нарізки + ≈ 0.6 с OCR на кадр (сотні кадрів
+    → кілька хвилин). Відео є лише в записах екрана Recall; без нього —
+    `error_code: NO_VIDEO`.
+
+    Параметри (усі опційні): method 'thumbs' (дефолт, ловить і короткі зміни
+    A→B→A) | 'bisect'; threshold — частка змінених пікселів (дефолт 0.02);
+    settle — серія змін частіше ніж раз на N с = один кадр (дефолт 2); min_res —
+    точність межі, с (1); ignore_regions — [[x, y, w, h]] частками кадру, напр.
+    плитки вебкамер [[0.8, 0, 0.2, 0.3]]; max_frames (1500).
+
+    describe=true — ще й опис кожного кадру vision-моделлю. Це ДОВГО (секунди на
+    кадр) і дефолтно ВИМКНЕНО. vision_backend: 'local' (дефолт — сам КРОК опису
+    робить локальна модель) або 'claude' — тоді кадри (із зафарбованими секретами)
+    ІДУТЬ В ANTHROPIC на крок опису і це коштує грошей; лише на явне прохання.
+
+    Памʼятай: усе, що повертають тулзи стрічки (текст з екрана, описи, кадри
+    get_frame), потрапляє в контекст того, хто кличе MCP, — тобто в Claude."""
+    refusal = _visual_refusal(transcription_id)
+    if refusal:
+        return refusal
+    body = {k: v for k, v in {
+        'method': method, 'step': step, 'min_res': min_res, 'threshold': threshold,
+        'settle': settle, 'ignore_regions': ignore_regions, 'max_frames': max_frames,
+        'ocr': ocr, 'describe': describe, 'vision_backend': vision_backend, 'force': force,
+    }.items() if v is not None}
+    return _api("POST", f"/api/transcription/{transcription_id}/analyze-video", body=body)
+
+
+@mcp.tool
+def get_visual_timeline(transcription_id: int, from_sec: Optional[float] = None,
+                        to_sec: Optional[float] = None, with_transcript: bool = True,
+                        format: str = "json", limit: int = 30, offset: int = 0,
+                        include_camera: bool = False, offset_sec: float = 0.0) -> dict:
+    """Візуальна стрічка запису: що було на екрані + що в цей час говорили.
+
+    Кожен елемент — відрізок [start, end] (с від початку запису) з одним кадром:
+    frame_time, frame_type (screen_share / slide / camera_only / blank /
+    transition), ocr_text (текст з екрана), description (лише якщо опис уже
+    робився — тут він НЕ генерується), duplicate_of (той самий екран уже був),
+    transcript — фрази зі спікерами за той самий інтервал.
+
+    Без картинок — лише текст і таймкоди; кадр дивись через get_frame. Стрічка
+    велика (сотні відрізків на 2 год) — бери сторінками: limit/offset,
+    `next_offset` у відповіді; або вузь вікно from_sec/to_sec. format='markdown'
+    віддає те саме читабельним текстом (поле `markdown`).
+
+    status: 'ready' | 'not_analyzed' (спершу video_analyze) | 'running' (з
+    progress). include_camera=true показує й кадри лише з вебкамерами/порожні.
+    offset_sec — зсув транскрипту відносно відео, якщо фрази «запізнюються»."""
+    refusal = _visual_refusal(transcription_id)
+    if refusal:
+        return refusal
+    # завжди JSON: фільтр іде по відрізках, markdown рендериться вже з відфільтрованого
+    params = {'with_transcript': int(with_transcript), 'format': 'json', 'limit': limit,
+              'offset': offset, 'include_camera': int(include_camera),
+              'offset_sec': offset_sec}
+    if from_sec is not None:
+        params['from'] = from_sec
+    if to_sec is not None:
+        params['to'] = to_sec
+    res = _api("GET", f"/api/transcription/{transcription_id}/visual-timeline", params=params)
+    if not isinstance(res, dict) or res.get('error'):
+        return res
+    words = _stop_words()
+    items = res.get('items') or []
+    kept = [i for i in items if not _visual_text_hidden(i, words, 'ocr_text', 'description')]
+    res['items'] = kept
+    res['private_hidden'] = len(items) - len(kept)
+    res.pop('markdown', None)
+    if format == 'markdown':
+        from app.services.video_timeline import to_markdown
+        res['markdown'] = to_markdown(res)
+    return res
+
+
+@mcp.tool
+def get_frame(transcription_id: int, t: Optional[float] = None,
+              from_sec: Optional[float] = None, to_sec: Optional[float] = None,
+              limit: int = 6, size: str = "thumb"):
+    """Подивитися кадри запису ОЧИМА: повертає зображення (image) + метадані.
+
+    Один кадр — `t` (секунда запису); працює навіть без video_analyze (кадр
+    ріжеться з відео на льоту). Пачка — `from_sec`/`to_sec`: по одному кадру на
+    кожен відрізок стрічки в цьому вікні, без повторів, не більше `limit`
+    (максимум 12) — для цього запис має бути нарізаний (video_analyze).
+
+    size: 'thumb' (≤960 px, дешевше для контексту) | 'full' (≤1920 px, дрібний
+    текст). Опис кадру в метаданих — лише якщо вже був зроблений; ця тулза
+    його не генерує. Рамки з паролями/токенами зафарбовані чорним.
+
+    Економ: спершу get_visual_timeline (текст), картинки — лише для ключових
+    моментів."""
+    refusal = _visual_refusal(transcription_id, images=True)
+    if refusal:
+        return refusal
+    params = {'limit': limit, 'size': size}
+    if t is not None:
+        params['t'] = t
+    if from_sec is not None:
+        params['from'] = from_sec
+    if to_sec is not None:
+        params['to'] = to_sec
+    res = _api("GET", f"/api/transcription/{transcription_id}/frames", params=params,
+               timeout=180.0)
+    if not isinstance(res, dict) or res.get('error') or not res.get('frames'):
+        return res
+    from fastmcp.utilities.types import Image
+    words = _stop_words()
+    out: list = []
+    meta = []
+    hidden = 0
+    for f in res['frames']:
+        data = f.pop('image_b64', None)
+        # frame_text — текст саме цього кадру; нема (OCR не було) — перевірити нічим, не віддаємо
+        frame_text = f.pop('frame_text', None)
+        if frame_text is None or _visual_text_hidden(
+                {**f, 'frame_text': frame_text}, words, 'frame_text', 'ocr_text', 'description'):
+            hidden += 1
+            continue
+        meta.append(f)
+        if data:
+            out.append(Image(data=base64.b64decode(data), format='jpeg'))
+    head = {'transcription_id': transcription_id, 'count': len(meta), 'frames': meta,
+            'private_hidden': hidden}
+    return [head] + out
+
+
+@mcp.tool
+def get_frames_for_text(transcription_id: int, query: Optional[str] = None,
+                        segment_index: Optional[int] = None, window: float = 5.0,
+                        offset_sec: float = 0.0) -> dict:
+    """Що було на екрані, коли сказали фразу: знаходить фразу в транскрипті
+    (підрядок без урахування регістру, до 5 збігів) або сегмент за індексом і
+    повертає відрізки стрічки у вікні ±window с — з ocr_text і frame_time.
+
+    Приклад: «покажи, що він показував, коли сказав "ось тут натискаємо"» →
+    get_frames_for_text(N, query="тут натискаємо") → get_frame(N, t=frame_time).
+    Запис має бути нарізаний (video_analyze), інакше frames порожні й analyzed=false."""
+    refusal = _visual_refusal(transcription_id)
+    if refusal:
+        return refusal
+    params = {'window': window, 'offset_sec': offset_sec}
+    if query:
+        params['query'] = query
+    if segment_index is not None:
+        params['segment_index'] = segment_index
+    res = _api("GET", f"/api/transcription/{transcription_id}/frames-for-text", params=params)
+    if not isinstance(res, dict) or res.get('error'):
+        return res
+    words = _stop_words()
+    hidden = 0
+    for m in res.get('matches') or []:
+        frames = m.get('frames') or []
+        kept = [f for f in frames if not _visual_text_hidden(f, words, 'ocr_text', 'description')]
+        hidden += len(frames) - len(kept)
+        m['frames'] = kept
+    res['private_hidden'] = hidden
+    return res
+
+
+@mcp.tool
+def search_visual(query: str, transcription_ids: Optional[list] = None,
+                  date_from: Optional[str] = None, date_to: Optional[str] = None,
+                  limit: int = 20) -> dict:
+    """Пошук по тексту З ЕКРАНА (OCR) і описах кадрів у всьому архіві: «де на
+    екрані була форма "Реалізація товарів"», «коли показували таблицю бюджету».
+
+    Повертає запис, таймкод, тип кадру, уривок тексту і frame_time для get_frame.
+    Підрядок без урахування регістру (кирилиця коректно). Шукає лише в нарізаних
+    записах. Ті самі кадри видно й у search_archive/ask_archive як джерело
+    «кадр ГГ:ХХ:СС» (speaker «екран»). date_from/date_to — YYYY-MM-DD."""
+    params = {'q': query, 'limit': limit}
+    if transcription_ids:
+        params['transcription_ids'] = ','.join(str(int(x)) for x in transcription_ids)
+    if date_from:
+        params['date_from'] = date_from
+    if date_to:
+        params['date_to'] = date_to
+    refusal = _visual_refusal(None)
+    if refusal:
+        return refusal
+    res = _api("GET", "/api/video/search", params=params)
+    if not isinstance(res, dict) or res.get('error'):
+        return res
+    hits = res.get('results') or []
+    words = _stop_words()
+    try:
+        private = _privacy.private_tids(DB_PATH, [h.get('transcription_id') for h in hits])
+        # уривок — лише шматок кадру: стоп-слово шукається в ПОВНОМУ тексті кадру з БД
+        ids = [int(h['keyframe_id']) for h in hits if h.get('keyframe_id') is not None]
+        full: dict = {}
+        if ids:
+            with get_db_connection(DB_PATH) as conn:
+                full = {r[0]: (r[1], r[2]) for r in conn.execute(
+                    f"SELECT id, ocr_text, vision_text FROM video_keyframes "
+                    f"WHERE id IN ({','.join('?' * len(ids))})", ids)}
+    except Exception:  # noqa: BLE001 — перевірка не вдалась: нічого не віддаємо
+        logger.warning("search_visual: приватність не перевірено — результати приховано",
+                       exc_info=True)
+        return {**res, 'count': 0, 'results': [], 'private_hidden': len(hits)}
+    kept = []
+    for h in hits:
+        if h.get('transcription_id') in private or h.get('keyframe_id') not in full:
+            continue
+        ocr, vision = full[h['keyframe_id']]
+        if _visual_text_hidden({'o': ocr, 'v': vision, 's': h.get('snippet')}, words,
+                               'o', 'v', 's'):
+            continue
+        kept.append(h)
+    res.update(results=kept, count=len(kept), private_hidden=len(hits) - len(kept))
+    return res
+
+
 _AMBIGUITY_FIELDS = ("session_id", "name", "auto_name", "elapsed_seconds", "streams",
                      "copilot_active")
 
@@ -1869,6 +2201,8 @@ _ABOUT_PROXY = (
     "get_speaker_stats", "get_speaker_timeline", "list_bookmarks", "list_saved_searches",
     "get_job_status", "get_active_recording", "copilot_availability", "telegram_status",
     "telegram_coverage", "get_live_transcript", "ask_live",
+    "video_analyze", "get_visual_timeline", "get_frame", "get_frames_for_text",
+    "search_visual",
 )
 
 
@@ -1913,7 +2247,12 @@ def about() -> str:
         "`telegram_status`; `list_comments` — власні уточнення й виправлення поверх записів;\n"
         "8. **Живий дзвінок:** `get_live_transcript`/`ask_live` — прев'ю транскрипту й питання до нього, "
         "поки дзвінок триває; `get_live_copilot` — повний потік подій ко-пілота (включно з притишеними "
-        "бюджетом і неверифікованими), фільтрація — на боці агента.\n\n"
+        "бюджетом і неверифікованими), фільтрація — на боці агента;\n"
+        "9. **Відео записів (що було на екрані):** `video_analyze(id)` — нарізка на ключові кадри + OCR "
+        "фоновою задачею (виняток із правила нижче — на прохання власника); `get_visual_timeline` — "
+        "кадри + фрази постранично; `get_frame` — сам кадр картинкою; `get_frames_for_text` — кадри "
+        "навколо фрази; `search_visual` — пошук по тексту з екрана. Паролі й токени з екрана замасковані, "
+        "сирих значень MCP не віддає.\n\n"
         "## Автономність (працює без запущеного app.py?)\n"
         f"**Direct-DB, автономні ({len(_ABOUT_DIRECT_DB)}):** "
         + ", ".join(f"`{n}`" for n in _ABOUT_DIRECT_DB) +

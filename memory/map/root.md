@@ -1,5 +1,7 @@
 # root — кореневі entry points
 
+last-verified: 2026-10-14 (mcp_server.py фільтр приватного, реєстр 155); 2026-10-13 (config.py); решта розділів — раніше
+
 ## app.py (1288)
 **Призначення:** головний Flask-сервер. Boot, реєстрація blueprints, фонові сервіси,
 глобальні singleton-и, HTTP-lifecycle.
@@ -48,7 +50,7 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
 `RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
 **Реєстр (`app/core/settings.py`, спек `config-registry-profiles` S1):** єдине джерело істини для
-146 env-флагів (K1 додав `RECALL_VOCAB_MODE`, `WHISPER_MULTILINGUAL` у групу «Транскрипція») (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
+155 env-флагів (4.11.0: +`RECALL_MCP_VISUAL`/`RECALL_PRIVATE_CATEGORIES`/`RECALL_PRIVATE_WORDS_FILE`, група «MCP-сервер»; 4.10.0: +`OCR_TESSERACT_CMD`/`OCR_TESSDATA_DIR`/`OCR_TESSDATA_FAST_DIR`, `RECORDING_VIDEO_SCENE_THRESHOLD` прибрано, `RECORDING_VIDEO_ANALYSIS_MAX_FRAMES` дефолт 1500; K1 додав `RECALL_VOCAB_MODE`, `WHISPER_MULTILINGUAL` у групу «Транскрипція») (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI
 `python -m app.core.settings env-example` генерує `.env.example`). Модуль без важких залежностей
 (не імпортує `app.*`/`flask`/`torch`/`config` — памʼятка `mcp-stdio-no-heavy-models`); `config.py`
@@ -100,11 +102,11 @@ Telethon-сесію не відкрити двома клієнтами — Flas
 
 ## mcp_server.py (785)
 **Призначення:** окремий MCP-сервер — **read-first** міст до Recall для Claude Code/Desktop.
-**35 read-only тулзів**, жодного create/update/delete (стратегічне рішення власника 02.07.2026;
+**40 read-only тулзів** (4.10.0: +5 відео-проксі, див. нижче), жодного create/update/delete (стратегічне рішення власника 02.07.2026;
 38 write-тулзів фізично видалено у Волні 1 — карта до цього стверджувала «~80 tools, CRUD-міст»).
 Число тулзів у `about()` рахується з реєстру FastMCP (`_registered_tool_names()`), а не хардкодиться.
-**Гібрид:** 15 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, працюють БЕЗ запущеного app.py,
-серед них `grep_archive`), 17 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
+**Гібрид:** 16 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, працюють БЕЗ запущеного app.py,
+серед них `grep_archive`), 24 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
 default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути torch/e5 у stdio-процес.
 `editable-title-description`-04 (4.5.0): `list_recent`/`get_transcript`/`search_archive`/
 `ask_archive` (sources), ресурс `recall://transcript/{id}` і експорт-заголовок несуть
@@ -118,7 +120,17 @@ default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути
 `research_preview`/`research_summary`/`search_history` (+ `category_id` у `grep_archive`); direct-DB
 тулзи будують SQL лише через `app.services.categories.filter_sql/tags_sql/date_sql`. `ask_archive`
 приймає `project=` як голу назву АБО повний шлях — на 409 `ambiguous` з HTTP повертає ноту з
-`candidates` (перелік шляхів), не виняток. Число тулзів лишилось **35** — нових не додано.
+`candidates` (перелік шляхів), не виняток. Тоді нових тулзів не додано (було 35; з 4.10.0 — 40).
+**Відео (4.10.0, mcp_server.py:1446-1601, усі — проксі на app.py):** `video_analyze(id, method, step, min_res, threshold,
+settle, ignore_regions, max_frames, ocr, describe, vision_backend)` → job (стан — `get_job_status`), `get_visual_timeline`,
+`get_frame(id, t | from/to)` (картинки base64 + метадані; кілька кадрів — до 12), `get_frames_for_text`, `search_visual`.
+Скіл `skills/recall-video/SKILL.md`; секрети в картинках/тексті вже замасковані (`services.md` → screen_secrets).
+**Фільтр приватного (`mcp-visual-privacy`, 4.11.0, `mcp_server.py:1500-1543`):** усі 5 відео-тулз проходять `_visual_refusal(tid,
+images=)` → `error_code` `MCP_VISUAL_OFF|MCP_VISUAL_TEXT_ONLY|PRIVACY_CHECK_FAILED|PRIVATE`; `_stop_words()` (None = файл не
+прочитався → ховати все з текстом), `_visual_text_hidden`. `get_frame` ховає кадр без `frame_text` або зі стоп-словом
+(`private_hidden`), `search_visual` перевіряє ПОВНИЙ OCR/опис з БД, не уривок. `search_archive` (`:577`) і `grep_archive`
+(`_grep_hide_screen`, `:816`) прибирають чанки `speaker='екран'`; `ask_archive` — через `rag` канал `mcp`. Env: `RECALL_MCP_VISUAL`
+(дефолт `images`), `RECALL_PRIVATE_CATEGORIES`, `RECALL_PRIVATE_WORDS_FILE`. Логіка — `services.md` → privacy.py.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
 **Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини. `ask_archive` шле
