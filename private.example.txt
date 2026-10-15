@@ -1,5 +1,5 @@
-# Стоп-слова й імена: кадри й текст з екрана з цими словами не йдуть через MCP у Claude (і в бота K4).
-# Скопіюй у private.txt (він у .gitignore) і впиши своє. По рядку; регістр не важливий.
-# Морфології нема — пиши основу: «Петренк» ловить і «Петренко», і «Петренку».
+# Stop-words and names: frames and screen text containing these words do not go through MCP to Claude (nor to the K4 bot).
+# Copy to private.txt (it is in .gitignore) and enter your own. One per line; case does not matter.
+# There is no morphology — write the stem: «Петренк» catches both «Петренко» and «Петренку».
 Петренк
 договір оренди

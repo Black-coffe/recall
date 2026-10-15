@@ -2,6 +2,8 @@
 (function () {
     'use strict';
     const U = {};
+    const T = (k, v) => window.Recall.t(k, v);
+    const lang = () => window.Recall.i18n.lang;
 
     // — HTML escaping (XSS) —
     U.esc = function (s) {
@@ -58,6 +60,7 @@
         if (!s) return '';
         const d = _toLocalDate(s);
         if (isNaN(d)) return String(s);
+        if (lang() === 'en') return window.Recall.i18n.date(d, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
         const dd = String(d.getDate()).padStart(2, '0');
         const mm = String(d.getMonth() + 1).padStart(2, '0');
         const hh = String(d.getHours()).padStart(2, '0');
@@ -68,6 +71,7 @@
         if (!s) return '';
         const d = _toLocalDate(s);
         if (isNaN(d)) return String(s);
+        if (lang() === 'en') return window.Recall.i18n.date(d, { year: 'numeric', month: 'short', day: 'numeric' });
         return `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;
     };
     U.fmtDuration = function (sec) {
@@ -90,7 +94,6 @@
         const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         return Math.round((d - today) / 86400000);
     };
-    const _PLURAL_DAY = ['день', 'дні', 'днів'];
     U.plural = function (n, forms) {
         n = Math.abs(Math.round(n));
         const n10 = n % 10, n100 = n % 100;
@@ -102,14 +105,14 @@
     U.fmtDue = function (iso) {
         const n = U.daysUntil(iso);
         if (n == null) return '';
-        if (n === 0) return 'сьогодні';
-        if (n === 1) return 'завтра';
-        if (n === -1) return 'вчора';
-        if (n > 0) return `за ${n} ${U.plural(n, _PLURAL_DAY)}`;
-        return `${-n} ${U.plural(n, _PLURAL_DAY)} тому`;
+        if (n === 0) return T('core.due.today');
+        if (n === 1) return T('core.due.tomorrow');
+        if (n === -1) return T('core.due.yesterday');
+        if (n > 0) return T('core.due.in', { count: n });
+        return T('core.due.ago', { count: -n });
     };
     // Коротка дата дедлайну: «пн 27.07», з роком якщо не поточний.
-    const _WD = ['нд', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+    const _WD = [T('core.wd.sun'), T('core.wd.mon'), T('core.wd.tue'), T('core.wd.wed'), T('core.wd.thu'), T('core.wd.fri'), T('core.wd.sat')];
     U.fmtDueDate = function (iso) {
         const d = _isoToLocalMidnight(iso);
         if (!d) return '';
@@ -118,24 +121,24 @@
     };
     // Клас точності дедлайну (Трек 1): наскільки буквально читати дату.
     U.DUE_PRECISION = {
-        day: '', week: 'тиждень', month: 'місяць', quarter: 'квартал',
-        soon: 'найближчим часом', event: 'за подією',
-        next_meeting: 'до наступної зустрічі', recurring: 'регулярно',
+        day: '', week: T('core.precision.week'), month: T('core.precision.month'), quarter: T('core.precision.quarter'),
+        soon: T('core.precision.soon'), event: T('core.precision.event'),
+        next_meeting: T('core.precision.nextMeeting'), recurring: T('core.precision.recurring'),
     };
 
     U.fmtBytes = function (n) {
         n = Number(n) || 0;
-        if (n < 1024) return n + ' B';
-        if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
-        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
-        return (n / 1073741824).toFixed(2) + ' GB';
+        if (n < 1024) return n + ' ' + T('core.bytes.b');
+        if (n < 1048576) return (n / 1024).toFixed(0) + ' ' + T('core.bytes.kb');
+        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' ' + T('core.bytes.mb');
+        return (n / 1073741824).toFixed(2) + ' ' + T('core.bytes.gb');
     };
 
     // — Source-type display labels (UA) —
     U.SRC_LABEL = {
-        youtube: 'YouTube', file: 'Файл', recording: 'Запис',
-        document: 'Документ', telegram: 'Telegram', library: 'Медіатека',
-        meeting_archive: 'Архів', copilot: 'Ко-пілот',
+        youtube: 'YouTube', file: T('core.src.file'), recording: T('core.src.recording'),
+        document: T('core.src.document'), telegram: 'Telegram', library: T('core.src.library'),
+        meeting_archive: T('core.src.archive'), copilot: T('core.src.copilot'),
     };
     U.SRC_ICON = {
         youtube: 'fa-brands fa-youtube', file: 'fa-solid fa-file-audio',
@@ -146,10 +149,10 @@
     // Статуси задач. У БД вони англійські (open/done/cancelled/stale) — але в
     // UI показувались сирими, тобто єдиним англійським словом серед українського
     // інтерфейсу. Один словник на всі три екрани, де задача видима.
-    U.TASK_STATUS = { open: 'відкрито', done: 'виконано', cancelled: 'скасовано', stale: 'застаріло' };
+    U.TASK_STATUS = { open: T('core.task.open'), done: T('core.task.done'), cancelled: T('core.task.cancelled'), stale: T('core.task.stale') };
     U.taskStatus = function (s) { return U.TASK_STATUS[s] || s || ''; };
 
-    U.LANG_LABEL = { uk: 'Українська', en: 'English', ru: 'Русский', auto: 'Авто' };
+    U.LANG_LABEL = { uk: 'Українська', en: 'English', ru: 'Русский', auto: T('core.lang.auto') };
     U.langLabel = function (c) { return U.LANG_LABEL[c] || (c || '').toUpperCase(); };
 
     // — DOM helpers —

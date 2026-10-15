@@ -64,7 +64,7 @@
         }
 
         if (!found) {
-            mount.innerHTML = R.ui.empty('Сторінку не знайдено', 'Можливо, посилання застаріле.', 'fa-compass');
+            mount.innerHTML = R.ui.empty(R.t('core.router.notFound'), R.t('core.router.notFoundHint'), 'fa-compass');
             R.shell.setActive(null);
             _current = null;
             return;
@@ -75,7 +75,7 @@
             : found.route.id === 'home' ? 'home' : found.route.id);
 
         if (!view) {
-            mount.innerHTML = R.ui.error('Модуль «' + found.route.view + '» не завантажено.');
+            mount.innerHTML = R.ui.error(R.t('core.router.moduleMissing', { view: found.route.view }));
             _current = null;
             return;
         }

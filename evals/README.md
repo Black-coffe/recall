@@ -1,37 +1,37 @@
-# evals/ — recall@k / citation-rate харнес для retrieval і RAG
+# evals/ — recall@k / citation-rate harness for retrieval and RAG
 
-**Навіщо.** Пороги гібридного retrieval (`app/services/retrieval.py`:
-`RAG_RECENCY_WEIGHT`, `RAG_MAX_PER_MEETING`, RRF) і промпт RAG-чату
-(`app/services/rag.py`) підбирались за ручними прогонами. Без відтворюваного
-харнесу будь-яка зміна промпта, чанкінгу, моделі чи ваг — і ви дізнаєтесь про
-регрес зі скарг користувача, а не з числа. Цей каталог — не заміна повноцінних
-evals-платформ, а мінімальний скрипт «прогнати N питань → порівняти до/після».
+**Why.** The hybrid retrieval thresholds (`app/services/retrieval.py`:
+`RAG_RECENCY_WEIGHT`, `RAG_MAX_PER_MEETING`, RRF) and the RAG chat prompt
+(`app/services/rag.py`) were tuned by manual runs. Without a reproducible
+harness, any change to the prompt, chunking, model or weights means you learn about a
+regression from a user complaint, not from a number. This directory is not a replacement for full-fledged
+evals platforms, just a minimal "run N questions → compare before/after" script.
 
-## Гейт (`evals.gate`) — рекомендований шлях для CI/локально
+## Gate (`evals.gate`) — the recommended path for CI/local
 
-`evals/run_eval.py` (нижче) — ручний скрипт для дослідження. `evals/gate.py` — те, що
-дає вердикт PASS/FAIL і придатне для обовʼязкового прогону: рахує лише БЕЗКОШТОВНИЙ
-retrieval (жодного виклику Claude), завжди на ДВОХ `k` (8 і 12 — урок
-`eval-verdict-flips-with-k`: вердикт перевертається залежно від одного k) і ганяється
-на ЗНІМКУ БД (`VACUUM INTO` з `mode=ro`-зʼєднання, ADR-003) — бойовий файл ніколи не
-відкривається на запис.
+`evals/run_eval.py` (below) is a manual research script. `evals/gate.py` is what
+gives a PASS/FAIL verdict and is suitable for a mandatory run: it computes only FREE
+retrieval (no Claude calls), always at TWO `k` values (8 and 12 — the lesson of
+`eval-verdict-flips-with-k`: the verdict flips depending on a single k) and runs
+on a DB SNAPSHOT (`VACUUM INTO` from a `mode=ro` connection, ADR-003) — the live file is never
+opened for writing.
 
-**Як зняти цю гарантію.** Єдиний легальний обхід — комбінація `--no-snapshot
---yes-live`: вона відкриває САМУ живу БД у WAL-режимі (`retrieval.search` іде через
-`get_db_connection`, `PRAGMA journal_mode=WAL`), поки в неї одночасно пишуть
-рекордер і `telegram_listener.py`. Гейт дозволяє це ЛИШЕ коли ціль справді жива БД
-(`Config.DATABASE`) — та сама пара прапорців, наведена на знімок чи будь-який інший
-файл, все одно проходить через захисну тимчасову копію (`_scratch_copy`): вимір іде
-проти копії, названий шлях сам ніколи не відкривається для пошуку.
+**How to lift this guarantee.** The only legal bypass is the combination `--no-snapshot
+--yes-live`: it opens the live DB itself in WAL mode (`retrieval.search` goes through
+`get_db_connection`, `PRAGMA journal_mode=WAL`) while the recorder and `telegram_listener.py`
+write to it at the same time. The gate allows this ONLY when the target really is the live DB
+(`Config.DATABASE`) — the same pair of flags pointed at a snapshot or any other
+file still goes through a protective temporary copy (`_scratch_copy`): the measurement runs
+against the copy, and the named path itself is never opened for search.
 
-Це ДВІ РІЗНІ гарантії, і плутати їх не можна. На шляху зі знімком (нижче,
-`VACUUM INTO` з `mode=ro`-зʼєднання) запис фізично неможливий — сам SQLite
-відмовить незалежно від того, який код це викликав, це гарантія ОС/двигуна БД. На
-шляху зі scratch-копією це гарантія КОДУ, не ОС: `_scratch_copy` просто копіює
-файл до того, як щось відкриє його для пошуку, і нічого фізичного не заважає
-майбутній правці помилково пустити `retrieval.search` напряму на названий шлях.
+These are TWO DIFFERENT guarantees, and they must not be confused. On the snapshot path (below,
+`VACUUM INTO` from a `mode=ro` connection) writing is physically impossible — SQLite itself
+will refuse regardless of which code called it, this is an OS/DB-engine guarantee. On
+the scratch-copy path it is a CODE guarantee, not an OS one: `_scratch_copy` simply copies the
+file before anything opens it for search, and nothing physical stops
+a future edit from mistakenly pointing `retrieval.search` directly at the named path.
 
-### Команда (на живій БД — автознімок)
+### Command (on the live DB — auto-snapshot)
 
 ```bash
 .venv/Scripts/python.exe -m evals.gate \
@@ -42,112 +42,112 @@ retrieval (жодного виклику Claude), завжди на ДВОХ `k`
     -q
 ```
 
-`--db whisper_history.db` (`Config.DATABASE`) розпізнається як жива БД
-(`evals/graph_links.py::is_live_db`) → гейт САМ робить знімок
-(`evals/snapshot.py::auto_snapshot`) у `evals/snapshots/<basename>-<YYYYMMDD-HHMMSS>.db`
-і шукає по ньому; сама жива БД відкривається лише `mode=ro` для `VACUUM INTO` — запис
-у неї неможливий фізично, не лише конвенцією коду. Той самий basename перевикористовує
-вже знятий знімок замість нового 300+ МБ файлу, якщо джерело (розмір+mtime) не
-змінилось відтоді — новий знімок і прибирання старих того самого basename
-трапляється лише коли джерело справді зрушило. Щоб примусово ганяти БЕЗ знімка (напр.
-вказаний шлях уже і є знімком) — `--no-snapshot`; на файлі, що збігається з
-`Config.DATABASE`, це заборонено без явного `--yes-live` (гейт має ганятись на копії
-за замовчуванням, а не на бойовому файлі "тому що швидше").
+`--db whisper_history.db` (`Config.DATABASE`) is recognized as the live DB
+(`evals/graph_links.py::is_live_db`) → the gate itself takes a snapshot
+(`evals/snapshot.py::auto_snapshot`) into `evals/snapshots/<basename>-<YYYYMMDD-HHMMSS>.db`
+and searches against it; the live DB itself is opened only `mode=ro` for `VACUUM INTO` — writing
+to it is physically impossible, not merely by code convention. The same basename reuses an
+already taken snapshot instead of a new 300+ MB file if the source (size+mtime) has not
+changed since — a new snapshot and pruning of old ones of the same basename
+happen only when the source has really moved. To force a run WITHOUT a snapshot (e.g. the
+given path already is a snapshot) use `--no-snapshot`; on a file that matches
+`Config.DATABASE` this is forbidden without an explicit `--yes-live` (the gate must run on a copy
+by default, not on the live file "because it is faster").
 
-Вихід: `0` — PASS. `1` — ВИКЛЮЧНО вердикт якості: поріг `--min-recall` не пройдено,
-падіння середнього відносно `--baseline` понад `--max-drop`, або пункт перейшов
-hit→miss понад `--max-item-regressions`. `2` — усе інше (дані/використання/
-інфраструктура): нема golden-файлу чи БД, жива БД без `--yes-live` при
-`--no-snapshot`, невалідний golden-set, жоден пункт `status="labeled"` не оцінено на
-якомусь `k`, `--json-out` без `.local.` у назві шляху, базова лінія знята за іншим
-провенансом (інший знімок або `vector_available`/`rerank`), збій інфраструктури під
-час заміру (модель, знімок, диск).
+Exit codes: `0` — PASS. `1` — EXCLUSIVELY a quality verdict: the `--min-recall` threshold is not met,
+the mean dropped against `--baseline` by more than `--max-drop`, or an item went
+hit→miss beyond `--max-item-regressions`. `2` — everything else (data/usage/
+infrastructure): no golden file or DB, live DB without `--yes-live` with
+`--no-snapshot`, invalid golden-set, no `status="labeled"` item evaluated at
+some `k`, `--json-out` without `.local.` in the path name, a baseline taken under a different
+provenance (a different snapshot or `vector_available`/`rerank`), an infrastructure failure during
+the measurement (model, snapshot, disk).
 
-### `--rerank` — міряти ту конфігурацію, яка справді відповідає
+### `--rerank` — measure the configuration that actually answers
 
-За замовчуванням гейт міряє ранжування БЕЗ cross-encoder-реранкера, а бойовий
-RAG-чат працює З ним (`RECALL_RERANK_ENABLED=1` у `.env` → `rag.py`
-`_RERANK_ENABLED` → `retrieval.search(rerank=True)`). Замір 17.09.2026 на 14
-пунктах: recall@8 **50.0% без реранка проти 78.6% з ним**, на k=12 — 78.6% в
-обох. Тобто прогін без прапорця занижує бойову якість і, гірше, будь-яке A/B
-(модель ембедингів, префікси, нарізка) порівнює ранжування, якого в продакшені
-немає.
+By default the gate measures ranking WITHOUT the cross-encoder reranker, while the live
+RAG chat works WITH it (`RECALL_RERANK_ENABLED=1` in `.env` → `rag.py`
+`_RERANK_ENABLED` → `retrieval.search(rerank=True)`). A measurement on 17.09.2026 over 14
+items: recall@8 **50.0% without the reranker vs 78.6% with it**, at k=12 — 78.6% in
+both. So a run without the flag understates the live quality and, worse, any A/B
+(embedding model, prefixes, chunking) compares a ranking that does not exist in production.
 
 ```bash
 .venv/Scripts/python.exe -m evals.gate     --golden evals/golden_set.local.json --db whisper_history.db     --k 8,12 --rerank --json-out evals/run_<що_міряємо>.local.json -q
 ```
 
-Дефолт лишився `off` навмисно: інакше всі раніше зняті лінії й прогони змінили б
-сенс заднім числом. Замість цього прогін підписує себе сам — конфігурація
-друкується в рядку вердикту (`[gate] PASS k=8,12 [rerank=on, rewrite=off]`,
-єдиний рядок під `-q`) і лягає в `--json-out` під ключем `provenance`. Лінія,
-знята з іншим `rerank`, до порівняння не допускається (той самий захист, що вже
-стоїть на знімку БД), тож лінію під реранкер треба зняти окремо
-(`--write-baseline`), а не переписувати стару.
+The default deliberately stayed `off`: otherwise all previously taken baselines and runs would have changed
+meaning retroactively. Instead the run signs itself — the configuration
+is printed in the verdict line (`[gate] PASS k=8,12 [rerank=on, rewrite=off]`,
+the only line under `-q`) and goes into `--json-out` under the `provenance` key. A baseline
+taken with a different `rerank` is not admitted to comparison (the same protection that already
+guards the DB snapshot), so a baseline for the reranker must be taken separately
+(`--write-baseline`), not by overwriting the old one.
 
-`rewrite` у провенансі — не прапорець гейта: `retrieval.search` читає гарячий
-`RAG_QUERY_REWRITE` сам, а прогін лише фіксує, з чим він знятий.
+`rewrite` in the provenance is not a gate flag: `retrieval.search` reads the hot
+`RAG_QUERY_REWRITE` itself, and the run only records what it was taken with.
 
-### Пороги (`--min-recall`) — детектор обвалу, не критерій якості
+### Thresholds (`--min-recall`) — a collapse detector, not a quality criterion
 
-Дефолт `8=0.15,12=0.40` — не число з голови, а виведене правилом
-`floor_0.05(виміряний recall@k калібрувальної лінії − 2/n)`, де `n` — кількість
-`labeled`-пунктів лінії (запас у два пункти набору: при `n=15` один пункт важить
-6.7 п.п., поріг, вужчий за зернистість набору, ловив би розмітку, а не ранжування).
-Фактичний запас ширший за ці 2 пункти: `floor_0.05` ще й округляє результат вниз
-до сітки 0.05, тож додає до нуля до цілої клітинки зверху. На лінії `n=15` це не
-13.3 п.п. (`2/15`), а 17.1 для `k=8`: поріг `0.15` лежить на 17.1 п.п. нижче
-виміряного `recall@8=0.32143`, не на 13.3.
+The default `8=0.15,12=0.40` is not a number out of thin air but derived by the rule
+`floor_0.05(measured recall@k of the calibration baseline − 2/n)`, where `n` is the number of
+`labeled` items in the baseline (a margin of two set items: at `n=15` one item weighs
+6.7 pp, a threshold narrower than the set's granularity would catch labeling, not ranking).
+The actual margin is wider than these 2 items: `floor_0.05` also rounds the result down
+to the 0.05 grid, adding up to a whole cell on top. On the `n=15` baseline this is not
+13.3 pp (`2/15`), but 17.1 for `k=8`: the `0.15` threshold lies 17.1 pp below the
+measured `recall@8=0.32143`, not 13.3.
 
-**Політика при дрейфі лінії (рішення власника, дельта D22 у
-`docs/specs/eval-gate/plan.md` — лише приватний репозиторій, `docs/specs/` не
-входить у публічне дзеркало).** Правило вище застосовується при КОЖНОМУ
-знятті лінії і дає ВЕРХНЮ межу для цього конкретного заміру, не саме значення
-шипованого дефолта: шипований дефолт — НАЙНИЖЧЕ з усіх значень, виведених по
-всіх лініях, які колись знімались. Причина — корпус доведено дрейфує в обидва
-боки (розділ «короткоживуча лінія» нижче), а поріг лишається детектором
-обвалу, не критерієм якості: підтягувати число вгору за кожною новою лінією
-означало б ловити хибне червоне на наступному дрейфі вниз, а не реальний
-регрес ранжування.
+**Policy on baseline drift (owner decision, delta D22 in
+`docs/specs/eval-gate/plan.md` — private repository only, `docs/specs/` is not
+part of the public mirror).** The rule above is applied at EVERY
+baseline capture and gives an UPPER bound for that particular measurement, not the value
+of the shipped default: the shipped default is the LOWEST of all values derived
+from all baselines ever taken. The reason is that the corpus provably drifts in both
+directions (the "short-lived baseline" section below), and the threshold stays a collapse
+detector, not a quality criterion: pulling the number up with every new baseline
+would mean catching a false red on the next downward drift rather than a real
+ranking regression.
 
-Замір 03.09.2026 ~22:00 (`n=15`, чинна лінія, знімок
-`evals/snapshots/whisper_history-20260903-182053.db`; повний провенанс — лише
-приватний репозиторій, `docs/specs/eval-gate/plan.md`, дельта D22):
-`recall@8=0.32143`, `recall@12=0.60714` → правило дає
-`floor_0.05(0.32143−2/15)=0.15`, `floor_0.05(0.60714−2/15)=0.45`. Шипований
-`k=12` лишається `0.40` — нижче за це `0.45`: попередня лінія (знімок, який
-закінчувався на `145235`, сім годин раніше того самого дня, відтоді видалений
-прунером) вимірювала `recall@12=0.53571` → `floor_0.05(...)=0.40`, і саме це,
-найнижче з двох, лишається шипованим дефолтом.
+Measurement of 03.09.2026 ~22:00 (`n=15`, the current baseline, snapshot
+`evals/snapshots/whisper_history-20260903-182053.db`; full provenance — private
+repository only, `docs/specs/eval-gate/plan.md`, delta D22):
+`recall@8=0.32143`, `recall@12=0.60714` → the rule gives
+`floor_0.05(0.32143−2/15)=0.15`, `floor_0.05(0.60714−2/15)=0.45`. The shipped
+`k=12` stays `0.40` — below this `0.45`: the previous baseline (a snapshot that
+ended in `145235`, seven hours earlier the same day, since deleted by the
+pruner) measured `recall@12=0.53571` → `floor_0.05(...)=0.40`, and that, the
+lowest of the two, remains the shipped default.
 
-Поріг ловить ОБВАЛ (ретривал зламався і не повертає нічого корисного) — той самий
-раунд замірів довів, що абсолютний поріг НЕ ловить саботаж у принципі: на k=8
-навмисно зламане (`--sabotage`) ранжування дало ВИЩИЙ recall, ніж чистий прогін
-(39.3% → 42.9%, той самий golden-set, інший знімок тієї самої сесії). Саботаж ловить
-пунктова регресія проти лінії — `--max-item-regressions` (дефолт `0`): жоден пункт не
-має права перейти з hit у miss відносно лінії.
+The threshold catches a COLLAPSE (retrieval broke and returns nothing useful) — the same
+round of measurements proved that an absolute threshold does NOT catch sabotage at all: at k=8 a
+deliberately broken (`--sabotage`) ranking gave a HIGHER recall than the clean run
+(39.3% → 42.9%, the same golden-set, a different snapshot of the same session). Sabotage is caught by
+the per-item regression against the baseline — `--max-item-regressions` (default `0`): no item
+may go from hit to miss relative to the baseline.
 
-### Червоний прогін — перевірка самого гейта
+### Red run — checking the gate itself
 
-`--sabotage shuffle|reverse` детерміновано (seed 0) ламає ПУЛ кандидатів ПЕРЕД
-відсіканням до `k`: голова пулу (стара топ-k) і хвіст тасуються НЕЗАЛЕЖНО, тоді хвіст
-ставиться перед головою — жоден старий top-k елемент не виживає в нових перших `k`
-(`reverse` дає ту саму гарантію тривіально, розворотом усього пулу). Доведено на
-дефолтних `--k 8,12`, не лише на малих тестових `k` — рання версія (звичайний
-`shuffle` над усім пулом) мовчала (`rc=0`) саме на 8/12, хоча червоніла на дрібних `k`.
+`--sabotage shuffle|reverse` deterministically (seed 0) breaks the candidate POOL BEFORE
+truncating to `k`: the head of the pool (the old top-k) and the tail are shuffled INDEPENDENTLY, then the tail
+is placed before the head — no old top-k element survives into the new first `k`
+(`reverse` gives the same guarantee trivially, by reversing the whole pool). Proven
+on the default `--k 8,12`, not only on small test `k` — an early version (plain
+`shuffle` over the whole pool) stayed silent (`rc=0`) precisely at 8/12, though it went red
+at small `k`.
 
-**Передумова, без якої гарантія мовчки не тримається:** доведено її для пулу
-розміром `4k` — саме стільки гейт ЗАПИТУЄ (`pool_size = k*4`), а не для пулу, який
-`retrieval.search` РЕАЛЬНО поверне. На тонкому архіві чи вузькому
-`category_id`-фільтрі кандидатів може повернутись менше. Мінімум, якого гарантія
-насправді вимагає — `2k`: і `shuffle` (хвосту потрібно принаймні `k` елементів поза
-старою головою), і `reverse` (старий індекс мусить піти за межу нового top-k)
-ламаються нижче цього порогу. Якщо повернений пул тонший за `2k`, старі top-k
-елементи можуть вижити в нових перших `k`, і `--sabotage` здатний надрукувати
-PASS, нічого насправді не зламавши — код цю умову не перевіряє і не попереджає.
+**A precondition without which the guarantee silently does not hold:** it is proven
+for a pool of size `4k` — exactly what the gate REQUESTS (`pool_size = k*4`), not for the pool
+`retrieval.search` will ACTUALLY return. On a thin archive or a narrow
+`category_id` filter fewer candidates may come back. The minimum the guarantee
+really requires is `2k`: both `shuffle` (the tail needs at least `k` elements outside the
+old head) and `reverse` (the old index must go past the border of the new top-k)
+break below this threshold. If the returned pool is thinner than `2k`, old top-k
+elements may survive into the new first `k`, and `--sabotage` can print
+PASS having broken nothing — the code neither checks nor warns about this condition.
 
-Абсолютний поріг саботаж не ловить (розділ вище) — гейт зобовʼязаний повернути `1`
-**проти базової лінії** (`--baseline`), через пунктову регресію чи падіння середнього:
+An absolute threshold does not catch sabotage (section above) — the gate is obliged to return `1`
+**against the baseline** (`--baseline`), via per-item regression or a drop in the mean:
 
 ```bash
 .venv/Scripts/python.exe -m evals.gate \
@@ -156,83 +156,83 @@ PASS, нічого насправді не зламавши — код цю ум
 # [gate] FAIL k=8,12 — k=8: mean_drop 0.071 > max-drop 0.020; item_regressions 2 > 0; ...
 ```
 
-Виміряно 03.09.2026 ~22:20 на чинній лінії (знімок `182053`, той самий golden-set,
+Measured 03.09.2026 ~22:20 on the current baseline (snapshot `182053`, the same golden-set,
 `n=15`): `shuffle` — k=8 `item_regressions=2`, `mean_drop=0.071`; k=12
 `recall_at_k=0.143`, `item_regressions=7`, `mean_drop=0.464`. `reverse` — k=8
 `recall_at_k=0.107`, `item_regressions=3`, `mean_drop=0.214`; k=12
-`recall_at_k=0.107`, `item_regressions=8`, `mean_drop=0.500`. Обидва режими
-провалюють гейт (`1`) на дефолтних `--k 8,12` — повний провенанс лишається лише
-в приватному репозиторії (`docs/specs/eval-gate/plan.md`, дельта D22):
-`docs/specs/` не входить у публічне дзеркало, числа вище — вся інформація, яку
-отримає публічний читач.
+`recall_at_k=0.107`, `item_regressions=8`, `mean_drop=0.500`. Both modes
+fail the gate (`1`) on the default `--k 8,12` — the full provenance remains only
+in the private repository (`docs/specs/eval-gate/plan.md`, delta D22):
+`docs/specs/` is not part of the public mirror, the numbers above are all the information
+the public reader gets.
 
-Ненульовий вихід тут — це і є критерій, що гейт справді щось перевіряє, а не завжди
-друкує PASS.
+A non-zero exit here is exactly the criterion that the gate really checks something, rather than always
+printing PASS.
 
-### Формат golden-set (JSONL, план C1)
+### Golden-set format (JSONL, plan C1)
 
-Сучасний формат — один JSON-обʼєкт на рядок у `.jsonl`-файлі (старий
-`golden_set.local.json`/`{"items": [...]}` і далі читається без конвертації —
-`evals/golden_io.py` розпізнає формат по розширенню файлу):
+The modern format is one JSON object per line in a `.jsonl` file (the old
+`golden_set.local.json`/`{"items": [...]}` is still read without conversion —
+`evals/golden_io.py` recognizes the format by the file extension):
 
 ```json
 {"id": "budget-decision-01", "question": "...", "slice": "calls", "category_id": null, "expected_transcription_ids": [101], "expected_source_name_contains": ["..."], "expected_facts": ["..."], "notes": "", "source": "manual", "status": "labeled", "candidates": []}
 ```
 
-| Поле | Навіщо |
+| Field | Purpose |
 |---|---|
-| `slice` | `"calls"` \| `"tg"` \| `"docs"` — розріз, по якому гейт рахує окрему агрегацію (`by_slice`) поверх спільної. |
-| `source` | `"mcp_log"` (намінене `build_golden.py` з реальних запитів) \| `"manual"` \| `"legacy"` (мігровано зі старого JSON). |
-| `status` | `"labeled"` — бере участь у метриках; `"unlabeled"` — пропускається ПОВНІСТЮ (пошук навіть не запускається); `"negative"` — пошук запускається і лишається у per-item звіті, але не входить у `aggregate`/`by_slice` (свідомо порожні `expected_*`, а не ще не розмічено). |
-| `candidates` | Підказка від `build_golden.py` (топ-N `retrieval.search` на момент мінінгу) — НЕ правда; людина або підтверджує їх у `expected_*`, або ігнорує. |
+| `slice` | `"calls"` \| `"tg"` \| `"docs"` — the slice by which the gate computes a separate aggregation (`by_slice`) on top of the shared one. |
+| `source` | `"mcp_log"` (mined by `build_golden.py` from real queries) \| `"manual"` \| `"legacy"` (migrated from the old JSON). |
+| `status` | `"labeled"` — takes part in the metrics; `"unlabeled"` — skipped ENTIRELY (the search is not even run); `"negative"` — the search is run and stays in the per-item report, but is not included in `aggregate`/`by_slice` (deliberately empty `expected_*`, as opposed to not yet labeled). |
+| `candidates` | A hint from `build_golden.py` (top-N `retrieval.search` at mining time) — NOT the truth; a human either confirms them into `expected_*` or ignores them. |
 
-Дедлайни/власники задач — окремий формат (план C7), будується `evals/build_tasks_golden.py`
-і звіряється `evals/tasks_eval.py`:
+Task deadlines/owners are a separate format (plan C7), built by `evals/build_tasks_golden.py`
+and checked by `evals/tasks_eval.py`:
 
 ```json
 {"id": "task-0001", "action_item_id": 4821, "transcription_id": 512, "task": "...", "owner_name_raw": "...", "due_raw": "до кінця тижня", "meeting_date": "2026-08-20", "source": null, "truth": {"owner": null, "due_date": null, "due_precision": null}, "status": "unlabeled"}
 ```
 
-`source: null` — задача успадкована з Claude-картки дзвінка; `"tg_thread"` — витягнута з
-переписки (`commitments.tg_tasks`). `truth.owner`/`truth.due_date`/`truth.due_precision`
-— ручна правда; `tasks_eval.py` звіряє `commitments.parse_due(due_raw, meeting_date)` з
-`truth.due_date` і поточний `owner_entity_id` зі знімка (канонічне імʼя + всі аліаси) з
-`truth.owner` — без жодного виклику Claude (A3 плану: точність самого витягу Claude
-лишається поза межами цього eval).
+`source: null` — the task is inherited from the Claude call card; `"tg_thread"` — extracted from
+the conversation (`commitments.tg_tasks`). `truth.owner`/`truth.due_date`/`truth.due_precision`
+are the manual truth; `tasks_eval.py` checks `commitments.parse_due(due_raw, meeting_date)` against
+`truth.due_date` and the current `owner_entity_id` from the snapshot (canonical name + all aliases) against
+`truth.owner` — without any Claude call (A3 of the plan: the accuracy of Claude's extraction itself
+stays outside the scope of this eval).
 
-### Робочий цикл наповнення набору
+### The workflow for filling the set
 
-1. `.venv/Scripts/python.exe -m evals.build_golden --db <знімок> --stats` — мінить
-   `logs/mcp_calls.log` (`RECALL_MCP_DEBUG_LOG=1`) у нові `status="unlabeled"` пункти з
-   кандидатами і друкує таблицю `slice × status` з дефіцитом до цілі (**≥50 на зріз** —
-   ціль наповнення ДАНИХ, не критерій прийняття коду, A2 плану).
-2. Розмітити вручну: для кожного `unlabeled` пункту звірити `candidates` з архівом,
-   заповнити `expected_transcription_ids`/`expected_source_name_contains`/
-   `expected_facts`, виставити `"status": "labeled"` (або `"negative"`, якщо релевантних
-   джерел свідомо немає — не плутати з ще не розміченим).
-3. `.venv/Scripts/python.exe -m evals.gate --golden <файл> --db <знімок>
-   --write-baseline evals/baseline.local.json` — зафіксувати поточний прогін як нову
-   базову лінію, коли набір стабільний.
-4. Наступні прогони — з `--baseline evals/baseline.local.json`: гейт порівнює і середнє,
-   і кожен пункт окремо (hit→miss відносно лінії).
+1. `.venv/Scripts/python.exe -m evals.build_golden --db <snapshot> --stats` — mines
+   `logs/mcp_calls.log` (`RECALL_MCP_DEBUG_LOG=1`) into new `status="unlabeled"` items with
+   candidates and prints a `slice × status` table with the deficit to the target (**≥50 per slice**
+   — a DATA-filling target, not a code acceptance criterion, A2 of the plan).
+2. Label manually: for each `unlabeled` item check `candidates` against the archive,
+   fill `expected_transcription_ids`/`expected_source_name_contains`/
+   `expected_facts`, set `"status": "labeled"` (or `"negative"` if there are deliberately no
+   relevant sources — do not confuse with not yet labeled).
+3. `.venv/Scripts/python.exe -m evals.gate --golden <file> --db <snapshot>
+   --write-baseline evals/baseline.local.json` — record the current run as a new
+   baseline once the set is stable.
+4. Subsequent runs use `--baseline evals/baseline.local.json`: the gate compares both the mean
+   and each item separately (hit→miss relative to the baseline).
 
-Той самий цикл для задач: `build_tasks_golden.py --stats` (ціль **≥30**, C7 плану) →
-заповнити `truth.owner`/`truth.due_date`/`truth.due_precision`, `status="labeled"` →
+The same workflow for tasks: `build_tasks_golden.py --stats` (target **≥30**, C7 of the plan) →
+fill `truth.owner`/`truth.due_date`/`truth.due_precision`, `status="labeled"` →
 `tasks_eval.py --golden ... --db ... --gate`.
 
-### Калібрувальна лінія — зняти, оновити, і чому вона тут короткоживуча
+### Calibration baseline — taking it, updating it, and why it is short-lived here
 
-Лінія знімається тим самим `--write-baseline` з кроку 3 вище. Історично тут
-вимикався абсолютний поріг (`--min-recall 8=0,12=0`), бо старий дефолт
-(`8=0.60,12=0.75`) блокував запис лінії ще до того, як вона зʼявилась —
-`--write-baseline` не пише лінію на вердикті FAIL. Шипований зараз дефолт
-(`8=0.15,12=0.40`) виведений із першого коли-небудь знятого набору ліній
-(розділ «Пороги» вище — правило дає ВЕРХНЮ межу за кожним знятим, дефолт —
-найнижче з усіх виведених) і проти чинної лінії не блокує — але це
-число під конкретний архів, на якому його калібрували, не універсальна константа:
-на іншому корпусі (менший розмір, інша розмітка) фактичний recall цілком може
-лежати нижче. Вимикати поріг на першому знятті лінії лишається безпечною
-звичкою, не обходом власного числа:
+The baseline is taken with the same `--write-baseline` from step 3 above. Historically the absolute
+threshold was disabled here (`--min-recall 8=0,12=0`), because the old default
+(`8=0.60,12=0.75`) blocked writing the baseline before it even existed —
+`--write-baseline` does not write a baseline on a FAIL verdict. The currently shipped default
+(`8=0.15,12=0.40`) is derived from the first set of baselines ever taken
+(the "Thresholds" section above — the rule gives an UPPER bound for each taken one, the default is the
+lowest of all derived) and does not block against the current baseline — but it is
+a number for the specific archive it was calibrated on, not a universal constant:
+on another corpus (smaller size, different labeling) the actual recall may well
+lie lower. Disabling the threshold when first taking a baseline remains a safe
+habit, not a bypass of your own number:
 
 ```bash
 .venv/Scripts/python.exe -m evals.gate \
@@ -240,109 +240,106 @@ PASS, нічого насправді не зламавши — код цю ум
     --k 8,12 --min-recall 8=0,12=0 --write-baseline evals/baseline.local.json
 ```
 
-Лінія дійсна, лише якщо переживає власний перезамір: другий прогін тієї самої
-команди проти того самого знімка з `--baseline evals/baseline.local.json` замість
-`--write-baseline` мусить дати `0` і жодної пунктової розбіжності. Лінія, яку не
-можна порівняти саму з собою, — не лінія: або знімок мутувався під час заміру
-(порушено ADR-003), або retrieval недетермінований — обидва випадки означають, що
-міряти ще нічим. `evals/baseline.local.json` лишається поза git (файлу нема, доки
-не запущено перший `--write-baseline`); повний провенанс — дата, ідентичність
-знімка, `n`, `vector_available`, стан reranker, виміряні агрегати — записаний
-дельтою в `docs/specs/eval-gate/plan.md` (лише приватний репозиторій —
-`docs/specs/` не входить у публічне дзеркало), сам файл лінії туди теж не
-потрапляє.
+A baseline is valid only if it survives its own re-measurement: a second run of the same
+command against the same snapshot with `--baseline evals/baseline.local.json` instead of
+`--write-baseline` must give `0` and no per-item divergence. A baseline that cannot
+be compared with itself is not a baseline: either the snapshot mutated during the measurement
+(ADR-003 violated), or retrieval is nondeterministic — both cases mean there is
+nothing to measure with yet. `evals/baseline.local.json` stays out of git (the file does not exist until
+the first `--write-baseline` is run); the full provenance — date, snapshot identity,
+`n`, `vector_available`, reranker state, measured aggregates — is recorded as a
+delta in `docs/specs/eval-gate/plan.md` (private repository only —
+`docs/specs/` is not part of the public mirror), the baseline file itself does not go there either.
 
-**Лінія короткоживуча на цій машині.** `app.py` із дочірнім `telegram_listener.py`
-безперервно доливають архів фоновим інджестом. `auto_snapshot` чесно виявляє зміну
-джерела і будує НОВИЙ знімок — після цього попередня лінія читається як «інший
-провенанс», і гейт повертає `2`, не `1`. Це НЕ регресія ранжування: червоний гейт
-на цій машині спершу перевіряють на провенанс (повідомлення `[gate] базова лінія
-... знята за іншим провенансом`), і лише якщо провенанс збігається — читають вихід
-як вердикт якості. Практичний наслідок — кроки «зняти лінію» і «звірити з нею»
-гонити ПОСЛІДОВНО, одним скриптом, без пауз між ними: навіть менш ніж за дві
-години простою фоновий інджест встигає зрушити recall@k приблизно на один пункт
-набору (при `n=15` — 6.7 п.п.), тобто саме ту величину, яку запас у два пункти
-з розділу «Пороги» розрахований гасити.
+**The baseline is short-lived on this machine.** `app.py` with the child `telegram_listener.py`
+continuously tops up the archive with background ingest. `auto_snapshot` honestly detects the change of
+the source and builds a NEW snapshot — after that the previous baseline reads as "a different
+provenance", and the gate returns `2`, not `1`. This is NOT a ranking regression: a red gate
+on this machine is first checked for provenance (the message `[gate] базова лінія ... знята за іншим провенансом`), and only if the provenance matches is the exit
+read as a quality verdict. The practical consequence — the steps "take the baseline" and "compare against it"
+should be run SEQUENTIALLY, in one script, without pauses between them: even in less than two
+hours of downtime background ingest manages to shift recall@k by about one item
+of the set (at `n=15` — 6.7 pp), which is exactly the quantity the two-item margin
+from the "Thresholds" section is designed to absorb.
 
-Прунер (`evals/snapshot.py::_prune_other_snapshots`) захищає від видалення знімки,
-названі `--baseline`/`--write-baseline` цього прогону, ТА знімок, на який показує
-конвенційний файл лінії `evals/baseline.local.json` — незалежно від того, чи прогін
-взагалі згадав лінію прапорцями (`_protected_snapshot_paths` перевіряє конвенційний
-шлях завжди, на додачу до переданих прапорців). Прогін без жодного прапорця про
-лінію (саботажний прогін, ручний замір) більше не сирота: лінія, яка фізично лежить
-на диску, вціліє.
+The pruner (`evals/snapshot.py::_prune_other_snapshots`) protects from deletion the snapshots
+named by `--baseline`/`--write-baseline` of this run, AND the snapshot that the conventional baseline
+file `evals/baseline.local.json` points to — regardless of whether the run
+mentioned a baseline in its flags at all (`_protected_snapshot_paths` always checks the conventional
+path, in addition to the flags passed). A run without any baseline flag (a sabotage run, a manual measurement) is no longer an orphan: a baseline physically lying
+on disk will survive.
 
-Це не воскрешає те, що прибрано ДО цього захисту: минулого разу (03.09 ~18:20)
-`evals/baseline.local.json` після ремонту й далі показував на видалений прунером
-`whisper_history-20260903-145235.db`, і лінію довелось зняти наново тим самим
-`--write-baseline` того ж дня ~22:00, на знімку `whisper_history-20260903-182053.db`.
-Зараз файл лінії показує саме на цей знімок, і він і далі лежить на диску
-(`evals/snapshots/`) — безумовний захист конвенційного шляху тримає його живим,
-поки лінію не перезаписано новою.
+This does not resurrect what was pruned BEFORE this protection: last time (03.09 ~18:20)
+`evals/baseline.local.json` after the repair still pointed to
+`whisper_history-20260903-145235.db`, deleted by the pruner, and the baseline had to be retaken
+with the same `--write-baseline` the same day ~22:00, on the snapshot `whisper_history-20260903-182053.db`.
+Now the baseline file points to exactly this snapshot, and it still lies on disk
+(`evals/snapshots/`) — the unconditional protection of the conventional path keeps it alive
+until the baseline is overwritten with a new one.
 
-**Мірило S1 і чому постійного регресійного гейта тут нема.** «main зелений на
-чистому прогоні, червоний на саботажі» знято ПЕРВИННО одним прогоном пари кроків
-03.09.2026 ~18:20 (чисто → `0`, `--sabotage shuffle` → `1`, `--sabotage reverse`
-→ `1`) і ПЕРЕЗНЯТО того ж дня ~22:20 проти чинної лінії (знімок `182053`) з тим
-самим результатом: чисто → `0`, `shuffle` → `1`, `reverse` → `1`. Мірило
-відтворюване — але саме проти цього збереженого знімка (безумовний захист
-конвенційного файлу лінії, вище, тримає його на диску), не «взагалі, на
-будь-якому майбутньому стані архіву».
+**The S1 criterion and why there is no permanent regression gate here.** "main is green
+on a clean run, red on sabotage" was first taken by a single run of a pair of steps
+on 03.09.2026 ~18:20 (clean → `0`, `--sabotage shuffle` → `1`, `--sabotage reverse`
+→ `1`) and RE-TAKEN the same day ~22:20 against the current baseline (snapshot `182053`) with the
+same result: clean → `0`, `shuffle` → `1`, `reverse` → `1`. The criterion is
+reproducible — but precisely against this preserved snapshot (the unconditional protection of the
+conventional baseline file, above, keeps it on disk), not "in general, on
+any future state of the archive".
 
-Це не робить постійним регресійний гейт на цій машині. Саботаж ловлять лише
-перевірки проти лінії (`--max-drop`/`--max-item-regressions`, розділ «Пороги»
-вище), а сама лінія МІЖ СЕСІЯМИ (не між прогонами всередині однієї) лишається
-короткоживучою (розділ вище): фоновий інджест зрушує провенанс знімка менш ніж
-за дві години простою, і наступний прогін з іншим знімком дає `2` (непорівнянно),
-не вердикт якості. Постійного гейта, що переживає перезапуск машини й дрейф
-архіву, тут нема і не буде, доки корпус не заморожено (S4, Linux CI): єдине, що
-переживає перезапуск, — абсолютний поріг (`--min-recall`), який саботаж, за
-розділом «Пороги» вище, не ловить.
+This does not make a regression gate permanent on this machine. Sabotage is caught only by
+the checks against the baseline (`--max-drop`/`--max-item-regressions`, the "Thresholds" section
+above), and the baseline itself BETWEEN SESSIONS (not between runs within one) stays
+short-lived (the section above): background ingest shifts the snapshot provenance in less
+than two hours of downtime, and the next run with a different snapshot gives `2` (incomparable),
+not a quality verdict. A permanent gate that survives a machine restart and archive drift
+does not exist here and will not, until the corpus is frozen (S4, Linux CI): the only thing that
+survives a restart is the absolute threshold (`--min-recall`), which, per the
+"Thresholds" section above, does not catch sabotage.
 
-### Приватність гейта
+### Gate privacy
 
-На додачу до `golden_set.local.json` (нижче) — усі артефакти гейта з реальними
-питаннями, ID транскриптів чи іменами з архіву gitignored за конвенцією `*.local.*`:
+In addition to `golden_set.local.json` (below) — all gate artifacts with real
+questions, transcript IDs or names from the archive are gitignored by the `*.local.*` convention:
 
-- `evals/*.local.jsonl` — golden-набори (`golden_candidates.local.jsonl`,
-  `tasks_golden.local.jsonl` тощо).
-- `evals/baseline*.local.json` — базові лінії.
-- `evals/*.local.json` — `--json-out` гейта (напр. `evals/gate_run.local.json`):
-  повний per-item результат несе реальні питання й `transcription_id` архіву;
-  `gate.py` сам відмовляється писати `--json-out` без `.local.` у назві шляху
-  (exit `2`) — файл без цієї конвенції в шляху не пройде. `evals/compare.py`
-  читає ці файли (і опційно пише свій `--json-out` з тими самими id/питаннями) —
-  тримайте його вихід під тією ж конвенцією `*.local.json` (compare сам це не
-  перевіряє — не гейт, довіра на людині, яка задає шлях).
-- `evals/snapshots/` — знімки БД (`VACUUM INTO`).
-- `evals/after_*.json`, `evals/before_*.json`, `evals/*_rerank.json` — результати
-  ручних прогонів `run_eval.py`.
+- `evals/*.local.jsonl` — golden sets (`golden_candidates.local.jsonl`,
+  `tasks_golden.local.jsonl`, etc.).
+- `evals/baseline*.local.json` — baselines.
+- `evals/*.local.json` — the gate's `--json-out` (e.g. `evals/gate_run.local.json`):
+  the full per-item result carries real questions and archive `transcription_id`s;
+  `gate.py` itself refuses to write `--json-out` without `.local.` in the path name
+  (exit `2`) — a file without this convention in the path will not pass. `evals/compare.py`
+  reads these files (and optionally writes its own `--json-out` with the same ids/questions) —
+  keep its output under the same `*.local.json` convention (compare does not check this
+  itself — it is not a gate, trust is on the human who sets the path).
+- `evals/snapshots/` — DB snapshots (`VACUUM INTO`).
+- `evals/after_*.json`, `evals/before_*.json`, `evals/*_rerank.json` — results of
+  manual `run_eval.py` runs.
 
-У репозиторії лишаються лише синтетичні приклади (`golden_set.example.json`) — той
-самий принцип, що й для основного golden-set нижче.
+Only synthetic examples (`golden_set.example.json`) stay in the repository — the same
+principle as for the main golden-set below.
 
-## Хвиля B — golden-set ≥30 і порівняння прогонів (`evals.compare`)
+## Wave B — golden-set ≥30 and run comparison (`evals.compare`)
 
-**Golden-set ≥30.** `evals/build_golden.py` (історія 01, вже в `main`) мінить кандидатів
-не лише з `logs/mcp_calls.log`, а й з логу `/api/memory/ask` (`--from-ask-log`) — реальні
-питання, які вже задавали архіву, а не вигадані заново. `--stats` друкує таблицю
-slice×status і дефіцит до цілі ≥30 розмічених записів; `--merge` дописує нових
-кандидатів у наявний `--out`, не перезаписуючи вже розмічені (без `--yes-overwrite-labeled`).
+**Golden-set ≥30.** `evals/build_golden.py` (story 01, already in `main`) mines candidates
+not only from `logs/mcp_calls.log` but also from the `/api/memory/ask` log (`--from-ask-log`) — real
+questions that were already asked of the archive, not invented anew. `--stats` prints the
+slice×status table and the deficit to the target of ≥30 labeled entries; `--merge` appends new
+candidates to the existing `--out`, without overwriting already labeled ones (without `--yes-overwrite-labeled`).
 
-**Порівняння двох прогонів гейта (`evals.compare`).** Рішення «перемикати боевую
-модель ембедингів (чи інший конфіг, що впливає на ранжування) чи ні» приймається НЕ за
-одним числом, а за таблицею на ОБОХ `k` (8 і 12) + per-item diff — той самий урок
-`eval-verdict-flips-with-k`. Процедура (Integration gate плану Хвилі B, пункти 3-7):
+**Comparing two gate runs (`evals.compare`).** The decision "switch the live
+embedding model (or another config that affects ranking) or not" is made NOT by
+a single number but by a table at BOTH `k` (8 and 12) + a per-item diff — the same lesson
+`eval-verdict-flips-with-k`. The procedure (Integration gate of the Wave B plan, items 3-7):
 
-1. Знімок A (`VACUUM INTO`) на чинному `.env` → гейт з `--json-out a.local.json`.
-2. Копія A → B, застосувати новий конфіг (`EMBED_MODEL`/`EMBED_VERSION`, `reembed run --db B`
-   тощо) → гейт на B тим самим golden-set і `--k` → `--json-out b.local.json`.
+1. Snapshot A (`VACUUM INTO`) on the current `.env` → gate with `--json-out a.local.json`.
+2. Copy A → B, apply the new config (`EMBED_MODEL`/`EMBED_VERSION`, `reembed run --db B`
+   etc.) → gate on B with the same golden-set and `--k` → `--json-out b.local.json`.
 3. `python -m evals.compare a.local.json b.local.json --label-a e5 --label-b qwen3`.
-4. Рішення за таблицею `k | A | B | Δ` і per-item diff (`hit→miss`/`miss→hit`) на ОБОХ k —
-   не лише за середнім. Compare не видає вердикт PASS/FAIL — це звіт, вердикт ухвалює людина.
+4. Decide by the `k | A | B | Δ` table and the per-item diff (`hit→miss`/`miss→hit`) at BOTH k —
+   not only by the mean. Compare does not issue a PASS/FAIL verdict — it is a report, the verdict is made by a human.
 
-`compare.py` сам нічого не рахує й не ходить у БД — лише читає два вже готові
-`--json-out` гейта і зводить їх поруч:
+`compare.py` computes nothing itself and does not touch the DB — it only reads two already prepared
+gate `--json-out` files and puts them side by side:
 
 ```bash
 .venv/Scripts/python.exe -m evals.compare \
@@ -351,39 +348,39 @@ slice×status і дефіцит до цілі ≥30 розмічених зап�
     --json-out evals/compare_run.local.json
 ```
 
-Друкує провенанс обох прогонів (шлях знімка БД, golden-set, `k`, кількість пунктів і
-`recall_at_k` з `aggregate` гейта — модель ембедингів/версія/`rerank`/`RAG_QUERY_REWRITE`
-у `--json-out` гейта НЕ записані, тому різницю між A і B називають `--label-a/--label-b`,
-не файл), потім таблицю на кожному спільному `k` і списки `hit→miss`/`miss→hit` (id +
-питання, обрізане до 80 символів). Якщо набори пунктів різняться між прогонами — окреме
-попередження і порівняння лише по перетину; пункти лише в одному прогоні позначені як
-«не порівняно». Вихід `0` для будь-яких валідних файлів (compare — звіт, не гейт);
-`2` — файл не читається або нема жодного спільного `k` (повідомлення в stderr, не
+It prints the provenance of both runs (DB snapshot path, golden-set, `k`, item count and
+`recall_at_k` from the gate's `aggregate` — the embedding model/version/`rerank`/`RAG_QUERY_REWRITE`
+are NOT recorded in the gate's `--json-out`, so the difference between A and B is named by `--label-a/--label-b`,
+not by the file), then a table at each shared `k` and the `hit→miss`/`miss→hit` lists (id +
+question, truncated to 80 characters). If the item sets differ between runs — a separate
+warning and comparison over the intersection only; items present in only one run are marked as
+"not compared". Exit `0` for any valid files (compare is a report, not a gate);
+`2` — a file is unreadable or there is no shared `k` (a message in stderr, not a
 traceback).
 
-## Структура
+## Structure
 
 ```
 evals/
   __init__.py
-  metrics.py              — ДЕТЕРМІНОВАНА математика метрик (recall@k, citation-rate).
-                             Без мережі/GPU/БД — тому тестується офлайн
+  metrics.py              — DETERMINISTIC metric math (recall@k, citation-rate).
+                             No network/GPU/DB — hence testable offline
                              (tests/test_eval_metrics.py).
-  run_eval.py              — CLI: ганяє golden-set проти реального архіву
-                             (retrieval.search + rag.answer_question) і друкує таблицю.
-  gate.py                  — CLI: PASS/FAIL retrieval-гейт на знімку БД (обидва k, лінія).
-  build_golden.py          — CLI: мінінг кандидатів golden-set з логів (mcp/ask).
-  compare.py               — CLI: два `--json-out` гейта поруч — таблиця Δ + per-item diff
-                             (Хвиля B, історія 06). Сам нічого не рахує й не ходить у БД.
-  golden_set.example.json  — ШАБЛОН golden-set із синтетичними записами
-                             (НЕ реальні транскрипти) — скопіюйте й адаптуйте.
-  README.md                — цей файл.
+  run_eval.py              — CLI: runs the golden-set against the real archive
+                             (retrieval.search + rag.answer_question) and prints a table.
+  gate.py                  — CLI: PASS/FAIL retrieval gate on a DB snapshot (both k, baseline).
+  build_golden.py          — CLI: mining golden-set candidates from logs (mcp/ask).
+  compare.py               — CLI: two gate `--json-out` files side by side — Δ table + per-item diff
+                             (Wave B, story 06). Computes nothing itself and does not touch the DB.
+  golden_set.example.json  — golden-set TEMPLATE with synthetic entries
+                             (NOT real transcripts) — copy and adapt.
+  README.md                — this file.
 ```
 
-## Формат golden-set
+## Golden-set format
 
-JSON-об'єкт з ключем `"items"` (список) або просто список записів. Кожен
-запис:
+A JSON object with an `"items"` key (a list) or just a list of entries. Each
+entry:
 
 ```json
 {
@@ -400,89 +397,89 @@ JSON-об'єкт з ключем `"items"` (список) або просто с
 }
 ```
 
-Усі поля крім `id`/`question` — опційні; кожна метрика в агрегації рахується
-лише по записах, де відповідний критерій заданий (порожній список = критерій
-пропускається, а не провал).
+All fields except `id`/`question` are optional; each metric in the aggregation is computed
+only over entries where the corresponding criterion is set (an empty list = the criterion
+is skipped, not a failure).
 
-| Поле | Навіщо |
+| Field | Purpose |
 |---|---|
-| `expected_transcription_ids` | Точні ID транскриптів-джерел → recall@k. **Крихкі**: змінюються при переінджесті архіву. |
-| `expected_source_name_contains` | Стійкіша альтернатива — підрядок `source_name`. Не залежить від ID. |
-| `expected_facts` | Факти, які МАЮТЬ бути у відповіді. Автоматично НЕ перевіряються (без LLM-judge) — призначені для ручного eyeball-огляду `--json-out` і для промпту LLM-judge (`--llm-judge`). |
-| `category_id` | Обмежити пошук напрямком (int / `"none"` / `null`) — як параметр `retrieval.search`. |
+| `expected_transcription_ids` | Exact IDs of source transcripts → recall@k. **Brittle**: they change on archive re-ingest. |
+| `expected_source_name_contains` | A more robust alternative — a substring of `source_name`. Does not depend on IDs. |
+| `expected_facts` | Facts that MUST be in the answer. NOT checked automatically (no LLM-judge) — meant for manual eyeball review of `--json-out` and for the LLM-judge prompt (`--llm-judge`). |
+| `category_id` | Restrict the search to a direction (int / `"none"` / `null`) — like the `retrieval.search` parameter. |
 
-Негативні кейси (свідомо немає релевантних джерел в архіві) — лишіть
-`expected_transcription_ids`/`expected_source_name_contains` порожніми
-списками; вони випадуть з recall@k-агрегації, але `--json-out` дозволить
-вручну перевірити, що модель чесно каже «не знайдено», а не галюцинує.
+Negative cases (deliberately no relevant sources in the archive) — leave
+`expected_transcription_ids`/`expected_source_name_contains` as empty
+lists; they drop out of the recall@k aggregation, but `--json-out` lets you
+manually check that the model honestly says "not found" rather than hallucinating.
 
-Дивіться `golden_set.example.json` — три синтетичні приклади (звичайний
-кейс з одним джерелом, кейс із кількома очікуваними джерелами, негативний
-кейс).
+See `golden_set.example.json` — three synthetic examples (a regular
+case with one source, a case with several expected sources, and a negative
+case).
 
-## Як зібрати ВЛАСНИЙ golden-set (по своєму архіву)
+## How to build YOUR OWN golden-set (from your archive)
 
-1. Скопіюйте `golden_set.example.json` → `golden_set.local.json` (або будь-яку
-   назву поза git — див. «Приватність» нижче).
-2. Візьміть 15-30 реальних питань, які ви (чи команда) справді задавали б
-   архіву — включно з кількома, де свідомо НЕМАЄ відповіді (негативні кейси
-   ловлять галюцинації).
-3. Для кожного питання вручну знайдіть у своєму архіві (UI «Запитай архів»
-   або SQL) правильний(і) `transcription_id` і/або назву джерела.
-4. Опційно — випишіть 1-3 факти, які відповідь МАЄ містити (`expected_facts`)
-   для LLM-judge/ручного огляду.
-5. Прогоняйте `run_eval.py` на цьому файлі — див. нижче.
+1. Copy `golden_set.example.json` → `golden_set.local.json` (or any
+   name outside git — see "Privacy" below).
+2. Take 15-30 real questions that you (or your team) would actually ask the
+   archive — including a few where there is deliberately NO answer (negative cases
+   catch hallucinations).
+3. For each question, manually find in your archive the correct `transcription_id`(s)
+   and/or the source name (the "Ask the archive" UI or SQL).
+4. Optionally — write out 1-3 facts the answer MUST contain (`expected_facts`)
+   for the LLM-judge/manual review.
+5. Run `run_eval.py` on this file — see below.
 
-**Приватність.** `golden_set.local.json` (чи будь-яка ваша копія з реальними
-питаннями/ID з вашого архіву) містить дані про ваші реальні мітинги —
-**НЕ комітьте її**. У репозиторії лишається лише синтетичний
-`golden_set.example.json`. Додайте свій файл у `.gitignore` (наприклад
-`evals/*.local.json`), якщо плануєте тримати кілька версій.
+**Privacy.** `golden_set.local.json` (or any of your copies with real
+questions/IDs from your archive) contains data about your real meetings —
+**do NOT commit it**. Only the synthetic
+`golden_set.example.json` stays in the repository. Add your file to `.gitignore` (for example
+`evals/*.local.json`) if you plan to keep several versions.
 
-## Коли ганяти
+## When to run
 
-- **Перед релізом** — regression-перевірка, що останні зміни не погіршили
-  recall@k / citation-rate відносно попереднього прогону.
-- **При зміні** `app/services/retrieval.py` (ваги RRF, recency, диверсифікація),
-  `app/services/rag.py` (системний промпт, чанкінг), або дефолтної моделі
-  (`app/services/models.py`) — прогнати ДО і ПІСЛЯ, порівняти `--json-out`.
-- **Тепер МОЖНА в CI (retrieval-only)** — `evals.gate` (розділ «Гейт» вище)
-  рахує лише безкоштовний retrieval (без GPU/ключа: e5-large локально, інакше
-  автоматичний FTS-фолбек) і повертає ненульовий код на регресії, тож його можна
-  вбудувати у квіт-гейт на кожен коміт/PR (`CLAUDE.vulyk.md ## Commands`, рядок
-  `eval`). Платні режими — і далі НІ: повний прогін `run_eval.py` з відповідями
-  (`rag.answer_question`) і особливо `--llm-judge` коштують реальних токенів
-  Claude — ганяйте вручну/за потреби, не вбудовуйте у обовʼязковий pre-commit
-  чи CI-гейт.
+- **Before a release** — a regression check that the latest changes did not worsen
+  recall@k / citation-rate relative to the previous run.
+- **When changing** `app/services/retrieval.py` (RRF weights, recency, diversification),
+  `app/services/rag.py` (system prompt, chunking), or the default model
+  (`app/services/models.py`) — run BEFORE and AFTER, compare `--json-out`.
+- **NOW it CAN be run in CI (retrieval-only)** — `evals.gate` (the "Gate" section above)
+  computes only free retrieval (no GPU/key: e5-large locally, otherwise
+  an automatic FTS fallback) and returns a non-zero code on regressions, so it can be
+  built into the quit-gate on every commit/PR (`CLAUDE.vulyk.md ## Commands`, the
+  `eval` row). Paid modes are still a NO: a full `run_eval.py` run with answers
+  (`rag.answer_question`) and especially `--llm-judge` cost real Claude tokens —
+  run them manually/as needed, do not build them into a mandatory pre-commit
+  or CI gate.
 
-## Запуск
+## Running
 
 ```bash
-# 1) Тільки retrieval — БЕЗКОШТОВНО, без ANTHROPIC_API_KEY.
-#    Перевіряє лише recall@k / source_name_hit_rate (без citation-rate,
-#    бо немає відповіді).
+# 1) Retrieval only — FREE, no ANTHROPIC_API_KEY.
+#    Checks only recall@k / source_name_hit_rate (no citation-rate,
+#    since there is no answer).
 .venv/Scripts/python.exe -m evals.run_eval \
     --golden evals/golden_set.local.json \
     --db whisper_history.db \
     --retrieval-only
 
-# 2) Повний прогін: retrieval + генерація відповіді через rag.answer_question
-#    (реальний виклик Claude API — ПЛАТНО, потребує ANTHROPIC_API_KEY у .env).
-#    Додає citation_rate / citations_valid_rate.
+# 2) Full run: retrieval + answer generation via rag.answer_question
+#    (a real Claude API call — PAID, requires ANTHROPIC_API_KEY in .env).
+#    Adds citation_rate / citations_valid_rate.
 .venv/Scripts/python.exe -m evals.run_eval \
     --golden evals/golden_set.local.json \
     --db whisper_history.db \
     --json-out evals/last_run.json
 
-# 3) + LLM-judge релевантності — ДОДАТКОВИЙ виклик Claude на КОЖНЕ питання
-#    (ще платніше). Вимкнено за замовчуванням, вмикається явно прапорцем.
+# 3) + LLM-judge of relevance — an ADDITIONAL Claude call for EVERY question
+#    (even more expensive). Off by default, enabled explicitly with a flag.
 .venv/Scripts/python.exe -m evals.run_eval \
     --golden evals/golden_set.local.json \
     --llm-judge
 
-# 4) T6.4: до/після локального cross-encoder rerank (bge-reranker-v2-m3,
-#    БЕЗКОШТОВНО, GPU/CPU — lazy-load моделі при першому виклику). Прогнати
-#    ОДИН І ТОЙ САМИЙ golden-set ДВІЧІ (без і з --rerank), звірити
+# 4) T6.4: before/after local cross-encoder rerank (bge-reranker-v2-m3,
+#    FREE, GPU/CPU — lazy-loads the model on first call). Run the
+#    SAME golden-set TWICE (without and with --rerank), compare
 #    recall@k/source_name_hit_rate/citation_rate:
 .venv/Scripts/python.exe -m evals.run_eval \
     --golden evals/golden_set.local.json --db whisper_history.db \
@@ -492,39 +489,39 @@ JSON-об'єкт з ключем `"items"` (список) або просто с
     --retrieval-only --rerank --json-out evals/after_rerank.json
 ```
 
-Прапорці: `--top-k` (default 8, як `retrieval.search`), `--model` (override
-дефолтної моделі з `app/services/models.py`), `--category-id` немає окремим
-прапорцем — задається ПО ЗАПИСУ golden-set (`"category_id"`), бо різні
-питання можуть стосуватись різних напрямків. `--rerank` (T6.4) — увімкнути
-локальний cross-encoder rerank для цього прогону: з `--retrieval-only`
-передається напряму у `retrieval.search(rerank=True)`; без нього виставляє
-`RECALL_RERANK_ENABLED=1` перед імпортом `app.services.rag`, тож і повний
-прогін (`rag.answer_question`) реранжує — той самий шлях, що продакшн
-RAG-чат (`app/services/rag.py`).
+Flags: `--top-k` (default 8, as in `retrieval.search`), `--model` (override of the
+default model from `app/services/models.py`), there is no separate `--category-id`
+flag — it is set PER ENTRY of the golden-set (`"category_id"`), because different
+questions may concern different directions. `--rerank` (T6.4) — enable the
+local cross-encoder rerank for this run: with `--retrieval-only` it is
+passed directly to `retrieval.search(rerank=True)`; without it, it sets
+`RECALL_RERANK_ENABLED=1` before importing `app.services.rag`, so the full
+run (`rag.answer_question`) also reranks — the same path as the production
+RAG chat (`app/services/rag.py`).
 
-## Інтерпретація метрик
+## Interpreting the metrics
 
-| Метрика | Що означає | Джерело |
+| Metric | What it means | Source |
 |---|---|---|
-| `recall@k` | Середня частка `expected_transcription_ids`, що знайшлися у top-k retrieved (по записах, де це поле задане) | `retrieval.search` |
-| `source_name_hit_rate` | Частка записів, де серед top-k знайшлось джерело з очікуваною назвою (підрядок) | `retrieval.search` |
-| `citation_rate` | Частка відповідей, що містять хоча б одне цитування `[n]` (вимагається системним промптом RAG) | `rag.answer_question` |
-| `citations_valid_rate` | Частка відповідей, де ВСІ цитати `[n]` посилаються на реально надані фрагменти (1..found) — ловить "галюцинований" номер джерела | `rag.answer_question` |
-| `llm_judge_score` (опційно) | Середня оцінка 1-5 від Claude-судді (релевантність + покриття `expected_facts`) | окремий виклик Claude, `--llm-judge` |
+| `recall@k` | The mean share of `expected_transcription_ids` found in the top-k retrieved (over entries where this field is set) | `retrieval.search` |
+| `source_name_hit_rate` | The share of entries where the top-k contained a source with the expected name (substring) | `retrieval.search` |
+| `citation_rate` | The share of answers containing at least one `[n]` citation (required by the RAG system prompt) | `rag.answer_question` |
+| `citations_valid_rate` | The share of answers where ALL `[n]` citations refer to fragments actually provided (1..found) — catches a "hallucinated" source number | `rag.answer_question` |
+| `llm_judge_score` (optional) | The mean 1-5 score from a Claude judge (relevance + coverage of `expected_facts`) | a separate Claude call, `--llm-judge` |
 
-Порівнюйте ДО/ПІСЛЯ через `--json-out` (два файли, `python -m evals.compare` —
-розділ «Хвиля B» вище) — цей харнес навмисно не робить автоматичний regression-gate
-(поріг "X% просідання = fail"), бо на малому golden-set (15-30 питань) такий
-поріг легко хибно спрацьовує. Дивіться таблицю по кожному запису (`per_item`
-у JSON) — там, де `recall_at_k` впав до 0 або `citations_valid` стало
-`false`, там і копайте.
+Compare BEFORE/AFTER via `--json-out` (two files, `python -m evals.compare` —
+the "Wave B" section above) — this harness deliberately does not make an automatic regression gate
+(a threshold of "X% drop = fail"), because on a small golden-set (15-30 questions) such a
+threshold easily fires falsely. Look at the per-entry table (`per_item`
+in the JSON) — wherever `recall_at_k` fell to 0 or `citations_valid` became
+`false`, that is where to dig.
 
-## Детермінована частина без API/GPU
+## The deterministic part without API/GPU
 
-`evals/metrics.py` — чисті функції (`recall_at_k`, `source_name_hit`,
-`has_citation`, `citations_in_range`, `evaluate_item`, `aggregate`), без
-жодного мережевого виклику чи звернення до БД. Покрито
-`tests/test_eval_metrics.py` на синтетичних даних (списки словників-чанків,
-рядки-відповіді) — жодного реального `ANTHROPIC_API_KEY` чи GPU не потрібно.
-Це та частина, яку ЛЕГКО й ПОТРІБНО тримати в звичайному `pytest`-прогоні;
-`run_eval.py` (реальні виклики retrieval/RAG) — окремо, ручний запуск.
+`evals/metrics.py` — pure functions (`recall_at_k`, `source_name_hit`,
+`has_citation`, `citations_in_range`, `evaluate_item`, `aggregate`), with no
+network call or DB access whatsoever. Covered by
+`tests/test_eval_metrics.py` on synthetic data (lists of chunk dicts,
+answer strings) — no real `ANTHROPIC_API_KEY` or GPU is needed.
+This is the part that is EASY and NECESSARY to keep in a regular `pytest` run;
+`run_eval.py` (real retrieval/RAG calls) is separate, a manual run.

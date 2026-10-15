@@ -10,6 +10,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core.i18n import tr
 from app.services.youtube_pytubefix import _classify_error, download_youtube_audio, open_youtube
 from app.utils.youtube_id import extract_youtube_id
 
@@ -27,14 +28,14 @@ def get_youtube_info():
     data = request.json
     url = data.get('url')
     if not url:
-        return jsonify({"success": False, "error": "URL не вказано"}), 400
+        return jsonify({"success": False, "error": tr('capture.yt.err.no_url')}), 400
     if not extract_youtube_id(url):
-        return jsonify({"success": False, "error": "Невірний YouTube URL"}), 400
+        return jsonify({"success": False, "error": tr('capture.yt.err.bad_url')}), 400
 
     try:
         yt = open_youtube(url)
-        title = yt.title or 'Невідоме відео'
-        author = yt.author or 'Невідомий автор'
+        title = yt.title or tr('capture.yt.unknown_video')
+        author = yt.author or tr('capture.yt.unknown_author')
         duration = yt.length or 0
         thumbnail = yt.thumbnail_url or ''
         video_id = yt.video_id or ''
@@ -52,7 +53,7 @@ def get_youtube_info():
         })
     except Exception as e:
         logger.error(f"YouTube info error for {url}: {type(e).__name__}: {e}")
-        return jsonify({"success": False, "error": _classify_error(str(e), default="Помилка отримання інформації про відео")}), 500
+        return jsonify({"success": False, "error": _classify_error(str(e), default=tr('capture.yt.err.info'))}), 500
 
 
 def _download_youtube_core(url, download_id, save_to_library=False, quality='best',
@@ -88,11 +89,11 @@ def download_youtube():
     end_time = data.get('end_time', None)
 
     if not url:
-        return jsonify({"success": False, "error": "URL не вказано"}), 400
+        return jsonify({"success": False, "error": tr('capture.yt.err.no_url')}), 400
     if not extract_youtube_id(url):
-        return jsonify({"success": False, "error": "Невірний YouTube URL"}), 400
+        return jsonify({"success": False, "error": tr('capture.yt.err.bad_url')}), 400
     if not state.ffmpeg_available:
-        return jsonify({"success": False, "error": "FFmpeg не встановлено."}), 500
+        return jsonify({"success": False, "error": tr('capture.yt.err.no_ffmpeg')}), 500
 
     download_id = str(uuid.uuid4())[:20]
     state.download_progress.set(download_id, {"status": "starting", "percent": 0})
@@ -118,8 +119,8 @@ def download_youtube():
         return jsonify({"success": True, "download_id": download_id})
     except Exception as e:
         logger.error(f"[API] Помилка запуску завантаження: {e}")
-        state.download_progress.set(download_id, {"status": "error", "error": "Помилка запуску завантаження"})
-        return jsonify({"success": False, "error": "Помилка запуску завантаження"}), 500
+        state.download_progress.set(download_id, {"status": "error", "error": tr('capture.yt.err.start')})
+        return jsonify({"success": False, "error": tr('capture.yt.err.start')}), 500
 
 
 @youtube_bp.route('/api/youtube/progress/<download_id>')

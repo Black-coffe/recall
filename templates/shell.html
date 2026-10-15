@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="uk">
+<html lang="uk" data-ui-lang="{{ ui_lang|default('auto') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Recall — архів памʼяті</title>
-    <meta name="description" content="Recall — особистий архів памʼяті: дзвінки, файли, документи, Telegram. Семантичний пошук і звʼязки.">
+    <title data-i18n="core.shell.title">Recall — архів памʼяті</title>
+    <meta name="description" data-i18n-content="core.shell.description" content="Recall — особистий архів памʼяті: дзвінки, файли, документи, Telegram. Семантичний пошук і звʼязки.">
 
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 
@@ -22,64 +22,64 @@
         <aside class="rc-sidebar" id="rcSidebar">
             <div class="rc-brand">
                 <span class="rc-brand__mark">Recall</span>
-                <span class="rc-brand__sub">архів</span>
+                <span class="rc-brand__sub" data-i18n="core.shell.brandSub">архів</span>
             </div>
 
-            <nav class="rc-nav" id="rcNav" aria-label="Основна навігація">
+            <nav class="rc-nav" id="rcNav" aria-label="Основна навігація" data-i18n-aria-label="core.nav.mainAria">
                 <a class="rc-nav__item" href="/" data-route="home">
-                    <i class="rc-ico fa-solid fa-house"></i> <span>Головна</span>
+                    <i class="rc-ico fa-solid fa-house"></i> <span data-i18n="core.nav.home">Головна</span>
                 </a>
                 <a class="rc-nav__item" href="/library" data-route="library">
-                    <i class="rc-ico fa-solid fa-layer-group"></i> <span>Бібліотека</span>
+                    <i class="rc-ico fa-solid fa-layer-group"></i> <span data-i18n="core.nav.library">Бібліотека</span>
                     <span class="rc-nav__count" data-count="library"></span>
                 </a>
                 <a class="rc-nav__item" href="/audio" data-route="audio">
-                    <i class="rc-ico fa-solid fa-compact-disc"></i> <span>Медіатека</span>
+                    <i class="rc-ico fa-solid fa-compact-disc"></i> <span data-i18n="core.nav.media">Медіатека</span>
                 </a>
                 <a class="rc-nav__item" href="/ask" data-route="ask">
-                    <i class="rc-ico fa-solid fa-comments"></i> <span>Запитай архів</span>
+                    <i class="rc-ico fa-solid fa-comments"></i> <span data-i18n="core.nav.ask">Запитай архів</span>
                 </a>
                 <a class="rc-nav__item" href="/research" data-route="research">
-                    <i class="rc-ico fa-solid fa-magnifying-glass-chart"></i> <span>Дослідження</span>
+                    <i class="rc-ico fa-solid fa-magnifying-glass-chart"></i> <span data-i18n="core.nav.research">Дослідження</span>
                 </a>
                 <a class="rc-nav__item" href="/entities" data-route="entities">
-                    <i class="rc-ico fa-solid fa-diagram-project"></i> <span>Сутності</span>
+                    <i class="rc-ico fa-solid fa-diagram-project"></i> <span data-i18n="core.nav.entities">Сутності</span>
                     <span class="rc-nav__count" data-count="entities"></span>
                 </a>
                 <a class="rc-nav__item" href="/tasks" data-route="tasks">
-                    <i class="rc-ico fa-solid fa-list-check"></i> <span>Задачі</span>
+                    <i class="rc-ico fa-solid fa-list-check"></i> <span data-i18n="core.nav.tasks">Задачі</span>
                     <span class="rc-nav__count" data-count="tasks"></span>
                 </a>
                 <a class="rc-nav__item" href="/comments" data-route="comments">
-                    <i class="rc-ico fa-regular fa-comment-dots"></i> <span>Коментарі</span>
+                    <i class="rc-ico fa-regular fa-comment-dots"></i> <span data-i18n="core.nav.comments">Коментарі</span>
                 </a>
                 <a class="rc-nav__item" href="/speakers" data-route="speakers">
-                    <i class="rc-ico fa-solid fa-users"></i> <span>Спікери</span>
+                    <i class="rc-ico fa-solid fa-users"></i> <span data-i18n="core.nav.speakers">Спікери</span>
                 </a>
 
-                <div class="rc-nav__group-label">Додати у архів</div>
+                <div class="rc-nav__group-label" data-i18n="core.nav.addGroup">Додати у архів</div>
                 <a class="rc-nav__item" href="/upload" data-route="upload">
-                    <i class="rc-ico fa-solid fa-arrow-up-from-bracket"></i> <span>Завантажити файл</span>
+                    <i class="rc-ico fa-solid fa-arrow-up-from-bracket"></i> <span data-i18n="core.nav.upload">Завантажити файл</span>
                 </a>
                 <a class="rc-nav__item" href="/youtube" data-route="youtube">
                     <i class="rc-ico fa-brands fa-youtube"></i> <span>YouTube</span>
                 </a>
                 <a class="rc-nav__item" href="/documents" data-route="documents">
-                    <i class="rc-ico fa-solid fa-file-lines"></i> <span>Документи</span>
+                    <i class="rc-ico fa-solid fa-file-lines"></i> <span data-i18n="core.nav.documents">Документи</span>
                 </a>
                 <a class="rc-nav__item" href="/telegram" data-route="telegram">
                     <i class="rc-ico fa-brands fa-telegram"></i> <span>Telegram</span>
                 </a>
                 <a class="rc-nav__item" href="/record" data-route="record">
-                    <i class="rc-ico fa-solid fa-microphone"></i> <span>Запис</span>
+                    <i class="rc-ico fa-solid fa-microphone"></i> <span data-i18n="core.nav.record">Запис</span>
                 </a>
             </nav>
 
             <div class="rc-sidebar__spacer"></div>
 
-            <nav class="rc-nav" aria-label="Сервіс">
+            <nav class="rc-nav" aria-label="Сервіс" data-i18n-aria-label="core.nav.serviceAria">
                 <a class="rc-nav__item" href="/settings" data-route="settings">
-                    <i class="rc-ico fa-solid fa-sliders"></i> <span>Налаштування</span>
+                    <i class="rc-ico fa-solid fa-sliders"></i> <span data-i18n="core.nav.settings">Налаштування</span>
                 </a>
             </nav>
         </aside>
@@ -87,21 +87,21 @@
         <!-- ====================== MAIN ====================== -->
         <div class="rc-main">
             <header class="rc-topbar">
-                <button class="rc-iconbtn rc-burger" id="rcBurger" aria-label="Меню"><i class="fa-solid fa-bars"></i></button>
-                <button class="rc-cmdk-trigger" id="rcCmdkTrigger" aria-label="Команди та пошук">
+                <button class="rc-iconbtn rc-burger" id="rcBurger" aria-label="Меню" data-i18n-aria-label="core.shell.menu"><i class="fa-solid fa-bars"></i></button>
+                <button class="rc-cmdk-trigger" id="rcCmdkTrigger" aria-label="Команди та пошук" data-i18n-aria-label="core.shell.cmdkAria">
                     <i class="fa-solid fa-magnifying-glass"></i>
-                    <span>Спитати архів або перейти…</span>
+                    <span data-i18n="core.shell.cmdkTrigger">Спитати архів або перейти…</span>
                     <kbd>⌘K</kbd>
                 </button>
                 <div class="rc-topbar__spacer"></div>
                 <div class="rc-topbar__actions">
-                    <div class="rc-conn" id="rcConn" data-state="online" title="З’єднання із сервером у нормі">
+                    <div class="rc-conn" id="rcConn" data-state="online" title="З’єднання із сервером у нормі" data-i18n-title="core.conn.onlineTitle">
                         <span class="rc-conn__dot"></span>
-                        <span class="rc-conn__label">Онлайн</span>
+                        <span class="rc-conn__label" data-i18n="core.conn.online">Онлайн</span>
                     </div>
-                    <button class="rc-iconbtn" id="rcOnbTrigger" type="button" title="Показати онбординг знову"><i class="fa-solid fa-graduation-cap"></i></button>
-                    <a class="rc-iconbtn" href="/ask" data-route="ask" title="Запитай архів"><i class="fa-solid fa-comments"></i></a>
-                    <a class="rc-iconbtn" href="/settings" data-route="settings" title="Налаштування"><i class="fa-solid fa-sliders"></i></a>
+                    <button class="rc-iconbtn" id="rcOnbTrigger" type="button" title="Показати онбординг знову" data-i18n-title="core.shell.onbShow"><i class="fa-solid fa-graduation-cap"></i></button>
+                    <a class="rc-iconbtn" href="/ask" data-route="ask" title="Запитай архів" data-i18n-title="core.nav.ask"><i class="fa-solid fa-comments"></i></a>
+                    <a class="rc-iconbtn" href="/settings" data-route="settings" title="Налаштування" data-i18n-title="core.nav.settings"><i class="fa-solid fa-sliders"></i></a>
                 </div>
             </header>
 
@@ -115,6 +115,14 @@
 
     <!-- ====================== SCRIPTS (dependency order) ====================== -->
     <script src="{{ url_for('static', filename='js/recall/namespace.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/core.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/capture.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/transcript.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/settings.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/library.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/knowledge.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/telegram.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/util.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/api.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/ui.js') }}"></script>

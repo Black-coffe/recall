@@ -14,6 +14,7 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
 
     // Довідник типів приходить із сервера (/api/comments/meta), а не дублюється
     // тут: ваги задають ранжування, і розʼїзд константи між фронтом і
@@ -30,18 +31,18 @@
     }
 
     const KIND_LABEL = {
-        correction: 'Виправлення',
-        decision: 'Рішення',
-        note: 'Нотатка',
-        context: 'Контекст',
-        question: 'Питання',
+        correction: T('knowledge.cmt.kind.correction'),
+        decision: T('knowledge.cmt.kind.decision'),
+        note: T('knowledge.cmt.kind.note'),
+        context: T('knowledge.cmt.kind.context'),
+        question: T('knowledge.cmt.kind.question'),
     };
     const KIND_HINT = {
-        correction: 'Скасовує сказане в записі — найвища вага у пошуку й відповідях',
-        decision: 'Підсумок або ухвалене рішення',
-        note: 'Звичайна замітка',
-        context: 'Передісторія, тло',
-        question: 'Відкрите питання до себе',
+        correction: T('knowledge.cmt.hint.correction'),
+        decision: T('knowledge.cmt.hint.decision'),
+        note: T('knowledge.cmt.hint.note'),
+        context: T('knowledge.cmt.hint.context'),
+        question: T('knowledge.cmt.hint.question'),
     };
 
     // ---- бейдж на картці ---------------------------------------------------
@@ -55,8 +56,8 @@
         const n = count || 0;
         const cls = 'rc-cmbtn' + (n ? ' is-has' : '') + (hasCorrection ? ' is-fix' : '');
         const title = n
-            ? `${n} ${U.plural(n, ['коментар', 'коментарі', 'коментарів'])}${hasCorrection ? ' · є виправлення' : ''}`
-            : 'Додати коментар';
+            ? T('knowledge.cmt.count', { count: n }) + (hasCorrection ? T('knowledge.cmt.hasFix') : '')
+            : T('knowledge.cmt.add');
         return `<button class="${cls}" data-act="comments" title="${U.esc(title)}" aria-label="${U.esc(title)}">
             <i class="fa-regular fa-comment-dots"></i>${n ? `<span class="rc-cmbtn__n">${n}</span>` : ''}
         </button>`;
@@ -102,16 +103,16 @@
         return `<div class="${cls}" data-cid="${c.id}" data-pinned="${c.pinned ? '1' : '0'}" data-analyzed="${c.analyzed ? '1' : '0'}">
             <div class="rc-cm__head">
                 <span class="rc-cm__kind">${U.esc(label)}</span>
-                ${c.pinned ? '<span class="rc-cm__pin" title="Закріплено — підшивається до відповідей завжди"><i class="fa-solid fa-thumbtack"></i></span>' : ''}
+                ${c.pinned ? `<span class="rc-cm__pin" title="${T('knowledge.cmt.pinnedTitle')}"><i class="fa-solid fa-thumbtack"></i></span>` : ''}
                 ${c.anchor_time != null ? `<span class="rc-cm__at rc-mono">${U.fmtDuration ? U.fmtDuration(c.anchor_time) : ''}</span>` : ''}
                 <span class="rc-cm__when">${U.esc(fmtWhen(c.created_at))}</span>
-                ${c.indexed ? '' : '<span class="rc-cm__pending" title="Ще не потрапив у векторний пошук — зʼявиться після індексації">в черзі</span>'}
+                ${c.indexed ? '' : `<span class="rc-cm__pending" title="${T('knowledge.cmt.pendingTitle')}">${T('knowledge.cmt.pending')}</span>`}
                 <span class="rc-cm__acts">
                     <button class="rc-iconbtn rc-iconbtn--xs" data-cm="analyze"
-                            title="${c.analyzed ? 'Розібрати ще раз (платний виклик Claude)' : 'Витягти задачі й звʼязки (платний виклик Claude)'}"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
-                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="pin" title="${c.pinned ? 'Відкріпити' : 'Закріпити'}"><i class="fa-solid fa-thumbtack"></i></button>
-                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="edit" title="Редагувати"><i class="fa-solid fa-pen"></i></button>
-                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="del" title="Видалити"><i class="fa-solid fa-trash"></i></button>
+                            title="${c.analyzed ? T('knowledge.cmt.reanalyzeTitle') : T('knowledge.cmt.analyzeTitle')}"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
+                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="pin" title="${c.pinned ? T('knowledge.cmt.unpin') : T('knowledge.cmt.pin')}"><i class="fa-solid fa-thumbtack"></i></button>
+                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="edit" title="${T('knowledge.cmt.edit')}"><i class="fa-solid fa-pen"></i></button>
+                    <button class="rc-iconbtn rc-iconbtn--xs" data-cm="del" title="${T('knowledge.cmt.delete')}"><i class="fa-solid fa-trash"></i></button>
                 </span>
             </div>
             <div class="rc-cm__body">${U.esc(c.body).replace(/\n/g, '<br>')}</div>
@@ -130,7 +131,7 @@
         catch (_) { return; }
         if (!tasks.length) {
             box.hidden = false;
-            box.innerHTML = `<span class="rc-cm__none">розібрано · задач немає</span>`;
+            box.innerHTML = `<span class="rc-cm__none">${T('knowledge.cmt.analyzedNone')}</span>`;
             return;
         }
         box.hidden = false;
@@ -152,14 +153,14 @@
         ).join('');
         return `<div class="rc-cmform">
             <textarea class="rc-cmform__ta" data-cm="body" rows="2" maxlength="${m.max_body_chars || 20000}"
-                      placeholder="Уточнення, виправлення, акцент — будь-якою мовою…"></textarea>
+                      placeholder="${U.esc(T('knowledge.cmt.placeholder'))}"></textarea>
             <div class="rc-cmform__row">
                 <select class="rc-select rc-select--sm" data-cm="kind">${opts}</select>
-                <label class="rc-cmform__pin"><input type="checkbox" data-cm="pinned"> Закріпити</label>
-                ${anchorTime != null ? `<span class="rc-cmform__at rc-mono" title="Коментар прикріплений до моменту запису">${U.fmtDuration ? U.fmtDuration(anchorTime) : ''}</span>` : ''}
+                <label class="rc-cmform__pin"><input type="checkbox" data-cm="pinned"> ${T('knowledge.cmt.pin')}</label>
+                ${anchorTime != null ? `<span class="rc-cmform__at rc-mono" title="${T('knowledge.cmt.anchorTitle')}">${U.fmtDuration ? U.fmtDuration(anchorTime) : ''}</span>` : ''}
                 <span class="rc-cmform__grow"></span>
                 <span class="rc-cmform__hint rc-mono">Ctrl+Enter</span>
-                <button class="rc-btn rc-btn--primary rc-btn--sm" data-cm="save">Додати</button>
+                <button class="rc-btn rc-btn--primary rc-btn--sm" data-cm="save">${T('knowledge.cmt.addBtn')}</button>
             </div>
         </div>`;
     }
@@ -183,7 +184,7 @@
         const panel = document.createElement('div');
         panel.className = 'rc-cmpanel';
         panel.dataset.for = `${targetType}:${targetId}`;
-        panel.innerHTML = '<div class="rc-cmpanel__loading rc-mono">Завантаження…</div>';
+        panel.innerHTML = '<div class="rc-cmpanel__loading rc-mono">' + T('knowledge.cmt.loading') + '</div>';
         host.insertAdjacentElement('afterend', panel);
         await mount(panel, targetType, targetId, o);
         const ta = panel.querySelector('[data-cm="body"]');
@@ -198,13 +199,13 @@
         let items = [];
         try { items = (await R.api.comments(targetType, targetId)).comments || []; }
         catch (err) {
-            panel.innerHTML = UI.error((err && err.message) || 'Не вдалося завантажити коментарі');
+            panel.innerHTML = UI.error((err && err.message) || T('knowledge.cmt.loadFail'));
             return;
         }
         panel.innerHTML =
             (items.length
                 ? `<div class="rc-cmlist">${items.map(itemHTML).join('')}</div>`
-                : `<div class="rc-cmpanel__empty">Коментарів ще немає. Написане тут має вищу вагу в пошуку й відповідях, ніж сам транскрипт.</div>`)
+                : `<div class="rc-cmpanel__empty">${T('knowledge.cmt.empty')}</div>`)
             + (await composerHTML(o.anchorTime));
         bind(panel, targetType, targetId, o);
     }
@@ -229,10 +230,10 @@
                     anchor_time: o.anchorTime != null ? o.anchorTime : undefined,
                     source: o.source || 'ui',
                 });
-                UI.toast('Коментар додано — він уже впливає на пошук', 'success');
+                UI.toast(T('knowledge.cmt.added'), 'success');
                 await reload();
             } catch (err) {
-                UI.toast((err && err.message) || 'Не вдалося зберегти', 'error');
+                UI.toast((err && err.message) || T('knowledge.cmt.saveFail'), 'error');
                 save.disabled = false;
             }
         };
@@ -247,20 +248,20 @@
             act('pin').addEventListener('click', async () => {
                 const pinned = el.dataset.pinned !== '1';
                 try { await R.api.commentUpdate(cid, { pinned }); await reload(); }
-                catch (err) { UI.toast((err && err.message) || 'Не вдалося', 'error'); }
+                catch (err) { UI.toast((err && err.message) || T('knowledge.cmt.fail'), 'error'); }
             });
             act('edit').addEventListener('click', async () => {
                 const cur = el.querySelector('.rc-cm__body');
                 const text = await UI.promptModal({
-                    title: 'Редагувати коментар',
-                    label: 'Текст коментаря',
+                    title: T('knowledge.cmt.editTitle'),
+                    label: T('knowledge.cmt.editLabel'),
                     defaultValue: cur ? cur.innerText : '',
-                    confirmLabel: 'Зберегти',
+                    confirmLabel: T('core.save'),
                     required: true,
                 });
                 if (!text) return;
                 try { await R.api.commentUpdate(cid, { body: text }); await reload(); }
-                catch (err) { UI.toast((err && err.message) || 'Не вдалося', 'error'); }
+                catch (err) { UI.toast((err && err.message) || T('knowledge.cmt.fail'), 'error'); }
             });
             // Розбір через Claude — платна дія, тож підтвердження обовʼязкове,
             // а повторний розбір уже розібраного питаємо окремо: інакше
@@ -268,11 +269,11 @@
             act('analyze').addEventListener('click', async () => {
                 const done = el.dataset.analyzed === '1';
                 const ok = await UI.confirmModal({
-                    title: done ? 'Розібрати ще раз' : 'Розібрати коментар',
+                    title: done ? T('knowledge.cmt.reanalyze') : T('knowledge.cmt.analyze'),
                     message: done
-                        ? 'Коментар уже розбирали. Повторний розбір — ще один платний виклик Claude; попередні задачі з цього коментаря буде замінено.'
-                        : 'Claude витягне з коментаря задачі та згадані імена й проєкти. Це платний виклик до API.',
-                    confirmLabel: 'Розібрати',
+                        ? T('knowledge.cmt.reanalyzeMsg')
+                        : T('knowledge.cmt.analyzeMsg'),
+                    confirmLabel: T('knowledge.cmt.analyzeBtn'),
                 });
                 if (!ok) return;
                 const btn = act('analyze');
@@ -282,11 +283,11 @@
                     const r = await R.api.commentAnalyze(cid, done ? { force: true } : {});
                     const n = (r.result && r.result.counts) || {};
                     UI.toast(n.action_items
-                        ? `Витягнуто задач: ${n.action_items}`
-                        : 'Задач у коментарі не знайшлось', 'success');
+                        ? T('knowledge.cmt.tasksExtracted', { count: n.action_items })
+                        : T('knowledge.cmt.noTasksFound'), 'success');
                     await reload();
                 } catch (err) {
-                    UI.toast((err && err.message) || 'Розбір не вдався', 'error');
+                    UI.toast((err && err.message) || T('knowledge.cmt.analyzeFail'), 'error');
                     btn.disabled = false;
                     btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i>';
                 }
@@ -297,11 +298,11 @@
                     await R.api.commentDelete(cid);
                     await reload();
                     // Soft-delete — тож пропонуємо повернути, як усюди в Recall.
-                    UI.actionToast('Коментар видалено', 'Скасувати', async () => {
+                    UI.actionToast(T('knowledge.cmt.deleted'), T('knowledge.cmt.undo'), async () => {
                         try { await R.api.commentRestore(cid); await reload(); }
-                        catch (e) { UI.toast((e && e.message) || 'Не вдалося відновити', 'error'); }
+                        catch (e) { UI.toast((e && e.message) || T('knowledge.cmt.restoreFail'), 'error'); }
                     });
-                } catch (err) { UI.toast((err && err.message) || 'Не вдалося видалити', 'error'); }
+                } catch (err) { UI.toast((err && err.message) || T('knowledge.cmt.deleteFail'), 'error'); }
             });
         });
     }

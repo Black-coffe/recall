@@ -8,21 +8,21 @@
 
 From `docs/specs/production-rag-wave-b/plan.md`, `## Goal`:
 
-> ... і покласти шов переписування запиту у `retrieval.search` за прапорцем ...
+> ... and put the query rewrite seam in `retrieval.search` behind a flag ...
 
 `## Contracts`, C7:
 
 > `query_rewrite.rewrite_query(question, *, max_variants=3, model=None) -> list[str]` — 1–3
-> формулювання без оригіналу; `[]` на будь-який збій. `retrieval.search(..., rewrite: bool | None =
-> None)`: `None` → `RAG_QUERY_REWRITE` (реєстр, дефолт `0`, гаряче читання); варіанти йдуть тими ж
-> vector+FTS гілками й зливаються наявним RRF до recency/rerank/cap; `explain=True` додає
-> `why["rewrites"]`. `rag.py` передає `rewrite=` явно з env, як `_RERANK_ENABLED`.
-> `RAG_QUERY_REWRITE_MODEL` (реєстр, дефолт Haiku 4.5).
+> formulations without the original; `[]` on any failure. `retrieval.search(..., rewrite: bool | None =
+> None)`: `None` → `RAG_QUERY_REWRITE` (registry, default `0`, hot read); the variants go through the same
+> vector+FTS branches and are merged by the existing RRF before recency/rerank/cap; `explain=True` adds
+> `why["rewrites"]`. `rag.py` passes `rewrite=` explicitly from env, like `_RERANK_ENABLED`.
+> `RAG_QUERY_REWRITE_MODEL` (registry, default Haiku 4.5).
 
 And the post-ship operating procedure:
 
-> Переписування запиту: `RAG_QUERY_REWRITE=1` для окремого прогону гейта на тому ж знімку →
-> `compare` з підписами; вмикати в `.env` лише після цифри.
+> Query rewriting: `RAG_QUERY_REWRITE=1` for a separate gate run on the same snapshot →
+> `compare` with labels; enable in `.env` only after the number.
 
 ## Options
 
@@ -39,7 +39,7 @@ explicitly, mirroring the existing `_RERANK_ENABLED` pattern rather than holding
 
 Easier: the retrieval-only eval gate can turn rewriting on for a measurement run by calling
 `retrieval.search` (or setting the env flag) directly, without going through `rag.py` or a full,
-Claude-synthesized answer — the post-ship procedure runs exactly this ("окремий прогін гейта").
+Claude-synthesized answer — the post-ship procedure runs exactly this ("a separate gate run").
 Harder: any future retrieval-level query transformation must be wired the same way (a registry-backed
 flag read at the `retrieval.search` layer) to stay measurable the same way, rather than being added
 inside `rag.py` where the gate cannot reach it; the `why["stages"]` merge-by-label behaviour and the

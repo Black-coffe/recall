@@ -9,20 +9,20 @@ Masking (ADR-030) covers passwords and tokens, but not the rest of what is on sc
 text and frame descriptions requested through MCP still reach Claude. The owner's remark, verbatim
 from the brief:
 
-> Зауваження (13.10.2026): «"Описание локально" защищает только шаг описания кадров. Сами кадры и текст с экрана, запрошенные через MCP, всё равно уходят в Claude.»
+> Remark (13.10.2026): `«"Описание локально" защищает только шаг описания кадров. Сами кадры и текст с экрана, запрошенные через MCP, всё равно уходят в Claude.»` ("Local description" protects only the frame-description step. The frames themselves and the screen text requested through MCP still go to Claude anyway.)
 
-The owner's constraint: «выдавать их через MCP и Claude нельзя, чтобы они в чат не попадали».
+The owner's constraint: `«выдавать их через MCP и Claude нельзя, чтобы они в чат не попадали»` (they must not be issued through MCP and Claude, so that they do not get into the chat).
 This decision comes from the grill (brief `## Answers` 1-2, Ask 5) and the plan's `## Goal`, not
 from a Plan delta. Verbatim:
 
-> 1. Загальний пошук — Да, все выходы MCP (Рекомендую): текст с экрана из приватных записей, со стоп-словами или при off не попадёт ни в одну тулзу — иначе утечка просто переедет из get_visual_timeline в search_archive.
-> 2. Стоп-лист — Один на бота и MCP (Рекомендую): один файл private.txt и одна настройка направлений; имя, добавленное раз, скрыто везде. Сейчас делаю общее ядро, K4 потом его переиспользует.
+> 1. `Общий поиск — Да, все выходы MCP (Рекомендую): текст с экрана из приватных записей, со стоп-словами или при off не попадёт ни в одну тулзу — иначе утечка просто переедет из get_visual_timeline в search_archive.` (General search — Yes, all MCP outputs (Recommended): screen text from private recordings, with stop-words, or when off, will not get into any tool — otherwise the leak simply moves from get_visual_timeline to search_archive.)
+> 2. `Стоп-лист — Один на бота и MCP (Рекомендую): один файл private.txt и одна настройка направлений; имя, добавленное раз, скрыто везде. Сейчас делаю общее ядро, K4 потом его переиспользует.` (Stop-list — One for the bot and MCP (Recommended): one file private.txt and one directions setting; a name added once is hidden everywhere. I am building the shared core now, K4 will reuse it later.)
 
-> 5. UI Recall и локальные скрипты фильтр не трогает.
+> 5. The Recall UI and local scripts are not touched by the filter.
 
-> Візуальне (кадри, текст з екрана, описи кадрів) виходить із Recall у Claude лише через MCP, тож фільтр
-> стоїть на виході MCP, а не в app.py: UI й локальні скрипти бачать усе як і раніше. [...] Будь-яка
-> помилка перевірки = «приховати».
+> Visual material (frames, screen text, frame descriptions) leaves Recall for Claude only through MCP, so the filter
+> sits at the MCP egress, not in app.py: the UI and local scripts see everything as before. [...] Any
+> check error = "hide".
 
 ## Options
 1. Filter only the five video tools. Rejected in Answer 1 because the leak "would just move from

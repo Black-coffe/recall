@@ -9,12 +9,12 @@ Story 01's measurement found that Tesseract was not installed and that `ocr_avai
 always returned False since a broken import. The owner chose to install Tesseract. The other
 path, OCR through a vision model, was rejected. Plan delta, verbatim:
 
-> 2026-10-13, історія 01, з виміру: Tesseract у системі не стояв, а `document_parser.ocr_available()` з 14.08
-> (коміт 67e71e0) завжди давав False — незімпортований `silence_pytesseract_console_windows`, NameError
-> ковтався. Власник: «Поставить Tesseract (Рекомендую)». Поставлено UB-Mannheim 5.4, мовні пакети в
-> `%LOCALAPPDATA%\Recall\tessdata(_fast)`; `document_parser.py` додано до `## Files` історії 01 (імпорт +
-> пошук бінаря/пакетів, 3 нові налаштування OCR_*). Відкинуто: OCR vision-моделлю — нема рамок слів, а без них
-> не зафарбувати секрети.
+> 2026-10-13, story 01, from a measurement: Tesseract was not installed on the system, and `document_parser.ocr_available()` had
+> always returned False since 14.08 (commit 67e71e0) — the unimported `silence_pytesseract_console_windows`, the NameError
+> was swallowed. The owner: `«Поставить Tesseract (Рекомендую)»` ("Install Tesseract (Recommended)"). UB-Mannheim 5.4 installed, language packs in
+> `%LOCALAPPDATA%\Recall\tessdata(_fast)`; `document_parser.py` added to `## Files` of story 01 (import +
+> lookup of the binary/packages, 3 new OCR_* settings). Rejected: OCR by a vision model — no word boxes, and without them
+> the secrets cannot be painted over.
 
 ## Options
 1. Local Tesseract (`image_to_data`, word-level boxes). Needs a system install and language packs.

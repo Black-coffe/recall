@@ -1,4 +1,4 @@
-# ADR-010: Доказ переходу стану — це слід, який продукт сам залишив, а не таймінг і не змінна, яку рахують і викидають
+# ADR-010: Evidence of a state transition is a trace the product itself left, not timing and not a variable that is computed and thrown away
 
 - Status: proposed
 - Date: 2026-09-06
@@ -6,53 +6,53 @@
 
 ## Context
 
-Із `## Plan deltas` спека `config-registry-fix-r3` («N1 підтвердилась наполовину — і другу половину
-слід читати як спростовану»):
+From `## Plan deltas` of the `config-registry-fix-r3` spec ("N1 was confirmed by half — and the other half
+must be read as refuted"):
 
-> Що правда: `test_headless_boot_ready_waits_for_preload` справді нічого не доводив —
-> `saw_not_ready` записувався і викидався рядком `_ = saw_not_ready` (291), тож вікно 503 могло не
-> спостерігатись жодного разу, а тест лишався зеленим.
+> What is true: `test_headless_boot_ready_waits_for_preload` really proved nothing —
+> `saw_not_ready` was recorded and thrown away by the line `_ = saw_not_ready` (291), so the 503 window might
+> never have been observed, and the test stayed green.
 >
-> Що НЕ правда: висновок звіту, що прогрів `large-v3-turbo` «за 4.12 секунди... або не виконується,
-> або виконується не тим шляхом, що в проді», був міркуванням, а не виміром. ... Тут Queen написала
-> вигаданий механізм — «просто CTranslate2 віддає вже закешовану модель через memory-mapping саме
-> так швидко» — якого ніхто не спостерігав. Це була неправда, а не уточнення формулювання. Виміряна
-> причина інша: boot-лог дочірнього процесу каже `Model loaded on GPU: NVIDIA GeForce RTX 3090`,
-> прогрів 1.7с — модель вантажиться на GPU..., попри те що мірило `_spawn_headless` виставляє
+> What is NOT true: the report's conclusion that the `large-v3-turbo` warm-up in "4.12 seconds... either is not performed
+> or is performed not by the path used in prod" was reasoning, not a measurement. ... Here the Queen wrote
+> an invented mechanism — "CTranslate2 simply serves the already cached model through memory-mapping that
+> fast" — which nobody observed. That was untrue, not a refinement of wording. The measured
+> cause is different: the child process boot log says `Model loaded on GPU: NVIDIA GeForce RTX 3090`,
+> warm-up 1.7s — the model loads onto the GPU..., despite the fact that the `_spawn_headless` harness sets
 > `FORCE_CPU=1`.
 >
-> Чому це записано: наступний раунд не повинен переоткривати «неможливу швидкість» як знахідку.
-> Швидкість сама по собі ніколи не була доказом; доказом є те, що продукт написав у лог.
+> Why this is recorded: the next round must not rediscover the "impossible speed" as a finding.
+> Speed in itself was never evidence; evidence is what the product wrote to the log.
 
 ## Options
 
-Нема жодних записаних — план фіксує обраний вигляд рішення (спостерігати лог, а не таймінг), а не
-альтернативи, які зважувались.
+None recorded - the plan fixes the chosen shape of the decision (observe the log, not timing), not the
+alternatives that were weighed.
 
 ## Decision
 
-Тест приймання, що доводить перехід стану (наприклад, `loading → ready`), приймає як доказ лише
-незалежний слід, який продукт сам залишив під час виконання — рядок логу, значення поля стану,
-запис у БД, — а не (а) швидкість чи таймінг виконання саму по собі, і (б) значення, яке тест
-обчислює і потім ігнорує (`_ = saw_not_ready`), не звіряючи його ні з чим. Якщо очікуваний слід
-відсутній у продукті, тест провалюється, а не мовчки лишається зеленим на непрозорому шляху.
+An acceptance test that proves a state transition (for example, `loading → ready`) accepts as evidence only
+an independent trace that the product itself left during execution — a log line, a state field value,
+a DB record — and not (a) speed or execution timing by itself, and (b) a value that the test
+computes and then ignores (`_ = saw_not_ready`), not checking it against anything. If the expected trace
+is absent from the product, the test fails, rather than silently staying green on an opaque path.
 
 ## Consequences
 
-Легше: наступний раунд ремонту не витрачає час на переоткриття «підозрілої швидкості» як багу —
-швидкість перестає бути аргументом сама по собі. Важче: кожен тест на перехід стану вимагає, щоб
-код-під-тестом справді залишав спостережуваний слід (лог, поле, повернене значення) — нашвидкуруч
-написане «почекати N секунд і повірити» більше не можна видати за доказ.
+Easier: the next repair round does not spend time rediscovering "suspicious speed" as a bug —
+speed stops being an argument in itself. Harder: every state-transition test requires the
+code under test to really leave an observable trace (a log, a field, a returned value) — a hastily
+written "wait N seconds and believe" can no longer be passed off as evidence.
 
 ## Invariants created
 
-Тест приймання, що стверджує перехід стану, або (1) спостерігає незалежний слід, залишений
-продуктом, і падає за його відсутності, або (2) чесно позначений як такий, що не доводить перехід.
-Обчислена, але ніде не звірена змінна (`_ = x`) доказом не є. Твердження про причину поведінки
-(«це швидко, бо...») без спостереженого підтвердження записується як міркування, не як факт.
+An acceptance test that asserts a state transition either (1) observes an independent trace left
+by the product and fails in its absence, or (2) is honestly marked as not proving the transition.
+A computed but never checked variable (`_ = x`) is not evidence. A claim about the cause of behavior
+("it is fast because...") without observed confirmation is recorded as reasoning, not as a fact.
 
 ## Revisit when
 
-Проект отримає стандартний механізм трасування переходів стану (наприклад, structured event log,
-який тести читають напряму) — тоді правило «слід у логі» можна звузити до конкретного формату цього
-механізму замість довільного `assert "текст" in full_log`.
+The project gets a standard mechanism for tracing state transitions (for example, a structured event log
+that tests read directly) — then the "trace in the log" rule can be narrowed to the concrete format of this
+mechanism instead of an arbitrary `assert "текст" in full_log`.

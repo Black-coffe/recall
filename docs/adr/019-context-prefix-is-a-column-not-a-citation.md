@@ -8,17 +8,17 @@
 
 From `docs/specs/production-rag-wave-b/plan.md`, `## Goal`:
 
-> Друга з чотирьох хвиль production-RAG. Зробити чанк самодостатнім для пошуку (структурний
-> префікс з полів БД + рядок сводки одиниці сенсу — у вектор і в BM25, але не в цитати) ...
+> The second of four production-RAG waves. Make a chunk self-sufficient for search (a structural
+> prefix from DB fields + a summary line of the unit of meaning — into the vector and into BM25, but not into citations) ...
 
 `## Contracts`, C4:
 
 > `chunks.context_prefix TEXT NULL` (v43). `embeddings.build_context_prefix(meta: dict, chunk: dict)
-> -> str`: рядок 1 — `[дзвінок|переписка|документ] {назва|чат} · {YYYY-MM-DD} · {спікер|автор} ·
-> {напрямок | нитка: label | стор. N / секція}` (відсутні поля пропускаються, без «None»); рядок 2 —
-> `unit_summary_line`, якщо є. Вхід ембедера = `prefix + "\n" + text` (стиль C3 накладається зверху);
-> `chunks.text` — лише текст. `chunks_fts` індексує `(context_prefix, text)`, тригери
-> `chunks_ai/ad/au` переписані; `retrieval`/`rag`/експорт читають лише `text` (як і зараз).
+> -> str`: line 1 —
+> `[дзвінок|переписка|документ] {назва|чат} · {YYYY-MM-DD} · {спікер|автор} · {напрямок | нитка: label | стор. N / секція}` (missing fields are skipped, no "None"); line 2 —
+> `unit_summary_line`, if present. The embedder input = `prefix + "\n" + text` (the C3 style is applied on top);
+> `chunks.text` — text only. `chunks_fts` indexes `(context_prefix, text)`, the triggers
+> `chunks_ai/ad/au` are rewritten; `retrieval`/`rag`/export read only `text` (as now).
 
 ## Options
 
@@ -39,7 +39,7 @@ speaker/author, directory/thread-label/page) without duplicating that text insid
 the citation/export surface never has to filter anything back out — it simply never sees the prefix.
 Accepted debt, not closed by this decision: unqualified `chunks_fts MATCH` queries that count query-
 term matches (e.g. `_term_match_counts` in `retrieval.py`) now also count prefix tokens (kind label,
-«нитка», «стор», date fragments) after re-embed — recorded by review as Minor 11.
+`нитка`, `стор`, date fragments) after re-embed — recorded by review as Minor 11.
 
 ## Invariants created
 

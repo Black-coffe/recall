@@ -1,9 +1,42 @@
 # Changelog
 
-Формат — [Keep a Changelog](https://keepachangelog.com/uk/1.1.0/);
-версіонування — [SemVer](https://semver.org/lang/uk/).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+## [4.16.1] — 2026-10-16
+
+### Changed
+- **Public documentation is in English** (spec `english-docs`, part 2 of 3; council GREEN in round 3). `README.md` is
+  English with a Ukrainian twin `README.uk.md` (linked both ways); `HOW_WHISPER_WORKS.md`, `docs/` (ADRs, wiki,
+  MCP setup, security, design system, video timeline), `evals/README.md`, module maps `memory/map/*`, the
+  `recall-video` skill and `requirements.txt` comments are translated. Older CHANGELOG entries stay as written;
+  new entries are English.
+- `.claude/rules/docs-language.md`: maps, ADRs, wiki and public docs are written in English from now on.
+- Guard test `tests/test_docs_english.py`: no Cyrillic prose in public-bound docs (code spans, quoted interface
+  strings and names from the mirror replacement map excepted) and intra-repo anchors resolve.
+- Mirror sanitizer: English twins of the private-repo-name replacement and the archive-figure rules, so the
+  translated README and ADR-023 do not leak what the Ukrainian text used to hide.
+- GitHub descriptions and topics of both repositories are English.
+
+## [4.16.0] — 2026-10-15
+
+### Додано
+- **Інтерфейс українською та англійською** (спека `english-i18n`, частина 1 з 3; рада ESCALATE у раунді 3 на
+  ask 4 — прийнято власником, див. нижче). Усі екрани SPA ідуть через словники `static/js/recall/i18n/*.js`
+  (`Recall.t`, плюралі через `Intl.PluralRules`, формат чисел/дат за мовою). Налаштування → «Мова інтерфейсу»:
+  Авто / Українська / English (`RECALL_UI_LANG`, `GET/POST /api/settings/ui-lang`, пишеться в `.env`, без рестарту).
+  «Авто»: мова браузера `uk*` → українська, будь-яка інша → англійська; явний вибір сильніший.
+- Тексти помилок і статусів сервера — з каталогу `app/core/i18n.py` (`tr`) мовою із заголовка `X-Recall-Lang`
+  (його шле `api.js` на кожен запит, зокрема upload і SSE); без заголовка — явне налаштування, `auto` → українська.
+- Брифінг і кнопки в Telegram — мовою налаштування (`auto` → українська). Зміст архіву, промпти LLM і мова зведень
+  не змінювались. Охоронний тест `tests/test_i18n_coverage.py` ловить кирилицю поза словниками в SPA і в `jsonify`.
+  Кеш SW `recall-v80`.
+
+### Відомі обмеження (частина 3)
+- Тексти винятків сервісів, що доходять до UI як `str(e)` (YouTube, Ollama тощо), рядки прогресу завантаження
+  аудіо/YouTube і заголовки експортів (TXT/MD/DOCX) поки українські в англійському режимі.
 
 ## [4.15.0] — 2026-10-15
 

@@ -28,6 +28,7 @@ from flask import Blueprint, current_app, jsonify, request
 from werkzeug.utils import secure_filename
 
 from app import state
+from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
 from app.services import document_parser, record_meta, text_polishing
 from app.utils.files import allowed_document_file
@@ -207,14 +208,14 @@ def _save_original(file, original_name: str) -> str:
 def upload_document():
     """Підвантажити документ → розібрати → (дедуп) → зберегти → enrich."""
     if 'document' not in request.files:
-        return jsonify({"success": False, "error": "Файл не знайдено"}), 400
+        return jsonify({"success": False, "error": tr('library.doc.err.no_file')}), 400
     file = request.files['document']
     if not file or file.filename == '':
-        return jsonify({"success": False, "error": "Файл не вибрано"}), 400
+        return jsonify({"success": False, "error": tr('library.doc.err.no_file_selected')}), 400
     if not allowed_document_file(file.filename):
         supported = ", ".join(sorted(document_parser.ALLOWED_DOCUMENT_EXTENSIONS))
         return jsonify({"success": False,
-                        "error": f"Непідтримуваний формат. Дозволені: {supported}"}), 400
+                        "error": tr('library.doc.err.unsupported', supported=supported)}), 400
 
     # editable-title-description-02: валідуємо ДО парсингу/збереження файлу.
     try:
@@ -229,10 +230,10 @@ def upload_document():
     try:
         filepath = _save_original(file, original_name)
     except ValueError:
-        return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+        return jsonify({"success": False, "error": tr('library.doc.err.bad_name')}), 400
     except Exception as e:
         logger.error("Не вдалося зберегти документ: %s", e)
-        return jsonify({"success": False, "error": "Не вдалося зберегти файл"}), 500
+        return jsonify({"success": False, "error": tr('library.doc.err.save_failed')}), 500
 
     # --- Парсинг (синхронно) ---
     t0 = time.time()
@@ -245,7 +246,7 @@ def upload_document():
     except Exception as e:
         _safe_remove(filepath)
         logger.error("Помилка парсингу '%s': %s", original_name, e, exc_info=True)
-        return jsonify({"success": False, "error": "Помилка розбору документа"}), 500
+        return jsonify({"success": False, "error": tr('library.doc.err.parse_failed')}), 500
     parse_time = round(time.time() - t0, 3)
 
     # --- Дедуп (16E): до Claude-опису, щоб не палити виклик на дублі ---
@@ -256,7 +257,7 @@ def upload_document():
             return jsonify({
                 "success": True, "duplicate": True,
                 "transcription_id": dup["id"], "source_name": dup["source_name"],
-                "message": "Такий документ уже є в архіві",
+                "message": tr('library.doc.err.duplicate'),
             })
 
     _cat_raw = request.form.get('category_id')
@@ -305,11 +306,11 @@ def reparse_document(tid: int):
             columns=("id", "source_type", "file_path", "original_filename", "source_name"),
         )
     if not row or row["source_type"] != "document":
-        return jsonify({"success": False, "error": "Документ не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('library.doc.err.not_found')}), 404
     filepath = row["file_path"]
     if not filepath or not os.path.exists(filepath):
         return jsonify({"success": False,
-                        "error": "Оригінал файлу відсутній — переразбір неможливий"}), 400
+                        "error": tr('library.doc.err.no_original')}), 400
 
     fname = row["original_filename"] or row["source_name"] or os.path.basename(filepath)
     t0 = time.time()
@@ -319,7 +320,7 @@ def reparse_document(tid: int):
         return jsonify({"success": False, "error": str(e)}), 422
     except Exception as e:
         logger.error("Reparse '%s' помилка: %s", fname, e, exc_info=True)
-        return jsonify({"success": False, "error": "Помилка розбору документа"}), 500
+        return jsonify({"success": False, "error": tr('library.doc.err.parse_failed')}), 500
     parse_time = round(time.time() - t0, 3)
 
     _describe_tabular(parsed)
@@ -458,25 +459,25 @@ def import_folder():
     data = request.get_json(silent=True) or {}
     folder = (data.get("path") or "").strip()
     if not folder:
-        return jsonify({"success": False, "error": "Не вказано шлях до папки"}), 400
+        return jsonify({"success": False, "error": tr('library.doc.err.no_path')}), 400
 
     roots = _import_roots()
     if not roots:
         return jsonify({
             "success": False,
-            "error": "Import-folder вимкнено: задайте RECALL_IMPORT_ROOTS у .env",
+            "error": tr('library.doc.err.import_disabled'),
         }), 403
 
     resolved = safe_path_within_any(roots, folder)
     if resolved is None:
         return jsonify({
             "success": False,
-            "error": "Ця папка недоступна для імпорту (поза дозволеними директоріями)",
+            "error": tr('library.doc.err.import_forbidden'),
         }), 403
     folder = resolved
 
     if not os.path.isdir(folder):
-        return jsonify({"success": False, "error": "Папку не знайдено"}), 400
+        return jsonify({"success": False, "error": tr('library.doc.err.folder_missing')}), 400
 
     recursive = bool(data.get("recursive"))
     _cat = data.get("category_id")
@@ -485,9 +486,9 @@ def import_folder():
     files = _collect_documents(folder, recursive)
     if not files:
         return jsonify({"success": False,
-                        "error": "У папці немає підтримуваних документів"}), 400
+                        "error": tr('library.doc.err.folder_empty')}), 400
     if state.job_queue is None:
-        return jsonify({"success": False, "error": "Черга завдань недоступна"}), 503
+        return jsonify({"success": False, "error": tr('library.doc.err.queue_unavailable')}), 503
 
     db_path = _db_path()
     docs_dir = os.path.abspath(current_app.config.get('DOCUMENTS_FOLDER', 'documents'))

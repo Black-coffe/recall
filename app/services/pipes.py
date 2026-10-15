@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from app.core.i18n import server_lang, tr
 from app.services import brief_actions, pipes_cards, pipes_privacy
 
 logger = logging.getLogger(__name__)
@@ -328,8 +329,11 @@ def is_empty(data: dict) -> bool:
     return True
 
 
-_TOOL_LABEL = {"weekly_digest": "Звід", "dropped_commitments": "Забуті обіцянки",
-               "open_questions": "Питання з Telegram"}
+_TOOL_LABELS = ("weekly_digest", "dropped_commitments", "open_questions")
+
+
+def _tool_label(tool: str) -> str:
+    return tr(f"telegram.brief.tool.{tool}", lang=server_lang()) if tool in _TOOL_LABELS else tool
 
 
 def not_collected(data: dict) -> list[str]:
@@ -339,9 +343,16 @@ def not_collected(data: dict) -> list[str]:
     відомого власника Telegram віддає [] і пояснення. Тиша тут не відрізнялась би від
     «питань нема», тому рядок додає код, а не модель."""
     out = []
+    lang = server_lang()
     for tool, res in data.items():
         if isinstance(res, dict) and res.get("reason"):
-            out.append(f"⚠️ {_TOOL_LABEL.get(tool, tool)} не зібрано: {res['reason']}")
+            reason = res["reason"]
+            # Сервіс пише причину українським літералом; відома причина (невідомий
+            # власник у open_questions) перекладається каталогом мовою брифінгу.
+            if tool == "open_questions" and res.get("me") is None:
+                reason = tr("telegram.brief.reason.noOwner", lang=lang)
+            out.append(tr("telegram.brief.notCollected", lang=lang,
+                          tool=_tool_label(tool), reason=reason))
     return out
 
 
@@ -505,20 +516,22 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
     return res
 
 
+#: Префікс ``res["error"]`` (рядок історії, лишається українським) → ключ причини в каталозі.
 _BLOCKED_REASONS = {
-    "стоп-слово": "у готовому тексті лишилось слово зі стоп-листа",
-    "приватність не перевірено (private.txt": "файл стоп-слів private.txt не читається",
-    "приватність не перевірено (напрямки": "не вдалося перевірити приватні напрямки (збій БД)",
+    "стоп-слово": "stopWord",
+    "приватність не перевірено (private.txt": "privateTxt",
+    "приватність не перевірено (напрямки": "dirsDb",
 }
 
 
 def _notify_blocked(pipe: Pipe, res: dict, deliver: Callable[[str], None]) -> None:
     """Фільтр зупинив брифінг: власник має знати, що його не буде. Без даних і без самого слова."""
     err = res["error"] or ""
-    reason = next((v for k, v in _BLOCKED_REASONS.items() if err.startswith(k)), "фільтр приватного")
+    lang = server_lang()
+    key = next((v for k, v in _BLOCKED_REASONS.items() if err.startswith(k)), "filter")
+    reason = tr("telegram.brief.blockedReason." + key, lang=lang)
     try:
-        deliver(html.escape(f"🔒 Брифінг «{pipe.name}» не надіслано: його зупинив фільтр "
-                            f"приватного — {reason}. Подивись у Recall; деталі — у list_pipe_runs.",
+        deliver(html.escape(tr("telegram.brief.blocked", lang=lang, name=pipe.name, reason=reason),
                             quote=False))
     except Exception as e:  # noqa: BLE001 — історія вже має blocked
         logger.warning("Труба %s: повідомлення про блокування не надіслано (%s)",
@@ -527,16 +540,18 @@ def _notify_blocked(pipe: Pipe, res: dict, deliver: Callable[[str], None]) -> No
 
 def _notify_failure(pipe: Pipe, res: dict, deliver: Callable[[str], None], *,
                     attempt: int = 1, max_attempts: int = 1, retry_minutes: int = 0) -> None:
+    lang = server_lang()
     reason = (res["error"] or "").split(":", 1)[0]
     if max_attempts <= 1:
         tail = ""
     elif attempt < max_attempts:
-        tail = f" Повторю через {retry_minutes} хв (спроба {attempt} з {max_attempts})."
+        tail = tr("telegram.brief.failRetry", lang=lang, minutes=retry_minutes,
+                  attempt=attempt, max=max_attempts)
     else:
-        tail = f" Спроби вичерпано ({max_attempts}), до наступного розкладу не пробую."
+        tail = tr("telegram.brief.failExhausted", lang=lang, max=max_attempts)
     try:
-        deliver(html.escape(f"⚠️ Труба «{pipe.name}» впала: {reason}.{tail} "
-                            f"Деталі — у list_pipe_runs.", quote=False))
+        deliver(html.escape(tr("telegram.brief.failed", lang=lang, name=pipe.name,
+                               reason=reason, tail=tail), quote=False))
     except Exception as e:  # noqa: BLE001 — канал теж лежить; історія вже має збій
         logger.warning("Труба %s: повідомлення про збій не надіслано (%s)",
                        pipe.name, type(e).__name__)

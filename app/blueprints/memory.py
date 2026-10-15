@@ -22,6 +22,7 @@ from datetime import date as _date, timedelta as _timedelta
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app import state
+from app.core.i18n import localize_sse, request_lang, tr
 from app.services import categories as cats
 from app.services import enrichment
 
@@ -98,7 +99,7 @@ def _check_project(raw) -> "str | None":
         text = list(raw)
         parts = text
     else:
-        raise cats.CategoryError("bad_name", "project: очікую текст або список текстів")
+        raise cats.CategoryError("bad_name", tr('knowledge.memory.err.project_bad'))
     with _get_db() as conn:
         for part in parts:
             if str(part).strip():
@@ -147,7 +148,7 @@ def _parse_channel(raw) -> tuple:
     channel = str(raw).strip().lower()
     if channel not in rag.ASK_CHANNELS:
         return None, (jsonify({"success": False,
-                               "error": f"Невідомий channel: {'/'.join(rag.ASK_CHANNELS)}"}), 400)
+                               "error": tr('knowledge.memory.err.channel', channels='/'.join(rag.ASK_CHANNELS))}), 400)
     return channel, None
 
 
@@ -262,7 +263,7 @@ def _parse_parent_id(raw) -> "tuple[int | None, tuple | None]":
     400 замість тихого падіння в «без батька» (або 500 — Мінор 5)."""
     val, ok = _parse_int_or_none(raw)
     if not ok:
-        return None, (jsonify({"success": False, "error": "parent_id: очікую id або null"}), 400)
+        return None, (jsonify({"success": False, "error": tr('knowledge.memory.err.parent_id_bad')}), 400)
     return val, None
 
 
@@ -275,7 +276,7 @@ def create_category():
     data = request.get_json(silent=True) or {}
     name = " ".join((data.get("name") or "").strip().split())
     if not name:
-        return jsonify({"success": False, "error": "Порожня назва"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.name_empty')}), 400
     parent_id, err = _parse_parent_id(data.get("parent_id"))
     if err:
         return err
@@ -305,7 +306,7 @@ def update_category(cid: int):
     kwargs = {}
     if "name" in data and data["name"] is not None:
         if not " ".join(str(data["name"]).strip().split()):
-            return jsonify({"success": False, "error": "Порожня назва"}), 400
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.name_empty')}), 400
         kwargs["name"] = data["name"]
     for key in ("color", "icon"):
         if key in data and data[key] is not None:
@@ -313,7 +314,7 @@ def update_category(cid: int):
     if "sort_order" in data:
         sort_order, ok = _parse_signed_int_or_none(data["sort_order"])
         if not ok:
-            return jsonify({"success": False, "error": "sort_order: очікую ціле число"}), 400
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.sort_order_bad')}), 400
         if sort_order is not None:
             kwargs["sort_order"] = sort_order
     if "parent_id" in data:
@@ -322,7 +323,7 @@ def update_category(cid: int):
             return err
         kwargs["parent_id"] = parent_id
     if not kwargs:
-        return jsonify({"success": False, "error": "Нічого оновлювати"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.nothing_to_update')}), 400
 
     try:
         with _get_db() as conn:
@@ -362,10 +363,10 @@ def merge_category(cid: int):
     data = request.get_json(silent=True) or {}
     dst, ok = _parse_int_or_none(data.get("target_id"))
     if not ok:
-        return jsonify({"success": False, "error": "target_id: очікую id або null"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.target_id_bad')}), 400
     delete_source = bool(data.get("delete_source"))
     if dst == cid:
-        return jsonify({"success": False, "error": "Не можна обʼєднати напрямок із самим собою"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.merge_self')}), 400
     try:
         with _get_db() as conn:
             moved = cats.merge_categories(conn, dst, cid)
@@ -383,13 +384,13 @@ def set_transcription_category(tid: int):
     data = request.get_json(silent=True) or {}
     cid, ok = _parse_int_or_none(data.get("category_id"))
     if not ok:
-        return jsonify({"success": False, "error": "category_id: очікую id або null"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.category_id_bad')}), 400
     with _get_db() as conn:
         if cid is not None and not conn.execute(
                 "SELECT 1 FROM categories WHERE id = ?", (cid,)).fetchone():
-            return jsonify({"success": False, "error": "Напрямок не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.category_not_found')}), 404
         if not conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid,)).fetchone():
-            return jsonify({"success": False, "error": "Транскрипт не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
         changed = cats.set_category(conn, [tid], cid)
     return jsonify({"success": True, "category_id": cid,
                     "reembed": _schedule_reembed(changed, "category_changed")})
@@ -404,7 +405,7 @@ def suggest_transcription_category(tid: int):
         res = categorize.suggest_category(current_app.config['DATABASE'], tid)
     except Exception as e:
         logger.error("[memory] suggest-category tx=%s failed: %s", tid, e, exc_info=True)
-        return jsonify({"success": False, "error": "Помилка підказки. Перевірте логи."}), 500
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.suggest_failed')}), 500
     return jsonify({"success": True, **res})
 
 
@@ -418,18 +419,18 @@ def bulk_set_category():
         # 400 до будь-якого запису (Мінор 6): раніше нецілий/невідомий
         # `category_id` тихо перетворювався на `None` і знімав напрямок УСІМ
         # цілям, а не відмовляв запитом.
-        return jsonify({"success": False, "error": "category_id: очікую id або null"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.category_id_bad')}), 400
     ids = data.get("ids")
     src = data.get("source_type")
     if ids is not None:
         # `{"ids": "123"}` — рядок теж ітерується (по символах!), тож без
         # перевірки типу він тихо розсипався б на `[1, 2, 3]`.
         if not isinstance(ids, (list, tuple)):
-            return jsonify({"success": False, "error": "ids: очікую список цілих чисел"}), 400
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_bad')}), 400
         try:
             ids = [int(i) for i in ids]
         except (TypeError, ValueError):
-            return jsonify({"success": False, "error": "ids: очікую список цілих чисел"}), 400
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_bad')}), 400
     with _get_db() as conn:
         if ids:
             targets = ids
@@ -438,7 +439,7 @@ def bulk_set_category():
                 "SELECT id FROM transcriptions WHERE source_type = ? AND category_id IS NULL",
                 (src,)).fetchall()]
         else:
-            return jsonify({"success": False, "error": "Вкажіть ids або source_type"}), 400
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_or_source')}), 400
         # `updated` тепер рахує записи, у яких напрямок СПРАВДІ змінився (а не
         # всі, що потрапили під UPDATE): саме цей список іде в re-embed, і
         # розбіжність між «оновлено» і «переембеджено» тільки б плутала.
@@ -473,15 +474,15 @@ def _tag_name_from_body(data, *, required: bool) -> "tuple[str | None, tuple | N
     (`cats.TAG_NAME_MAX`) — завжди 400, незалежно від `required`."""
     if "name" not in data or data["name"] is None:
         if required:
-            return None, (jsonify({"success": False, "error": "Порожня назва тега"}), 400)
+            return None, (jsonify({"success": False, "error": tr('knowledge.memory.err.tag_name_empty')}), 400)
         return None, None
     name = cats.clean_name(data["name"])
     if not name:
-        return None, (jsonify({"success": False, "error": "Порожня назва тега"}), 400)
+        return None, (jsonify({"success": False, "error": tr('knowledge.memory.err.tag_name_empty')}), 400)
     if len(name) > cats.TAG_NAME_MAX:
         return None, (jsonify({
             "success": False,
-            "error": f"Назва тега довша за {cats.TAG_NAME_MAX} символів"}), 400)
+            "error": tr('knowledge.memory.err.tag_name_long', max=cats.TAG_NAME_MAX)}), 400)
     return name, None
 
 
@@ -506,7 +507,7 @@ def create_tag():
     color, ok = _parse_color(data.get("color"))
     if not ok:
         return jsonify({"success": False,
-                        "error": "color: очікую #RGB/#RGBA/#RRGGBB/#RRGGBBAA"}), 400
+                        "error": tr('knowledge.memory.err.color_bad')}), 400
     with _get_db() as conn:
         existed = conn.execute("SELECT 1 FROM tags WHERE name_norm = ?",
                                (cats.norm_name(name),)).fetchone()
@@ -528,10 +529,10 @@ def update_tag_route(tag_id: int):
         color, ok = _parse_color(data["color"])
         if not ok:
             return jsonify({"success": False,
-                            "error": "color: очікую #RGB/#RGBA/#RRGGBB/#RRGGBBAA"}), 400
+                            "error": tr('knowledge.memory.err.color_bad')}), 400
         kwargs["color"] = color
     if not kwargs:
-        return jsonify({"success": False, "error": "Нічого оновлювати"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.nothing_to_update')}), 400
     try:
         with _get_db() as conn:
             tag, ids = cats.update_tag(conn, tag_id, **kwargs)
@@ -561,7 +562,7 @@ def merge_tags_route():
     keep_id, keep_ok = _parse_int_or_none(data.get("keep_id"))
     merge_id, merge_ok = _parse_int_or_none(data.get("merge_id"))
     if not keep_ok or not merge_ok or keep_id is None or merge_id is None:
-        return jsonify({"success": False, "error": "Вкажіть keep_id і merge_id"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.tag_merge_ids')}), 400
     try:
         with _get_db() as conn:
             ids = cats.merge_tags(conn, keep_id, merge_id)
@@ -578,11 +579,11 @@ def set_record_tags(tid: int):
     створюються з місця вживання (той самий патерн, що напрямок)."""
     data = request.get_json(silent=True) or {}
     if "add" not in data and "remove" not in data:
-        return jsonify({"success": False, "error": "Вкажіть add і/або remove"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.tag_add_remove')}), 400
     try:
         with _get_db() as conn:
             if not conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid,)).fetchone():
-                return jsonify({"success": False, "error": "Транскрипт не знайдено"}), 404
+                return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
             changed = cats.set_tags(conn, tid, add=data.get("add") or (),
                                     remove=data.get("remove") or ())
             tags = cats.tags_for(conn, [tid]).get(tid, [])
@@ -605,11 +606,11 @@ def resolve_tag_suggestions(tid: int):
     accept = data.get("accept") or []
     dismiss = data.get("dismiss") or []
     if not accept and not dismiss:
-        return jsonify({"success": False, "error": "Вкажіть accept і/або dismiss"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.tag_accept_dismiss')}), 400
     try:
         with _get_db() as conn:
             if not conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid,)).fetchone():
-                return jsonify({"success": False, "error": "Транскрипт не знайдено"}), 404
+                return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
             changed = cats.resolve_suggestions(conn, tid, accept=accept, dismiss=dismiss)
             tags = cats.tags_for(conn, [tid]).get(tid, [])
             suggested = cats.suggested_tags(conn, tid)
@@ -631,7 +632,7 @@ def enrich_one(tid: int):
     # Як і в backfill нижче: embed-фаза не потребує Claude — див. коментар там.
     if not enrichment.any_available():
         return jsonify({"success": False,
-                        "error": "Немає ні ANTHROPIC_API_KEY, ні локальних embeddings"}), 400
+                        "error": tr('knowledge.memory.err.no_key_no_embeddings')}), 400
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))
     model = data.get("model")
@@ -641,9 +642,9 @@ def enrich_one(tid: int):
         )
     except Exception as e:
         logger.error("[memory] enrich tx=%s failed: %s", tid, e, exc_info=True)
-        return jsonify({"success": False, "error": "Помилка збагачення. Перевірте логи."}), 500
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.enrich_failed')}), 500
     if res.get("status") == "not_found":
-        return jsonify({"success": False, "error": "Транскрипт не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
     return jsonify({"success": True, **res})
 
 
@@ -658,10 +659,10 @@ def start_backfill():
     # (transcription.py/documents.py/copilot.py) — тут був розсинхрон.
     if not enrichment.any_available():
         return jsonify({"success": False,
-                        "error": "Немає ні ANTHROPIC_API_KEY, ні локальних embeddings"}), 400
+                        "error": tr('knowledge.memory.err.no_key_no_embeddings')}), 400
     with _backfill_lock:
         if _backfill_state.get("running"):
-            return jsonify({"success": False, "error": "Backfill вже виконується"}), 409
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.backfill_running')}), 409
 
     data = request.get_json(silent=True) or {}
     force = bool(data.get("force"))
@@ -726,9 +727,9 @@ def import_archive():
     data = request.get_json(silent=True) or {}
     root = (data.get("path") or "").strip()
     if not root:
-        return jsonify({"success": False, "error": "Вкажіть path до директорії meeting_archive"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.import_path')}), 400
     if not os.path.isdir(root):
-        return jsonify({"success": False, "error": f"Директорію не знайдено: {root}"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.dir_not_found', path=root)}), 400
     from app.services import archive_import
     res = archive_import.import_directory(current_app.config['DATABASE'], root)
     return jsonify({"success": True, **res})
@@ -744,7 +745,7 @@ def search():
     tags (через кому), since, until (контракт C4 — невалідна вісь → 400)."""
     q = (request.args.get('q') or '').strip()
     if not q:
-        return jsonify({"success": False, "error": "Порожній запит"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.query_empty')}), 400
     try:
         k = min(max(int(request.args.get('k', 8)), 1), 30)
     except ValueError:
@@ -770,11 +771,11 @@ def ask():
     `since`/`until` — контракт C4, невалідна вісь → 400. `channel` (`ui`|`mcp`)
     лише позначає походження питання в `ask_log`."""
     if not enrichment.is_available():
-        return jsonify({"success": False, "error": "ANTHROPIC_API_KEY не налаштовано"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.no_api_key')}), 400
     data = request.get_json(silent=True) or {}
     q = (data.get("question") or "").strip()
     if not q:
-        return jsonify({"success": False, "error": "Порожнє питання"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.question_empty')}), 400
     channel, err = _parse_channel(data.get("channel"))
     if err:
         return err
@@ -802,8 +803,16 @@ def ask():
                                   tags=tags, since=since, until=until)
     except Exception as e:
         logger.error("[memory] ask failed: %s", e, exc_info=True)
-        return jsonify({"success": False, "error": "Помилка RAG. Перевірте логи."}), 500
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.rag_failed')}), 500
     return jsonify({"success": True, **res})
+
+
+# Тексти статусів/помилок, які `answer_question_stream` стрімить українською.
+_ASK_SSE_KEYS = (
+    'knowledge.memory.err.question_empty',
+    'knowledge.memory.err.rag_failed',
+    'knowledge.memory.ans.no_results',
+)
 
 
 @memory_bp.route('/api/memory/ask/stream', methods=['POST'])
@@ -815,11 +824,11 @@ def ask_stream():
     Усі значення з request читаємо ДО генератора (поза request-контекстом).
     """
     if not enrichment.is_available():
-        return jsonify({"success": False, "error": "ANTHROPIC_API_KEY не налаштовано"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.no_api_key')}), 400
     data = request.get_json(silent=True) or {}
     q = (data.get("question") or "").strip()
     if not q:
-        return jsonify({"success": False, "error": "Порожнє питання"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.question_empty')}), 400
     channel, err = _parse_channel(data.get("channel"))
     if err:
         return err
@@ -842,15 +851,19 @@ def ask_stream():
     explain = _parse_explain(data.get("explain"))
     db_path = current_app.config['DATABASE']
 
+    lang = request_lang()
+
     def generate():
         try:
-            yield from rag.answer_question_stream(db_path, q, top_k=k, model=model,
-                                                  category_id=category_id, project=project,
-                                                  explain=explain, channel=channel,
-                                                  tags=tags, since=since, until=until)
+            yield from localize_sse(
+                rag.answer_question_stream(db_path, q, top_k=k, model=model,
+                                           category_id=category_id, project=project,
+                                           explain=explain, channel=channel,
+                                           tags=tags, since=since, until=until),
+                lang, _ASK_SSE_KEYS)
         except Exception as e:
             logger.error("[memory] ask_stream generator failed: %s", e, exc_info=True)
-            yield rag._sse("error", {"error": "Помилка RAG."})
+            yield rag._sse("error", {"error": tr('knowledge.memory.err.rag_stream_failed', lang=lang)})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -868,11 +881,11 @@ def rate_ask(ask_id: int):
     except (TypeError, ValueError):
         rating = 0
     if rating not in (1, -1):
-        return jsonify({"success": False, "error": "rating має бути 1 або -1"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.rating_bad')}), 400
     from app.services import rag
     if not rag.rate_ask(current_app.config['DATABASE'], ask_id, rating,
                         data.get("note")):
-        return jsonify({"success": False, "error": "Питання не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.question_not_found')}), 404
     return jsonify({"success": True, "ask_id": ask_id})
 
 
@@ -967,7 +980,7 @@ def entity_detail(eid: int):
     with _get_db() as conn:
         ent = conn.execute("SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
         if not ent:
-            return jsonify({"success": False, "error": "Сутність не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('knowledge.memory.err.entity_not_found')}), 404
 
         meetings = conn.execute(
             "SELECT t.id, t.source_name, t.source_type, t.created_at, "
@@ -1223,14 +1236,14 @@ def update_action_item(aid: int):
     data = request.get_json(silent=True) or {}
     status = data.get('status')
     if status not in ('open', 'done', 'cancelled'):
-        return jsonify({"success": False, "error": "Невірний статус"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.status_bad')}), 400
     # K5: той самий писальний шлях, що й кнопки брифінгу — з подією в журналі.
     from app.services import commitments
     try:
         commitments.apply_action(current_app.config['DATABASE'], aid, status,
                                  source='web', actor='web')
     except LookupError:
-        return jsonify({"success": False, "error": "Задачу не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.task_not_found')}), 404
     return jsonify({"success": True})
 
 

@@ -8,17 +8,17 @@
 
 From `docs/specs/production-rag-wave-b/plan.md`, `## Assumptions`:
 
-> Дефолти коду не змінюються цією хвилею. `EMBED_MODEL` лишається `intfloat/multilingual-e5-large`,
-> `EMBED_VERSION` (стає env через реєстр) — `2`. Пара `Qwen/Qwen3-Embedding-0.6B` + `3` вмикається
-> двома рядками `.env` (задокументовано в `.env.example`) — спочатку для процесу re-embed на знімку й
-> гейта, потім, після рішення власника, у бойовому `.env`. Перекидання дефолтів у коді — Tier 0 після
-> рішення. Причина: злитий код інакше змінив би поведінку живого пошуку до будь-якого порівняння.
+> The code defaults are not changed by this wave. `EMBED_MODEL` stays `intfloat/multilingual-e5-large`,
+> `EMBED_VERSION` (becomes env via the registry) — `2`. The pair `Qwen/Qwen3-Embedding-0.6B` + `3` is enabled by
+> two `.env` lines (documented in `.env.example`) — first for the re-embed process on a snapshot and the
+> gate, then, after the owner's decision, in the live `.env`. Flipping the defaults in code is Tier 0 after
+> the decision. Reason: the merged code would otherwise change live search behavior before any comparison.
 
 And `## Tradeoffs`:
 
-> Модель через env, не через код (C3) проти «дефолт = Qwen3, версія 3 у коді» (Ask 3 буквально):
-> обрано env, бо злиття гілки тоді не міняє живий пошук і відкат — два рядки; ціна — один Tier 0
-> після рішення власника, щоб дефолти наздогнали `.env`.
+> Model via env, not via code (C3) versus "default = Qwen3, version 3 in code" (Ask 3 literally):
+> env was chosen because merging the branch then does not change live search and rollback is two lines; the cost is one Tier 0
+> after the owner's decision so that the defaults catch up with `.env`.
 
 ## Options
 

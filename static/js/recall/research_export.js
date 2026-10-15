@@ -23,19 +23,18 @@
 
     // Експорт оригіналів (0 токенів, без AI). payload: {q?|entity_id?, category_id?}.
     async function runOriginals(payload, box, ctx) {
-        box.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> Збираю оригінали…</div>`;
+        box.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.export.collecting')}</div>`;
         try {
             const data = await R.api.researchOriginals(payload);
             if (ctx && !ctx.isCurrent()) return;
             downloadMd(data.filename, data.markdown);
             const kb = Math.round((data.markdown || '').length / 1024);
             box.innerHTML = `<div class="rc-research__done">
-                <i class="fa-solid fa-circle-check"></i> Завантажено <b>${U.esc(data.filename)}</b>
-                — ${data.stats.records} записів, ~${kb} КБ.
-                <button class="rc-btn rc-btn--sm" data-redl><i class="fa-solid fa-download"></i> Завантажити ще раз</button>
+                <i class="fa-solid fa-circle-check"></i> ${R.t('knowledge.export.downloaded', { file: U.esc(data.filename), records: R.t('knowledge.export.records', { count: data.stats.records }), kb: kb })}
+                <button class="rc-btn rc-btn--sm" data-redl><i class="fa-solid fa-download"></i> ${R.t('knowledge.export.again')}</button>
             </div>`;
             box.querySelector('[data-redl]').addEventListener('click', () => downloadMd(data.filename, data.markdown));
-            UI.toast('Оригінали експортовано', 'success');
+            UI.toast(R.t('knowledge.export.originalsDone'), 'success');
         } catch (err) {
             if (!ctx || ctx.isCurrent()) box.innerHTML = UI.error(err && err.message);
             throw err;
@@ -44,17 +43,17 @@
 
     // AI-саммарі (дешева модель, SSE map-reduce). payload: {q?|entity_id?, category_id?, model?}.
     async function runSummary(payload, box, ctx, signal, nameForFile) {
-        box.innerHTML = `<div class="rc-research__status" data-st><i class="fa-solid fa-spinner fa-spin"></i> Готую саммарі…</div>`;
+        box.innerHTML = `<div class="rc-research__status" data-st><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.export.preparing')}</div>`;
         const st = box.querySelector('[data-st]');
         try {
             await R.api.researchSummary(payload, (event, d) => {
                 if (ctx && !ctx.isCurrent()) return;
                 if (event === 'start') {
-                    st.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Аналізую ${d.fragments} фрагментів з ${d.records} записів (${d.batches} ${d.batches === 1 ? 'батч' : 'батчі'}, ${U.esc(d.model || '')})…`;
+                    st.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.export.analyzing', { fragments: d.fragments, records: d.records, batches: R.t('knowledge.export.batches', { count: d.batches }), model: U.esc(d.model || '') })}`;
                 } else if (event === 'progress') {
                     st.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${U.esc(d.label || '')} <span class="rc-mono">(${d.step}/${d.total})</span>`;
                 } else if (event === 'error') {
-                    box.innerHTML = UI.error(d.error || 'Помилка саммарі');
+                    box.innerHTML = UI.error(d.error || R.t('knowledge.export.summaryError'));
                 } else if (event === 'done') {
                     summaryDone(box, d, nameForFile);
                 }
@@ -69,15 +68,15 @@
         const fn = `recall-${slugName(nameForFile)}-summary.md`;
         box.innerHTML = `
             <div class="rc-research__done">
-                <i class="fa-solid fa-circle-check"></i> Саммарі готове.
-                <span class="rc-mono rc-research__usage">${U.esc(d.model || '')} · ${d.input_tokens || 0}→${d.output_tokens || 0} ток. · ${cost}</span>
-                <button class="rc-btn rc-btn--primary rc-btn--sm" data-dl><i class="fa-solid fa-download"></i> Завантажити .md</button>
+                <i class="fa-solid fa-circle-check"></i> ${R.t('knowledge.export.summaryReady')}
+                <span class="rc-mono rc-research__usage">${U.esc(d.model || '')} · ${d.input_tokens || 0}→${d.output_tokens || 0} ${R.t('knowledge.export.tokens')} · ${cost}</span>
+                <button class="rc-btn rc-btn--primary rc-btn--sm" data-dl><i class="fa-solid fa-download"></i> ${R.t('knowledge.export.downloadMd')}</button>
             </div>
             <pre class="rc-research__md" data-md></pre>`;
         box.querySelector('[data-md]').textContent = d.markdown || '';
         box.querySelector('[data-dl]').addEventListener('click', () => downloadMd(fn, d.markdown || ''));
         downloadMd(fn, d.markdown || '');  // одразу віддаємо файл
-        UI.toast('Саммарі згенеровано', 'success');
+        UI.toast(R.t('knowledge.export.summaryToast'), 'success');
     }
 
     R.researchExport = { downloadMd, runOriginals, runSummary };

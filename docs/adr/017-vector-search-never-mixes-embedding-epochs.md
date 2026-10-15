@@ -8,22 +8,22 @@
 
 From `docs/specs/production-rag-wave-b/plan.md`, `## Assumptions`:
 
-> Векторна гілка `retrieval` після історії 04 бере лише чанки записів, ембеднутих поточною парою
-> (модель, версія): вектори різних епох ніколи не порівнюються (dim однаковий — сьогодні це було б
-> тихо). Побічно: під час нічного re-embed на бойовій БД пошук деградує до FTS + зростаюча векторна
-> частка, а не до сміття.
+> After story 04 the `retrieval` vector branch takes only record chunks embedded with the current pair
+> (model, version): vectors of different epochs are never compared (dim is the same — today that would be
+> silent). Incidentally: during a nightly re-embed on the live DB, search degrades to FTS + a growing vector
+> share, not to garbage.
 
 And `## Tradeoffs`:
 
-> Фільтр епохи у векторній гілці (04) проти «нічого, бо після re-embed усе одно»: без фільтра ніч
-> re-embed на бойовій БД = змішані вектори в кожній відповіді; ціна — один join у brute-force
-> завантаженні.
+> An epoch filter in the vector branch (04) versus "nothing, since after re-embed it is all the same": without the filter a night of
+> re-embed on the live DB = mixed vectors in every answer; the cost is one join in the brute-force
+> load.
 
 `## Plan deltas` D1 records an open exception this decision does not close:
 
-> Не вирізано, бо поза `red: 6`: `review` Major 3 (`_comment_vector_search` без фільтра епохи) і
-> Major 5 ... обидва Ask 3 (GREEN у всіх сідалищ); рішення Queen — окрема історія хвилі 3 або
-> запис тут.
+> Not cut out, because outside `red: 6`: `review` Major 3 (`_comment_vector_search` without an epoch filter) and
+> Major 5 ... both Ask 3 (GREEN in all seats); the Queen's decision — a separate story of wave 3 or
+> a record here.
 
 ## Options
 

@@ -18,14 +18,14 @@
     const R = window.Recall, U = R.util, UI = R.ui;
 
     const LANGS = [
-        { v: 'uk', l: 'Українська' }, { v: 'en', l: 'English' },
-        { v: 'ru', l: 'Русский' }, { v: 'auto', l: 'Авто-визначення' },
+        { v: 'uk', l: 'capture.lang.uk' }, { v: 'en', l: 'capture.lang.en' },
+        { v: 'ru', l: 'capture.lang.ru' }, { v: 'auto', l: 'capture.lang.auto' },
     ];
     const DEFAULT_MODEL = 'large-v3-turbo';
 
     // Co-pilot (Phase 19): мега-налаштування на старті дзвінка.
-    const CP_MODES = [{ v: 'light', l: 'Лайтовий' }, { v: 'medium', l: 'Середній' }, { v: 'hard', l: 'Жорсткий' }];
-    const CP_IMP = [{ v: 'low', l: 'Низька' }, { v: 'medium', l: 'Середня' }, { v: 'high', l: 'Висока' }];
+    const CP_MODES = [{ v: 'light', l: 'capture.rec.cp.mode.light' }, { v: 'medium', l: 'capture.rec.cp.mode.medium' }, { v: 'hard', l: 'capture.rec.cp.mode.hard' }];
+    const CP_IMP = [{ v: 'low', l: 'capture.rec.cp.imp.low' }, { v: 'medium', l: 'capture.rec.cp.imp.medium' }, { v: 'high', l: 'capture.rec.cp.imp.high' }];
 
     // Паралельні записи (C9): G — чернетка налаштувань нового запису; кожен живий
     // запис — свій S у `sessions` (власний SSE-читач і тік працюють у фоні).
@@ -70,21 +70,21 @@
     function $id(id) { return (st && st.sessionId && st.sessionId === selSid) ? document.getElementById(id) : null; }
     function withS(S, fn) { const prev = st; st = S; try { return fn(); } finally { st = prev; } }
     function liveSessions() { return [...sessions.values()].filter(S => S.stage === 'active'); }
-    function tabName(S) { return S.name ? S.name : ('Запис ' + S.letter); }
+    function tabName(S) { return S.name ? S.name : R.t('capture.rec.tabName', { letter: S.letter }); }
     function errCode(err) { return (err && err.body && err.body.error_code) || null; }
     const ERR_TXT = {
-        SESSION_LIMIT: 'Досягнуто ліміту одночасних записів',
-        NOT_FOUND: 'Запис уже не активний',
-        UNSUPPORTED_SOURCE_SPEC: 'Такий набір системних джерел не підтримується',
-        NO_SYSTEM_STREAM: 'У цьому записі немає системного звуку',
-        COPILOT_BUSY: 'Ко-пілот уже працює на іншому записі',
-        AMBIGUOUS_SESSION: 'Записів кілька — оберіть потрібний',
+        SESSION_LIMIT: 'capture.rec.err.SESSION_LIMIT',
+        NOT_FOUND: 'capture.rec.err.NOT_FOUND',
+        UNSUPPORTED_SOURCE_SPEC: 'capture.rec.err.UNSUPPORTED_SOURCE_SPEC',
+        NO_SYSTEM_STREAM: 'capture.rec.err.NO_SYSTEM_STREAM',
+        COPILOT_BUSY: 'capture.rec.err.COPILOT_BUSY',
+        AMBIGUOUS_SESSION: 'capture.rec.err.AMBIGUOUS_SESSION',
     };
     function errToast(err, prefix) {
         const code = errCode(err);
         const txt = (code && ERR_TXT[code])
-            ? ERR_TXT[code] + ((err.body && err.body.error) ? ' (' + err.body.error + ')' : '')
-            : ((err && err.message) || 'невідома помилка');
+            ? R.t(ERR_TXT[code]) + ((err.body && err.body.error) ? ' (' + err.body.error + ')' : '')
+            : ((err && err.message) || R.t('capture.rec.err.unknown'));
         UI.toast((prefix ? prefix + ': ' : '') + txt, 'error');
     }
 
@@ -98,9 +98,9 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-solid fa-microphone" style="color:var(--rc-src-recording)"></i> Додати у архів · Запис</div>
-                <h1 class="rc-pagehead__title">Запис</h1>
-                <p class="rc-pagehead__lede">Запис іде на сервері — переживе закриття вкладки й обрив інтернету. Кожні ~5 секунд чанк зберігається на диск. Можна писати мікрофон, системний звук або обидва.</p>
+                <div class="rc-eyebrow"><i class="fa-solid fa-microphone" style="color:var(--rc-src-recording)"></i> ${R.t('capture.rec.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${R.t('capture.rec.title')}</h1>
+                <p class="rc-pagehead__lede">${R.t('capture.rec.lede')}</p>
             </div>
             <div class="rc-rectabs" id="rcRecTabs" hidden></div>
             <div id="rcRecBody"></div>`;
@@ -111,8 +111,8 @@
             G.devices = d.devices || [];
         } catch (err) {
             if (!ctx.isCurrent()) return;
-            ctx.mount.querySelector('#rcRecBody').innerHTML = UI.empty('Запис недоступний',
-                err.status === 503 ? 'Рекордер вимкнено на бекенді (немає аудіо-підсистеми).' : (err.message || ''), 'fa-microphone-slash');
+            ctx.mount.querySelector('#rcRecBody').innerHTML = UI.empty(R.t('capture.rec.unavailable'),
+                err.status === 503 ? R.t('capture.rec.recorderOff') : (err.message || ''), 'fa-microphone-slash');
             return;
         }
 
@@ -193,8 +193,8 @@
         else renderActive(ctx);
     }
     function tabStateTxt(S) {
-        if (S.stage === 'stopname') return 'зупинено';
-        return S.status === 'paused' ? 'пауза' : 'REC';
+        if (S.stage === 'stopname') return R.t('capture.rec.tab.stopped');
+        return S.status === 'paused' ? R.t('capture.rec.tab.paused') : 'REC';
     }
     function renderTabs(ctx) {
         const bar = ctx.mount.querySelector('#rcRecTabs');
@@ -208,9 +208,9 @@
                 <span class="rc-rectabs__name">${U.esc(tabName(S))}</span>
                 <span class="rc-rectabs__time rc-mono">${fmt(S.elapsedSec)}</span>
                 <span class="rc-rectabs__state rc-mono">${tabStateTxt(S)}</span>
-                ${(S.copilotSessionId || S.copilotActive) ? '<i class="fa-solid fa-wand-magic-sparkles" title="Ко-пілот на цьому записі"></i>' : ''}
+                ${(S.copilotSessionId || S.copilotActive) ? '<i class="fa-solid fa-wand-magic-sparkles" title="' + R.t('capture.rec.tab.copilot') + '"></i>' : ''}
             </button>`).join('');
-        const plus = _limitHit ? '' : `<button class="rc-rectabs__tab rc-rectabs__tab--new${selSid === null ? ' is-active' : ''}" data-sid=""><i class="fa-solid fa-plus"></i> Новий запис</button>`;
+        const plus = _limitHit ? '' : `<button class="rc-rectabs__tab rc-rectabs__tab--new${selSid === null ? ' is-active' : ''}" data-sid=""><i class="fa-solid fa-plus"></i> ${R.t('capture.rec.tab.new')}</button>`;
         bar.innerHTML = tabs + plus;
         bar.querySelectorAll('.rc-rectabs__tab').forEach(b => b.addEventListener('click', () => select(ctx, b.dataset.sid || null)));
     }
@@ -246,7 +246,7 @@
             return `<option value="${U.esc(m.name)}"${m.name === DEFAULT_MODEL ? ' selected' : ''}>${U.esc(m.name)}${hint ? ' — ' + U.esc(hint) : ''}</option>`;
         }).join('');
     }
-    function langOpts() { return LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${l.l}</option>`).join(''); }
+    function langOpts() { return LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${R.t(l.l)}</option>`).join(''); }
     // Дерево напрямків: <optgroup «Напрямок»> + «— Проєкт» усередині. Під
     // селектом живий рядок шляху (`catPathLine`) — у закритому селекті видно
     // лише «— Проєкт», без напрямку-батька.
@@ -265,7 +265,7 @@
         sel.parentNode.appendChild(line);
         const paint = () => {
             const p = sel.value ? UI.catPath(Number(sel.value)) : '';
-            line.textContent = p ? p : (sel.value ? '' : 'Без напрямку');
+            line.textContent = p ? p : (sel.value ? '' : R.t('capture.rec.noCategory'));
         };
         sel.addEventListener('change', paint);
         paint();
@@ -273,13 +273,13 @@
 
     // ---- Co-pilot mega-settings (Phase 19, Крок 1) -------------------------
     function cpOpts(arr, def) {
-        return arr.map(o => `<option value="${o.v}"${o.v === def ? ' selected' : ''}>${o.l}</option>`).join('');
+        return arr.map(o => `<option value="${o.v}"${o.v === def ? ' selected' : ''}>${R.t(o.l)}</option>`).join('');
     }
     function copilotPanel() {
         if (!_cpAvail || !_cpAvail.enabled) return '';   // фіча вимкнена на бекенді
         const status = _cpAvail.local_llm_available
-            ? `<span class="rc-mono" style="color:var(--rc-ok)"><i class="fa-solid fa-circle-check"></i> локальна модель готова</span>`
-            : `<span class="rc-mono" style="color:var(--rc-warn,#fb8c00)" title="${U.esc(_cpAvail.local_llm_reason || '')}"><i class="fa-solid fa-circle-exclamation"></i> Ollama не готовий — підказки запрацюють після запуску</span>`;
+            ? `<span class="rc-mono" style="color:var(--rc-ok)"><i class="fa-solid fa-circle-check"></i> ${R.t('capture.rec.cp.localReady')}</span>`
+            : `<span class="rc-mono" style="color:var(--rc-warn,#fb8c00)" title="${U.esc(_cpAvail.local_llm_reason || '')}"><i class="fa-solid fa-circle-exclamation"></i> ${R.t('capture.rec.cp.ollamaNotReady')}</span>`;
         // T5.2 (REMEDIATION_PLAN Волна 3): режим/важливість/бюджет — power-user
         // налаштування, сховані за вкладеним "Розширені" — новий користувач, що
         // розгортає "Ко-пілот наживо" на старті першого дзвінка, бачить лише
@@ -287,20 +287,20 @@
         // дефолту (medium/medium), а не 3 селекти й числове поле бюджету одразу.
         return `
             <details class="rc-rec-copilot" id="rcCopilot">
-                <summary style="cursor:pointer;font-weight:600"><i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот наживо <span style="margin-left:8px;font-weight:400">${status}</span></summary>
+                <summary style="cursor:pointer;font-weight:600"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.rec.cp.summary')} <span style="margin-left:8px;font-weight:400">${status}</span></summary>
                 <div style="margin-top:12px">
-                    <div class="rc-field"><label class="rc-field__label" for="rcCpVector">Вектор (напрямок)</label><select class="rc-select rc-catsel" id="rcCpVector" data-cat-first="none">${catOpts()}</select></div>
-                    <div class="rc-field" style="margin-top:10px"><label class="rc-field__label" for="rcCpScope">Про що дзвінок — проєкти та учасники</label><input class="rc-input" id="rcCpScope" type="text" placeholder="напр. Маяк, Олена — через кому (не обовʼязково)"><div class="rc-rec-hint rc-mono" style="margin-top:4px">Звужує пошук у архіві до цих проєктів/людей. Без цього копілот шукає по всьому напрямку.</div></div>
-                    <label class="rc-check" style="margin-top:10px"><input type="checkbox" id="rcCpLocalOnly"> <span>Лише локально (без Claude API, $0)</span></label>
+                    <div class="rc-field"><label class="rc-field__label" for="rcCpVector">${R.t('capture.rec.cp.vector')}</label><select class="rc-select rc-catsel" id="rcCpVector" data-cat-first="none">${catOpts()}</select></div>
+                    <div class="rc-field" style="margin-top:10px"><label class="rc-field__label" for="rcCpScope">${R.t('capture.rec.cp.scopeLabel')}</label><input class="rc-input" id="rcCpScope" type="text" placeholder="${R.t('capture.rec.cp.scopePh')}"><div class="rc-rec-hint rc-mono" style="margin-top:4px">${R.t('capture.rec.cp.scopeHint')}</div></div>
+                    <label class="rc-check" style="margin-top:10px"><input type="checkbox" id="rcCpLocalOnly"> <span>${R.t('capture.rec.cp.localOnly')}</span></label>
                     <div class="rc-rec-hint rc-mono" id="rcCpHint" style="margin-top:10px"></div>
                     <details style="margin-top:12px">
-                        <summary class="rc-mono" style="cursor:pointer;color:var(--rc-ink-3);font-size:var(--rc-t-xs)">Розширені</summary>
+                        <summary class="rc-mono" style="cursor:pointer;color:var(--rc-ink-3);font-size:var(--rc-t-xs)">${R.t('capture.rec.cp.advanced')}</summary>
                         <div style="margin-top:10px">
                             <div class="rc-yt__settings">
-                                <div class="rc-field"><label class="rc-field__label" for="rcCpMode">Режим</label><select class="rc-select" id="rcCpMode">${cpOpts(CP_MODES, 'medium')}</select></div>
-                                <div class="rc-field"><label class="rc-field__label" for="rcCpImportance">Важливість</label><select class="rc-select" id="rcCpImportance">${cpOpts(CP_IMP, 'medium')}</select></div>
+                                <div class="rc-field"><label class="rc-field__label" for="rcCpMode">${R.t('capture.rec.cp.mode')}</label><select class="rc-select" id="rcCpMode">${cpOpts(CP_MODES, 'medium')}</select></div>
+                                <div class="rc-field"><label class="rc-field__label" for="rcCpImportance">${R.t('capture.rec.cp.importance')}</label><select class="rc-select" id="rcCpImportance">${cpOpts(CP_IMP, 'medium')}</select></div>
                             </div>
-                            <div class="rc-field" style="max-width:220px;margin-top:10px"><label class="rc-field__label" for="rcCpBudget">Бюджет Claude, $ за сесію</label><input class="rc-input" id="rcCpBudget" type="number" min="0" step="0.5" placeholder="авто (за важливістю)"></div>
+                            <div class="rc-field" style="max-width:220px;margin-top:10px"><label class="rc-field__label" for="rcCpBudget">${R.t('capture.rec.cp.budget')}</label><input class="rc-input" id="rcCpBudget" type="number" min="0" step="0.5" placeholder="${R.t('capture.rec.cp.budgetPh')}"></div>
                         </div>
                     </details>
                 </div>
@@ -312,9 +312,9 @@
         const imp = get('#rcCpImportance') || 'medium';
         const localOnly = !!(ctx.mount.querySelector('#rcCpLocalOnly') || {}).checked;
         const where = (localOnly || imp === 'low')
-            ? 'Лише локально — без зовнішніх викликів, $0.'
-            : 'Гібрид: локальна модель + Claude-верифікація протиріч.';
-        return `Режим «${(CP_MODES.find(m => m.v === mode) || {}).l}», важливість «${(CP_IMP.find(i => i.v === imp) || {}).l}». ${where} Низька важливість за замовч. = лише локально.`;
+            ? R.t('capture.rec.cp.whereLocal')
+            : R.t('capture.rec.cp.whereHybrid');
+        return R.t('capture.rec.cp.hintText', { mode: R.t((CP_MODES.find(m => m.v === mode) || {}).l), imp: R.t((CP_IMP.find(i => i.v === imp) || {}).l), where });
     }
     function wireCopilot(ctx) {
         if (!ctx.mount.querySelector('#rcCopilot')) return;
@@ -351,13 +351,13 @@
     function videoSection() {
         const avail = G.videoAvailable;
         const disabledAttr = avail ? '' : ' disabled';
-        const hint = avail ? '' : `<span class="rc-rec-hint rc-mono">Недоступно: потрібні NVENC + ddagrab</span>`;
+        const hint = avail ? '' : `<span class="rc-rec-hint rc-mono">${R.t('capture.rec.video.unavailable')}</span>`;
         const cards = G.screens.map(s => {
             const primaryBadge = s.is_primary ? `<span class="rc-screen-card__badge">PRIMARY</span>` : '';
             const thumb = s.thumbnail ? `<img class="rc-screen-card__thumb" src="${U.esc(s.thumbnail)}" alt="">` : '';
             const reg = G.videoRegions[String(s.monitor_index)];
             const regionChip = (reg && reg.mode === 'region' && reg.region)
-                ? `<span class="rc-screen-region-chip rc-mono">Область ${reg.region.w}×${reg.region.h}</span>` : '';
+                ? `<span class="rc-screen-region-chip rc-mono">${R.t('capture.rec.video.regionChip', { w: reg.region.w, h: reg.region.h })}</span>` : '';
             return `<div class="rc-screen-card-wrap" data-monitor="${s.monitor_index}">
                 <label class="rc-screen-card${s.is_primary ? ' is-primary' : ''}">
                     <input type="checkbox" value="${s.monitor_index}"${s.is_primary ? ' checked' : ''}>
@@ -370,11 +370,11 @@
                 </label>
                 <div class="rc-screen-mode" id="rcScreenMode_${s.monitor_index}" hidden>
                     <div class="rc-screen-mode__toggle">
-                        <button class="rc-screen-mode__btn is-active" data-monitor="${s.monitor_index}" data-mode="full">Повний</button>
-                        <button class="rc-screen-mode__btn" data-monitor="${s.monitor_index}" data-mode="region">Область</button>
+                        <button class="rc-screen-mode__btn is-active" data-monitor="${s.monitor_index}" data-mode="full">${R.t('capture.rec.video.full')}</button>
+                        <button class="rc-screen-mode__btn" data-monitor="${s.monitor_index}" data-mode="region">${R.t('capture.rec.video.region')}</button>
                     </div>
                     <button class="rc-screen-region-pick" data-monitor="${s.monitor_index}" id="rcPickRegion_${s.monitor_index}" hidden>
-                        <i class="fa-solid fa-crop-simple"></i> Виділити область
+                        <i class="fa-solid fa-crop-simple"></i> ${R.t('capture.rec.video.pick')}
                     </button>
                     ${regionChip}
                 </div>
@@ -383,7 +383,7 @@
         return `
             <div class="rc-rec-dev">
                 <label class="rc-check"><input type="checkbox" id="rcRecVideoEn"${disabledAttr}>
-                    📺 <span>Записувати екран</span></label>
+                    📺 <span>${R.t('capture.rec.video.record')}</span></label>
                 ${hint}
             </div>
             <div class="rc-rec-screens" id="rcRecScreens" hidden>${cards}</div>`;
@@ -450,7 +450,7 @@
                 chip.className = 'rc-screen-region-chip rc-mono';
                 wrap.querySelector('.rc-screen-mode').appendChild(chip);
             }
-            chip.textContent = `Область ${region.w}×${region.h}`;
+            chip.textContent = R.t('capture.rec.region.chip', { w: region.w, h: region.h });
         } else {
             if (chip) chip.remove();
         }
@@ -466,12 +466,12 @@
         modal.innerHTML = `
             <div class="rc-region-panel">
                 <div class="rc-region-panel__head">
-                    <span class="rc-region-panel__title"><i class="fa-solid fa-crop-simple"></i> Виділити область — ${U.esc(screenInfo.label || ('Monitor ' + monitorIdx))}</span>
-                    <button class="rc-region-close" id="rcRegionCancel" title="Скасувати"><i class="fa-solid fa-xmark"></i></button>
+                    <span class="rc-region-panel__title"><i class="fa-solid fa-crop-simple"></i> ${U.esc(R.t('capture.rec.region.title', { label: screenInfo.label || ('Monitor ' + monitorIdx) }))}</span>
+                    <button class="rc-region-close" id="rcRegionCancel" title="${R.t('capture.rec.cancel')}"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="rc-region-stage-wrap">
                     <div class="rc-region-stage" id="rcRegionStage">
-                        <div class="rc-region-loading rc-mono" id="rcRegionLoading"><i class="fa-solid fa-spinner fa-spin"></i> Завантаження превʼю…</div>
+                        <div class="rc-region-loading rc-mono" id="rcRegionLoading"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('capture.rec.region.loading')}</div>
                         <div class="rc-region-rect" id="rcRegionRect" hidden></div>
                     </div>
                 </div>
@@ -483,9 +483,9 @@
                     <div class="rc-region-field"><label>H</label><input class="rc-input rc-mono" id="rcRiH" type="number" min="2" step="2" placeholder="${screenInfo.height}"></div>
                 </div>
                 <div class="rc-region-panel__foot">
-                    <button class="rc-btn" id="rcRegionCancelBtn"><i class="fa-solid fa-xmark"></i> Скасувати</button>
+                    <button class="rc-btn" id="rcRegionCancelBtn"><i class="fa-solid fa-xmark"></i> ${R.t('capture.rec.cancel')}</button>
                     <div style="flex:1"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcRegionDone"><i class="fa-solid fa-check"></i> Готово</button>
+                    <button class="rc-btn rc-btn--primary" id="rcRegionDone"><i class="fa-solid fa-check"></i> ${R.t('capture.rec.region.done')}</button>
                 </div>
             </div>`;
         document.body.appendChild(modal);
@@ -503,7 +503,7 @@
         let currentRect = null;  // { x, y, w, h } in display pixels (stage-relative)
 
         R.api.get('/api/recording/screens/' + monitorIdx + '/preview?w=1000').then(data => {
-            if (!data || !data.image) throw new Error('Немає зображення');
+            if (!data || !data.image) throw new Error(R.t('capture.rec.region.noImage'));
             loading.remove();
             const img = document.createElement('img');
             img.className = 'rc-region-img';
@@ -525,7 +525,7 @@
                 updateSizeLabel(saved.w, saved.h);
             }
         }).catch(err => {
-            loading.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color:var(--rc-err)"></i> Не вдалось завантажити превʼю: ${U.esc(err && err.message || '')}. Введіть координати вручну.`;
+            loading.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color:var(--rc-err)"></i> ${U.esc(R.t('capture.rec.region.previewFailed', { error: err && err.message || '' }))}`;
         });
 
         function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -625,7 +625,7 @@
                 const rx = getVal('#rcRiX') || 0, ry = getVal('#rcRiY') || 0;
                 const rw = getVal('#rcRiW'), rh = getVal('#rcRiH');
                 if (!rw || !rh || rw < 2 || rh < 2) {
-                    UI.toast('Виділіть область або введіть координати', 'error');
+                    UI.toast(R.t('capture.rec.region.needRegion'), 'error');
                     return;
                 }
                 const r2 = { x: evenFloor(rx), y: evenFloor(ry), w: evenFloor(rw), h: evenFloor(rh) };
@@ -653,12 +653,12 @@
         const preMic = pre && pre.mic && mics.some(d => d.name === pre.mic) ? pre.mic : null;
         const isSel = d => (d.kind === 'mic' && preMic) ? d.name === preMic : d.is_default;
         const devOpts = (arr, empty) => arr.length
-            ? arr.map(d => `<option value="${d.index}" data-name="${U.esc(d.name)}"${isSel(d) ? ' selected' : ''}>${U.esc(d.name)}${d.is_default ? ' (типовий)' : ''}</option>`).join('')
+            ? arr.map(d => `<option value="${d.index}" data-name="${U.esc(d.name)}"${isSel(d) ? ' selected' : ''}>${U.esc(d.name)}${d.is_default ? R.t('capture.rec.dev.default') : ''}</option>`).join('')
             : `<option value="">${empty}</option>`;
         const presetBlock = pre ? `
                 <div class="rc-recsrc rc-recsrc--prompt" id="rcRecPreset">
-                    <div class="rc-recsrc__head"><i class="fa-solid fa-phone"></i> Підказка дзвінка</div>
-                    <label class="rc-check"><input type="checkbox" id="rcRecPresetOnly" checked> <span>Системний звук — лише ${U.esc(pre.label)}</span></label>
+                    <div class="rc-recsrc__head"><i class="fa-solid fa-phone"></i> ${R.t('capture.rec.preset.head')}</div>
+                    <label class="rc-check"><input type="checkbox" id="rcRecPresetOnly" checked> <span>${U.esc(R.t('capture.rec.preset.only', { label: pre.label }))}</span></label>
                 </div>` : '';
         const second = liveSessions().length > 0;
 
@@ -667,26 +667,26 @@
             <div class="rc-rec-setup">
                 <div class="rc-rec-dev">
                     <label class="rc-check"><input type="checkbox" id="rcRecMicEn" ${mics.length ? 'checked' : ''} ${mics.length ? '' : 'disabled'}>
-                        <i class="fa-solid fa-microphone"></i> <span>Мікрофон</span></label>
-                    <select class="rc-select" id="rcRecMic" ${mics.length ? '' : 'disabled'}>${devOpts(mics, 'Немає мікрофонів')}</select>
+                        <i class="fa-solid fa-microphone"></i> <span>${R.t('capture.rec.mic')}</span></label>
+                    <select class="rc-select" id="rcRecMic" ${mics.length ? '' : 'disabled'}>${devOpts(mics, R.t('capture.rec.noMics'))}</select>
                 </div>
                 <div class="rc-rec-dev">
                     <label class="rc-check"><input type="checkbox" id="rcRecSysEn" ${lbs.length ? 'checked' : ''} ${lbs.length ? '' : 'disabled'}>
-                        <i class="fa-solid fa-volume-high"></i> <span>Системний звук</span></label>
-                    <select class="rc-select" id="rcRecSys" ${lbs.length ? '' : 'disabled'}>${devOpts(lbs, 'Немає loopback')}</select>
+                        <i class="fa-solid fa-volume-high"></i> <span>${R.t('capture.rec.sys')}</span></label>
+                    <select class="rc-select" id="rcRecSys" ${lbs.length ? '' : 'disabled'}>${devOpts(lbs, R.t('capture.rec.noLoopback'))}</select>
                 </div>
                 ${presetBlock}
                 ${videoSection()}
                 <div class="rc-field" style="max-width:260px">
-                    <label class="rc-field__label" for="rcRecLang">Мова live-превʼю</label>
+                    <label class="rc-field__label" for="rcRecLang">${R.t('capture.rec.liveLang')}</label>
                     <select class="rc-select" id="rcRecLang">${langOpts()}</select>
                 </div>
                 ${copilotPanel()}
                 ${second ? appsPromptShell() : ''}
-                <div class="rc-rec-hint rc-mono"><i class="fa-solid fa-shield-halved"></i> Якщо мікрофона немає у списку — дозвольте доступ у налаштуваннях ОС. Системний звук (loopback) дозволу не потребує.</div>
+                <div class="rc-rec-hint rc-mono"><i class="fa-solid fa-shield-halved"></i> ${R.t('capture.rec.permHint')}</div>
                 <div class="rc-yt__actions">
                     <div class="rc-yt__spacer"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcRecStart"><i class="fa-solid fa-circle" style="color:var(--rc-err)"></i> Розпочати запис</button>
+                    <button class="rc-btn rc-btn--primary" id="rcRecStart"><i class="fa-solid fa-circle" style="color:var(--rc-err)"></i> ${R.t('capture.rec.start')}</button>
                 </div>
             </div>`;
         body.querySelector('#rcRecStart').addEventListener('click', () => start(ctx));
@@ -703,12 +703,12 @@
     function appsPromptShell() {
         return `
             <div class="rc-recsrc rc-recsrc--prompt" id="rcRecApps">
-                <div class="rc-recsrc__head"><i class="fa-solid fa-volume-high"></i> Що зараз звучить</div>
-                <div id="rcRecAppsList" class="rc-mono rc-recsrc__muted"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю застосунки зі звуком…</div>
+                <div class="rc-recsrc__head"><i class="fa-solid fa-volume-high"></i> ${R.t('capture.rec.apps.head')}</div>
+                <div id="rcRecAppsList" class="rc-mono rc-recsrc__muted"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('capture.rec.apps.searching')}</div>
             </div>
             <div class="rc-recwarn">
-                <div><i class="fa-solid fa-headphones"></i> Запис із мікрофоном — у навушниках: інакше мікрофон почує звук іншого дзвінка з колонок.</div>
-                <div><i class="fa-solid fa-window-restore"></i> Два дзвінки в одному браузері — це один процес, Recall не зможе їх розділити. Другий дзвінок відкрийте в іншому браузері чи застосунку.</div>
+                <div><i class="fa-solid fa-headphones"></i> ${R.t('capture.rec.apps.tipHeadphones')}</div>
+                <div><i class="fa-solid fa-window-restore"></i> ${R.t('capture.rec.apps.tipBrowser')}</div>
             </div>`;
     }
     async function loadAppsPrompt(ctx) {
@@ -721,20 +721,20 @@
         const apps = (d && Array.isArray(d.apps)) ? d.apps : [];
         if (!d || d.available === false || !apps.length) {
             box.textContent = (d && d.available === false)
-                ? 'Список застосунків недоступний' + (d.reason ? ' (' + d.reason + ')' : '') + ' — новий запис писатиме весь системний звук.'
-                : 'Зараз жоден застосунок не звучить — новий запис писатиме весь системний звук.';
+                ? R.t('capture.rec.apps.unavailable', { reason: d.reason ? ' (' + d.reason + ')' : '' })
+                : R.t('capture.rec.apps.noneSounding');
             return;
         }
         box.classList.remove('rc-mono', 'rc-recsrc__muted');
         box.innerHTML = apps.map(a => {
             const by = (a.recorded_by || []).map(sid => sessions.get(sid)).filter(S => S && S.stage === 'active');
-            const badges = by.map(S => `<span class="rc-recsrc__badge rc-mono">у записі ${U.esc(tabName(S))}</span>`).join('');
+            const badges = by.map(S => `<span class="rc-recsrc__badge rc-mono">${U.esc(R.t('capture.rec.apps.inRecording', { name: tabName(S) }))}</span>`).join('');
             const onlyQ = by.map(S => `
-                <label class="rc-check"><input type="checkbox" data-incl="${U.esc(a.exe)}" data-sid="${U.esc(S.sessionId)}"> <span>Лишити в «${U.esc(tabName(S))}» тільки ${U.esc(a.label || a.exe)}?</span></label>`).join('');
+                <label class="rc-check"><input type="checkbox" data-incl="${U.esc(a.exe)}" data-sid="${U.esc(S.sessionId)}"> <span>${U.esc(R.t('capture.rec.apps.keepOnly', { name: tabName(S), app: a.label || a.exe }))}</span></label>`).join('');
             return `
                 <div class="rc-recsrc__app">
-                    <div class="rc-recsrc__appname"><b>${U.esc(a.label || a.exe)}</b> <span class="rc-mono rc-recsrc__muted">${a.state === 'active' ? 'звучить' : 'тихо'}</span> ${badges}</div>
-                    <label class="rc-check"><input type="checkbox" data-excl="${U.esc(a.exe)}"> <span>Виключити ${U.esc(a.label || a.exe)} з цього запису?</span></label>
+                    <div class="rc-recsrc__appname"><b>${U.esc(a.label || a.exe)}</b> <span class="rc-mono rc-recsrc__muted">${a.state === 'active' ? R.t('capture.rec.apps.sounding') : R.t('capture.rec.apps.quiet')}</span> ${badges}</div>
+                    <label class="rc-check"><input type="checkbox" data-excl="${U.esc(a.exe)}"> <span>${U.esc(R.t('capture.rec.apps.exclude', { app: a.label || a.exe }))}</span></label>
                     ${onlyQ}
                 </div>`;
         }).join('');
@@ -749,7 +749,7 @@
                 const set = G.includeFor[sid] || (G.includeFor[sid] = []);
                 const i = set.indexOf(cb.dataset.incl);
                 if (cb.checked && i < 0) {
-                    if (set.length >= 4) { cb.checked = false; UI.toast('Не більше 4 застосунків на один запис', 'error'); return; }
+                    if (set.length >= 4) { cb.checked = false; UI.toast(R.t('capture.rec.apps.max4'), 'error'); return; }
                     set.push(cb.dataset.incl);
                 } else if (!cb.checked && i >= 0) set.splice(i, 1);
             }
@@ -781,7 +781,7 @@
             payload.system_source = { mode: 'include', apps: [G.preset.app] };
         }
         if (payload.mic_device_index == null && payload.system_device_index == null && !payload.system_source) {
-            UI.toast('Оберіть хоча б один потік', 'error'); return;
+            UI.toast(R.t('capture.rec.pickStream'), 'error'); return;
         }
         const langSel = ctx.mount.querySelector('#rcRecLang');
         if (langSel && langSel.value) payload.language = langSel.value;
@@ -818,7 +818,7 @@
         if (btn) btn.disabled = true;
         try {
             const r = await R.api.post('/api/recording/start', payload);
-            if (!r || !r.session_id) throw new Error((r && r.error) || 'Не вдалось розпочати');
+            if (!r || !r.session_id) throw new Error((r && r.error) || R.t('capture.rec.startFailed'));
             if (!ctx.isCurrent()) return;
             const S = newS(r.session_id);
             S.copilotConfig = cp || null;
@@ -865,7 +865,7 @@
                 const first = sessions.keys().next();
                 if (!first.done) { select(ctx, first.value); return; }
             } else {
-                errToast(err, 'Не вдалось розпочати');
+                errToast(err, R.t('capture.rec.startFailed'));
             }
             if (btn) btn.disabled = false;
         }
@@ -879,7 +879,7 @@
         try {
             const r = await R.api.post('/api/recording/' + S.sessionId + '/system-source', body);
             if (r && r.source) S.systemSource = r.source;
-            if (r && r.applied_on_resume) UI.toast(tabName(S) + ': застосується після зняття з паузи', 'info');
+            if (r && r.applied_on_resume) UI.toast(R.t('capture.rec.appliedOnResume', { name: tabName(S) }), 'info');
             if (ctx.isCurrent()) withS(S, paintSource);
             return true;
         } catch (err) {
@@ -887,7 +887,7 @@
             return false;
         }
     }
-    const SRC_LBL = { all: 'весь', include: 'тільки ці', exclude: 'усе, крім цих' };
+    const SRC_LBL = { all: 'capture.rec.src.all', include: 'capture.rec.src.include', exclude: 'capture.rec.src.exclude' };
     function sourceHTML() {
         if (!st.hasSystem) return '';
         return `<div class="rc-recsrc" id="rcRecSrc"></div>`;
@@ -901,7 +901,7 @@
             <div class="rc-recsrc__row">
                 <span class="rc-recsrc__lbl rc-mono">SYS</span>
                 <div class="rc-seg-toggle">${['all', 'include', 'exclude'].map(m =>
-                    `<button type="button" data-mode="${m}" class="${src.mode === m ? 'is-active' : ''}">${SRC_LBL[m]}</button>`).join('')}</div>
+                    `<button type="button" data-mode="${m}" class="${src.mode === m ? 'is-active' : ''}">${R.t(SRC_LBL[m])}</button>`).join('')}</div>
                 ${apps && src.mode !== 'all' ? `<span class="rc-recsrc__muted rc-mono">${U.esc(apps)}</span>` : ''}
             </div>
             <div class="rc-recsrc__pick" id="rcRecSrcPick" hidden></div>`;
@@ -916,7 +916,7 @@
         const pick = withS(S, () => $id('rcRecSrcPick'));
         if (!pick) return;
         pick.hidden = false;
-        pick.innerHTML = `<span class="rc-mono rc-recsrc__muted"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю застосунки зі звуком…</span>`;
+        pick.innerHTML = `<span class="rc-mono rc-recsrc__muted"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('capture.rec.apps.searching')}</span>`;
         let d = null;
         try { d = await R.api.get('/api/recording/apps'); } catch (_) { d = null; }
         if (!pick.isConnected) return;
@@ -925,22 +925,22 @@
         ((d && d.apps) || []).forEach(a => byExe.set(a.exe, a.label || a.exe));
         cur.forEach(x => { if (!byExe.has(x)) byExe.set(x, x); });   // застосунок зараз мовчить — лишаємо у списку
         if (!byExe.size) {
-            pick.innerHTML = `<span class="rc-mono rc-recsrc__muted">${(d && d.available === false) ? 'Список застосунків недоступний' : 'Зараз жоден застосунок не звучить'}.</span>`;
+            pick.innerHTML = `<span class="rc-mono rc-recsrc__muted">${(d && d.available === false) ? R.t('capture.rec.apps.listUnavailable') : R.t('capture.rec.apps.noneSoundingShort')}.</span>`;
             return;
         }
         const multi = mode === 'include';
         pick.innerHTML = `
-            <div class="rc-recsrc__muted rc-mono">${multi ? 'Писати тільки (до 4):' : 'Писати все, крім (один):'}</div>
+            <div class="rc-recsrc__muted rc-mono">${multi ? R.t('capture.rec.apps.recordOnly') : R.t('capture.rec.apps.recordExcept')}</div>
             ${[...byExe.entries()].map(([exe, label]) => `<label class="rc-check"><input type="${multi ? 'checkbox' : 'radio'}" name="rcSrcPick" value="${U.esc(exe)}"${cur.indexOf(exe) >= 0 ? ' checked' : ''}> <span>${U.esc(label)}</span></label>`).join('')}
             <div class="rc-recsrc__row">
-                <button type="button" class="rc-btn rc-btn--primary" data-act="apply">Застосувати</button>
-                <button type="button" class="rc-btn" data-act="cancel">Скасувати</button>
+                <button type="button" class="rc-btn rc-btn--primary" data-act="apply">${R.t('capture.rec.apply')}</button>
+                <button type="button" class="rc-btn" data-act="cancel">${R.t('capture.rec.cancel')}</button>
             </div>`;
         pick.querySelector('[data-act="cancel"]').addEventListener('click', () => { pick.hidden = true; pick.innerHTML = ''; });
         pick.querySelector('[data-act="apply"]').addEventListener('click', async () => {
             const apps = [...pick.querySelectorAll('input[name="rcSrcPick"]:checked')].map(x => x.value);
-            if (!apps.length) { UI.toast('Оберіть застосунок', 'error'); return; }
-            if (multi && apps.length > 4) { UI.toast('Не більше 4 застосунків', 'error'); return; }
+            if (!apps.length) { UI.toast(R.t('capture.rec.apps.pickOne'), 'error'); return; }
+            if (multi && apps.length > 4) { UI.toast(R.t('capture.rec.apps.max4short'), 'error'); return; }
             await setSystemSource(currentCtx, S, { mode, apps, reason: 'user' });
         });
     }
@@ -961,14 +961,14 @@
         // Власник: з відповіді COPILOT_BUSY (owner_session_id), інакше — хто з табів його тримає.
         const ownerS = st.cpOffer ? sessions.get(st.cpOffer) : copilotOwner();
         const ownerSid = st.cpOffer || (ownerS && ownerS.sessionId) || null;
-        const ownerName = ownerS ? tabName(ownerS) : 'інший запис';
+        const ownerName = ownerS ? tabName(ownerS) : R.t('capture.rec.cpbar.otherRecording');
         const here = st.copilotSessionId || st.copilotActive;
         let html;
-        if (here) html = '<i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот працює на цьому записі.';
+        if (here) html = '<i class="fa-solid fa-wand-magic-sparkles"></i> ' + R.t('capture.rec.cpbar.here');
         else if (ownerSid && ownerSid !== st.sessionId) {
-            html = `<i class="fa-solid fa-wand-magic-sparkles"></i> ${st.cpOffer ? 'Ко-пілот зайнятий: ' : 'Ко-пілот: '}на записі «${U.esc(ownerName)}».
-                <button type="button" class="rc-btn rc-btn--sm" data-cpmove="${U.esc(ownerSid)}">${st.cpOffer ? 'Перенести ко-пілот із «' + U.esc(ownerName) + '» сюди?' : 'Перенести сюди'}</button>`;
-        } else html = '<i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот зараз не працює.';
+            html = `<i class="fa-solid fa-wand-magic-sparkles"></i> ${st.cpOffer ? R.t('capture.rec.cpbar.busyPrefix') : R.t('capture.rec.cpbar.prefix')}${U.esc(R.t('capture.rec.cpbar.onRecording', { name: ownerName }))}
+                <button type="button" class="rc-btn rc-btn--sm" data-cpmove="${U.esc(ownerSid)}">${st.cpOffer ? U.esc(R.t('capture.rec.cpbar.moveFrom', { name: ownerName })) : R.t('capture.rec.cpbar.moveHere')}</button>`;
+        } else html = '<i class="fa-solid fa-wand-magic-sparkles"></i> ' + R.t('capture.rec.cpbar.idle');
         el.innerHTML = html;
         const b = el.querySelector('[data-cpmove]');
         const S = st;
@@ -978,7 +978,7 @@
         let r;
         try {
             r = await R.api.post('/api/copilot/move', { from_session_id: fromSid, to_session_id: toS.sessionId });
-        } catch (err) { errToast(err, 'Ко-пілот не перенесено'); return; }
+        } catch (err) { errToast(err, R.t('capture.rec.cpbar.moveFailed')); return; }
         const from = sessions.get(fromSid);
         if (from) { from.copilotSessionId = null; from.copilotActive = false; }
         toS.cpOffer = null;
@@ -987,9 +987,9 @@
             toS.copilotActive = true;
             if (!toS.copilotConfig && from) toS.copilotConfig = from.copilotConfig;
             toS.topics = []; toS.curTopic = null; toS.insights = []; toS.cpStatus = 'analyzing'; toS.cpUnseen = 0; toS.cpUsage = null;
-            UI.toast('Ко-пілот перенесено на «' + tabName(toS) + '»', 'success');
+            UI.toast(R.t('capture.rec.cpMoved', { name: tabName(toS) }), 'success');
         } else {
-            UI.toast('Ко-пілот зупинено на «' + (from ? tabName(from) : fromSid) + '», але не запустився тут' + (r && r.reason ? ': ' + r.reason : ''), 'error');
+            UI.toast(R.t('capture.rec.cpStoppedHere', { name: from ? tabName(from) : fromSid }) + (r && r.reason ? ': ' + r.reason : ''), 'error');
         }
         if (ctx.isCurrent()) select(ctx, selSid);
     }
@@ -1017,11 +1017,11 @@
                     <div class="rc-rec-live" id="rcRecLive" hidden></div>
                     ${liveCommentHTML()}
                     <div class="rc-yt__actions" style="margin-top:24px">
-                        <button class="rc-btn" id="rcRecDiscard"><i class="fa-solid fa-trash"></i> Скасувати</button>
+                        <button class="rc-btn" id="rcRecDiscard"><i class="fa-solid fa-trash"></i> ${R.t('capture.rec.discard')}</button>
                         <div class="rc-yt__spacer"></div>
-                        ${(sessions.size < 2 && !_limitHit) ? '<button class="rc-btn" id="rcRecNew" title="Паралельний запис — окремий дзвінок"><i class="fa-solid fa-plus"></i> Новий запис</button>' : ''}
-                        <button class="rc-btn" id="rcRecPause"><i class="fa-solid ${st.status === 'paused' ? 'fa-play' : 'fa-pause'}"></i> <span id="rcRecPauseLbl">${st.status === 'paused' ? 'Продовжити' : 'Пауза'}</span></button>
-                        <button class="rc-btn rc-btn--primary" id="rcRecStop"><i class="fa-solid fa-stop"></i> Зупинити</button>
+                        ${(sessions.size < 2 && !_limitHit) ? '<button class="rc-btn" id="rcRecNew" title="' + R.t('capture.rec.parallelTitle') + '"><i class="fa-solid fa-plus"></i> ' + R.t('capture.rec.tab.new') + '</button>' : ''}
+                        <button class="rc-btn" id="rcRecPause"><i class="fa-solid ${st.status === 'paused' ? 'fa-play' : 'fa-pause'}"></i> <span id="rcRecPauseLbl">${st.status === 'paused' ? R.t('capture.rec.resume') : R.t('capture.rec.pause')}</span></button>
+                        <button class="rc-btn rc-btn--primary" id="rcRecStop"><i class="fa-solid fa-stop"></i> ${R.t('capture.rec.stop')}</button>
                     </div>
                 </div>
                 ${cp ? copilotWidget() : ''}
@@ -1060,12 +1060,12 @@
                 <div class="rc-livecm__row">
                     <i class="rc-livecm__ic fa-regular fa-comment-dots" aria-hidden="true"></i>
                     <input class="rc-livecm__in" id="rcLiveCmIn" type="text" autocomplete="off"
-                           placeholder="Коментар до цього моменту — Enter, щоб зберегти">
+                           placeholder="${R.t('capture.rec.live.placeholder')}">
                     <select class="rc-select rc-select--sm rc-livecm__kind" id="rcLiveCmKind">
-                        <option value="note">Нотатка</option>
-                        <option value="correction">Виправлення</option>
-                        <option value="decision">Рішення</option>
-                        <option value="question">Питання</option>
+                        <option value="note">${R.t('capture.rec.live.note')}</option>
+                        <option value="correction">${R.t('capture.rec.live.correction')}</option>
+                        <option value="decision">${R.t('capture.rec.live.decision')}</option>
+                        <option value="question">${R.t('capture.rec.live.question')}</option>
                     </select>
                     <span class="rc-livecm__hint rc-mono">Ctrl+Shift+K</span>
                 </div>
@@ -1114,7 +1114,7 @@
             refreshLiveComments();
         } catch (err) {
             inp.value = body;
-            UI.toast((err && err.message) || 'Коментар не збережено', 'error');
+            UI.toast((err && err.message) || R.t('capture.rec.live.notSaved'), 'error');
         }
     }
 
@@ -1181,8 +1181,8 @@
         icon.className = 'fa-solid ' + (kind === 'failed' ? 'fa-triangle-exclamation' : 'fa-rotate fa-spin');
         b.appendChild(icon);
         b.appendChild(document.createTextNode(kind === 'failed'
-            ? ' Live-перегляд відключено — запис триває, перепідключитись не вдалось. Оновіть сторінку, щоб відновити моніторинг.'
-            : ' Live-перегляд відключено — запис триває, перепідключення' + (attempt ? ' (спроба ' + attempt + ')' : '') + '…'));
+            ? R.t('capture.rec.sse.failed')
+            : R.t('capture.rec.sse.retrying', { attempt: attempt ? R.t('capture.rec.sse.attempt', { n: attempt }) : '' })));
     }
     function hideSseBanner() {
         const b = $id('rcRecSseBanner');
@@ -1196,13 +1196,13 @@
     // Previously this only got an auto-dismissing toast + VU-row highlight
     // (markStreamStatus) — that stays for the in-context cue, this adds the
     // persistent one. -----------------------------------------------------
-    const AUDIO_STREAM_LBL = { mic: 'Мікрофон', system: 'Системний звук' };
+    const AUDIO_STREAM_LBL = { mic: 'capture.rec.mic', system: 'capture.rec.sys' };
     function refreshAudioBanner() {
         const b = $id('rcRecAudioBanner');
         if (!b) return;
         const failed = Object.keys(st.streamErr || {}).filter(k => st.streamErr[k]);
         if (!failed.length) { b.hidden = true; b.innerHTML = ''; return; }
-        const label = failed.map(k => AUDIO_STREAM_LBL[k] || k).join(', ');
+        const label = failed.map(k => (AUDIO_STREAM_LBL[k] ? R.t(AUDIO_STREAM_LBL[k]) : k)).join(', ');
         const detail = failed.map(k => st.streamErr[k]).filter(Boolean).join('; ');
         b.hidden = false;
         b.innerHTML = '';
@@ -1210,12 +1210,12 @@
         icon.className = 'fa-solid fa-microphone-slash';
         b.appendChild(icon);
         b.appendChild(document.createTextNode(
-            ' Аудіопотік «' + label + '» відвалився — запис без цього джерела триває' + (detail ? ' (' + detail + ')' : '') + '.'
+            R.t('capture.rec.audioFailed', { label, detail: detail ? ' (' + detail + ')' : '' })
         ));
     }
 
-    const CP_MODE_LBL = { light: 'лайт', medium: 'середній', hard: 'жорсткий' };
-    const CP_IMP_LBL = { low: 'важл. низька', medium: 'важл. середня', high: 'важл. висока' };
+    const CP_MODE_LBL = { light: 'capture.rec.cp.lbl.mode.light', medium: 'capture.rec.cp.lbl.mode.medium', hard: 'capture.rec.cp.lbl.mode.hard' };
+    const CP_IMP_LBL = { low: 'capture.rec.cp.lbl.imp.low', medium: 'capture.rec.cp.lbl.imp.medium', high: 'capture.rec.cp.lbl.imp.high' };
     const CP_MODE_NEXT = { light: 'medium', medium: 'hard', hard: 'light' };
     const CP_IMP_NEXT = { low: 'medium', medium: 'high', high: 'low' };
     function copilotWidget() {
@@ -1225,21 +1225,21 @@
         return `
             <aside class="rc-cp" id="rcCp">
                 <div class="rc-cp__head">
-                    <span class="rc-cp__title"><i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот</span>
-                    <span class="rc-cp__status" id="rcCpStatus" data-state="analyzing"><span class="rc-cp__dot"></span><span id="rcCpStatusTxt">аналіз…</span></span>
+                    <span class="rc-cp__title"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.rec.cp.widgetTitle')}</span>
+                    <span class="rc-cp__status" id="rcCpStatus" data-state="analyzing"><span class="rc-cp__dot"></span><span id="rcCpStatusTxt">${R.t('capture.rec.cp.analyzing')}</span></span>
                     <span class="rc-cp__cost rc-mono" id="rcCpCost" hidden></span>
                     <span class="rc-cp__count rc-mono" id="rcCpCount" hidden>0</span>
-                    <span class="rc-cp__count rc-mono" id="rcCpBudgetLbl" title="Показано карток за дзвінок (бюджет уваги)" hidden></span>
-                    <button class="rc-cp__collapse" id="rcCpCollapse" title="Згорнути/розгорнути"><i class="fa-solid fa-chevron-right"></i></button>
+                    <span class="rc-cp__count rc-mono" id="rcCpBudgetLbl" title="${R.t('capture.rec.cp.budgetTitle')}" hidden></span>
+                    <button class="rc-cp__collapse" id="rcCpCollapse" title="${R.t('capture.rec.cp.collapse')}"><i class="fa-solid fa-chevron-right"></i></button>
                 </div>
                 <div class="rc-cp__ctrls">
-                    <button class="rc-cp__chip rc-mono" id="rcCpMode" data-mode="${mode}" title="Режим аналізу — клік змінює (лайт/середній/жорсткий)"><i class="fa-solid fa-gauge-high"></i> ${CP_MODE_LBL[mode]}</button>
-                    <button class="rc-cp__chip rc-mono" id="rcCpImp" data-imp="${imp}" title="Важливість дзвінка — клік змінює (масштабує бюджет/модель)"><i class="fa-solid fa-flag"></i> ${CP_IMP_LBL[imp]}</button>
+                    <button class="rc-cp__chip rc-mono" id="rcCpMode" data-mode="${mode}" title="${R.t('capture.rec.cp.modeChipTitle')}"><i class="fa-solid fa-gauge-high"></i> ${R.t(CP_MODE_LBL[mode])}</button>
+                    <button class="rc-cp__chip rc-mono" id="rcCpImp" data-imp="${imp}" title="${R.t('capture.rec.cp.impChipTitle')}"><i class="fa-solid fa-flag"></i> ${R.t(CP_IMP_LBL[imp])}</button>
                 </div>
                 <div class="rc-cp__banner" id="rcCpBanner" hidden></div>
                 <div class="rc-cp-strip" id="rcCpStrip" hidden></div>
                 <div class="rc-cp__feed" id="rcCpInsights"></div>
-                <div class="rc-cp__empty" id="rcCpEmpty"><i class="fa-solid fa-ear-listen"></i> Слухаю розмову — підказки зʼявляться тут.</div>
+                <div class="rc-cp__empty" id="rcCpEmpty"><i class="fa-solid fa-ear-listen"></i> ${R.t('capture.rec.cp.listening')}</div>
             </aside>`;
     }
 
@@ -1267,17 +1267,17 @@
             if (r && r.config) {
                 S.copilotConfig = r.config;
                 withS(S, refreshWidgetChips);
-                const lbl = field === 'mode' ? CP_MODE_LBL[value] : CP_IMP_LBL[value];
-                UI.toast('Ко-пілот: ' + lbl, 'info');
+                const lbl = R.t(field === 'mode' ? CP_MODE_LBL[value] : CP_IMP_LBL[value]);
+                UI.toast(R.t('capture.rec.cp.toastChanged', { label: lbl }), 'info');
             }
-        } catch (err) { UI.toast('Не вдалось змінити: ' + (err && err.message), 'error'); }
+        } catch (err) { UI.toast(R.t('capture.rec.cp.changeFailed', { error: (err && err.message) || '' }), 'error'); }
     }
     function refreshWidgetChips() {
         const c = st.copilotConfig || {};
         const m = $id('rcCpMode');
-        if (m && c.mode) { m.dataset.mode = c.mode; m.innerHTML = `<i class="fa-solid fa-gauge-high"></i> ${CP_MODE_LBL[c.mode]}`; }
+        if (m && c.mode) { m.dataset.mode = c.mode; m.innerHTML = `<i class="fa-solid fa-gauge-high"></i> ${R.t(CP_MODE_LBL[c.mode])}`; }
         const ip = $id('rcCpImp');
-        if (ip && c.importance) { ip.dataset.imp = c.importance; ip.innerHTML = `<i class="fa-solid fa-flag"></i> ${CP_IMP_LBL[c.importance]}`; }
+        if (ip && c.importance) { ip.dataset.imp = c.importance; ip.innerHTML = `<i class="fa-solid fa-flag"></i> ${R.t(CP_IMP_LBL[c.importance])}`; }
     }
 
     function toggleWidget() {
@@ -1294,7 +1294,7 @@
         const pauseBtn = $id('rcRecPause');
         const paused = st.status === 'paused';
         refreshPill();
-        if (lbl) lbl.textContent = paused ? 'Продовжити' : 'Пауза';
+        if (lbl) lbl.textContent = paused ? R.t('capture.rec.resume') : R.t('capture.rec.pause');
         if (pauseBtn) { const i = pauseBtn.querySelector('i'); if (i) i.className = 'fa-solid ' + (paused ? 'fa-play' : 'fa-pause'); }
         // ко-пілот: миттєво відобразити паузу/відновлення (SSE copilot_status прийде з лагом тіку)
         if (st.copilotSessionId) setCpStatus(paused ? 'paused' : 'analyzing');
@@ -1309,7 +1309,7 @@
             S.status = r.status || (action === 'pause' ? 'paused' : 'recording');
             withS(S, applyPauseUi);
             paintTab(S);
-        } catch (err) { errToast(err, 'Помилка'); }
+        } catch (err) { errToast(err, R.t('capture.rec.error')); }
     }
 
     // ---- SSE (fetch-reader + AbortController, auto-reconnect — T4.8) -------
@@ -1401,11 +1401,11 @@
                 // gets its own branch instead of falling into the generic toast.
                 if (data && data.code === 'sse_broken') return;
                 if (data && data.stream) {
-                    st.streamErr[data.stream] = data.message || 'помилка';
+                    st.streamErr[data.stream] = data.message || R.t('capture.rec.stream.error');
                     markStreamStatus();
                     refreshAudioBanner();
                 }
-                UI.toast((sessions.size > 1 ? tabName(S) + ': ' : '') + 'Помилка запису: ' + ((data && data.message) || 'невідома'), 'error');
+                UI.toast((sessions.size > 1 ? tabName(S) + ': ' : '') + R.t('capture.rec.stream.errorToast', { message: (data && data.message) || R.t('capture.rec.stream.unknown') }), 'error');
             }
     }
 
@@ -1435,7 +1435,7 @@
                 icon.className = 'fa-solid fa-triangle-exclamation';
                 banner.appendChild(icon);
                 banner.appendChild(document.createTextNode(
-                    ' Запис екрана зупинено (' + (data.monitor_label || ('Monitor ' + data.monitor_index)) + ') — аудіо триває'
+                    R.t('capture.rec.video.stopped', { label: data.monitor_label || ('Monitor ' + data.monitor_index) })
                 ));
             }
         }
@@ -1551,7 +1551,7 @@
         for (const s of segs) {
             const text = (s.text || '').trim();
             if (!text) continue;
-            const who = s.speaker === 'self' ? 'Ви' : (s.speaker === 'other' ? 'Інший' : '?');
+            const who = s.speaker === 'self' ? R.t('capture.rec.seg.you') : (s.speaker === 'other' ? R.t('capture.rec.seg.other') : '?');
             const div = U.el('div', { class: 'rc-rec-seg' },
                 `<span class="rc-rec-seg__who rc-mono ${s.speaker === 'self' ? 'is-self' : 'is-other'}">${who}</span><span>${U.esc(text)}</span>`);
             live.appendChild(div);
@@ -1566,32 +1566,32 @@
         if (!el) return;
         if (!st.topics.length) { el.hidden = true; return; }
         el.hidden = false;
-        el.innerHTML = '<span class="rc-cp-strip__lbl rc-mono">ТЕМИ</span>'
+        el.innerHTML = '<span class="rc-cp-strip__lbl rc-mono">' + R.t('capture.rec.topics') + '</span>'
             + st.topics.map(t => {
                 const on = t.index === st.curTopic;
-                return `<span class="rc-cp-topic rc-mono${on ? ' is-active' : ''}">${U.esc(t.label || ('Тема ' + (t.index + 1)))}</span>`;
+                return `<span class="rc-cp-topic rc-mono${on ? ' is-active' : ''}">${U.esc(t.label || R.t('capture.rec.topic', { n: t.index + 1 }))}</span>`;
             }).join('');
     }
     function applyCopilotTopic(data) {
         if (!data || data.topic_index == null) return;
         const idx = data.topic_index;
         const found = st.topics.find(t => t.index === idx);
-        if (!found) st.topics.push({ index: idx, label: data.label || ('Тема ' + (idx + 1)) });
+        if (!found) st.topics.push({ index: idx, label: data.label || R.t('capture.rec.topic', { n: idx + 1 }) });
         else if (data.label) found.label = data.label;
         st.curTopic = idx;
         renderTopicStrip();
         if (data.action === 'return') {
-            UI.toast('↩ Повернулись до теми: ' + (data.label || ('Тема ' + (idx + 1))), 'info');
+            UI.toast(R.t('capture.rec.topicReturn', { label: data.label || R.t('capture.rec.topic', { n: idx + 1 }) }), 'info');
         }
     }
 
     // ---- Co-pilot: індикатор стану (Крок 4) -------------------------------
     const CP_STATE = {
-        analyzing: { txt: 'аналіз…',          cls: 'is-analyzing' },
-        paused:    { txt: 'на паузі',          cls: 'is-paused' },
-        idle:      { txt: 'очікую',            cls: 'is-idle' },
-        degraded:  { txt: 'лок. модель офлайн', cls: 'is-degraded' },
-        quiet:     { txt: 'тихий режим',       cls: 'is-idle' },
+        analyzing: { txt: 'capture.rec.cp.state.analyzing', cls: 'is-analyzing' },
+        paused:    { txt: 'capture.rec.cp.state.paused', cls: 'is-paused' },
+        idle:      { txt: 'capture.rec.cp.state.idle', cls: 'is-idle' },
+        degraded:  { txt: 'capture.rec.cp.state.degraded', cls: 'is-degraded' },
+        quiet:     { txt: 'capture.rec.cp.state.quiet', cls: 'is-idle' },
     };
     function applyCopilotStatus(data) {
         if (!data || !data.state) return;
@@ -1600,8 +1600,8 @@
         // читається як «копілот зламався», а не «він навмисно мовчить».
         if (data.state === 'quiet' && data.reason === 'card_budget') {
             const n = data.suppressed || 0;
-            showCpBanner('Бюджет підказок за дзвінок вичерпано' +
-                (n ? ` — ще ${n} знахідок збережено, дивись у розборі після дзвінка.` : '.'));
+            showCpBanner(R.t('capture.rec.cp.budgetSpent') +
+                (n ? R.t('capture.rec.cp.budgetSuppressed', { count: n }) : '.'));
         }
         if (data.cards_shown != null) updateCardBudget(data.cards_shown);
     }
@@ -1635,9 +1635,9 @@
         el.classList.toggle('is-warn', warn);
         const ic = over ? '<i class="fa-solid fa-ban"></i> ' : (warn ? '<i class="fa-solid fa-triangle-exclamation"></i> ' : '');
         el.innerHTML = ic + U.esc(cost + lim);
-        el.title = over ? 'Бюджет вичерпано — лише локальний аналіз'
-            : warn ? 'Бюджет майже вичерпано'
-            : ('Верифікація Claude · ' + (data.tokens_in || 0) + '→' + (data.tokens_out || 0) + ' ток.');
+        el.title = over ? R.t('capture.rec.cp.budgetOver')
+            : warn ? R.t('capture.rec.cp.budgetWarn')
+            : R.t('capture.rec.cp.verification', { in: data.tokens_in || 0, out: data.tokens_out || 0 });
     }
     function setCpStatus(state, reason) {
         st.cpStatus = state;
@@ -1647,7 +1647,7 @@
         el.dataset.state = state;
         if (reason) el.title = reason;
         const t = $id('rcCpStatusTxt');
-        if (t) t.textContent = s.txt;
+        if (t) t.textContent = R.t(s.txt);
         const cp = $id('rcCp');
         if (cp) cp.classList.toggle('is-paused', state === 'paused');
         // Деградація (Ollama впав) → банер; запис/STT працюють далі (Крок 9).
@@ -1655,20 +1655,20 @@
         if (banner) {
             if (state === 'degraded') {
                 banner.hidden = false;
-                banner.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Локальна модель недоступна — ко-пілот призупинено. Запис триває.`;
+                banner.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> ${R.t('capture.rec.cp.degraded')}`;
             } else { banner.hidden = true; banner.innerHTML = ''; }
         }
     }
 
     // ---- Co-pilot: картки-інсайти з діями (Крок 4) ------------------------
     const CP_KIND = {
-        contradiction: { icon: 'fa-triangle-exclamation', lbl: 'протиріччя' },
-        question:      { icon: 'fa-circle-question',       lbl: 'питання' },
-        clarification: { icon: 'fa-lightbulb',             lbl: 'уточнення' },
-        fact:          { icon: 'fa-thumbtack',             lbl: 'факт із архіву' },
+        contradiction: { icon: 'fa-triangle-exclamation', lbl: 'capture.rec.cp.kind.contradiction' },
+        question:      { icon: 'fa-circle-question',       lbl: 'capture.rec.cp.kind.question' },
+        clarification: { icon: 'fa-lightbulb',             lbl: 'capture.rec.cp.kind.clarification' },
+        fact:          { icon: 'fa-thumbtack',             lbl: 'capture.rec.cp.kind.fact' },
         // Історія 27: системне попередження «скоуп неоднозначний» — своя картка
         // (не інсайт диспетчера), тому без кнопок закріпити/оцінити/копнути глибше.
-        scope_notice:  { icon: 'fa-circle-info',            lbl: 'скоуп' },
+        scope_notice:  { icon: 'fa-circle-info',            lbl: 'capture.rec.cp.kind.scope_notice' },
     };
     function applyCopilotInsight(data) {
         if (!data || !data.text) return;
@@ -1736,13 +1736,13 @@
         const verified = ins.source === 'api';
         const refuted = ins.verdict === 'refuted';
         const badge = verified
-            ? `<span class="rc-cp-card__badge is-verified" title="перевірено Claude"><i class="fa-solid fa-circle-check"></i> ${refuted ? 'спростовано' : 'перевірено'}${pct ? ' · ' + pct : ''}</span>`
-            : `<span class="rc-cp-card__badge is-local" title="локальна модель, не перевірено"><i class="fa-solid fa-microchip"></i> локально${pct ? ' · ' + pct : ''}</span>`;
+            ? `<span class="rc-cp-card__badge is-verified" title="${R.t('capture.rec.cp.verifiedTitle')}"><i class="fa-solid fa-circle-check"></i> ${refuted ? R.t('capture.rec.cp.refuted') : R.t('capture.rec.cp.verified')}${pct ? ' · ' + pct : ''}</span>`
+            : `<span class="rc-cp-card__badge is-local" title="${R.t('capture.rec.cp.localTitle')}"><i class="fa-solid fa-microchip"></i> ${R.t('capture.rec.cp.localBadge')}${pct ? ' · ' + pct : ''}</span>`;
         const time = (ins.ts_offset_sec != null) ? fmt(Math.round(ins.ts_offset_sec)) : '';
         const cnt = (ins.count > 1) ? ` <span class="rc-cp-card__cnt rc-mono">×${ins.count}</span>` : '';
         const ev = (ins.evidence || []).map(e => {
             const name = e.source_name || ('#' + e.transcription_id);
-            const slug = U.slug(e.transcription_id, e.source_name || 'Джерело');
+            const slug = U.slug(e.transcription_id, e.source_name || R.t('capture.rec.cp.source'));
             return `<a class="rc-cp-ev rc-mono" href="/transcript/${slug}" title="${U.esc((e.meeting_date || '') + ' · ' + name)}">[${U.esc(name)}]</a>`;
         }).join(' ');
         const act = (a, ic, title, on) =>
@@ -1751,20 +1751,20 @@
         // оцінити/копнути глибше для нього безглузді, лишається тільки «прибрати».
         const isNotice = ins.kind === 'scope_notice';
         const actions = isNotice
-            ? `<span class="rc-yt__spacer"></span>${act('dismiss', 'fa-xmark', 'Прибрати', false)}`
-            : `${act('pin', 'fa-thumbtack', ins.pinned ? 'Відкріпити' : 'Закріпити', ins.pinned)}
-                ${act('thumbs_up', 'fa-thumbs-up', 'Корисно', ins.feedback === 'up')}
-                ${act('thumbs_down', 'fa-thumbs-down', 'Не корисно', ins.feedback === 'down')}
-                ${act('escalate', 'fa-magnifying-glass-plus', 'Копнути глибше (перевірка Claude)', ins.escalated)}
+            ? `<span class="rc-yt__spacer"></span>${act('dismiss', 'fa-xmark', R.t('capture.rec.cp.act.dismiss'), false)}`
+            : `${act('pin', 'fa-thumbtack', ins.pinned ? R.t('capture.rec.cp.act.unpin') : R.t('capture.rec.cp.act.pin'), ins.pinned)}
+                ${act('thumbs_up', 'fa-thumbs-up', R.t('capture.rec.cp.act.up'), ins.feedback === 'up')}
+                ${act('thumbs_down', 'fa-thumbs-down', R.t('capture.rec.cp.act.down'), ins.feedback === 'down')}
+                ${act('escalate', 'fa-magnifying-glass-plus', R.t('capture.rec.cp.act.escalate'), ins.escalated)}
                 <span class="rc-yt__spacer"></span>
-                ${act('dismiss', 'fa-xmark', 'Відхилити', false)}`;
+                ${act('dismiss', 'fa-xmark', R.t('capture.rec.cp.act.reject'), false)}`;
         const paths = (isNotice && (ins.candidates || []).length)
             ? `<ul class="rc-cp-card__paths">${ins.candidates.map(p => `<li>${U.esc(p)}</li>`).join('')}</ul>`
             : '';
         return `<div class="rc-cp-card is-${ins.kind}${ins.pinned ? ' is-pinned' : ''}${refuted ? ' is-refuted' : ''}" data-id="${ins.id != null ? ins.id : ''}" data-key="${U.esc(ins.key)}">
             <div class="rc-cp-card__head">
                 <i class="fa-solid ${k.icon} rc-cp-card__kico"></i>
-                <span class="rc-cp-card__kind rc-mono">${k.lbl}${cnt}</span>
+                <span class="rc-cp-card__kind rc-mono">${R.t(k.lbl)}${cnt}</span>
                 ${badge}
                 ${time ? `<span class="rc-cp-card__time rc-mono">${time}</span>` : ''}
             </div>
@@ -1791,7 +1791,7 @@
         if (a === 'thumbs_down') { ins.feedback = ins.feedback === 'down' ? null : 'down'; if (ins.feedback) cpAction(ins, 'thumbs_down'); renderInsights(); return; }
         if (a === 'escalate') {
             ins.escalated = true; cpAction(ins, 'escalate');
-            UI.toast('Надіслано на глибшу перевірку (Claude — у наступному кроці)', 'info');
+            UI.toast(R.t('capture.rec.cp.escalated'), 'info');
             renderInsights();
         }
     }
@@ -1835,7 +1835,7 @@
             await R.api.post('/api/recording/' + sid + '/stop', {});
             S.status = 'stopping';
         } catch (err) {
-            errToast(err, 'Помилка зупинки');
+            errToast(err, R.t('capture.rec.stopFailed'));
             // запис живий далі — повертаємо йому читач і тік
             if (ctx.isCurrent() && sessions.get(sid) === S && errCode(err) !== 'NOT_FOUND') { connectSSE(ctx, S); startTick(ctx, S); }
             return;
@@ -1863,10 +1863,10 @@
         if (!rows.length) return '';
         return rows.map(o => `
             <div class="rc-recwarn rc-recwarn--ask" data-restore="${U.esc(o.sessionId)}">
-                <span><i class="fa-solid fa-volume-high"></i> Повернути в запис «${U.esc(tabName(o))}» весь системний звук? <span class="rc-mono rc-recsrc__muted">зараз: ${U.esc(SRC_LBL[o.systemSource.mode] || o.systemSource.mode)}${(o.systemSource.apps || []).length ? ' — ' + U.esc(o.systemSource.apps.join(', ')) : ''}</span></span>
+                <span><i class="fa-solid fa-volume-high"></i> ${U.esc(R.t('capture.rec.restore.ask', { name: tabName(o) }))} <span class="rc-mono rc-recsrc__muted">${U.esc(R.t('capture.rec.restore.now', { mode: SRC_LBL[o.systemSource.mode] ? R.t(SRC_LBL[o.systemSource.mode]) : o.systemSource.mode }))}${(o.systemSource.apps || []).length ? ' — ' + U.esc(o.systemSource.apps.join(', ')) : ''}</span></span>
                 <span class="rc-yt__spacer"></span>
-                <button type="button" class="rc-btn rc-btn--primary rc-btn--sm" data-restore-yes>Так</button>
-                <button type="button" class="rc-btn rc-btn--sm" data-restore-no>Ні</button>
+                <button type="button" class="rc-btn rc-btn--primary rc-btn--sm" data-restore-yes>${R.t('capture.rec.yes')}</button>
+                <button type="button" class="rc-btn rc-btn--sm" data-restore-no>${R.t('capture.rec.no')}</button>
             </div>`).join('');
     }
     function wireRestore(ctx, body) {
@@ -1901,35 +1901,35 @@
         const body = ctx.mount.querySelector('#rcRecBody');
         body.innerHTML = `
             <div class="rc-rec-stop">
-                <div class="rc-rec-summary rc-mono"><i class="fa-solid fa-circle-check" style="color:var(--rc-ok)"></i> Запис зупинено · ${fmt(st.elapsedSec)} · ${segs} ${segs === 1 ? 'сегмент' : 'сегментів'}</div>
+                <div class="rc-rec-summary rc-mono"><i class="fa-solid fa-circle-check" style="color:var(--rc-ok)"></i> ${R.t('capture.rec.stopped')} · ${fmt(st.elapsedSec)} · ${R.t('capture.rec.segments', { count: segs })}</div>
                 ${restoreHTML()}
                 <div class="rc-field">
-                    <label class="rc-field__label" for="rcRecName">Назва запису</label>
-                    <input class="rc-input" id="rcRecName" placeholder="${U.esc(autoName || 'Запис…')}" autocomplete="off" maxlength="200">
+                    <label class="rc-field__label" for="rcRecName">${R.t('capture.rec.nameLabel')}</label>
+                    <input class="rc-input" id="rcRecName" placeholder="${U.esc(autoName || R.t('capture.rec.namePh'))}" autocomplete="off" maxlength="200">
                 </div>
                 <div class="rc-field">
-                    <label class="rc-field__label" for="rcRecDesc">Опис (необовʼязково)</label>
-                    <textarea class="rc-textarea" id="rcRecDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
+                    <label class="rc-field__label" for="rcRecDesc">${R.t('capture.common.descOpt')}</label>
+                    <textarea class="rc-textarea" id="rcRecDesc" maxlength="4000" placeholder="${R.t('capture.common.descPh')}"></textarea>
                 </div>
-                <label class="rc-check" style="margin-top:8px"><input type="checkbox" id="rcRecWantTr" checked> <span>Одразу транскрибувати (інакше — лише зберегти аудіо)</span></label>
+                <label class="rc-check" style="margin-top:8px"><input type="checkbox" id="rcRecWantTr" checked> <span>${R.t('capture.rec.wantTr')}</span></label>
                 <div class="rc-rec-tropts" id="rcRecTrOpts">
                     <div class="rc-yt__settings">
-                        <div class="rc-field"><label class="rc-field__label" for="rcRecModel">Модель</label><select class="rc-select" id="rcRecModel">${modelOpts()}</select></div>
-                        <div class="rc-field"><label class="rc-field__label" for="rcRecTrLang">Мова</label><select class="rc-select" id="rcRecTrLang">${langOpts()}</select></div>
-                        <div class="rc-field"><label class="rc-field__label" for="rcRecCat">Напрямок</label><select class="rc-select rc-catsel" id="rcRecCat" data-cat-first="none">${catOpts()}</select></div>
+                        <div class="rc-field"><label class="rc-field__label" for="rcRecModel">${R.t('capture.rec.model')}</label><select class="rc-select" id="rcRecModel">${modelOpts()}</select></div>
+                        <div class="rc-field"><label class="rc-field__label" for="rcRecTrLang">${R.t('capture.common.language')}</label><select class="rc-select" id="rcRecTrLang">${langOpts()}</select></div>
+                        <div class="rc-field"><label class="rc-field__label" for="rcRecCat">${R.t('capture.common.category')}</label><select class="rc-select rc-catsel" id="rcRecCat" data-cat-first="none">${catOpts()}</select></div>
                     </div>
                 </div>
                 <div class="rc-yt__actions" style="margin-top:20px">
-                    <button class="rc-btn" id="rcRecCancel"><i class="fa-solid fa-trash"></i> Скасувати запис</button>
+                    <button class="rc-btn" id="rcRecCancel"><i class="fa-solid fa-trash"></i> ${R.t('capture.rec.cancelRecording')}</button>
                     <div class="rc-yt__spacer"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcRecSave"><i class="fa-solid fa-floppy-disk"></i> <span id="rcRecSaveLbl">Зберегти та транскрибувати</span></button>
+                    <button class="rc-btn rc-btn--primary" id="rcRecSave"><i class="fa-solid fa-floppy-disk"></i> <span id="rcRecSaveLbl">${R.t('capture.rec.saveTr')}</span></button>
                 </div>
                 <div id="rcRecSaveRun"></div>
             </div>`;
         const want = body.querySelector('#rcRecWantTr');
         const opts = body.querySelector('#rcRecTrOpts');
         const lbl = body.querySelector('#rcRecSaveLbl');
-        const syncWant = () => { opts.hidden = !want.checked; lbl.textContent = want.checked ? 'Зберегти та транскрибувати' : 'Тільки зберегти'; };
+        const syncWant = () => { opts.hidden = !want.checked; lbl.textContent = want.checked ? R.t('capture.rec.saveTr') : R.t('capture.rec.saveOnly'); };
         want.addEventListener('change', syncWant); syncWant();
         bindCatPath(body.querySelector('#rcRecCat'));
         wireRestore(ctx, body);
@@ -1951,7 +1951,7 @@
         const btn = ctx.mount.querySelector('#rcRecSave');
         if (btn) btn.disabled = true;
         const run = ctx.mount.querySelector('#rcRecSaveRun');
-        if (run) run.innerHTML = `<div class="rc-run__hint rc-mono" style="margin-top:12px"><i class="fa-solid fa-spinner fa-spin"></i> Зводжу та зберігаю запис… (для довгих записів — до хвилини)</div>`;
+        if (run) run.innerHTML = `<div class="rc-run__hint rc-mono" style="margin-top:12px"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('capture.rec.saving')}</div>`;
         applyPendingRestore(ctx, S);
 
         const savePayload = { name: name.trim() };
@@ -1963,18 +1963,18 @@
             // Finalize довший за дедлайн (504) → запис усе одно авто-реєструється
             // на сервері. Не блокуємо — ведемо в Аудіотеку, де він зʼявиться.
             if (err && err.status === 504) {
-                UI.toast('Запис зводиться у фоні — зʼявиться в Аудіотеці за хвилину', 'info');
+                UI.toast(R.t('capture.rec.savingBg'), 'info');
                 dropSession(S);
                 if (ctx.isCurrent()) afterDrop(ctx, () => { reset(); R.router.navigate('/audio'); });
                 return;
             }
-            UI.toast('Помилка: ' + (err && err.message), 'error');
+            UI.toast(R.t('capture.rec.errorWith', { error: (err && err.message) || '' }), 'error');
             if (btn) btn.disabled = false;
             if (run) run.innerHTML = '';
             return;
         }
 
-        UI.toast('Запис «' + (sb.name || 'без назви') + '» збережено в Аудіотеці', 'success');
+        UI.toast(R.t('capture.rec.savedAs', { name: sb.name || R.t('capture.rec.untitled') }), 'success');
 
         // Транскрипція — у ФОНІ (неблокуюча). Йдемо library-шляхом по download_id,
         // щоб серверний active-tracker (/api/transcribe/active) позначив картку
@@ -1989,7 +1989,7 @@
             fd.append('language', lang);
             if (cat) fd.append('category_id', cat);
             R.api.transcribe(fd).catch(() => { /* фоново; статус видно в Аудіотеці */ });
-            UI.toast('Транскрибую у фоні — статус видно в Аудіотеці', 'info');
+            UI.toast(R.t('capture.rec.transcribingBg'), 'info');
         }
 
         dropSession(S);
@@ -2001,13 +2001,13 @@
     async function discard(ctx) {
         const S = st;
         if (!S || !S.sessionId) { renderSetup(ctx); return; }
-        const ok = await UI.confirmModal({ title: 'Скасувати запис?', message: 'Дані буде стерто.', confirmLabel: 'Скасувати запис' });
+        const ok = await UI.confirmModal({ title: R.t('capture.rec.discardTitle'), message: R.t('capture.rec.discardMsg'), confirmLabel: R.t('capture.rec.cancelRecording') });
         if (!ok) return;
         const sid = S.sessionId;
         haltS(S);
         if (S.stage === 'stopname') applyPendingRestore(ctx, S);
         try { await R.api.post('/api/recording/' + sid + '/discard'); } catch (_) {}
-        UI.toast('Запис скасовано', 'info');
+        UI.toast(R.t('capture.rec.discarded'), 'info');
         dropSession(S);
         if (!ctx.isCurrent()) return;
         afterDrop(ctx, () => select(ctx, null));
@@ -2023,15 +2023,15 @@
     function fmtBytes(b) {
         if (b == null) return '';
         const mb = b / MIB;
-        if (mb < 1024) return mb.toFixed(1) + ' МБ';
-        return (mb / 1024).toFixed(2) + ' ГБ';
+        if (mb < 1024) return R.t('capture.rec.unit.mb', { n: mb.toFixed(1) });
+        return R.t('capture.rec.unit.gb', { n: (mb / 1024).toFixed(2) });
     }
     function fmtDur(sec) {
         sec = Math.max(0, Math.floor(sec));
         const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
-        if (h > 0) return h + ' год ' + m + ' хв';
-        if (m > 0) return m + ' хв';
-        return '< 1 хв';
+        if (h > 0) return R.t('capture.rec.unit.hm', { h, m });
+        if (m > 0) return R.t('capture.rec.unit.m', { m });
+        return R.t('capture.rec.unit.lt1m');
     }
     function recTotalBytes() {
         let total = 0;
@@ -2047,9 +2047,9 @@
         const rateBps = st.elapsedSec > 1 ? total / st.elapsedSec : 0;
         const parts = [];
         parts.push('<span><i class="fa-solid fa-database"></i> ' + fmtBytes(total) + '</span>');
-        if (rateBps > 0) parts.push('<span>' + (rateBps * 60 / MIB).toFixed(1) + ' МБ/хв</span>');
+        if (rateBps > 0) parts.push('<span>' + R.t('capture.rec.unit.mbPerMin', { n: (rateBps * 60 / MIB).toFixed(1) }) + '</span>');
         if (st.diskFree != null) {
-            let txt = '<i class="fa-solid fa-hard-drive"></i> ' + fmtBytes(st.diskFree) + ' вільно';
+            let txt = '<i class="fa-solid fa-hard-drive"></i> ' + R.t('capture.rec.diskFree', { size: fmtBytes(st.diskFree) });
             let warn = st.diskFree < 2 * GIB;
             if (rateBps > 0) {
                 const left = st.diskFree / rateBps;        // секунд до заповнення

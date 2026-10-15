@@ -14,10 +14,10 @@
     const EXT = ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm', 'ogg', 'flac', 'avi', 'mov', 'mkv', 'wmv'];
     const VIDEO_EXT = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'webm', 'mpeg'];
     const LANGS = [
-        { v: 'uk', l: 'Українська' },
-        { v: 'en', l: 'English' },
-        { v: 'ru', l: 'Русский' },
-        { v: 'auto', l: 'Авто-визначення' },
+        { v: 'uk', l: 'capture.lang.uk' },
+        { v: 'en', l: 'capture.lang.en' },
+        { v: 'ru', l: 'capture.lang.ru' },
+        { v: 'auto', l: 'capture.lang.auto' },
     ];
     const DEFAULT_MODEL = 'large-v3-turbo';
 
@@ -38,10 +38,10 @@
 
     function bgNoticeHTML(label) {
         return `<div class="rc-note">
-            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> Транскрибую «${U.esc(label)}» у фоні</div>
-            <p>Можна закрити цю вкладку або перейти в інший розділ — запис з'явиться в Історії, коли транскрипція завершиться.</p>
+            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> ${U.esc(R.t('capture.common.bgTitle', { label }))}</div>
+            <p>${R.t('capture.common.bgText')}</p>
             <div class="rc-note__actions">
-                <button class="rc-btn rc-btn--primary" id="rcUpGoHistory">Перейти в Історію</button>
+                <button class="rc-btn rc-btn--primary" id="rcUpGoHistory">${R.t('capture.common.goHistory')}</button>
             </div>
         </div>`;
     }
@@ -59,14 +59,14 @@
         st = { file: null, opts: null, busy: false };
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-solid fa-arrow-up-from-bracket"></i> Додати у архів · Файл</div>
-                <h1 class="rc-pagehead__title">Завантажити файл</h1>
-                <p class="rc-pagehead__lede">Аудіо або відео — Recall розпізнає мову й збереже у Бібліотеку. З відео аудіо витягується автоматично. Готовий запис відкриється як сторінка в Історії.</p>
+                <div class="rc-eyebrow"><i class="fa-solid fa-arrow-up-from-bracket"></i> ${R.t('capture.up.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${R.t('capture.up.title')}</h1>
+                <p class="rc-pagehead__lede">${R.t('capture.up.lede')}</p>
             </div>
-            <div class="rc-drop" id="rcDrop" tabindex="0" role="button" aria-label="Обрати файл або перетягнути сюди">
+            <div class="rc-drop" id="rcDrop" tabindex="0" role="button" aria-label="${R.t('capture.up.dropAria')}">
                 <input type="file" id="rcFile" accept="${EXT.map(e => '.' + e).join(',')},audio/*,video/*" hidden>
                 <div class="rc-drop__ico"><i class="fa-solid fa-cloud-arrow-up"></i></div>
-                <div class="rc-drop__title">Перетягніть файл сюди або натисніть, щоб обрати</div>
+                <div class="rc-drop__title">${R.t('capture.up.dropTitle')}</div>
                 <div class="rc-drop__hint rc-mono">${EXT.join(' · ')}</div>
             </div>
             <div id="rcUpBody"></div>`;
@@ -100,7 +100,7 @@
 
     // ---- a file was chosen: show card + options ---------------------------
     async function onFile(ctx, file) {
-        if (!extOk(file.name)) { UI.toast('Підтримуються лише аудіо/відео файли', 'error'); return; }
+        if (!extOk(file.name)) { UI.toast(R.t('capture.up.badType'), 'error'); return; }
         st.file = file; st.busy = false;
         await renderForm(ctx);
     }
@@ -117,7 +117,7 @@
             const hint = [inf.size, inf.speed].filter(Boolean).join(', ');
             return `<option value="${U.esc(m.name)}"${m.name === DEFAULT_MODEL ? ' selected' : ''}>${U.esc(m.name)}${hint ? ' — ' + U.esc(hint) : ''}</option>`;
         }).join('');
-        const langOpts = LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${l.l}</option>`).join('');
+        const langOpts = LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${R.t(l.l)}</option>`).join('');
         const catOpts = UI.catOptions('', { first: 'none' });
 
         const vid = isVideo(st.file.name);
@@ -127,39 +127,39 @@
                     <div class="rc-up__fico"><i class="fa-solid ${vid ? 'fa-file-video' : 'fa-file-audio'}"></i></div>
                     <div class="rc-up__fmeta">
                         <div class="rc-up__fname">${U.esc(st.file.name)}</div>
-                        <div class="rc-up__fsub rc-mono">${U.fmtBytes(st.file.size)}${vid ? ' · відео — аудіо витягнеться автоматично' : ''}</div>
+                        <div class="rc-up__fsub rc-mono">${U.fmtBytes(st.file.size)}${vid ? ' · ' + R.t('capture.up.videoNote') : ''}</div>
                     </div>
-                    <button class="rc-iconbtn" id="rcUpClear" title="Прибрати"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="rc-iconbtn" id="rcUpClear" title="${R.t('capture.up.remove')}"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcUpTitle">Назва (необовʼязково)</label>
+                        <label class="rc-field__label" for="rcUpTitle">${R.t('capture.common.titleOpt')}</label>
                         <input class="rc-input" id="rcUpTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(st.file.name)}">
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcUpDesc">Опис (необовʼязково)</label>
-                        <textarea class="rc-textarea" id="rcUpDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
+                        <label class="rc-field__label" for="rcUpDesc">${R.t('capture.common.descOpt')}</label>
+                        <textarea class="rc-textarea" id="rcUpDesc" maxlength="4000" placeholder="${R.t('capture.common.descPh')}"></textarea>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcUpModel">Модель розпізнавання</label>
+                        <label class="rc-field__label" for="rcUpModel">${R.t('capture.common.model')}</label>
                         <select class="rc-select" id="rcUpModel">${modelOpts}</select>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcUpLang">Мова</label>
+                        <label class="rc-field__label" for="rcUpLang">${R.t('capture.common.language')}</label>
                         <select class="rc-select" id="rcUpLang">${langOpts}</select>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcUpCat">Напрямок</label>
+                        <label class="rc-field__label" for="rcUpCat">${R.t('capture.common.category')}</label>
                         <select class="rc-select rc-catsel" id="rcUpCat" data-cat-first="none">${catOpts}</select>
                     </div>
                     <label class="rc-check" for="rcUpDiar">
-                        <input type="checkbox" id="rcUpDiar"> <span>Розрізняти спікерів (діаризація)</span>
+                        <input type="checkbox" id="rcUpDiar"> <span>${R.t('capture.common.diarize')}</span>
                     </label>
                 </div>
                 <div class="rc-yt__actions">
-                    <button class="rc-btn" id="rcUpBack"><i class="fa-solid fa-arrow-left"></i> Інший файл</button>
+                    <button class="rc-btn" id="rcUpBack"><i class="fa-solid fa-arrow-left"></i> ${R.t('capture.up.another')}</button>
                     <div class="rc-yt__spacer"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcUpStart"><i class="fa-solid fa-wand-magic-sparkles"></i> Транскрибувати та зберегти</button>
+                    <button class="rc-btn rc-btn--primary" id="rcUpStart"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.common.transcribeSave')}</button>
                 </div>
             </div>
             <div id="rcUpRun"></div>`;
@@ -202,7 +202,7 @@
         const label = st.file.name;
         const run = ctx.mount.querySelector('#rcUpRun');
         if (run) run.innerHTML = `<div class="rc-run">
-            <div class="rc-run__head"><span class="rc-run__stage" id="rcUpStage">Завантаження файлу…</span><span class="rc-run__pct rc-mono" id="rcUpPct">0%</span></div>
+            <div class="rc-run__head"><span class="rc-run__stage" id="rcUpStage">${R.t('capture.up.uploading')}</span><span class="rc-run__pct rc-mono" id="rcUpPct">0%</span></div>
             <div class="rc-progress"><div class="rc-progress__fill" id="rcUpFill"></div></div>
             <div class="rc-run__hint rc-mono" id="rcUpHint">${U.esc(st.file.name)} · ${U.fmtBytes(st.file.size)}</div>
         </div>`;
@@ -225,11 +225,11 @@
                 // байти дійшли — далі безпечно навіть без цієї вкладки
                 const run2 = ctx.mount.querySelector('#rcUpRun');
                 if (run2) { run2.innerHTML = bgNoticeHTML(label); wireBgNotice(run2); }
-                UI.toast('Файл завантажено — транскрибую «' + label + '» у фоні. Можна закрити вкладку.', 'info');
+                UI.toast(R.t('capture.up.uploaded', { label }), 'info');
             }
         ).then((result) => {
             bgJob = null;
-            UI.toast('Готово — «' + label + '» збережено у Бібліотеці', 'success');
+            UI.toast(R.t('capture.common.done', { label }), 'success');
             if (!ctx.isCurrent()) return;     // saved server-side regardless
             st.busy = false;
             const tid = result && result.transcription_id;
@@ -238,7 +238,7 @@
             else R.router.navigate('/library');
         }).catch((err) => {
             bgJob = null;
-            UI.toast('Транскрипція «' + label + '» не вдалась: ' + ((err && err.message) || 'помилка'), 'error');
+            UI.toast(R.t('capture.common.failed', { label, error: (err && err.message) || R.t('capture.common.errorWord') }), 'error');
             if (!ctx.isCurrent()) return;
             fail(ctx, err && err.message);
         });
@@ -260,8 +260,8 @@
         setFormDisabled(ctx, false);
         const run = ctx.mount.querySelector('#rcUpRun');
         if (run) {
-            run.innerHTML = UI.error(msg || 'Помилка')
-                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcUpRetry"><i class="fa-solid fa-rotate-right"></i> Спробувати ще раз</button></div>`;
+            run.innerHTML = UI.error(msg || R.t('capture.common.error'))
+                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcUpRetry"><i class="fa-solid fa-rotate-right"></i> ${R.t('capture.common.retry')}</button></div>`;
             const retry = run.querySelector('#rcUpRetry');
             if (retry) retry.addEventListener('click', () => start(ctx));
         }

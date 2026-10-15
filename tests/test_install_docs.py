@@ -16,7 +16,7 @@ ENV_EXAMPLE = (ROOT / '.env.example').read_text(encoding='utf-8')
 
 
 def _quickstart() -> str:
-    start = README.index('## 🚀 Швидкий старт')
+    start = README.index('## 🚀 Quick start')
     end = README.index('\n## ', start + 1)
     return README[start:end]
 
@@ -24,7 +24,7 @@ def _quickstart() -> str:
 def _install_block() -> list[str]:
     """Команди першого cmd-блоку розділу «1. Залежності», без REM і порожніх рядків."""
     qs = _quickstart()
-    sec = qs[qs.index('### 1. Залежності'):]
+    sec = qs[qs.index('### 1. Dependencies'):]
     block = re.search(r'```cmd\n(.*?)```', sec, re.S).group(1)
     return [l.strip() for l in block.splitlines() if l.strip() and not l.strip().upper().startswith('REM')]
 

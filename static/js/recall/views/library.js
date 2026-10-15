@@ -4,14 +4,15 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
     const PER_PAGE = 20;
 
     const SOURCES = [
-        { k: '', label: 'Усі' },
+        { k: '', label: T('library.lib.src.all') },
         { k: 'youtube', label: 'YouTube' },
-        { k: 'recording', label: 'Запис' },
-        { k: 'document', label: 'Документи' },
-        { k: 'file', label: 'Файли' },
+        { k: 'recording', label: T('library.lib.src.recording') },
+        { k: 'document', label: T('library.lib.src.document') },
+        { k: 'file', label: T('library.lib.src.file') },
         { k: 'telegram', label: 'Telegram' },
     ];
 
@@ -20,19 +21,18 @@
     // по тексту (відправник, назва чату, автор каналу).
     const FACETS = {
         telegram: [
-            { key: 'tg_sender', icon: 'fa-user', ph: 'Відправник…' },
-            { key: 'tg_chat', icon: 'fa-comments', ph: 'Група / канал…' },
+            { key: 'tg_sender', icon: 'fa-user', ph: T('library.lib.facet.sender') },
+            { key: 'tg_chat', icon: 'fa-comments', ph: T('library.lib.facet.chat') },
         ],
         youtube: [
-            { key: 'yt_author', icon: 'fa-youtube fa-brands', ph: 'Автор / канал…' },
+            { key: 'yt_author', icon: 'fa-youtube fa-brands', ph: T('library.lib.facet.author') },
         ],
     };
     const FACET_KEYS = ['tg_sender', 'tg_chat', 'yt_author'];
 
     // C9: напрямок/проєкт/тег — три різні осі, і підказка пояснює, як вони
     // складаються (напрямок тягне свої проєкти, тег ріже впоперек усіх напрямків).
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
-        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+    const FILTER_HINT = T('library.filterHint');
 
     let listEl = null, cats = null, state = null;
     let selecting = false, selected = new Set(), curRows = [], lastData = null;
@@ -47,12 +47,12 @@
         const bits = [];
         if (st.category_id && UI.catLabel) {
             const p = UI.catLabel(Number(st.category_id)).text;
-            if (p) bits.push('у «' + p + '»');
+            if (p) bits.push(T('library.lib.explain.in', { path: p }));
         }
-        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
-        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (st.tags.length) bits.push(T('library.lib.explain.tags', { tags: st.tags.join(', ') }));
+        if (st.since || st.until) bits.push(T('library.lib.explain.period', { from: st.since || '…', to: st.until || '…' }));
         if (!bits.length) return null;
-        return 'Нічого не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період фільтра — і спробуйте ширше.';
+        return T('library.lib.explain.none', { bits: bits.join(' ') });
     }
 
     async function render(ctx) {
@@ -79,27 +79,27 @@
             <div class="rc-pagehead">
                 <div class="rc-pagehead__row">
                     <div>
-                        <div class="rc-eyebrow">Архів</div>
-                        <h1 class="rc-pagehead__title">Бібліотека</h1>
+                        <div class="rc-eyebrow">${T('library.lib.eyebrow')}</div>
+                        <h1 class="rc-pagehead__title">${T('library.lib.title')}</h1>
                     </div>
                 </div>
-                <p class="rc-pagehead__lede">Усі записи архіву — дзвінки, відео, документи, Telegram. Натисніть запис, щоб відкрити повну сторінку з провенансом і звʼязками.</p>
+                <p class="rc-pagehead__lede">${T('library.lib.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
-                    <input id="rcLibSearch" type="search" placeholder="Пошук по тексту записів…" value="${U.esc(state.search)}">
+                    <input id="rcLibSearch" type="search" placeholder="${U.esc(T('library.lib.searchPh'))}" value="${U.esc(state.search)}">
                 </div>
                 <select class="rc-select rc-catsel" id="rcLibCat" data-cat-first="all">${catOpts}</select>
-                <button class="rc-btn" id="rcLibSaveSearch" title="Зберегти поточний фільтр як пошук"><i class="fa-regular fa-bookmark"></i></button>
-                <button class="rc-btn" id="rcLibSelect"><i class="fa-solid fa-list-check"></i> Вибрати</button>
+                <button class="rc-btn" id="rcLibSaveSearch" title="${U.esc(T('library.lib.saveSearchTitle'))}"><i class="fa-regular fa-bookmark"></i></button>
+                <button class="rc-btn" id="rcLibSelect"><i class="fa-solid fa-list-check"></i> ${T('library.lib.select')}</button>
             </div>
             <div class="rc-filterbar" id="rcLibSources"></div>
             <div class="rc-facets" id="rcLibFacets" hidden></div>
             <div class="rc-toolbar" id="rcLibTagPeriod">
                 <div id="rcLibTagsWrap">${tagSel}</div>
-                <input type="date" class="rc-input rc-select--sm" id="rcLibSince" value="${U.esc(state.since)}" title="Записи з дати">
-                <input type="date" class="rc-input rc-select--sm" id="rcLibUntil" value="${U.esc(state.until)}" title="Записи по дату">
+                <input type="date" class="rc-input rc-select--sm" id="rcLibSince" value="${U.esc(state.since)}" title="${U.esc(T('library.lib.sinceTitle'))}">
+                <input type="date" class="rc-input rc-select--sm" id="rcLibUntil" value="${U.esc(state.until)}" title="${U.esc(T('library.lib.untilTitle'))}">
             </div>
             <div id="rcLibHint"></div>
             <div class="rc-savedrow" id="rcLibSaved"></div>
@@ -132,7 +132,7 @@
         catSel.addEventListener('change', () => { state.category_id = catSel.value; state.page = 1; selected.clear(); sync(); load(ctx); });
 
         const tagSelEl = ctx.mount.querySelector('#rcLibTagsWrap select');
-        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', T('library.lib.tagsAria')); tagSelEl.title = T('library.lib.tagsTitle'); }
         if (tagSelEl) tagSelEl.addEventListener('change', () => {
             state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
             state.page = 1; selected.clear(); sync(); load(ctx);
@@ -206,10 +206,10 @@
         catch (_) { box.innerHTML = ''; return; }
         if (!ctx.isCurrent()) return;
         if (!searches.length) { box.innerHTML = ''; return; }
-        box.innerHTML = `<span class="rc-savedrow__lbl rc-mono">Збережені:</span>` + searches.map(s =>
-            `<span class="rc-saved" data-id="${s.id}" title="${U.esc(queryDesc(s.query) || 'усі записи')}">
+        box.innerHTML = `<span class="rc-savedrow__lbl rc-mono">${T('library.lib.savedLbl')}</span>` + searches.map(s =>
+            `<span class="rc-saved" data-id="${s.id}" title="${U.esc(queryDesc(s.query) || T('library.lib.allRecords'))}">
                 <button class="rc-saved__go" data-go="${s.id}">${U.esc(s.name)}</button>
-                <button class="rc-saved__del" data-del="${s.id}" title="Видалити">&times;</button>
+                <button class="rc-saved__del" data-del="${s.id}" title="${U.esc(T('library.lib.delete'))}">&times;</button>
             </span>`).join('');
         box._searches = searches;
         box.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => applySaved(ctx, searches.find(x => x.id === Number(b.dataset.go)))));
@@ -245,17 +245,17 @@
     }
     async function doSaveSearch(ctx) {
         const q = curQuery();
-        if (!Object.keys(q).length) { UI.toast('Спершу задайте пошук або фільтр', 'info'); return; }
+        if (!Object.keys(q).length) { UI.toast(T('library.lib.saveFirst'), 'info'); return; }
         const name = await UI.promptModal({
-            title: 'Зберегти пошук',
-            label: 'Назва збереженого пошуку',
+            title: T('library.lib.saveModalTitle'),
+            label: T('library.lib.saveModalLabel'),
             defaultValue: queryDesc(q),
-            confirmLabel: 'Зберегти',
+            confirmLabel: T('library.lib.save'),
             required: true,
         });
         if (!name) return;
-        try { await R.api.savedSearchCreate(name, q); UI.toast('Пошук збережено', 'success'); loadSaved(ctx); }
-        catch (err) { UI.toast(err && err.message || 'Не вдалося зберегти', 'error'); }
+        try { await R.api.savedSearchCreate(name, q); UI.toast(T('library.lib.searchSaved'), 'success'); loadSaved(ctx); }
+        catch (err) { UI.toast(err && err.message || T('library.lib.saveFail'), 'error'); }
     }
 
     function sync() {
@@ -311,11 +311,11 @@
         renderSelectBar(ctx);
         if (!curRows.length) {
             const explain = filterExplain(state, cats);
-            listEl.innerHTML = UI.empty('Нічого не знайдено',
+            listEl.innerHTML = UI.empty(T('library.lib.empty.title'),
                 explain ||
                 (state.search || state.source_type || state.tg_sender || state.tg_chat || state.yt_author
-                    ? 'Спробуйте змінити фільтри або пошуковий запит.'
-                    : 'Архів поки порожній — додайте перший запис.'), 'fa-box-open');
+                    ? T('library.lib.empty.change')
+                    : T('library.lib.empty.archive')), 'fa-box-open');
             if (pagerEl) pagerEl.innerHTML = '';
             return;
         }
@@ -352,7 +352,7 @@
             });
             if (!res) return;
             renderRows(ctx);
-            UI.toast('Збережено', 'success');
+            UI.toast(T('library.lib.savedOk'), 'success');
         };
         listEl.querySelectorAll('[data-act="edit"]').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -392,8 +392,9 @@
     }
 
     const DOC_TYPE_LABEL = {
-        photo: 'фото', video: 'відео', voice: 'голосове', audio: 'аудіо',
-        sticker: 'стікер', document: 'файл',
+        photo: T('library.lib.docType.photo'), video: T('library.lib.docType.video'),
+        voice: T('library.lib.docType.voice'), audio: T('library.lib.docType.audio'),
+        sticker: T('library.lib.docType.sticker'), document: T('library.lib.docType.document'),
     };
 
     // Назва чату: власне поле, інакше — з префікса «[TG] Чат: текст…», яким
@@ -413,15 +414,15 @@
         const src = t.source_type;
         const dt = DOC_TYPE_LABEL[t.doc_type];
         const tasks = t.open_tasks > 0
-            ? `<span class="rc-rec__sig">${t.open_tasks} ${U.plural(t.open_tasks, ['задача', 'задачі', 'задач'])}</span>` : '';
+            ? `<span class="rc-rec__sig">${T('library.lib.tasks', { count: t.open_tasks })}</span>` : '';
         // «Не збагачено» — виняток (для дзвінків/файлів це меншість), тож це
         // сигнал «Claude ще не розбирав», а не декоративний бейдж на всьому.
         const raw = (src !== 'telegram' && !t.enriched_at)
-            ? `<span class="rc-rec__warn">не збагачено</span>` : '';
+            ? `<span class="rc-rec__warn">${T('library.lib.notEnriched')}</span>` : '';
         // Дубль лишається в списку (свої коментарі/файл/задачі), але його текст
         // уже представлений оригіналом — і в пошуку бере участь саме оригінал.
         const dup = t.duplicate_of
-            ? `<span class="rc-rec__warn">дубль #${t.duplicate_of}</span>` : '';
+            ? `<span class="rc-rec__warn">${T('library.lib.dup', { id: t.duplicate_of })}</span>` : '';
 
         if (src === 'telegram') {
             return {
@@ -435,21 +436,21 @@
         }
         if (src === 'document') {
             return {
-                title: U.esc(t.display_name || t.original_filename || t.source_name || ('Документ #' + t.id)),
+                title: U.esc(t.display_name || t.original_filename || t.source_name || T('library.lib.docFallback', { id: t.id })),
                 titleClass: 'rc-rec__title',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
-                            t.page_count ? `<span>${t.page_count} ${U.plural(t.page_count, ['стор.', 'стор.', 'стор.'])}</span>` : '',
+                            t.page_count ? `<span>${T('library.lib.pages', { count: t.page_count })}</span>` : '',
                             tasks, raw, dup, `<span>${U.fmtDate(t.created_at)}</span>`]),
             };
         }
         const dur = t.youtube_duration;
         return {
-            title: U.esc(t.display_name || t.source_name || ('Запис #' + t.id)),
+            title: U.esc(t.display_name || t.source_name || T('library.lib.recFallback', { id: t.id })),
             titleClass: 'rc-rec__title',
             meta: meta([
                 UI.srcBadge(src),
                 dur ? `<span class="rc-rec__sig">${U.fmtDuration(dur)}</span>` : '',
-                t.speaker_count > 0 ? `<span>${t.speaker_count} ${U.plural(t.speaker_count, ['спікер', 'спікери', 'спікерів'])}</span>` : '',
+                t.speaker_count > 0 ? `<span>${T('library.lib.speakers', { count: t.speaker_count })}</span>` : '',
                 tasks, raw, dup,
                 t.youtube_author ? `<span>${U.esc(t.youtube_author)}</span>` : '',
                 `<span>${U.fmtDate(t.created_at)}</span>`,
@@ -481,13 +482,13 @@
         const cat = state && state.category_id ? '' : UI.catChip(t.category_id);
         const tgLink = !selecting && t.tg_link
             ? `<a class="rc-iconbtn rc-rec__ext" href="${U.esc(t.tg_link)}" target="_blank" rel="noopener"
-                  title="Відкрити у Telegram" aria-label="Відкрити у Telegram"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
+                  title="${U.esc(T('library.lib.openTg'))}" aria-label="${U.esc(T('library.lib.openTg'))}"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
         const check = selecting ? `<span class="rc-rec__check"><input type="checkbox" ${selected.has(t.id) ? 'checked' : ''} tabindex="-1"></span>` : '';
-        const edit = !selecting ? `<button class="rc-iconbtn rc-rec__edit" data-act="edit" data-id="${t.id}" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>` : '';
+        const edit = !selecting ? `<button class="rc-iconbtn rc-rec__edit" data-act="edit" data-id="${t.id}" title="${U.esc(T('library.lib.editMeta'))}" aria-label="${U.esc(T('library.lib.editMeta'))}"><i class="fa-solid fa-pen"></i></button>` : '';
         // Запис без власної назви — помітна кнопка: локальна модель пропонує варіанти.
         const name = !selecting && UI.isUnnamedRecording(t)
-            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" data-id="${t.id}" title="Локальна модель запропонує назву й опис"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати назву</button>` : '';
-        const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="Видалити запис" aria-label="Видалити запис"><i class="fa-solid fa-trash"></i></button>` : '';
+            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" data-id="${t.id}" title="${U.esc(T('library.lib.suggestTitle'))}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.lib.suggest')}</button>` : '';
+        const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="${U.esc(T('library.lib.deleteRecord'))}" aria-label="${U.esc(T('library.lib.deleteRecord'))}"><i class="fa-solid fa-trash"></i></button>` : '';
         return `<div class="rc-rec${selecting ? ' is-select' : ''}${selected.has(t.id) ? ' is-checked' : ''}" data-id="${t.id}" data-href="${U.esc(href)}">
             ${check}<span class="rc-rec__rail">${rail}</span>
             <div class="rc-rec__body">
@@ -506,7 +507,7 @@
         selecting = !selecting;
         if (!selecting) selected.clear();
         const btn = ctx.mount.querySelector('#rcLibSelect');
-        if (btn) btn.innerHTML = selecting ? '<i class="fa-solid fa-xmark"></i> Готово' : '<i class="fa-solid fa-list-check"></i> Вибрати';
+        if (btn) btn.innerHTML = selecting ? '<i class="fa-solid fa-xmark"></i> ' + T('library.lib.done') : '<i class="fa-solid fa-list-check"></i> ' + T('library.lib.select');
         renderRows(ctx);
     }
 
@@ -534,9 +535,9 @@
         const total = lastData ? (lastData.total || 0) : pageIds.length;
         bar.hidden = false;
         bar.innerHTML = `
-            <label><input type="checkbox" id="rcLibSelAllPage" ${allPageSelected ? 'checked' : ''}> Вибрати всі на сторінці (${pageIds.length})</label>
-            ${total > pageIds.length ? `<button class="rc-btn rc-btn--ghost rc-btn--sm" id="rcLibSelAllFiltered">${selected.size >= total ? `Вибрано всі ${total}` : `Вибрати всі ${total} за фільтром`}</button>` : ''}
-            ${selected.size ? `<button class="rc-btn rc-btn--ghost rc-btn--sm" id="rcLibSelClear">Зняти вибір (${selected.size})</button>` : ''}`;
+            <label><input type="checkbox" id="rcLibSelAllPage" ${allPageSelected ? 'checked' : ''}> ${T('library.lib.selAllPage', { count: pageIds.length })}</label>
+            ${total > pageIds.length ? `<button class="rc-btn rc-btn--ghost rc-btn--sm" id="rcLibSelAllFiltered">${selected.size >= total ? T('library.lib.selectedAll', { total: total }) : T('library.lib.selAllFiltered', { total: total })}</button>` : ''}
+            ${selected.size ? `<button class="rc-btn rc-btn--ghost rc-btn--sm" id="rcLibSelClear">${T('library.lib.selClear', { count: selected.size })}</button>` : ''}`;
         const cb = bar.querySelector('#rcLibSelAllPage');
         if (cb) cb.addEventListener('change', () => {
             if (cb.checked) pageIds.forEach(id => selected.add(id));
@@ -553,11 +554,11 @@
         if (!lastData) return;
         const total = lastData.total || 0;
         if (total > SELECT_ALL_CAP) {
-            UI.toast(`Забагато записів (${total}) для вибору одразу — звузьте фільтр (до ${SELECT_ALL_CAP}).`, 'error');
+            UI.toast(T('library.lib.tooMany', { total: total, cap: SELECT_ALL_CAP }), 'error');
             return;
         }
         const btn = ctx.mount.querySelector('#rcLibSelAllFiltered');
-        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Завантаження…'; }
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('library.lib.loading'); }
         try {
             const perPage = 100;
             const pages = Math.max(1, Math.ceil(total / perPage));
@@ -568,10 +569,10 @@
             }
             if (!ctx.isCurrent()) return;
             ids.forEach(id => selected.add(id));
-            UI.toast(`Вибрано ${selected.size} записів за фільтром`, 'success');
+            UI.toast(T('library.lib.selectedFiltered', { count: selected.size }), 'success');
             renderRows(ctx);
         } catch (err) {
-            UI.toast((err && err.message) || 'Не вдалося вибрати всі записи', 'error');
+            UI.toast((err && err.message) || T('library.lib.selectAllFail'), 'error');
             if (btn) btn.disabled = false;
         }
     }
@@ -583,18 +584,18 @@
         const catO = UI.catOptions('', { first: 'none' });
         bar.hidden = false;
         bar.innerHTML = `
-            <span class="rc-bulkbar__n">${selected.size} вибрано</span>
+            <span class="rc-bulkbar__n">${T('library.lib.bulk.n', { count: selected.size })}</span>
             <select class="rc-select rc-select--sm rc-catsel" id="rcBulkCat" data-cat-first="none">${catO}</select>
-            <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcBulkApply">Призначити напрямок</button>
+            <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcBulkApply">${T('library.lib.bulk.apply')}</button>
             <div class="rc-yt__spacer"></div>
             <select class="rc-select rc-select--sm" id="rcBulkFmt">
                 <option value="md">Markdown</option>
-                <option value="txt">Текст</option>
+                <option value="txt">${T('library.lib.bulk.fmtText')}</option>
                 <option value="docx">Word</option>
                 <option value="json">JSON</option>
             </select>
-            <button class="rc-btn rc-btn--sm" id="rcBulkExport"><i class="fa-solid fa-file-export"></i> Експорт</button>
-            <button class="rc-btn rc-btn--sm" id="rcBulkDelete"><i class="fa-solid fa-trash"></i> Видалити</button>`;
+            <button class="rc-btn rc-btn--sm" id="rcBulkExport"><i class="fa-solid fa-file-export"></i> ${T('library.lib.bulk.export')}</button>
+            <button class="rc-btn rc-btn--sm" id="rcBulkDelete"><i class="fa-solid fa-trash"></i> ${T('library.lib.delete')}</button>`;
         bar.querySelector('#rcBulkApply').addEventListener('click', () => doBulkCategory(ctx));
         bar.querySelector('#rcBulkExport').addEventListener('click', () => doBulkExport(ctx));
         bar.querySelector('#rcBulkDelete').addEventListener('click', () => doBulkDelete(ctx));
@@ -604,7 +605,7 @@
         const ids = [...selected];
         const fmt = (ctx.mount.querySelector('#rcBulkFmt') || {}).value || 'md';
         const btn = ctx.mount.querySelector('#rcBulkExport');
-        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Експорт…'; }
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('library.lib.bulk.exporting'); }
         try {
             const res = await R.api.bulkExport(ids, fmt);
             if (!res.ok) { let m = 'HTTP ' + res.status; try { const j = await res.json(); if (j.error) m = j.error; } catch (_) {} throw new Error(m); }
@@ -614,9 +615,9 @@
             a.download = `recall-export-${ids.length}.${fmt}`;
             document.body.appendChild(a); a.click();
             setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
-            UI.toast(`Експортовано ${ids.length} записів (${fmt.toUpperCase()})`, 'success');
-        } catch (err) { UI.toast(err && err.message || 'Помилка експорту', 'error'); }
-        finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-export"></i> Експорт'; } }
+            UI.toast(T('library.lib.bulk.exported', { count: ids.length, fmt: fmt.toUpperCase() }), 'success');
+        } catch (err) { UI.toast(err && err.message || T('library.lib.bulk.exportFail'), 'error'); }
+        finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-export"></i> ' + T('library.lib.bulk.export'); } }
     }
 
     async function doBulkCategory(ctx) {
@@ -627,10 +628,10 @@
         if (apply) apply.disabled = true;
         try {
             const r = await R.api.post('/api/memory/transcriptions/bulk-category', { ids, category_id: cid });
-            UI.toast(`Напрямок ${cid ? 'призначено' : 'знято'} для ${r.updated} запис(ів)`, 'success');
+            UI.toast(T(cid ? 'library.lib.bulk.catSet' : 'library.lib.bulk.catUnset', { count: r.updated }), 'success');
             selecting = false; selected.clear();
             const btn = ctx.mount.querySelector('#rcLibSelect');
-            if (btn) btn.innerHTML = '<i class="fa-solid fa-list-check"></i> Вибрати';
+            if (btn) btn.innerHTML = '<i class="fa-solid fa-list-check"></i> ' + T('library.lib.select');
             load(ctx);
         } catch (err) { UI.toast(err && err.message, 'error'); if (apply) apply.disabled = false; }
     }
@@ -639,9 +640,9 @@
     // рядок зі списку; якщо DELETE впаде — повертає рядок назад.
     async function doSingleDelete(ctx, id, title) {
         const ok = await UI.confirmModal({
-            title: 'Видалити запис',
-            message: `Видалити «${title || ('Запис #' + id)}» з архіву? Файл одразу приховається зі списків; протягом короткого часу його можна відновити (сповіщення знизу).`,
-            confirmLabel: 'Видалити',
+            title: T('library.lib.del.title'),
+            message: T('library.lib.del.message', { title: title || T('library.lib.recFallback', { id: id }) }),
+            confirmLabel: T('library.lib.delete'),
         });
         if (!ok) return;
         const idx = curRows.findIndex(r => r.id === id);
@@ -652,17 +653,17 @@
         try {
             await R.api.del('/api/history/' + id);
             if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
-            UI.actionToast('Запис видалено', 'Скасувати', async () => {
+            UI.actionToast(T('library.lib.del.done'), T('library.lib.del.undo'), async () => {
                 try {
                     await R.api.post('/api/history/' + id + '/restore');
-                    UI.toast('Запис відновлено', 'success');
+                    UI.toast(T('library.lib.del.restored'), 'success');
                     load(ctx);
                     if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
-                } catch (e) { UI.toast((e && e.message) || 'Не вдалося відновити', 'error'); }
+                } catch (e) { UI.toast((e && e.message) || T('library.lib.del.restoreFail'), 'error'); }
             });
         } catch (err) {
             if (removedRow && ctx.isCurrent()) { curRows.splice(idx, 0, removedRow); renderRows(ctx); }
-            UI.toast((err && err.message) || 'Не вдалося видалити', 'error');
+            UI.toast((err && err.message) || T('library.lib.del.fail'), 'error');
         }
     }
 
@@ -671,18 +672,18 @@
         const BIG_N = 10; // від такої кількості вимагаємо усвідомленого type-to-confirm
         const needsTypeConfirm = ids.length > BIG_N;
         const ok = await UI.modal({
-            title: 'Видалити записи',
+            title: T('library.lib.bulkDel.title'),
             icon: 'fa-trash',
             bodyHTML: `
-                <p>Видалити <b>${ids.length}</b> запис(ів) з архіву? Це фізичне видалення — файли й дані стираються одразу, скасувати цю дію НЕ можна.</p>
+                <p>${T('library.lib.bulkDel.body', { count: ids.length })}</p>
                 ${needsTypeConfirm ? `
-                    <label class="rc-field__label" for="rcBulkDelConfirm">Введіть <b>${ids.length}</b>, щоб підтвердити</label>
+                    <label class="rc-field__label" for="rcBulkDelConfirm">${T('library.lib.bulkDel.type', { count: ids.length })}</label>
                     <input class="rc-input" id="rcBulkDelConfirm" autocomplete="off" placeholder="${ids.length}">
                 ` : ''}`,
             actions: [
-                { label: 'Скасувати', value: false },
+                { label: T('library.lib.bulkDel.cancel'), value: false },
                 {
-                    label: `Видалити ${ids.length} записів`, value: true, primary: true, danger: true,
+                    label: T('library.lib.bulkDel.go', { count: ids.length }), value: true, primary: true, danger: true,
                     validate: (ov) => {
                         if (!needsTypeConfirm) return true;
                         const inp = ov.querySelector('#rcBulkDelConfirm');
@@ -695,10 +696,10 @@
         if (!ok) return;
         try {
             await R.api.post('/api/history/bulk_delete', { ids });
-            UI.toast(`Видалено ${ids.length} записів`, 'success');
+            UI.toast(T('library.lib.bulkDel.done', { count: ids.length }), 'success');
             selecting = false; selected.clear();
             const btn = ctx.mount.querySelector('#rcLibSelect');
-            if (btn) btn.innerHTML = '<i class="fa-solid fa-list-check"></i> Вибрати';
+            if (btn) btn.innerHTML = '<i class="fa-solid fa-list-check"></i> ' + T('library.lib.select');
             if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
             load(ctx);
         } catch (err) { UI.toast(err && err.message, 'error'); }
@@ -706,10 +707,10 @@
 
     function pagerHTML(d) {
         const total = d.total_pages || 1, page = d.page || 1;
-        if (total <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${d.total || 0} записів</span></div>`;
+        if (total <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${T('library.lib.pager.total', { count: d.total || 0, num: R.i18n.num(d.total || 0) })}</span></div>`;
         const prev = page > 1 ? `<button class="rc-btn rc-btn--sm" data-page="${page - 1}"><i class="fa-solid fa-chevron-left"></i></button>` : '';
         const next = page < total ? `<button class="rc-btn rc-btn--sm" data-page="${page + 1}"><i class="fa-solid fa-chevron-right"></i></button>` : '';
-        return `<div class="rc-pager">${prev}<span class="rc-pager__info">стор. ${page} / ${total} · ${d.total} записів</span>${next}</div>`;
+        return `<div class="rc-pager">${prev}<span class="rc-pager__info">${T('library.lib.pager.page', { page: R.i18n.num(page), pages: R.i18n.num(total), total: T('library.lib.pager.total', { count: d.total, num: R.i18n.num(d.total) }) })}</span>${next}</div>`;
     }
 
     R.views.library = { render, destroy() { listEl = null; state = null; selecting = false; selected = new Set(); curRows = []; } };

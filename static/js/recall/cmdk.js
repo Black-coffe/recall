@@ -9,28 +9,28 @@
     const SEARCH_DEBOUNCE_MS = 220;
 
     const NAV = [
-        { group: 'Розділи', icon: 'fa-house', label: 'Головна', path: '/' },
-        { group: 'Розділи', icon: 'fa-layer-group', label: 'Бібліотека', path: '/library' },
-        { group: 'Розділи', icon: 'fa-compact-disc', label: 'Медіатека', path: '/audio' },
-        { group: 'Розділи', icon: 'fa-comments', label: 'Запитай архів', path: '/ask' },
-        { group: 'Розділи', icon: 'fa-magnifying-glass-chart', label: 'Дослідження бренду', path: '/research' },
-        { group: 'Розділи', icon: 'fa-diagram-project', label: 'Сутності', path: '/entities' },
-        { group: 'Розділи', icon: 'fa-list-check', label: 'Задачі', path: '/tasks' },
-        { group: 'Розділи', icon: 'fa-users', label: 'Спікери', path: '/speakers' },
-        { group: 'Додати', icon: 'fa-arrow-up-from-bracket', label: 'Завантажити файл', path: '/upload' },
-        { group: 'Додати', icon: 'fa-youtube', label: 'YouTube', path: '/youtube' },
-        { group: 'Додати', icon: 'fa-file-lines', label: 'Документ', path: '/documents' },
-        { group: 'Додати', icon: 'fa-telegram', label: 'Telegram', path: '/telegram' },
-        { group: 'Додати', icon: 'fa-microphone', label: 'Запис', path: '/record' },
-        { group: 'Сервіс', icon: 'fa-sliders', label: 'Налаштування', path: '/settings' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-house', label: R.t('core.cmdk.nav.home'), path: '/' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-layer-group', label: R.t('core.cmdk.nav.library'), path: '/library' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-compact-disc', label: R.t('core.cmdk.nav.media'), path: '/audio' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-comments', label: R.t('core.cmdk.nav.ask'), path: '/ask' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-magnifying-glass-chart', label: R.t('core.cmdk.nav.research'), path: '/research' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-diagram-project', label: R.t('core.cmdk.nav.entities'), path: '/entities' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-list-check', label: R.t('core.cmdk.nav.tasks'), path: '/tasks' },
+        { group: R.t('core.cmdk.group.sections'), icon: 'fa-users', label: R.t('core.cmdk.nav.speakers'), path: '/speakers' },
+        { group: R.t('core.cmdk.group.add'), icon: 'fa-arrow-up-from-bracket', label: R.t('core.cmdk.nav.upload'), path: '/upload' },
+        { group: R.t('core.cmdk.group.add'), icon: 'fa-youtube', label: 'YouTube', path: '/youtube' },
+        { group: R.t('core.cmdk.group.add'), icon: 'fa-file-lines', label: R.t('core.cmdk.nav.document'), path: '/documents' },
+        { group: R.t('core.cmdk.group.add'), icon: 'fa-telegram', label: 'Telegram', path: '/telegram' },
+        { group: R.t('core.cmdk.group.add'), icon: 'fa-microphone', label: R.t('core.cmdk.nav.record'), path: '/record' },
+        { group: R.t('core.cmdk.group.service'), icon: 'fa-sliders', label: R.t('core.cmdk.nav.settings'), path: '/settings' },
     ];
 
     cmdk.open = function () {
         if (overlay) return;
         overlay = U.el('div', { class: 'rc-cmdk-overlay' });
         overlay.innerHTML = `
-            <div class="rc-cmdk" role="dialog" aria-label="Команди">
-                <input class="rc-cmdk__input" type="text" placeholder="Спитати архів, перейти, знайти запис…" autocomplete="off" spellcheck="false">
+            <div class="rc-cmdk" role="dialog" aria-label="${R.t('core.cmdk.ariaLabel')}">
+                <input class="rc-cmdk__input" type="text" placeholder="${R.t('core.cmdk.placeholder')}" autocomplete="off" spellcheck="false">
                 <div class="rc-cmdk__list"></div>
             </div>`;
         document.body.appendChild(overlay);
@@ -64,13 +64,13 @@
             try {
                 const data = await R.api.history({ search: q, per_page: 6 });
                 const recs = (data.transcriptions || []).map(t => ({
-                    group: 'Записи', icon: U.SRC_ICON[t.source_type] || 'fa-file',
-                    label: t.display_name || t.source_name || ('Запис #' + t.id),
+                    group: R.t('core.cmdk.group.records'), icon: U.SRC_ICON[t.source_type] || 'fa-file',
+                    label: t.display_name || t.source_name || R.t('core.cmdk.recordN', { id: t.id }),
                     badge: '#' + t.id,
                     path: '/transcript/' + U.slug(t.id, t.display_name || t.source_name),
                 }));
                 // also offer "ask the archive: q"
-                const ask = { group: 'Дія', icon: 'fa-comments', label: 'Запитати архів: «' + q + '»',
+                const ask = { group: R.t('core.cmdk.group.action'), icon: 'fa-comments', label: R.t('core.cmdk.askArchive', { q: q }),
                     path: '/ask?q=' + encodeURIComponent(q) };
                 renderItems(navMatches.concat([ask], recs), q, true);
             } catch (_) {}
@@ -79,7 +79,7 @@
 
     function renderItems(arr, q, keepFocus) {
         items = arr; active = 0;
-        if (!arr.length) { list.innerHTML = `<div class="rc-cmdk__group">Нічого не знайдено</div>`; return; }
+        if (!arr.length) { list.innerHTML = `<div class="rc-cmdk__group">${R.t('core.cmdk.nothingFound')}</div>`; return; }
         let html = '', lastGroup = null;
         arr.forEach((it, i) => {
             if (it.group !== lastGroup) { html += `<div class="rc-cmdk__group">${U.esc(it.group)}</div>`; lastGroup = it.group; }

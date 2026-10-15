@@ -7,13 +7,13 @@
 ## Context
 Plan delta, 2026-10-15 (fix story `k4-scheduled-pipes-05`), verbatim:
 
-> - 2026-10-15 · Після GREEN раунду 2, перед ship — поправка власника, fix-історія `k4-scheduled-pipes-05` (ріже Queen):
+> - 2026-10-15 · After GREEN of round 2, before ship — the owner's correction, fix story `k4-scheduled-pipes-05` (cut by the Queen):
 >
->   > «Если в понедельник в 9:00 брифинг не отправится, Recall не попробует ещё раз, и свод за эту неделю пропадёт.»
+  > `«Если в понедельник в 9:00 брифинг не отправится, Recall не попробует ещё раз, и свод за эту неделю пропадёт.»` (If the briefing is not sent on Monday at 9:00, Recall will not try again, and this week's digest will be lost.)
 >
->   Запуск зі статусом `error`, завислий `running` і ручний `pipes run` більше не закривають момент розкладу:
->   повтор через `PIPES_RETRY_MINUTES` (15) до `PIPES_RETRY_MAX` (6) спроб. Перший пункт Descoped (ручний запуск
->   гасить догін) закрито цією ж історією. Карточка `docs/defects/pipe-failure-loses-brief.md` з `check:`.
+  A run with status `error`, a hung `running` and a manual `pipes run` no longer close the schedule moment:
+  a retry after `PIPES_RETRY_MINUTES` (15) up to `PIPES_RETRY_MAX` (6) attempts. The first Descoped item (a manual run
+  suppresses the catch-up) is closed by this same story. The card `docs/defects/pipe-failure-loses-brief.md` with `check:`.
 
 ## Options
 1. Any recorded run (including `error`, stuck `running`, or a manual run) closes the scheduled moment - the shape before this delta; a single failure silently loses that period's brief.

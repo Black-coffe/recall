@@ -115,7 +115,7 @@
 //   3. Новий асет, на який НЕМАЄ тегу в shell.html (іконка з
 //      manifest.webmanifest, інший файл, на який лише JS посилається
 //      рядком) → додай вручну в FALLBACK_SHELL нижче.
-const VERSION = 'recall-v79';
+const VERSION = 'recall-v80';
 const STATIC_CACHE = `recall-static-${VERSION}`;
 const RUNTIME_CACHE = `recall-runtime-${VERSION}`;
 

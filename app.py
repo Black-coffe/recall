@@ -26,6 +26,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 import atexit
 from config import get_config
+from app.core.i18n import tr
 # Загружаем .env как можно раньше — до того, как сервисы прочитают env vars
 try:
     from dotenv import load_dotenv
@@ -366,7 +367,7 @@ logger.info(
 def ratelimit_handler(e):
     return jsonify({
         "success": False,
-        "error": f"Rate limit exceeded: {e.description}. Спробуйте пізніше.",
+        "error": tr("core.error.rate_limit", desc=e.description),
     }), 429
 
 # Створюємо необхідні папки
@@ -384,7 +385,7 @@ def request_entity_too_large(error):
     max_size_gb = app.config['MAX_CONTENT_LENGTH'] / (1024 * 1024 * 1024)
     return jsonify({
         'success': False,
-        'error': f'Файл занадто великий. Максимальний розмір: {max_size_gb:.1f} GB'
+        'error': tr("core.error.file_too_large", max_gb=f"{max_size_gb:.1f}")
     }), 413
 
 

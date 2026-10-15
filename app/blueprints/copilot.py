@@ -21,6 +21,7 @@ from typing import Any, Optional
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app import state
+from app.core.i18n import tr as _t
 from app.db.connection import get_db_connection
 from app.services import live_ask, local_llm
 from app.services.copilot import export as cp_export
@@ -34,7 +35,7 @@ copilot_bp = Blueprint('copilot', __name__)
 def _service_unavailable():
     return jsonify({
         'success': False,
-        'error': 'Ко-пілот вимкнено (COPILOT_ENABLED=False)',
+        'error': _t('capture.cp.err.disabled'),
         'error_code': 'COPILOT_DISABLED',
     }), 503
 
@@ -48,7 +49,7 @@ def _require_service():
 def _busy_response(e: CopilotBusyError):
     return jsonify({
         'success': False,
-        'error': 'Ко-пілот уже працює на іншому записі',
+        'error': _t('capture.cp.err.busy'),
         'error_code': 'COPILOT_BUSY',
         'owner_session_id': e.owner_session_id,
     }), 409
@@ -152,11 +153,11 @@ def _parse_top_k(raw: Any) -> tuple[Optional[int], Optional[str]]:
     if raw is None:
         return 6, None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return None, "top_k має бути числом"
+        return None, _t('capture.cp.err.top_k_number')
     if not math.isfinite(raw):
-        return None, "top_k має бути скінченним числом"
+        return None, _t('capture.cp.err.top_k_finite')
     if raw <= 0:
-        return None, "top_k має бути додатним"
+        return None, _t('capture.cp.err.top_k_positive')
     return min(int(raw), _MAX_TOP_K), None
 
 
@@ -192,7 +193,7 @@ def live_ask_endpoint():
     data = request.get_json(silent=True) or {}
     question = (data.get('question') or '').strip()
     if not question:
-        return jsonify({'success': False, 'error': 'Порожнє питання',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.empty_question'),
                         'error_code': 'EMPTY_QUESTION'}), 400
 
     scope = data.get('scope') if data.get('scope') in _LIVE_ASK_SCOPES else 'both'
@@ -212,7 +213,7 @@ def live_ask_endpoint():
         if len(live_sids) > 1:
             return jsonify({
                 'success': False,
-                'error': 'Активних записів кілька — вкажіть session_id',
+                'error': _t('capture.cp.err.ambiguous'),
                 'error_code': 'AMBIGUOUS_SESSION',
                 'sessions': [{'session_id': s} for s in live_sids],
             }), 409
@@ -267,16 +268,16 @@ def move():
     from_sid = data.get('from_session_id')
     to_sid = data.get('to_session_id')
     if not from_sid or not to_sid:
-        return jsonify({'success': False, 'error': 'Потрібні from_session_id і to_session_id',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.move_ids'),
                         'error_code': 'BAD_REQUEST'}), 400
     rs = state.recording_service
     is_active = getattr(rs, 'is_active', None) if rs is not None else None
     if callable(is_active) and not is_active(to_sid):
-        return jsonify({'success': False, 'error': 'Запис не знайдено або він не активний',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.move_inactive'),
                         'error_code': 'NOT_FOUND'}), 404
     prev = state.copilot_service.get_by_recording(from_sid)
     if not prev or prev.get('status') == 'ended':
-        return jsonify({'success': False, 'error': 'На цьому записі ко-пілот не працює',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.move_not_running'),
                         'error_code': 'NO_COPILOT'}), 404
     settings = data.get('settings')
     if settings is None:
@@ -297,7 +298,7 @@ def move():
     except Exception as e:
         logger.warning("copilot move %s -> %s: start failed: %s", from_sid, to_sid, e)
         reason = ('COPILOT_BUSY' if isinstance(e, CopilotBusyError)
-                  else 'Не вдалося запустити ко-пілот на новому записі')
+                  else _t('capture.cp.err.move_failed'))
         return jsonify({'success': False, 'error_code': 'COPILOT_MOVE_FAILED',
                         'ended_from': True, 'reason': reason})
     return jsonify({'success': True, 'ended_from': True,
@@ -327,7 +328,7 @@ def timeline(copilot_session_id: int):
         return err
     tl = state.copilot_service.get_timeline(copilot_session_id)
     if tl is None:
-        return jsonify({'success': False, 'error': 'Сесію не знайдено',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
     return jsonify({'success': True, 'timeline': tl})
 
@@ -366,7 +367,7 @@ def export_session(copilot_session_id: int):
         return err
     tl = state.copilot_service.get_timeline(copilot_session_id)
     if tl is None:
-        return jsonify({'success': False, 'error': 'Сесію не знайдено',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
     session = tl.get('session') or {}
     tr = state.copilot_service.get_transcript_brief(session.get('transcription_id'))
@@ -393,13 +394,13 @@ def reingest(copilot_session_id: int):
         return err
     tl = state.copilot_service.get_timeline(copilot_session_id)
     if tl is None:
-        return jsonify({'success': False, 'error': 'Сесію не знайдено',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
     session = tl.get('session') or {}
     tr = state.copilot_service.get_transcript_brief(session.get('transcription_id'))
     digest = cp_export.notes_digest(tl, tr, _session_comments(session))
     if not digest or len(digest) < 20:
-        return jsonify({'success': False, 'error': 'Нема підказок для збереження',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.no_hints'),
                         'error_code': 'EMPTY'}), 400
     name = (tr or {}).get('source_name')
     src_name = f"Ко-пілот: {name}" if name else f"Ко-пілот сесії #{copilot_session_id}"
@@ -446,7 +447,7 @@ def get_state(copilot_session_id: int):
         return err
     snap = state.copilot_service.get_state(copilot_session_id)
     if snap is None:
-        return jsonify({'success': False, 'error': 'Сесію не знайдено',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
     return jsonify({'success': True, 'state': snap})
 
@@ -467,12 +468,12 @@ def update_settings(copilot_session_id: int):
     mode = data.get('mode') if data.get('mode') in _MODES else None
     importance = data.get('importance') if data.get('importance') in _IMPORTANCE else None
     if mode is None and importance is None:
-        return jsonify({'success': False, 'error': 'Нема валідних полів',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.no_fields'),
                         'error_code': 'BAD_SETTINGS'}), 400
     cfg = state.copilot_service.update_settings(copilot_session_id, mode=mode,
                                                 importance=importance)
     if cfg is None:
-        return jsonify({'success': False, 'error': 'Сесію не знайдено',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
     if state.copilot_worker is not None:
         snap = state.copilot_service.get_state(copilot_session_id)
@@ -502,7 +503,7 @@ def action(copilot_session_id: int):
     data = request.get_json(silent=True) or {}
     act = data.get('action')
     if act not in _OPERATOR_ACTIONS:
-        return jsonify({'success': False, 'error': 'Невідома дія',
+        return jsonify({'success': False, 'error': _t('capture.cp.err.unknown_action'),
                         'error_code': 'BAD_ACTION'}), 400
     ev = data.get('event_id')
     ev = int(ev) if (ev is not None and str(ev).isdigit()) else None

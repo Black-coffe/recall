@@ -334,3 +334,38 @@ def test_run_pipe_with_buttons_passes_keyboard(db, monkeypatch):
     rows = kw["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["text"] == "1 ✅" and rows[0][0]["callback_data"].startswith("a:1:")
     assert len(rows) == len(re.findall(r"<b>\d+\.</b> ", text))
+
+
+# --- english-i18n-08: службові рядки брифінгу мовою налаштування ---------------
+
+def test_en_render_translates_service_strings_keeps_data(db, monkeypatch):
+    from app.services import brief_actions
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    ids: list = []
+    text, leaked = _render(db, {"weekly_digest": _digest(n_overdue=2)}, buttons=ids, hidden=3)
+    assert leaked == [] and _balanced(text)
+    assert "📌 Tasks" in text and "3 more →" in text and "No category" in text
+    assert "overdue since" in text and "3 items hidden, see Recall" in text
+    assert brief_actions.footer("en") in text and "Buttons work" in text
+    assert "ще 3" not in text and "Задачі" not in text and "Без напрямку" not in text
+    assert "Альфа-фонд" in text and "Сирота" in text            # дані — як є
+    assert pipes_cards.title_for(["weekly_digest"]) == "🗓 Weekly digest"
+    kb = brief_actions.keyboard(ids)
+    assert kb["inline_keyboard"][0][0]["callback_data"].startswith("a:1:")
+
+
+@pytest.mark.parametrize("setting", ["auto", "uk"])
+def test_auto_and_uk_render_in_ukrainian(db, monkeypatch, setting):
+    monkeypatch.setenv("RECALL_UI_LANG", setting)
+    text, _ = _render(db, {"weekly_digest": _digest()}, hidden=1)
+    assert "📌 Задачі" in text and "ще 3 →" in text and "1 пункт приховано" in text
+
+
+def test_en_masking_and_leaked_words_still_work(db, monkeypatch):
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    d = _digest()
+    d["this_week"][0]["task"] = "Оплатити на UA213223130000026007233566001, тел +380 67 123 45 67"
+    d["this_week"][1]["owner"] = "Петренко"
+    text, leaked = _render(db, {"weekly_digest": d}, words=["петренко"])
+    assert "UA21" not in text and "123 45 67" not in text and "•••" in text
+    assert leaked == ["петренко"]

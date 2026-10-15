@@ -32,9 +32,11 @@ import logging
 from flask import Flask, g, has_request_context, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+from app.core.i18n import tr
+
 logger = logging.getLogger(__name__)
 
-GENERIC_MESSAGE = "Внутрішня помилка сервера. Спробуйте пізніше."
+GENERIC_MESSAGE = tr("core.error.internal", lang="uk")  # uk-текст для сумісності; відповідь локалізує tr()
 
 
 def _current_request_id() -> str:
@@ -59,6 +61,6 @@ def register(app: Flask) -> None:
         logger.exception("Unhandled exception: %s %s", method, path)
         return jsonify({
             "success": False,
-            "error": GENERIC_MESSAGE,
+            "error": tr("core.error.internal"),
             "request_id": rid,
         }), 500

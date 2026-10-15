@@ -27,6 +27,7 @@ from collections import defaultdict
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core.i18n import tr
 from app.repositories import speakers as speakers_repo
 from app.repositories import transcriptions as tx_repo
 
@@ -55,12 +56,12 @@ def _normalize_name(name: str) -> str:
 
 def _validate_name(raw: str | None) -> tuple[str | None, str | None]:
     if not isinstance(raw, str):
-        return None, "name мусить бути string"
+        return None, tr('settings.speakers.err.name_type')
     name = _normalize_name(raw)
     if not name:
-        return None, "name не може бути порожнім"
+        return None, tr('settings.speakers.err.name_empty')
     if len(name) > _NAME_MAX_LEN:
-        return None, f"name занадто довгий (max {_NAME_MAX_LEN})"
+        return None, tr('settings.speakers.err.name_long', max=_NAME_MAX_LEN)
     return name, None
 
 
@@ -68,9 +69,9 @@ def _validate_color(raw) -> tuple[str | None, str | None]:
     if raw is None:
         return None, None  # ok, optional
     if not isinstance(raw, str):
-        return None, "color мусить бути string '#RRGGBB' або null"
+        return None, tr('settings.speakers.err.color_type')
     if not _COLOR_RE.match(raw):
-        return None, "color має бути hex '#RRGGBB' або 'RRGGBB'"
+        return None, tr('settings.speakers.err.color_hex')
     return raw if raw.startswith('#') else f'#{raw}', None
 
 
@@ -151,7 +152,7 @@ def create_speaker():
             full = speakers_repo.get_full_by_id(conn, existing['id'])
             return jsonify({
                 'success': False,
-                'error': 'Спікер з таким іменем уже існує',
+                'error': tr('settings.speakers.err.exists'),
                 'existing_speaker': _serialize_speaker(full),
             }), 409
 
@@ -187,14 +188,14 @@ def update_speaker(speaker_id):
         fields_to_update.append(('color', color))
 
     if not fields_to_update:
-        return jsonify({'success': False, 'error': 'Нічого не задано для оновлення'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.nothing_to_update')}), 400
 
     with _get_db() as conn:
         existing = conn.execute(
             'SELECT id, name FROM speakers WHERE id = ?', (speaker_id,)
         ).fetchone()
         if not existing:
-            return jsonify({'success': False, 'error': 'Спікер не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
 
         # При rename: перевірити на конфлікт case-insensitive (виключаючи цей же id)
         new_name = next((v for k, v in fields_to_update if k == 'name'), None)
@@ -203,7 +204,7 @@ def update_speaker(speaker_id):
             if conflict and conflict['id'] != speaker_id:
                 return jsonify({
                     'success': False,
-                    'error': f'Ім\'я "{new_name}" вже використовується',
+                    'error': tr('settings.speakers.err.name_taken', name=new_name),
                 }), 409
 
         set_clause = ', '.join(f'{k} = ?' for k, _ in fields_to_update)
@@ -234,11 +235,11 @@ def delete_speaker(speaker_id):
             'SELECT id, is_self FROM speakers WHERE id = ?', (speaker_id,)
         ).fetchone()
         if not row:
-            return jsonify({'success': False, 'error': 'Спікер не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
         if row['is_self']:
             return jsonify({
                 'success': False,
-                'error': '"Ви" не можна видалити — використовується для mic-стріму',
+                'error': tr('settings.speakers.err.self_delete'),
             }), 400
         conn.execute('DELETE FROM speakers WHERE id = ?', (speaker_id,))
         conn.commit()
@@ -266,11 +267,11 @@ def patch_transcription_speakers(transcription_id):
     data = request.get_json(silent=True) or {}
     mapping = data.get('mapping', {})
     if not isinstance(mapping, dict):
-        return jsonify({'success': False, 'error': 'mapping має бути обʼєктом'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.mapping_type')}), 400
 
     with _get_db() as conn:
         if not tx_repo.exists(conn, transcription_id):
-            return jsonify({'success': False, 'error': 'Транскрипт не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.tx_not_found')}), 404
 
         c = conn.cursor()
         usage_increments: list[int] = []  # speaker_ids на яких треба підняти usage_count
@@ -297,7 +298,7 @@ def patch_transcription_speakers(transcription_id):
             if err:
                 return jsonify({
                     'success': False,
-                    'error': f'Невірне імʼя для {raw_label}: {err}',
+                    'error': tr('settings.speakers.err.bad_name_for', label=raw_label, err=err),
                 }), 400
             existing = _find_speaker_case_insensitive(conn, name)
             if existing:
@@ -570,14 +571,8 @@ def speakers_stats():
             'total_transcripts': total_tx,
             'telegram_messages': sum(s['messages'] for s in tg_senders),
             'tg_senders_linked_to_graph': linked,
-            'note': (
-                f'`speakers` — голоси з діаризації: {diarized} записів із {total_tx}. '
-                f'Решта архіву — переписка, де автор відомий точно і рахується в '
-                f'`tg_senders` (без секунд і слів мовлення). Одиниці шарів різні, '
-                f'їх не додають. Спільна людина видна через `entity_id`: він '
-                f'проставлений у {linked} із {len(tg_senders)} відправників, '
-                f'решту граф просто не знає під цим написанням'
-            ),
+            'note': tr('settings.speakers.stats_note', diarized=diarized, total_tx=total_tx,
+                       linked=linked, senders=len(tg_senders)),
         },
     })
 
@@ -602,7 +597,7 @@ def speaker_timeline(speaker_id):
             'SELECT id, name FROM speakers WHERE id = ?', (speaker_id,)
         ).fetchone()
         if not speaker:
-            return jsonify({'success': False, 'error': 'Спікер не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
 
         # Усі transcripts де цей speaker присутній за останні N днів.
         rows = conn.execute('''
@@ -709,15 +704,15 @@ def merge_speakers():
     merge_ids = data.get('merge_ids', [])
 
     if not isinstance(keep_id, int) or keep_id <= 0:
-        return jsonify({'success': False, 'error': 'keep_id мусить бути позитивним int'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.keep_id_int')}), 400
     if not isinstance(merge_ids, list) or not merge_ids:
-        return jsonify({'success': False, 'error': 'merge_ids мусить бути непорожнім списком'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.merge_ids_list')}), 400
     try:
         merge_ids = [int(x) for x in merge_ids]
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'merge_ids має містити лише числа'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.merge_ids_nums')}), 400
     if keep_id in merge_ids:
-        return jsonify({'success': False, 'error': 'keep_id не може бути у merge_ids'}), 400
+        return jsonify({'success': False, 'error': tr('settings.speakers.err.keep_in_merge')}), 400
 
     from app.services.diarization_service import (
         average_embeddings, blob_to_embedding, embedding_to_blob,
@@ -731,7 +726,7 @@ def merge_speakers():
             (keep_id,),
         ).fetchone()
         if not keep_row:
-            return jsonify({'success': False, 'error': 'keep_id не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.keep_not_found')}), 404
 
         # Verify усі merge_ids існують та не є is_self
         placeholders = ','.join('?' * len(merge_ids))
@@ -741,11 +736,11 @@ def merge_speakers():
             merge_ids,
         ).fetchall()
         if len(merge_rows) != len(set(merge_ids)):
-            return jsonify({'success': False, 'error': 'Деякі merge_ids не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.some_not_found')}), 404
         if any(r['is_self'] for r in merge_rows):
             return jsonify({
                 'success': False,
-                'error': '"Ви" (is_self=1) не можна злити з іншим спікером',
+                'error': tr('settings.speakers.err.self_merge'),
             }), 400
 
         # --- T4.6: before-снапшот (ДО будь-яких мутацій) ---
@@ -886,14 +881,14 @@ def unmerge_speakers(merge_id):
             (merge_id,),
         ).fetchone()
         if not row:
-            return jsonify({'success': False, 'error': 'Merge не знайдено (можливо, прострочено)'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.merge_not_found')}), 404
         if row['restored_at'] is not None:
-            return jsonify({'success': False, 'error': 'Цей merge вже відновлено'}), 409
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.merge_restored')}), 409
 
         try:
             snap = json.loads(row['before_json'])
         except (json.JSONDecodeError, TypeError):
-            return jsonify({'success': False, 'error': 'Пошкоджений снапшот merge'}), 500
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.snapshot_bad')}), 500
 
         # 1. Пересоздати видалені speakers (INSERT OR IGNORE — якщо хтось уже
         # створив нового спікера з тим самим id, теоретично неможливо через
@@ -973,7 +968,7 @@ def speaker_samples(speaker_id):
             'SELECT id, name FROM speakers WHERE id = ?', (speaker_id,)
         ).fetchone()
         if not speaker:
-            return jsonify({'success': False, 'error': 'Спікер не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
 
         rows = conn.execute('''
             SELECT m.transcription_id, m.raw_label, t.source_name, t.segments

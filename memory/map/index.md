@@ -1,36 +1,39 @@
-# 🗺️ memory/map — карта коду Recall
+# 🗺️ memory/map — Recall code map
 
-> Запозичено з [VULYK](https://github.com/Black-coffe/vulyk) (layer 4 — `memory/map/`),
-> адаптовано під наш репозиторій. Це **підказка для навігації**, а не істина:
-> завжди звіряй із реальним кодом перед правкою (наприклад, перед великою зміною
-> в `app.py`). Якщо карта розійшлась із кодом — онови карту (делегуй дешевому агенту:
-> `Agent(model: haiku)` або `Agent(effort: low)`).
+> Borrowed from [VULYK](https://github.com/Black-coffe/vulyk) (layer 4 — `memory/map/`),
+> adapted to our repository. This is a **navigation hint**, not the truth:
+> always check against the real code before editing (for example, before a large change
+> in `app.py`). If the map has diverged from the code — update the map (delegate to a cheap agent:
+> `Agent(model: haiku)` or `Agent(effort: low)`).
 
-**Навіщо:** `app.py` (817 рядків), `whisper_manager_new.py` (867), `transcription.py`
-blueprint (~1600), `recall.css` (1397) — не вміщуються в один погляд. Карта дає
-точку входу: куди йти за фічею, не перечитуючи піврепо.
+**Why:** `app.py` (817 lines), `whisper_manager_new.py` (867), the `transcription.py`
+blueprint (~1600), `recall.css` (1397) — do not fit in one view. The map gives
+an entry point: where to go for a feature without rereading half the repo.
 
-## Файли карти
+## Map files
 
-| Файл | Що описує |
+| File | What it describes |
 |---|---|
-| [overview.md](overview.md) | Архітектура, 3 процеси (Flask + telegram_listener + mcp_server), boot/shutdown, SSE/логи/rate-limit/безпека |
-| [root.md](root.md) | Кореневі entry points: `app.py`, `config.py`, `whisper_manager_new.py`, `telegram_*`, `mcp_server.py`, `app/state.py` |
-| [blueprints.md](blueprints.md) | HTTP-шар: 14 blueprints, ~135 endpoints, де що крутиться |
-| [services.md](services.md) | `app/services/*` — транскрипція, RAG (embeddings/retrieval/rag), enrichment, документи, відео-стрічка (`video_*`, `screen_secrets`), фільтр приватного для MCP (`privacy`), dba, інфра |
-| [copilot.md](copilot.md) | `app/services/copilot/*` — живий ко-пілот, local-first cascade (Qwen→Claude) |
-| [recording.md](recording.md) | `app/services/recording/*` — WASAPI-запис, FSM, finalize, recovery, відеодоріжки |
-| [frontend.md](frontend.md) | SPA `static/js/recall/*` — роутер, views, SSE-через-fetch, service worker |
+| [overview.md](overview.md) | Architecture, 3 processes (Flask + telegram_listener + mcp_server), boot/shutdown, SSE/logs/rate-limit/security |
+| [root.md](root.md) | Root entry points: `app.py` boot, `config.py`, `app/state.py`, `whisper_manager_new.py` |
+| [root-processes.md](root-processes.md) | Separate processes: `telegram_listener.py`/`telegram_login.py`, `mcp_server.py` |
+| [blueprints.md](blueprints.md) | HTTP layer: overview of 15 blueprints (~180 endpoints) + system/events/settings/comments/documents/copilot/speakers/bookmarks |
+| [blueprints-media.md](blueprints-media.md) | transcription (video, export), audio_library, youtube, recording (K2 autoprompt) |
+| [blueprints-memory.md](blueprints-memory.md) | memory (categories, tags, RAG, action-items), research, telegram |
+| [services.md](services.md) | `app/services/*` — hub: 10 slices `services-*.md` (media, video-privacy, pipes-bot, taxonomy, embeddings, retrieval, enrichment, telegram, entities, infra) |
+| [copilot.md](copilot.md) | `app/services/copilot/*` — live copilot, local-first cascade (Qwen→Claude) |
+| [recording.md](recording.md) | `app/services/recording/*` — WASAPI recording, FSM, finalize, recovery, video tracks |
+| [frontend.md](frontend.md) | SPA `static/js/recall/*` — router, views, SSE-via-fetch, service worker |
 
-## Конвенції карти
+## Map conventions
 
-Кожен модуль описано як:
-- **Призначення** — 1-2 речення.
-- **Entry points** — публічні функції/класи/маршрути, які викликають ззовні.
-- **Типи/стан** — важливі глобали, dataclass-и, singleton-и.
-- **Gotchas** — Windows-специфіка, порядок ініціалізації, GPU-локи, бюджет, неочевидне.
+Each module is described as:
+- **Purpose** — 1-2 sentences.
+- **Entry points** — public functions/classes/routes that are called from outside.
+- **Types/state** — important globals, dataclasses, singletons.
+- **Gotchas** — Windows specifics, initialization order, GPU locks, budget, the non-obvious.
 
-Стиль роботи з картою — у `CLAUDE.md`, секція «🐝 Routing-матриця моделей».
+How to work with the map — in `CLAUDE.md`, section `«🐝 Routing-матриця моделей»`.
 
-*Згенеровано 2026-06-23 з реального коду (4 паралельні Explore-агенти). При
-суттєвих змінах архітектури — перегенеруй відповідний файл.*
+*Generated 2026-06-23 from the real code (4 parallel Explore agents). On
+significant architecture changes — regenerate the relevant file.*

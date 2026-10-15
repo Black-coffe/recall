@@ -8,23 +8,23 @@
 
 From `docs/specs/editable-title-description/plan.md`, `## Assumptions`:
 
-> **Пошукові результати** (`retrieval.search`, `rag` sources, `/api/memory/search`, MCP
-> `search_archive`/`ask_archive`) несуть `display_name` і `title` ПОРУЧ із `source_name`; ключ
-> `source_name` не перезаписується (провенанс, контракт S2/Хвилі A не змінюється).
+> **Search results** (`retrieval.search`, `rag` sources, `/api/memory/search`, MCP
+> `search_archive`/`ask_archive`) carry `display_name` and `title` ALONGSIDE `source_name`; the
+> `source_name` key is not overwritten (provenance, the S2/Wave A contract does not change).
 
 From the same plan.md, `## Tradeoffs`:
 
-> **`display_name` поруч із `source_name`** проти «`COALESCE` у `source_name` на виході API»:
-> друге — одна SQL-правка на споживача, але ламає провенанс у JSON-експорті, MCP і S2-контракті;
-> ціна першого — кожен читач фронта переходить на нове поле (05).
+> **`display_name` alongside `source_name`** versus "`COALESCE` into `source_name` at the API output":
+> the latter is one SQL change per consumer, but it breaks provenance in the JSON export, MCP and the S2 contract;
+> the cost of the former is that every frontend reader moves to the new field (05).
 
 From `docs/specs/editable-title-description/brief.md`, `## Answers`, item 1 (the owner's chosen
 option, recommended):
 
-> **Зберігання** — Нові поля title + description (Рекомендую): Дві нові колонки; source_name
-> лишається як «походження» (оригінальне імʼя файлу). Скрізь показується title, якщо він є,
-> інакше source_name. Так Telegram-слухач при повторному збереженні відредагованого повідомлення
-> не затре вашу назву (він переписує саме source_name), а оригінал файлу не губиться.
+> **Storage** — New title + description fields (Recommended): Two new columns; source_name
+> stays as the "origin" (the original file name). Everywhere, title is shown if it exists,
+> otherwise source_name. This way the Telegram listener, when re-saving an edited message,
+> will not wipe your title (it rewrites source_name specifically), and the original file name is not lost.
 
 ## Options
 
@@ -48,8 +48,8 @@ prefix, MCP tools, SPA views). `source_name` is never overwritten by a title/des
 Every existing and future reader that surfaces `source_name` to a person must be updated to read
 `display_name` instead (or `title || source_name`) — this touched creation-path serializers,
 RAG's `build_context_prefix`, MCP's `list_recent`/`get_transcript`/`search_archive`/`ask_archive`,
-exports, comment chips (`target_name`), and SPA list/detail views (story 05, `## Tradeoffs`: "ціна
-першого — кожен читач фронта переходить на нове поле"). In exchange, provenance stays intact: a
+exports, comment chips (`target_name`), and SPA list/detail views (story 05, `## Tradeoffs`: "the cost
+of the former is that every frontend reader moves to the new field"). In exchange, provenance stays intact: a
 re-saved Telegram message can keep overwriting `source_name` without ever touching an owner-set
 title, and the JSON export/MCP/S2 contracts keep their original meaning of `source_name`.
 

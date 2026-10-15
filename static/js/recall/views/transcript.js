@@ -4,6 +4,7 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
     let cats = null, data = null, mode = 'text', audioReq = null, ppOpen = null, speakersOpen = false;
     let bookmarks = {}, bookmarksOpen = false;   // {segment_index: {id, note}}
     let _onTime = null;   // audio timeupdate handler (segment ↔ playback sync)
@@ -17,7 +18,7 @@
 
     async function render(ctx) {
         const id = U.parseId(ctx.params.slug);
-        if (!Number.isInteger(id)) { ctx.mount.innerHTML = UI.error('Некоректне посилання на запис.'); return; }
+        if (!Number.isInteger(id)) { ctx.mount.innerHTML = UI.error(T('transcript.badLink')); return; }
 
         ctx.mount.innerHTML = `<div class="rc-record"><div class="rc-record__head">
             <div class="rc-skel" style="height:14px;width:180px;margin-bottom:16px"></div>
@@ -29,7 +30,7 @@
         let t;
         try { t = await R.api.transcript(id); }
         catch (err) {
-            if (ctx.isCurrent()) ctx.mount.innerHTML = UI.error(err.status === 404 ? 'Запис не знайдено.' : err.message);
+            if (ctx.isCurrent()) ctx.mount.innerHTML = UI.error(err.status === 404 ? T('transcript.notFound') : err.message);
             return;
         }
         if (!ctx.isCurrent()) return;
@@ -63,17 +64,17 @@
         const hasPolished = !!(t.polished_text && t.polished_text.trim());
 
         ctx.mount.innerHTML = `
-            <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/library" style="margin-bottom:16px"><i class="fa-solid fa-arrow-left"></i> Бібліотека</a>
+            <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/library" style="margin-bottom:16px"><i class="fa-solid fa-arrow-left"></i> ${T('transcript.back')}</a>
             <div class="rc-record">
                 <div class="rc-record__head">
                     ${t.youtube_thumbnail ? `<img class="rc-record__thumb" src="${U.esc(t.youtube_thumbnail)}" alt="">` : ''}
                     <div class="rc-record__accession">
-                        <span>RECALL · ЗАПИС <span class="rc-id">#${id}</span></span>
+                        <span>RECALL · ${T('transcript.accession')} <span class="rc-id">#${id}</span></span>
                         <span>·</span>${UI.srcBadge(t.source_type)}
                     </div>
                     <div class="rc-record__titlerow">
-                        <h1 class="rc-record__title" id="rcRecordTitle">${U.esc(t.display_name || t.source_name || ('Запис #' + id))}</h1>
-                        <button class="rc-iconbtn" id="rcMetaEditBtn" aria-label="Редагувати назву й опис" title="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
+                        <h1 class="rc-record__title" id="rcRecordTitle">${U.esc(t.display_name || t.source_name || T('transcript.recordN', { id }))}</h1>
+                        <button class="rc-iconbtn" id="rcMetaEditBtn" aria-label="${T('transcript.editMeta')}" title="${T('transcript.editMeta')}"><i class="fa-solid fa-pen"></i></button>
                     </div>
                     ${t.description ? `<p class="rc-record__desc" id="rcRecordDesc">${U.esc(t.description)}</p>` : ''}
                     <div id="rcRecTax"></div>
@@ -81,26 +82,26 @@
                 </div>
                 <div class="rc-record__actions">
                     <div class="rc-seg-toggle" id="rcViewToggle">
-                        <button data-mode="text" class="${mode==='text'?'is-active':''}">Текст</button>
-                        <button data-mode="segments" class="${mode==='segments'?'is-active':''}">Таймкоди</button>
-                        ${hasPolished ? `<button data-mode="polished" class="${mode==='polished'?'is-active':''}">✦ Поліпшений</button>` : ''}
+                        <button data-mode="text" class="${mode==='text'?'is-active':''}">${T('transcript.mode.text')}</button>
+                        <button data-mode="segments" class="${mode==='segments'?'is-active':''}">${T('transcript.mode.segments')}</button>
+                        ${hasPolished ? `<button data-mode="polished" class="${mode==='polished'?'is-active':''}">${T('transcript.mode.polished')}</button>` : ''}
                     </div>
-                    ${hasSpeakers ? `<button class="rc-btn rc-btn--sm" id="rcSpeakersBtn"><i class="fa-solid fa-user-pen"></i> Спікери</button>` : ''}
-                    ${segs.length ? `<button class="rc-btn rc-btn--sm" id="rcBookmarksBtn"><i class="fa-solid fa-bookmark"></i> Закладки<span id="rcBmCount"></span></button>` : ''}
-                    <button class="rc-btn rc-btn--sm" id="rcCommentsBtn"><i class="fa-regular fa-comment-dots"></i> Коментарі<span id="rcCmCount"></span></button>
-                    <button class="rc-btn rc-btn--sm" id="rcCopy"><i class="fa-solid fa-copy"></i> Копіювати</button>
+                    ${hasSpeakers ? `<button class="rc-btn rc-btn--sm" id="rcSpeakersBtn"><i class="fa-solid fa-user-pen"></i> ${T('transcript.speakers')}</button>` : ''}
+                    ${segs.length ? `<button class="rc-btn rc-btn--sm" id="rcBookmarksBtn"><i class="fa-solid fa-bookmark"></i> ${T('transcript.bookmarks')}<span id="rcBmCount"></span></button>` : ''}
+                    <button class="rc-btn rc-btn--sm" id="rcCommentsBtn"><i class="fa-regular fa-comment-dots"></i> ${T('transcript.comments')}<span id="rcCmCount"></span></button>
+                    <button class="rc-btn rc-btn--sm" id="rcCopy"><i class="fa-solid fa-copy"></i> ${T('transcript.copy')}</button>
                     <div class="rc-spacer"></div>
                     <button class="rc-btn rc-btn--sm" data-export="txt">TXT</button>
                     <button class="rc-btn rc-btn--sm" data-export="srt">SRT</button>
                     <button class="rc-btn rc-btn--sm" data-export="json">JSON</button>
-                    <button class="rc-btn rc-btn--sm" id="rcPolish"><i class="fa-solid fa-wand-magic-sparkles"></i> Покращити</button>
-                    <button class="rc-btn rc-btn--sm" id="rcSummary"><i class="fa-solid fa-list-check"></i> Резюме</button>
-                    <button class="rc-btn rc-btn--sm rc-btn--video-hidden" id="rcVideoBtn" style="display:none"><i class="fa-solid fa-film"></i> <span id="rcVideoBtnLbl">Розібрати відео</span></button>
-                    <label id="rcVisionClaudeWrap" style="display:none;align-items:center;gap:4px;font-size:.82em;color:#777;cursor:pointer" title="Опис кадрів через Claude vision (платно, точніше). Без галочки — локальна модель ($0)."><input type="checkbox" id="rcVisionClaude" style="margin:0">Claude-опис</label>
-                    <button class="rc-btn rc-btn--sm" data-pp="translate"><i class="fa-solid fa-language"></i> Переклад</button>
-                    <button class="rc-btn rc-btn--sm" data-pp="topics"><i class="fa-solid fa-tags"></i> Теми</button>
-                    <button class="rc-btn rc-btn--sm" data-pp="wordcloud"><i class="fa-solid fa-cloud"></i> Хмара слів</button>
-                    <button class="rc-btn rc-btn--sm" data-pp="sentiment"><i class="fa-solid fa-face-smile"></i> Емоції</button>
+                    <button class="rc-btn rc-btn--sm" id="rcPolish"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('transcript.polish')}</button>
+                    <button class="rc-btn rc-btn--sm" id="rcSummary"><i class="fa-solid fa-list-check"></i> ${T('transcript.summary')}</button>
+                    <button class="rc-btn rc-btn--sm rc-btn--video-hidden" id="rcVideoBtn" style="display:none"><i class="fa-solid fa-film"></i> <span id="rcVideoBtnLbl">${T('transcript.video.analyze')}</span></button>
+                    <label id="rcVisionClaudeWrap" style="display:none;align-items:center;gap:4px;font-size:.82em;color:#777;cursor:pointer" title="${T('transcript.video.visionTitle')}"><input type="checkbox" id="rcVisionClaude" style="margin:0">${T('transcript.video.claudeDesc')}</label>
+                    <button class="rc-btn rc-btn--sm" data-pp="translate"><i class="fa-solid fa-language"></i> ${T('transcript.translate')}</button>
+                    <button class="rc-btn rc-btn--sm" data-pp="topics"><i class="fa-solid fa-tags"></i> ${T('transcript.topics')}</button>
+                    <button class="rc-btn rc-btn--sm" data-pp="wordcloud"><i class="fa-solid fa-cloud"></i> ${T('transcript.wordcloud')}</button>
+                    <button class="rc-btn rc-btn--sm" data-pp="sentiment"><i class="fa-solid fa-face-smile"></i> ${T('transcript.sentiment')}</button>
                 </div>
                 <div class="rc-mono" id="rcAiKeyChip" style="margin:-8px 0 12px;font-size:var(--rc-t-xs)"></div>
                 <div class="rc-record__body">
@@ -143,7 +144,7 @@
             });
             if (!res) return;
             const titleEl = ctx.mount.querySelector('#rcRecordTitle');
-            if (titleEl) titleEl.textContent = t.display_name || t.source_name || ('Запис #' + id);
+            if (titleEl) titleEl.textContent = t.display_name || t.source_name || T('transcript.recordN', { id });
             let descEl = ctx.mount.querySelector('#rcRecordDesc');
             if (t.description) {
                 if (!descEl) {
@@ -156,15 +157,15 @@
             }
             const canonical = '/transcript/' + U.slug(id, t.display_name || t.source_name);
             if (location.pathname !== canonical) R.router.replace(canonical + location.search);
-            UI.toast('Збережено', 'success');
+            UI.toast(T('transcript.saved'), 'success');
         });
 
         // copy
         ctx.mount.querySelector('#rcCopy').addEventListener('click', () => {
             const txt = (mode === 'polished' && hasPolished) ? t.polished_text : t.transcript_text || '';
             navigator.clipboard.writeText(txt).then(
-                () => UI.toast('Скопійовано', 'success'),
-                () => UI.toast('Не вдалося скопіювати', 'error'));
+                () => UI.toast(T('transcript.copied'), 'success'),
+                () => UI.toast(T('transcript.copyFailed'), 'error'));
         });
 
         // export
@@ -226,9 +227,9 @@
             const s = await R.api.get('/api/settings/anthropic-key/status');
             if (!ctx.isCurrent()) return;
             if (s && s.configured) {
-                chip.innerHTML = `<i class="fa-solid fa-circle" style="font-size:7px;color:var(--rc-ok)"></i> Claude-ключ налаштовано`;
+                chip.innerHTML = `<i class="fa-solid fa-circle" style="font-size:7px;color:var(--rc-ok)"></i> ${T('transcript.keyOk')}`;
             } else {
-                chip.innerHTML = `<a href="/settings" style="color:var(--rc-warn,#b07a16)"><i class="fa-solid fa-triangle-exclamation"></i> Покращити/Резюме/Переклад потребують Claude-ключа — додайте в Налаштуваннях</a>`;
+                chip.innerHTML = `<a href="/settings" style="color:var(--rc-warn,#b07a16)"><i class="fa-solid fa-triangle-exclamation"></i> ${T('transcript.keyMissing')}</a>`;
             }
         } catch (_) { chip.innerHTML = ''; }   // best-effort — не критично для перегляду транскрипту
     }
@@ -237,15 +238,15 @@
     // Паралельна доріжка під діалогом: усе, що ко-пілот робив у кожен момент;
     // клік по події → seek аудіо на той таймкод (механіка з Phase 18).
     const CP_EVENT = {
-        topic_shift:      { icon: 'fa-diagram-project', cls: 'is-topic', lbl: 'нова тема' },
-        topic_return:     { icon: 'fa-rotate-left',     cls: 'is-topic', lbl: 'повернення до теми' },
-        retrieval:        { icon: 'fa-magnifying-glass', cls: 'is-rag', lbl: 'пошук в архіві' },
-        insight_local:    { icon: 'fa-microchip',       cls: 'is-local', lbl: 'локальна підказка' },
-        insight_verified: { icon: 'fa-circle-check',    cls: 'is-verified', lbl: 'перевірено Claude' },
-        operator_action:  { icon: 'fa-user',            cls: 'is-op', lbl: 'дія оператора' },
+        topic_shift:      { icon: 'fa-diagram-project', cls: 'is-topic', lbl: T('transcript.cp.ev.topicShift') },
+        topic_return:     { icon: 'fa-rotate-left',     cls: 'is-topic', lbl: T('transcript.cp.ev.topicReturn') },
+        retrieval:        { icon: 'fa-magnifying-glass', cls: 'is-rag', lbl: T('transcript.cp.ev.retrieval') },
+        insight_local:    { icon: 'fa-microchip',       cls: 'is-local', lbl: T('transcript.cp.ev.local') },
+        insight_verified: { icon: 'fa-circle-check',    cls: 'is-verified', lbl: T('transcript.cp.ev.verified') },
+        operator_action:  { icon: 'fa-user',            cls: 'is-op', lbl: T('transcript.cp.ev.operator') },
     };
-    const CP_KIND_LBL = { contradiction: 'протиріччя', question: 'питання', clarification: 'уточнення', fact: 'факт' };
-    const CP_OPACT_LBL = { pin: 'закріпив', unpin: 'відкріпив', dismiss: 'відхилив', thumbs_up: '👍 корисно', thumbs_down: '👎 не корисно', escalate: 'копнути глибше' };
+    const CP_KIND_LBL = { contradiction: T('transcript.cp.kind.contradiction'), question: T('transcript.cp.kind.question'), clarification: T('transcript.cp.kind.clarification'), fact: T('transcript.cp.kind.fact') };
+    const CP_OPACT_LBL = { pin: T('transcript.cp.act.pin'), unpin: T('transcript.cp.act.unpin'), dismiss: T('transcript.cp.act.dismiss'), thumbs_up: T('transcript.cp.act.up'), thumbs_down: T('transcript.cp.act.down'), escalate: T('transcript.cp.act.escalate') };
 
     async function loadCopilotTab(ctx, id) {
         let r = null;
@@ -259,7 +260,7 @@
         const n = (copilotTL.aggregates || {});
         const cnt = (n.insight_local || 0) + (n.insight_verified || 0);
         const btn = U.el('button', { class: 'rc-btn rc-btn--sm', id: 'rcCopilotBtn' },
-            `<i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот${cnt ? `<span class="rc-mono"> ${cnt}</span>` : ''}`);
+            `<i class="fa-solid fa-wand-magic-sparkles"></i> ${T('transcript.cp.button')}${cnt ? `<span class="rc-mono"> ${cnt}</span>` : ''}`);
         bar.insertBefore(btn, spacer || null);
         btn.addEventListener('click', () => toggleCopilot(ctx));
     }
@@ -279,20 +280,20 @@
         const s = copilotTL.session || {};
         const agg = copilotTL.aggregates || {};
         const cfg = s.config || {};
-        const modeLbl = { light: 'лайт', medium: 'середній', hard: 'жорсткий' }[cfg.mode || s.mode] || '';
-        const cost = (s.cost_estimate != null && s.cost_estimate > 0) ? `$${Number(s.cost_estimate).toFixed(2)}` : '$0';
-        const FILTERS = [['all', 'усе'], ['contradiction', 'протиріччя'], ['question', 'питання'],
-            ['clarification', 'уточнення'], ['fact', 'факти']];
+        const modeLbl = { light: T('transcript.cp.mode.light'), medium: T('transcript.cp.mode.medium'), hard: T('transcript.cp.mode.hard') }[cfg.mode || s.mode] || '';
+        const cost = (s.cost_estimate != null && s.cost_estimate > 0) ? `$${R.i18n.num(Number(s.cost_estimate), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '$0';
+        const FILTERS = [['all', T('transcript.cp.filter.all')], ['contradiction', T('transcript.cp.kind.contradiction')], ['question', T('transcript.cp.kind.question')],
+            ['clarification', T('transcript.cp.kind.clarification')], ['fact', T('transcript.cp.filter.facts')]];
         panel.innerHTML = `<div class="rc-cptl">
             <div class="rc-cptl__head">
-                <span class="rc-cptl__title"><i class="fa-solid fa-wand-magic-sparkles"></i> Ко-пілот сесії</span>
-                <span class="rc-cptl__meta rc-mono">${modeLbl ? 'режим: ' + modeLbl + ' · ' : ''}${(agg.insight_local || 0) + (agg.insight_verified || 0)} підказок · ${agg.insight_verified || 0} перевірено · ${cost}</span>
+                <span class="rc-cptl__title"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('transcript.cp.title')}</span>
+                <span class="rc-cptl__meta rc-mono">${modeLbl ? T('transcript.cp.mode', { mode: modeLbl }) + ' · ' : ''}${T('transcript.cp.hints', { count: (agg.insight_local || 0) + (agg.insight_verified || 0) })} · ${T('transcript.cp.verifiedN', { count: agg.insight_verified || 0 })} · ${cost}</span>
                 <div class="rc-cptl__exp">
-                    <button class="rc-btn rc-btn--sm" data-exp="md" title="Експорт у Markdown">MD</button>
-                    <button class="rc-btn rc-btn--sm" data-exp="json" title="Експорт у JSON">JSON</button>
-                    <button class="rc-btn rc-btn--sm" data-exp="archive" title="Зберегти підказки в архів (шукабельно у RAG)"><i class="fa-solid fa-database"></i> В архів</button>
+                    <button class="rc-btn rc-btn--sm" data-exp="md" title="${T('transcript.cp.expMd')}">MD</button>
+                    <button class="rc-btn rc-btn--sm" data-exp="json" title="${T('transcript.cp.expJson')}">JSON</button>
+                    <button class="rc-btn rc-btn--sm" data-exp="archive" title="${T('transcript.cp.archiveTitle')}"><i class="fa-solid fa-database"></i> ${T('transcript.cp.archive')}</button>
                 </div>
-                <button class="rc-cptl__close" id="rcCpTlClose" title="Закрити"><i class="fa-solid fa-xmark"></i></button>
+                <button class="rc-cptl__close" id="rcCpTlClose" title="${T('core.close')}"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="rc-cptl__filters">${FILTERS.map(([k, l]) =>
                 `<button class="rc-cptl__filt rc-mono${cpFilter === k ? ' is-active' : ''}" data-filt="${k}">${l}</button>`).join('')}</div>
@@ -321,16 +322,16 @@
     }
     function renderTimelineRows() {
         const events = (copilotTL.events || []).filter(eventMatchesFilter);
-        if (!events.length) return `<div class="rc-cptl__empty rc-mono">Нічого за цим фільтром.</div>`;
+        if (!events.length) return `<div class="rc-cptl__empty rc-mono">${T('transcript.cp.emptyFilter')}</div>`;
         return events.map(e => {
             const m = CP_EVENT[e.kind] || { icon: 'fa-circle', cls: '', lbl: e.kind };
             const t = (e.ts_offset_sec != null) ? U.fmtDuration(e.ts_offset_sec) : '—';
             const p = e.payload || {};
             let body = '';
             if (e.kind === 'topic_shift' || e.kind === 'topic_return') {
-                body = `<b>${U.esc(p.label || 'тема')}</b>`;
+                body = `<b>${U.esc(p.label || T('transcript.cp.topicFallback'))}</b>`;
             } else if (e.kind === 'retrieval') {
-                body = `«${U.esc(p.query || '')}» <span class="rc-mono" style="color:var(--rc-ink-3)">${p.n || 0} фрагм.</span>`;
+                body = `«${U.esc(p.query || '')}» <span class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.cp.frags', { count: p.n || 0 })}</span>`;
             } else if (e.kind === 'operator_action') {
                 body = CP_OPACT_LBL[e.operator_action] || U.esc(e.operator_action || '');
             } else { // insight_local | insight_verified
@@ -354,7 +355,7 @@
         const sid = (copilotTL.session || {}).id;
         if (!sid) return;
         try {
-            const res = await fetch('/api/copilot/' + sid + '/export?format=' + fmt);
+            const res = await fetch('/api/copilot/' + sid + '/export?format=' + fmt, { headers: R.i18n.headers() });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const blob = await res.blob();
             const a = document.createElement('a');
@@ -362,8 +363,8 @@
             a.download = 'copilot-session-' + sid + '.' + fmt;
             document.body.appendChild(a); a.click();
             URL.revokeObjectURL(a.href); a.remove();
-            UI.toast('Експортовано ' + fmt.toUpperCase(), 'success');
-        } catch (_) { UI.toast('Помилка експорту', 'error'); }
+            UI.toast(T('transcript.exported', { fmt: fmt.toUpperCase() }), 'success');
+        } catch (_) { UI.toast(T('transcript.exportFailed'), 'error'); }
     }
     async function reingestCopilot(ctx) {
         const sid = (copilotTL.session || {}).id;
@@ -371,10 +372,10 @@
         try {
             const r = await R.api.post('/api/copilot/' + sid + '/reingest', {});
             if (r && r.transcription_id) {
-                UI.toast('Збережено в архів — індексується для пошуку', 'success');
+                UI.toast(T('transcript.cp.archived'), 'success');
                 R.router.navigate('/transcript/' + U.slug(r.transcription_id, r.source_name || 'Ко-пілот'));
             }
-        } catch (err) { UI.toast('Не вдалось зберегти: ' + (err && err.message), 'error'); }
+        } catch (err) { UI.toast(T('transcript.cp.saveFailed', { msg: err && err.message }), 'error'); }
     }
 
     function wireTimelineSeek(ctx, panel) {
@@ -422,11 +423,11 @@
         const lbl = ctx.mount.querySelector('#rcVideoBtnLbl');
         if (!lbl || !videoInfo) return;
         if (videoInfo.video_analysis_at && videoInfo.keyframes_count > 0) {
-            lbl.textContent = 'Перерозібрати (' + videoInfo.keyframes_count + ' кадрів)';
+            lbl.textContent = T('transcript.video.reanalyzeN', { count: videoInfo.keyframes_count });
         } else if (videoInfo.video_analysis_at) {
-            lbl.textContent = 'Перерозібрати відео';
+            lbl.textContent = T('transcript.video.reanalyze');
         } else {
-            lbl.textContent = 'Розібрати відео';
+            lbl.textContent = T('transcript.video.analyze');
         }
     }
 
@@ -450,12 +451,12 @@
         panel.innerHTML = `<div class="rc-tvideo">
             <div class="rc-tvideo__head">
                 <i class="fa-solid fa-display rc-tvideo__ico"></i>
-                <span class="rc-tvideo__title">Запис екрану</span>
-                <button class="rc-tvideo__close rc-iconbtn" id="rcVideoClose" title="Згорнути"><i class="fa-solid fa-xmark"></i></button>
+                <span class="rc-tvideo__title">${T('transcript.video.title')}</span>
+                <button class="rc-tvideo__close rc-iconbtn" id="rcVideoClose" title="${T('transcript.video.collapse')}"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <video class="rc-tvideo__el" id="rcVideo" muted playsinline preload="metadata"
                    src="${U.esc(videoSrc)}"></video>
-            <div class="rc-kfstrip" id="rcKfStrip"><span class="rc-mono rc-kfstrip__empty">Кадри завантажуються…</span></div>
+            <div class="rc-kfstrip" id="rcKfStrip"><span class="rc-mono rc-kfstrip__empty">${T('transcript.video.framesLoading')}</span></div>
         </div>`;
 
         const video = panel.querySelector('#rcVideo');
@@ -512,13 +513,13 @@
         const kfs = (data && data.keyframes) || [];
         const strip = ctx.mount.querySelector('#rcKfStrip');
         if (!strip) return;
-        if (!kfs.length) { strip.innerHTML = `<span class="rc-mono rc-kfstrip__empty">Кадри відсутні.</span>`; return; }
+        if (!kfs.length) { strip.innerHTML = `<span class="rc-mono rc-kfstrip__empty">${T('transcript.video.noFrames')}</span>`; return; }
 
         strip.innerHTML = kfs.map(kf => {
             const ts = U.fmtDuration(kf.ts_offset_sec || 0);
             const vis = kf.vision_excerpt ? kf.vision_excerpt.slice(0, 200) : '';
             const ocr = kf.ocr_excerpt ? kf.ocr_excerpt.slice(0, 120) : '';
-            const title = U.esc((vis && ocr) ? (vis + '\nНа екрані: ' + ocr) : (vis || ocr));
+            const title = U.esc((vis && ocr) ? (vis + '\n' + T('transcript.video.onScreen', { text: ocr })) : (vis || ocr));
             return `<div class="rc-kf" data-ts="${U.esc(String(kf.ts_offset_sec || 0))}" title="${title}">
                 <img class="rc-kf__img" src="/api/transcription/${id}/keyframe/${U.esc(String(kf.id))}" loading="lazy" alt="">
                 <span class="rc-kf__ts rc-mono">${ts}</span>
@@ -541,20 +542,20 @@
         const btn = ctx.mount.querySelector('#rcVideoBtn');
         const lbl = ctx.mount.querySelector('#rcVideoBtnLbl');
         if (btn) { btn.disabled = true; }
-        if (lbl) lbl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Розбираю відео…';
+        if (lbl) lbl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('transcript.video.analyzing');
 
         const claudeCb = ctx.mount.querySelector('#rcVisionClaude');
         const body = (claudeCb && claudeCb.checked) ? { vision_backend: 'claude' } : {};
         let result;
         try { result = await R.api.post('/api/transcription/' + id + '/analyze-video', body); }
         catch (err) {
-            UI.toast((err && err.message) || 'Не вдалося запустити аналіз відео', 'error');
+            UI.toast((err && err.message) || T('transcript.video.startFailed'), 'error');
             if (btn) { btn.disabled = false; updateVideoBtnLabel(ctx); }
             return;
         }
         if (!result || !result.success) {
             const reason = (result && result.reason) || 'no video';
-            UI.toast(reason === 'no video' ? 'Відеозапис відсутній' : ('Помилка: ' + reason), 'error');
+            UI.toast(reason === 'no video' ? T('transcript.video.none') : T('transcript.video.error', { reason }), 'error');
             if (btn) { btn.disabled = false; updateVideoBtnLabel(ctx); }
             return;
         }
@@ -567,7 +568,7 @@
             polls++;
             if (polls > MAX_POLLS) {
                 clearInterval(videoPolling); videoPolling = null;
-                UI.toast('Час очікування аналізу вичерпано', 'error');
+                UI.toast(T('transcript.video.timeout'), 'error');
                 if (btn) { btn.disabled = false; updateVideoBtnLabel(ctx); }
                 return;
             }
@@ -580,14 +581,14 @@
                 videoInfo = info;
                 if (btn) { btn.disabled = false; }
                 updateVideoBtnLabel(ctx);
-                UI.toast('Відео розібрано — ' + (info.keyframes_count || 0) + ' кадрів', 'success');
+                UI.toast(T('transcript.video.done', { count: info.keyframes_count || 0 }), 'success');
                 // Ensure video element is shown, then load keyframes
                 renderVideoElement(ctx, id, info);
                 loadKeyframes(ctx, id);
             } else {
                 // Update progress label with known keyframe count if polling info has it
                 const kn = parseInt((info && info.keyframes_count) || 0, 10) || 0;
-                if (lbl) lbl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Розбираю відео…${kn ? ' (' + kn + ' кадрів)' : ''}`;
+                if (lbl) lbl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${T('transcript.video.analyzing')}${kn ? ' (' + T('transcript.video.framesN', { count: kn }) + ')' : ''}`;
             }
         }, 2000);
     }
@@ -599,35 +600,35 @@
     function provenanceHTML(t) {
         const c = [];
         // universal
-        c.push(cell('Тип', U.SRC_LABEL[t.source_type] || t.source_type));
-        c.push(cell('Дата', U.fmtDate(t.created_at)));
-        c.push(cell('Мова', U.langLabel(t.language)));
-        if (t.model_used) c.push(cell('Модель', `<span class="rc-mono">${U.esc((t.model_used||'').toUpperCase())}</span>`));
-        if (t.processing_time) c.push(cell('Обробка', `${Number(t.processing_time).toFixed(1)} с`));
+        c.push(cell(T('transcript.prov.type'), U.SRC_LABEL[t.source_type] || t.source_type));
+        c.push(cell(T('transcript.prov.date'), U.fmtDate(t.created_at)));
+        c.push(cell(T('transcript.prov.language'), U.langLabel(t.language)));
+        if (t.model_used) c.push(cell(T('transcript.prov.model'), `<span class="rc-mono">${U.esc((t.model_used||'').toUpperCase())}</span>`));
+        if (t.processing_time) c.push(cell(T('transcript.prov.processing'), T('transcript.prov.seconds', { n: R.i18n.num(Number(t.processing_time), { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })));
         // Напрямок — editable (select + ✨ k-NN suggest); filled by bindCategoryEditor.
-        c.push(`<div class="rc-prov__cell"><div class="rc-prov__k">Напрямок</div><div class="rc-prov__v" id="rcCatEdit"></div></div>`);
+        c.push(`<div class="rc-prov__cell"><div class="rc-prov__k">${T('transcript.prov.category')}</div><div class="rc-prov__v" id="rcCatEdit"></div></div>`);
 
         // per-source provenance
         if (t.source_type === 'youtube') {
-            c.push(cell('Канал', U.esc(t.youtube_author)));
-            if (t.youtube_duration) c.push(cell('Тривалість', U.fmtDuration(t.youtube_duration)));
-            if (t.source_url) c.push(cell('Джерело', ext(t.source_url, 'Відкрити на YouTube')));
+            c.push(cell(T('transcript.prov.channel'), U.esc(t.youtube_author)));
+            if (t.youtube_duration) c.push(cell(T('transcript.prov.duration'), U.fmtDuration(t.youtube_duration)));
+            if (t.source_url) c.push(cell(T('transcript.prov.source'), ext(t.source_url, T('transcript.prov.openYoutube'))));
             if (t.youtube_id) c.push(cell('Video ID', `<span class="rc-mono">${U.esc(t.youtube_id)}</span>`));
         } else if (t.source_type === 'telegram') {
-            c.push(cell('Чат', U.esc(t.tg_chat_title)));
-            c.push(cell('Від', U.esc(t.tg_sender)));
-            if (t.tg_date) c.push(cell('Надіслано', U.fmtDate(t.tg_date)));
-            if (t.tg_link) c.push(cell('Джерело', ext(t.tg_link, 'Відкрити в Telegram')));
+            c.push(cell(T('transcript.prov.chat'), U.esc(t.tg_chat_title)));
+            c.push(cell(T('transcript.prov.from'), U.esc(t.tg_sender)));
+            if (t.tg_date) c.push(cell(T('transcript.prov.sent'), U.fmtDate(t.tg_date)));
+            if (t.tg_link) c.push(cell(T('transcript.prov.source'), ext(t.tg_link, T('transcript.prov.openTelegram'))));
         } else if (t.source_type === 'document') {
-            if (t.doc_type) c.push(cell('Формат', `<span class="rc-mono">${U.esc((t.doc_type||'').toUpperCase())}</span>`));
-            c.push(cell('Файл', U.esc(t.original_filename || t.source_name)));
-            if (t.page_count) c.push(cell('Сторінок', t.page_count));
-            if (t.byte_size) c.push(cell('Розмір', U.fmtBytes(t.byte_size)));
+            if (t.doc_type) c.push(cell(T('transcript.prov.format'), `<span class="rc-mono">${U.esc((t.doc_type||'').toUpperCase())}</span>`));
+            c.push(cell(T('transcript.prov.file'), U.esc(t.original_filename || t.source_name)));
+            if (t.page_count) c.push(cell(T('transcript.prov.pages'), t.page_count));
+            if (t.byte_size) c.push(cell(T('transcript.prov.size'), U.fmtBytes(t.byte_size)));
         } else if (t.source_type === 'file') {
-            c.push(cell('Файл', U.esc(t.original_filename || t.source_name)));
+            c.push(cell(T('transcript.prov.file'), U.esc(t.original_filename || t.source_name)));
         } else if (t.source_type === 'recording') {
             const sp = (t.speakers || []).filter(s => s.name).map(s => s.name);
-            if (sp.length) c.push(cell('Спікери', U.esc(sp.join(', '))));
+            if (sp.length) c.push(cell(T('transcript.speakers'), U.esc(sp.join(', '))));
         }
         return `<div class="rc-prov">${c.join('')}</div>`;
     }
@@ -640,16 +641,16 @@
             box.innerHTML = `<div class="rc-transcript">${U.esc(t.polished_text)}</div>`;
         } else if (mode === 'segments') {
             const segs = t.segments || [];
-            if (!segs.length) { box.innerHTML = UI.empty('Сегментів немає', '', 'fa-clock'); return; }
+            if (!segs.length) { box.innerHTML = UI.empty(T('transcript.seg.none'), '', 'fa-clock'); return; }
             const spMap = {}; (t.speakers || []).forEach(s => { if (s.name) spMap[s.raw_label] = s.name; });
-            box.innerHTML = `<div class="rc-seghint rc-mono"><i class="fa-solid fa-circle-play"></i> Клік по репліці — відтворити аудіо з цього місця (упізнати голос). Прапорець — закладка.</div>
+            box.innerHTML = `<div class="rc-seghint rc-mono"><i class="fa-solid fa-circle-play"></i> ${T('transcript.seg.hint')}</div>
             <div class="rc-segments">${segs.map((s, i) => {
                 const sp = s.speaker ? (spMap[s.speaker] || labelOf(s.speaker)) : '';
                 const bm = bookmarks[i];
                 const end = s.end != null ? s.end : (segs[i + 1] ? segs[i + 1].start : (s.start || 0) + 5);
                 return `<div class="rc-seg${bm ? ' is-bookmarked' : ''}" data-seg="${i}" data-start="${s.start || 0}" data-end="${end}">
                     <div class="rc-seg__t">${U.fmtDuration(s.start)}
-                        <button class="rc-seg__bm" data-bm="${i}" title="${bm ? 'Прибрати закладку' : 'Додати закладку'}"><i class="${bm ? 'fa-solid' : 'fa-regular'} fa-bookmark"></i></button>
+                        <button class="rc-seg__bm" data-bm="${i}" title="${bm ? T('transcript.bm.remove') : T('transcript.bm.add')}"><i class="${bm ? 'fa-solid' : 'fa-regular'} fa-bookmark"></i></button>
                     </div>
                     <div class="rc-seg__txt">${sp ? `<span class="rc-seg__sp">${U.esc(sp)}</span>` : ''}${U.esc(s.text || '')}
                         ${bm && bm.note ? `<div class="rc-seg__note"><i class="fa-solid fa-note-sticky"></i> ${U.esc(bm.note)}</div>` : ''}
@@ -658,13 +659,13 @@
             }).join('')}</div>`;
             setupSegmentSync(ctx, t, segs);
         } else {
-            box.innerHTML = `<div class="rc-transcript">${U.esc(t.transcript_text || 'Текст відсутній')}</div>`;
+            box.innerHTML = `<div class="rc-transcript">${U.esc(t.transcript_text || T('transcript.text.none'))}</div>`;
         }
     }
     function labelOf(raw) {
-        if (raw === 'self') return 'Ви';
+        if (raw === 'self') return T('transcript.speaker.you');
         const m = /^SPEAKER_(\d+)$/.exec(raw);
-        return m ? 'Спікер ' + (parseInt(m[1], 10) + 1) : raw;
+        return m ? T('transcript.speaker.n', { n: parseInt(m[1], 10) + 1 }) : raw;
     }
 
     // ---- per-record speaker editor (name new speakers / fix misidentified) ----
@@ -687,7 +688,7 @@
         }
         (t.speakers || []).forEach(s => { if (s.raw_label && !seen.has(s.raw_label)) { seen.add(s.raw_label); order.push(s.raw_label); } });
         if (!order.length) {
-            panel.innerHTML = `<div class="rc-spkedit"><p class="rc-mono" style="color:var(--rc-ink-3)">У цьому записі немає розрізнення спікерів (діаризація не виконувалась).</p></div>`;
+            panel.innerHTML = `<div class="rc-spkedit"><p class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.spk.noDiarization')}</p></div>`;
             return;
         }
         const nameOf = {}; (t.speakers || []).forEach(s => { if (s.name) nameOf[s.raw_label] = s.name; });
@@ -698,8 +699,8 @@
         if (!ctx.isCurrent()) return;
 
         panel.innerHTML = `<div class="rc-spkedit">
-            <div class="rc-spkedit__head"><i class="fa-solid fa-user-pen"></i> Імена спікерів у цьому записі</div>
-            <p class="rc-spkedit__hint">Назвіть нерозпізнаних, виправте помилкові авто-збіги. Підказка під кожним — перша репліка спікера. Імена зберігаються глобально й підставляться наступного разу.</p>
+            <div class="rc-spkedit__head"><i class="fa-solid fa-user-pen"></i> ${T('transcript.spk.head')}</div>
+            <p class="rc-spkedit__hint">${T('transcript.spk.hint')}</p>
             <datalist id="rcSpkKnown">${known.map(n => `<option value="${U.esc(n)}"></option>`).join('')}</datalist>
             <div class="rc-spkedit__rows">${order.map(raw => {
                 const sample = sampleOf[raw] ? (sampleOf[raw].slice(0, 110) + (sampleOf[raw].length > 110 ? '…' : '')) : '';
@@ -709,12 +710,12 @@
                         ${sample ? `<span class="rc-spkedit__sample">«${U.esc(sample)}»</span>` : ''}
                     </div>
                     <input class="rc-input rc-input--sm rc-spkedit__in" list="rcSpkKnown" autocomplete="off"
-                           value="${U.esc(nameOf[raw] || '')}" placeholder="Імʼя спікера…">
+                           value="${U.esc(nameOf[raw] || '')}" placeholder="${T('transcript.spk.placeholder')}">
                 </div>`;
             }).join('')}</div>
             <div class="rc-spkedit__actions">
-                <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcSpkSave"><i class="fa-solid fa-check"></i> Зберегти імена</button>
-                <button class="rc-btn rc-btn--sm" id="rcSpkClose">Закрити</button>
+                <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcSpkSave"><i class="fa-solid fa-check"></i> ${T('transcript.spk.save')}</button>
+                <button class="rc-btn rc-btn--sm" id="rcSpkClose">${T('core.close')}</button>
             </div>
         </div>`;
         panel.querySelector('#rcSpkSave').addEventListener('click', () => saveSpeakers(ctx, id, t, panel));
@@ -728,15 +729,15 @@
             mapping[row.dataset.raw] = (row.querySelector('.rc-spkedit__in').value || '').trim() || null;
         });
         const btn = panel.querySelector('#rcSpkSave');
-        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Зберігаю…';
+        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('transcript.saving');
         try {
             const r = await R.api.patch('/api/transcriptions/' + id + '/speakers', { mapping });
             data.speakers = r.speakers || data.speakers;
-            UI.toast('Імена спікерів збережено', 'success');
+            UI.toast(T('transcript.spk.saved'), 'success');
             speakersOpen = false;
             paint(ctx, id, data);   // re-render header + transcript with new names
         } catch (err) {
-            UI.toast((err && err.message) || 'Не вдалося зберегти', 'error');
+            UI.toast((err && err.message) || T('transcript.saveFailed'), 'error');
             btn.disabled = false; btn.innerHTML = old;
         }
     }
@@ -806,7 +807,7 @@
         if (!panel.hidden) { panel.hidden = true; panel.innerHTML = ''; return; }
         panel.hidden = false;
         panel.className = 'rc-cmpanel';
-        panel.innerHTML = '<div class="rc-cmpanel__loading rc-mono">Завантаження…</div>';
+        panel.innerHTML = '<div class="rc-cmpanel__loading rc-mono">' + T('transcript.loading') + '</div>';
         const audio = ctx.mount.querySelector('#rcAudio');
         // Якір ставимо лише коли плеєр реально зрушив з нуля: інакше кожен
         // коментар отримав би фальшивий «~00:00», що гірше за жоден якір.
@@ -819,11 +820,11 @@
 
     async function toggleBookmark(ctx, t, idx) {
         if (bookmarks[idx]) {
-            try { await R.api.bookmarkDelete(bookmarks[idx].id); delete bookmarks[idx]; UI.toast('Закладку прибрано', 'info'); afterBookmarkChange(ctx, t); }
+            try { await R.api.bookmarkDelete(bookmarks[idx].id); delete bookmarks[idx]; UI.toast(T('transcript.bm.removed'), 'info'); afterBookmarkChange(ctx, t); }
             catch (e) { UI.toast(e.message, 'error'); }
         } else {
-            const note = (await UI.promptModal({ title: 'Закладка', label: 'Нотатка до закладки (необовʼязково)', maxlength: 300 }) || '').trim();
-            try { const r = await R.api.bookmarkCreate(data.id, idx, note || undefined); bookmarks[idx] = { id: r.id, note: note || '' }; UI.toast('Закладку додано', 'success'); afterBookmarkChange(ctx, t); }
+            const note = (await UI.promptModal({ title: T('transcript.bm.modalTitle'), label: T('transcript.bm.noteOptional'), maxlength: 300 }) || '').trim();
+            try { const r = await R.api.bookmarkCreate(data.id, idx, note || undefined); bookmarks[idx] = { id: r.id, note: note || '' }; UI.toast(T('transcript.bm.added'), 'success'); afterBookmarkChange(ctx, t); }
             catch (e) { UI.toast(e.message, 'error'); }
         }
     }
@@ -846,17 +847,17 @@
         const segs = t.segments || [];
         const items = Object.keys(bookmarks).map(Number).sort((a, b) => a - b);
         if (!items.length) {
-            panel.innerHTML = `<div class="rc-bmpanel"><div class="rc-bmpanel__h"><i class="fa-solid fa-bookmark"></i> Закладки</div><p class="rc-mono" style="color:var(--rc-ink-3)">Ще немає. У вкладці «Таймкоди» натисніть прапорець біля моменту.</p></div>`;
+            panel.innerHTML = `<div class="rc-bmpanel"><div class="rc-bmpanel__h"><i class="fa-solid fa-bookmark"></i> ${T('transcript.bookmarks')}</div><p class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.bm.empty')}</p></div>`;
             return;
         }
-        panel.innerHTML = `<div class="rc-bmpanel"><div class="rc-bmpanel__h"><i class="fa-solid fa-bookmark"></i> Закладки <span class="rc-mono">${items.length}</span></div>
+        panel.innerHTML = `<div class="rc-bmpanel"><div class="rc-bmpanel__h"><i class="fa-solid fa-bookmark"></i> ${T('transcript.bookmarks')} <span class="rc-mono">${items.length}</span></div>
             ${items.map(i => {
                 const s = segs[i] || {}, bm = bookmarks[i];
                 return `<div class="rc-bm" data-jump="${i}">
                     <span class="rc-bm__t rc-mono">${U.fmtDuration(s.start || 0)}</span>
-                    <span class="rc-bm__note">${bm.note ? U.esc(bm.note) : '<span class="rc-bm__empty">без нотатки</span>'}</span>
-                    <button class="rc-iconbtn" data-edit="${i}" title="Нотатка"><i class="fa-solid fa-pen"></i></button>
-                    <button class="rc-iconbtn" data-del="${i}" title="Прибрати"><i class="fa-solid fa-trash"></i></button>
+                    <span class="rc-bm__note">${bm.note ? U.esc(bm.note) : '<span class="rc-bm__empty">' + T('transcript.bm.noNote') + '</span>'}</span>
+                    <button class="rc-iconbtn" data-edit="${i}" title="${T('transcript.bm.note')}"><i class="fa-solid fa-pen"></i></button>
+                    <button class="rc-iconbtn" data-del="${i}" title="${T('transcript.bm.delete')}"><i class="fa-solid fa-trash"></i></button>
                 </div>`;
             }).join('')}</div>`;
         panel.querySelectorAll('[data-jump]').forEach(el => el.addEventListener('click', (e) => {
@@ -881,11 +882,11 @@
     }
     async function editBookmarkNote(ctx, t, idx) {
         const bm = bookmarks[idx]; if (!bm) return;
-        const raw = await UI.promptModal({ title: 'Нотатка до закладки', label: 'Нотатка', defaultValue: bm.note || '', maxlength: 300 });
+        const raw = await UI.promptModal({ title: T('transcript.bm.editTitle'), label: T('transcript.bm.note'), defaultValue: bm.note || '', maxlength: 300 });
         if (raw == null) return;   // скасовано (Escape/backdrop/×) — на відміну від window.prompt, тепер розрізняємо це від "зберегти порожньою"
         const note = raw.trim();
         if (note === (bm.note || '')) return;
-        R.api.bookmarkUpdate(bm.id, note).then(() => { bm.note = note; afterBookmarkChange(ctx, t); UI.toast('Нотатку збережено', 'success'); }).catch(e => UI.toast(e.message, 'error'));
+        R.api.bookmarkUpdate(bm.id, note).then(() => { bm.note = note; afterBookmarkChange(ctx, t); UI.toast(T('transcript.bm.noteSaved'), 'success'); }).catch(e => UI.toast(e.message, 'error'));
     }
 
     // ---- editable напрямок + ✨ k-NN suggest ----
@@ -894,7 +895,7 @@
         if (!box) return;
         const opts = UI.catOptions(t.category_id, { first: 'none' });
         box.innerHTML = `<select class="rc-select rc-select--sm rc-catsel" id="rcCatSel" data-cat-first="none">${opts}</select>
-            <button class="rc-iconbtn" id="rcCatSuggest" title="Підказати напрямок за схожими записами (✨)"><i class="fa-solid fa-wand-magic-sparkles"></i></button>`;
+            <button class="rc-iconbtn" id="rcCatSuggest" title="${T('transcript.cat.suggestTitle')}"><i class="fa-solid fa-wand-magic-sparkles"></i></button>`;
         box.querySelector('#rcCatSel').addEventListener('change', (e) => applyCategory(ctx, id, t, e.target.value ? Number(e.target.value) : null));
         box.querySelector('#rcCatSuggest').addEventListener('click', () => suggestCat(ctx, id, t));
     }
@@ -902,28 +903,28 @@
         try {
             await R.api.setCategory(id, cid); t.category_id = cid; data.category_id = cid;
             renderTaxonomy(ctx, id, t);   // шлях під заголовком іде за напрямком
-            UI.toast(cid ? 'Напрямок змінено' : 'Напрямок знято', 'success');
+            UI.toast(cid ? T('transcript.cat.changed') : T('transcript.cat.cleared'), 'success');
         }
-        catch (e) { UI.toast(e.message || 'Не вдалося', 'error'); }
+        catch (e) { UI.toast(e.message || T('transcript.failed'), 'error'); }
     }
     const _CAT_REASON = {
-        insufficient_labels: 'Замало розмічених напрямків для підказки — розмітьте кілька записів вручну.',
-        not_embedded: 'Запис ще не проіндексовано (embeddings) — підказка недоступна.',
-        embeddings_unavailable: 'Локальні embeddings недоступні.',
-        no_labeled_data: 'Немає розмічених записів для порівняння.',
-        dim_mismatch: 'Несумісні embeddings — підказка недоступна.',
+        insufficient_labels: T('transcript.cat.r.insufficient'),
+        not_embedded: T('transcript.cat.r.notEmbedded'),
+        embeddings_unavailable: T('transcript.cat.r.embUnavailable'),
+        no_labeled_data: T('transcript.cat.r.noLabeled'),
+        dim_mismatch: T('transcript.cat.r.dimMismatch'),
     };
     async function suggestCat(ctx, id, t) {
         const btn = ctx.mount.querySelector('#rcCatSuggest');
         if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
         try {
             const r = await R.api.suggestCategory(id);
-            if (!r.suggestion) { UI.toast(_CAT_REASON[r.reason] || 'Підказати не вдалося.', 'info'); return; }
+            if (!r.suggestion) { UI.toast(_CAT_REASON[r.reason] || T('transcript.cat.suggestFailed'), 'info'); return; }
             const sel = ctx.mount.querySelector('#rcCatSel');
             if (sel) sel.value = String(r.suggestion.category_id);
             await applyCategory(ctx, id, t, r.suggestion.category_id);
-            UI.toast(`За схожими записами: «${r.suggestion.name}» (${Math.round((r.suggestion.confidence || 0) * 100)}%)`, 'success');
-        } catch (e) { UI.toast(e.message || 'Помилка підказки', 'error'); }
+            UI.toast(T('transcript.cat.suggested', { name: r.suggestion.name, pct: Math.round((r.suggestion.confidence || 0) * 100) }), 'success');
+        } catch (e) { UI.toast(e.message || T('transcript.cat.suggestError'), 'error'); }
         finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i>'; } }
     }
 
@@ -939,14 +940,14 @@
 
         const path = UI.catPath ? UI.catPath(t.category_id) : '';
         box.appendChild(U.el('div', { class: 'rc-mono', style: 'font-size:var(--rc-t-xs);color:var(--rc-ink-3)' },
-            path ? `<i class="fa-solid fa-folder-tree"></i> ${U.esc(path)}` : '<i class="fa-solid fa-folder-tree"></i> Без напрямку'));
+            path ? `<i class="fa-solid fa-folder-tree"></i> ${U.esc(path)}` : '<i class="fa-solid fa-folder-tree"></i> ' + T('transcript.cat.none')));
 
         const row = U.el('div', { class: 'rc-tags' });
         (t.tags || []).forEach((tag) => {
             row.appendChild(UI.tagChip(tag, { onRemove: (tg) => changeTags(ctx, id, t, { remove: [tg.name] }) }));
         });
         const add = U.el('span', { style: 'display:inline-flex;gap:4px;align-items:center' },
-            `<input class="rc-input rc-select--sm" placeholder="Додати тег…" style="width:150px" maxlength="40" autocomplete="off">
+            `<input class="rc-input rc-select--sm" placeholder="${T('transcript.tag.add')}" style="width:150px" maxlength="40" autocomplete="off">
              <button class="rc-btn rc-btn--sm" type="button"><i class="fa-solid fa-plus"></i></button>`);
         const inp = add.querySelector('input');
         const submit = () => {
@@ -963,12 +964,12 @@
         const sugg = (t.suggested_tags || []).filter(Boolean);
         if (sugg.length) {
             const sbox = U.el('div', { class: 'rc-tags' },
-                `<span class="rc-mono" style="font-size:var(--rc-t-xs);color:var(--rc-ink-3)">Claude пропонує:</span>`);
+                `<span class="rc-mono" style="font-size:var(--rc-t-xs);color:var(--rc-ink-3)">${T('transcript.tag.claudeSuggests')}</span>`);
             sugg.forEach((name) => {
                 const chip = U.el('span', { class: 'rc-tag' },
                     `${U.esc(name)}
-                     <button type="button" class="rc-tag__x" data-act="accept" title="Прийняти тег" aria-label="Прийняти тег ${U.esc(name)}"><i class="fa-solid fa-check"></i></button>
-                     <button type="button" class="rc-tag__x" data-act="dismiss" title="Відхилити" aria-label="Відхилити тег ${U.esc(name)}">&times;</button>`);
+                     <button type="button" class="rc-tag__x" data-act="accept" title="${T('transcript.tag.accept')}" aria-label="${T('transcript.tag.acceptAria', { name: U.esc(name) })}"><i class="fa-solid fa-check"></i></button>
+                     <button type="button" class="rc-tag__x" data-act="dismiss" title="${T('transcript.tag.dismiss')}" aria-label="${T('transcript.tag.dismissAria', { name: U.esc(name) })}">&times;</button>`);
                 chip.querySelector('[data-act="accept"]').addEventListener('click',
                     () => resolveSuggestion(ctx, id, t, { accept: [name] }));
                 chip.querySelector('[data-act="dismiss"]').addEventListener('click',
@@ -987,11 +988,11 @@
     }
     async function changeTags(ctx, id, t, body) {
         try { _applyTagResponse(ctx, id, t, await R.api.setRecordTags(id, body)); }
-        catch (e) { UI.toast((e && e.message) || 'Не вдалося змінити теги', 'error'); }
+        catch (e) { UI.toast((e && e.message) || T('transcript.tag.changeFailed'), 'error'); }
     }
     async function resolveSuggestion(ctx, id, t, body) {
         try { _applyTagResponse(ctx, id, t, await R.api.resolveTagSuggestions(id, body)); }
-        catch (e) { UI.toast((e && e.message) || 'Не вдалося застосувати підказку', 'error'); }
+        catch (e) { UI.toast((e && e.message) || T('transcript.tag.applyFailed'), 'error'); }
     }
 
     // ---- related / connections ----
@@ -1003,14 +1004,14 @@
 
         if (ents.length) {
             blocks.push(`<div class="rc-rel__block">
-                <div class="rc-rel__h">Сутності <span class="rc-mono">${ents.length}</span></div>
+                <div class="rc-rel__h">${T('transcript.rel.entities')} <span class="rc-mono">${ents.length}</span></div>
                 <div class="rc-tags">${ents.map(e =>
                     `<a class="rc-entity" href="/entities/${e.id}"><span class="rc-entity__type">${U.esc(e.type||'')}</span>${U.esc(e.canonical_name)}</a>`
                 ).join('')}</div></div>`);
         }
         if (tasks.length) {
             blocks.push(`<div class="rc-rel__block">
-                <div class="rc-rel__h">Задачі <span class="rc-mono">${tasks.length}</span></div>
+                <div class="rc-rel__h">${T('transcript.rel.tasks')} <span class="rc-mono">${tasks.length}</span></div>
                 <div>${tasks.map(a =>
                     `<div class="rc-task" data-id="${U.esc(a.id)}"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(U.taskStatus(a.status))}</span>
                     <div class="rc-task__body">${U.esc(a.task)}${a.owner_name ? ` <span class="rc-task__owner">· ${U.esc(a.owner_name)}</span>` : ''}</div></div>`
@@ -1026,9 +1027,9 @@
                 if (!ctx.isCurrent()) return;
                 const others = (d.transcriptions || []).filter(x => x.id !== id).slice(0, 5);
                 if (others.length) {
-                    const cat = (cats.map[t.category_id] || {}).name || 'напрямку';
+                    const cat = (cats.map[t.category_id] || {}).name || T('transcript.rel.categoryFallback');
                     const block = U.el('div', { class: 'rc-rel__block' });
-                    block.innerHTML = `<div class="rc-rel__h">Той самий напрямок <span class="rc-mono">${U.esc(cat)}</span></div>
+                    block.innerHTML = `<div class="rc-rel__h">${T('transcript.rel.sameCategory')} <span class="rc-mono">${U.esc(cat)}</span></div>
                         <div class="rc-tags">${others.map(o =>
                             `<a class="rc-entity" href="/transcript/${U.slug(o.id, o.source_name)}">${U.esc(o.source_name || ('#'+o.id))}</a>`
                         ).join('')}</div>`;
@@ -1057,21 +1058,21 @@
     // ---- Claude actions (existing endpoints) ----
     async function doPolish(ctx, id) {
         const btn = ctx.mount.querySelector('#rcPolish');
-        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Покращую…';
+        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('transcript.polish.busy');
         try {
             const r = await R.api.post('/api/transcription/' + id + '/polish', {});
             data.polished_text = r.polished_text;
-            UI.toast(r.cached ? 'Готовий поліпшений текст' : 'Поліпшено ✦', 'success');
+            UI.toast(r.cached ? T('transcript.polish.ready') : T('transcript.polish.done'), 'success');
             paint(ctx, id, data); mode = 'polished'; renderBody(ctx, data);
             ctx.mount.querySelectorAll('#rcViewToggle button').forEach(x => x.classList.toggle('is-active', x.dataset.mode === 'polished'));
         } catch (err) { UI.toast(err.message, 'error'); btn.disabled = false; btn.innerHTML = old; }
     }
     async function doSummary(ctx, id) {
         const btn = ctx.mount.querySelector('#rcSummary');
-        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Резюмую…';
+        btn.disabled = true; const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('transcript.summary.busy');
         try {
             const r = await R.api.post('/api/transcription/' + id + '/summarize', {});
-            renderSummary(ctx, r); UI.toast(r.cached ? 'Резюме готове' : 'Резюме згенеровано', 'success');
+            renderSummary(ctx, r); UI.toast(r.cached ? T('transcript.summary.ready') : T('transcript.summary.done'), 'success');
         } catch (err) { UI.toast(err.message, 'error'); }
         finally { btn.disabled = false; btn.innerHTML = old; }
     }
@@ -1081,8 +1082,8 @@
         const ai = (r.action_items || []).map(a => `<li>${U.esc(typeof a === 'string' ? a : (a.task || ''))}</li>`).join('');
         panel.innerHTML = `<div class="rc-ask__answer" style="margin-bottom:24px">
             ${r.summary ? `<p>${U.esc(r.summary)}</p>` : ''}
-            ${kp ? `<div class="rc-eyebrow" style="margin-top:12px">Ключові тези</div><ul>${kp}</ul>` : ''}
-            ${ai ? `<div class="rc-eyebrow" style="margin-top:12px">Задачі</div><ul>${ai}</ul>` : ''}
+            ${kp ? `<div class="rc-eyebrow" style="margin-top:12px">${T('transcript.summary.keyPoints')}</div><ul>${kp}</ul>` : ''}
+            ${ai ? `<div class="rc-eyebrow" style="margin-top:12px">${T('transcript.rel.tasks')}</div><ul>${ai}</ul>` : ''}
         </div>`;
     }
 
@@ -1099,11 +1100,11 @@
         else if (kind === 'sentiment') doSentiment(ctx, id, panel);
     }
     const ppHead = (title, ico) => `<div class="rc-pp__head"><i class="fa-solid ${ico}"></i> ${U.esc(title)}</div>`;
-    const ppSpin = () => `<span class="rc-mono" style="color:var(--rc-ink-3)"><i class="fa-solid fa-spinner fa-spin"></i> Обробка…</span>`;
+    const ppSpin = () => `<span class="rc-mono" style="color:var(--rc-ink-3)"><i class="fa-solid fa-spinner fa-spin"></i> ${T('transcript.pp.busy')}</span>`;
     const topicLabel = (tp) => typeof tp === 'string' ? tp : (tp.topic || tp.label || tp.name || '');
 
     async function doTopics(ctx, id, t, panel) {
-        panel.innerHTML = `<div class="rc-pp">${ppHead('Теми', 'fa-tags')}<div class="rc-pp__body" id="rcPPb">${ppSpin()}</div></div>`;
+        panel.innerHTML = `<div class="rc-pp">${ppHead(T('transcript.topics'), 'fa-tags')}<div class="rc-pp__body" id="rcPPb">${ppSpin()}</div></div>`;
         const body = panel.querySelector('#rcPPb');
         let topics = null;
         if (t.topics_json) { try { topics = JSON.parse(t.topics_json).topics; } catch (_) {} }
@@ -1111,19 +1112,19 @@
             if (!topics) { const r = await R.api.post('/api/transcription/' + id + '/topics', {}); topics = r.topics || []; t.topics_json = JSON.stringify({ topics }); }
             if (!ctx.isCurrent()) return;
             const labels = topics.map(topicLabel).filter(Boolean);
-            if (!labels.length) { body.innerHTML = `<p class="rc-mono" style="color:var(--rc-ink-3)">Тем не знайдено.</p>`; return; }
+            if (!labels.length) { body.innerHTML = `<p class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.pp.noTopics')}</p>`; return; }
             body.innerHTML = `<div class="rc-tags">${labels.map(l =>
                 `<a class="rc-entity" href="/library?search=${encodeURIComponent(l)}">${U.esc(l)}</a>`).join('')}</div>`;
         } catch (err) { if (ctx.isCurrent()) body.innerHTML = UI.error(err && err.message); }
     }
 
     function doTranslate(ctx, id, t, panel) {
-        const ALL = [{ v: 'uk', l: 'Українською' }, { v: 'en', l: 'English' }, { v: 'ru', l: 'Русською' }];
+        const ALL = [{ v: 'uk', l: T('transcript.pp.langUk') }, { v: 'en', l: T('transcript.pp.langEn') }, { v: 'ru', l: T('transcript.pp.langRu') }];
         const src = (t.language || '').toLowerCase();
         const opts = ALL.filter(l => l.v !== src);
         let cached = {};
         if (t.translations_json) { try { cached = JSON.parse(t.translations_json) || {}; } catch (_) {} }
-        panel.innerHTML = `<div class="rc-pp">${ppHead('Переклад', 'fa-language')}<div class="rc-pp__body">
+        panel.innerHTML = `<div class="rc-pp">${ppHead(T('transcript.translate'), 'fa-language')}<div class="rc-pp__body">
             <div class="rc-pp__row">${opts.map(l => `<button class="rc-btn rc-btn--sm" data-lang="${l.v}">${U.esc(l.l)}${cached[l.v] ? ' ✓' : ''}</button>`).join('')}</div>
             <div id="rcTrOut"></div></div></div>`;
         const out = panel.querySelector('#rcTrOut');
@@ -1154,10 +1155,10 @@
     function doWordcloud(ctx, t, panel) {
         const text = (mode === 'polished' && t.polished_text) ? t.polished_text : (t.transcript_text || '');
         const counts = countWords(text);
-        if (!counts.length) { panel.innerHTML = `<div class="rc-pp">${ppHead('Хмара слів', 'fa-cloud')}<div class="rc-pp__body"><p class="rc-mono" style="color:var(--rc-ink-3)">Замало слів для хмари.</p></div></div>`; return; }
+        if (!counts.length) { panel.innerHTML = `<div class="rc-pp">${ppHead(T('transcript.wordcloud'), 'fa-cloud')}<div class="rc-pp__body"><p class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.pp.fewWords')}</p></div></div>`; return; }
         const max = Math.log(counts[0][1]), min = Math.log(counts[counts.length - 1][1]);
         const size = (c) => max === min ? 22 : Math.round(14 + (Math.log(c) - min) / (max - min) * 28);
-        panel.innerHTML = `<div class="rc-pp">${ppHead('Хмара слів', 'fa-cloud')}<div class="rc-pp__body"><div class="rc-cloud">${
+        panel.innerHTML = `<div class="rc-pp">${ppHead(T('transcript.wordcloud'), 'fa-cloud')}<div class="rc-pp__body"><div class="rc-cloud">${
             counts.map(([w, c]) => `<span class="rc-cloud__w" data-w="${U.esc(w)}" style="font-size:${size(c)}px" title="${c}×">${U.esc(w)}</span>`).join('')
         }</div></div></div>`;
         panel.querySelectorAll('.rc-cloud__w').forEach(el =>
@@ -1165,14 +1166,14 @@
     }
 
     async function doSentiment(ctx, id, panel) {
-        panel.innerHTML = `<div class="rc-pp">${ppHead('Емоції за спікерами', 'fa-face-smile')}<div class="rc-pp__body" id="rcPPb">${ppSpin()}</div></div>`;
+        panel.innerHTML = `<div class="rc-pp">${ppHead(T('transcript.pp.sentimentHead'), 'fa-face-smile')}<div class="rc-pp__body" id="rcPPb">${ppSpin()}</div></div>`;
         const body = panel.querySelector('#rcPPb');
         try {
             const r = await R.api.post('/api/transcription/' + id + '/sentiment', {});
             if (!ctx.isCurrent()) return;
             const sp = r.speakers || {};
             const names = Object.keys(sp);
-            if (!names.length) { body.innerHTML = `<p class="rc-mono" style="color:var(--rc-ink-3)">Немає даних.</p>`; return; }
+            if (!names.length) { body.innerHTML = `<p class="rc-mono" style="color:var(--rc-ink-3)">${T('transcript.pp.noData')}</p>`; return; }
             body.innerHTML = `<div class="rc-senti">${names.map(n => sentiCard(n, sp[n] || {})).join('')}</div>`;
         } catch (err) { if (ctx.isCurrent()) body.innerHTML = UI.error(err && err.message); }
     }
@@ -1181,7 +1182,7 @@
         const pct = Math.round((score + 1) / 2 * 100);
         const color = score > 0.15 ? 'var(--rc-ok)' : score < -0.15 ? 'var(--rc-err)' : 'var(--rc-ink-3)';
         return `<div class="rc-senti__card">
-            <div class="rc-senti__head"><span class="rc-senti__name">${U.esc(name)}</span><span class="rc-mono" style="color:var(--rc-ink-3)">${U.esc(d.tone || '')} · ${score.toFixed(2)}</span></div>
+            <div class="rc-senti__head"><span class="rc-senti__name">${U.esc(name)}</span><span class="rc-mono" style="color:var(--rc-ink-3)">${U.esc(d.tone || '')} · ${R.i18n.num(score, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
             <div class="rc-senti__bar"><div class="rc-senti__fill" style="width:${pct}%;background:${color}"></div></div>
             ${d.summary ? `<p class="rc-senti__sum">${U.esc(d.summary)}</p>` : ''}
         </div>`;
@@ -1190,7 +1191,7 @@
     async function doExport(fmt, t) {
         try {
             const res = await fetch(R.api.exportUrl(fmt), {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, R.i18n.headers()),
                 body: JSON.stringify(t),
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1200,8 +1201,8 @@
             a.download = U.slug(t.id, t.source_name) + '.' + fmt;
             document.body.appendChild(a); a.click();
             URL.revokeObjectURL(a.href); a.remove();
-            UI.toast('Експортовано ' + fmt.toUpperCase(), 'success');
-        } catch (err) { UI.toast('Помилка експорту', 'error'); }
+            UI.toast(T('transcript.exported', { fmt: fmt.toUpperCase() }), 'success');
+        } catch (err) { UI.toast(T('transcript.exportFailed'), 'error'); }
     }
 
     R.views.transcript = {

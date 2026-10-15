@@ -26,6 +26,7 @@ import threading
 from collections import OrderedDict
 from typing import Optional
 
+from app.core.i18n import server_lang, tr
 from app.services import commitments, tg_bot
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,28 @@ logger = logging.getLogger(__name__)
 #: 3 кнопки на задачу, ліміт Telegram — 100 на повідомлення.
 MAX_ITEMS = 33
 POLL_TIMEOUT = 15            # < tg_bot.TIMEOUT: long-poll не має впертись у таймаут HTTP
-FOOTER = "Кнопки спрацьовують, коли увімкнений домашній ПК."
+_DONE_KEYS = {"done": "done", "cancelled": "cancelled", "postpone:1": "postpone1",
+              "postpone:7": "postpone7", "postpone:30": "postpone30"}
 
-_DONE_LABEL = {"done": "✅ зроблено", "cancelled": "🚫 неактуально",
-               "postpone:1": "⏭ на завтра", "postpone:7": "⏭ на тиждень",
-               "postpone:30": "⏭ на місяць"}
+
+def _t(key: str, lang: Optional[str] = None, **vars) -> str:
+    """Текст кнопки/відповіді мовою налаштування на момент складання/натиску."""
+    return tr("telegram.btn." + key, lang=lang or server_lang(), **vars)
+
+
+def footer(lang: Optional[str] = None) -> str:
+    return _t("footer", lang)
+
+
+def __getattr__(name: str):
+    if name == "FOOTER":          # сумісність: константа стала мовозалежною
+        return footer()
+    raise AttributeError(name)
+
+
+def _done_label(action: str, lang: Optional[str] = None) -> Optional[str]:
+    key = _DONE_KEYS.get(action)
+    return _t("label." + key, lang) if key else None
 
 
 def _btn(text: str, data: str) -> dict:
@@ -50,18 +68,19 @@ def task_row(n: int, item_id: int) -> list[dict]:
             _btn("⏭", f"p:{n}:{item_id}")]
 
 
-def postpone_row(n: int, item_id: int) -> list[dict]:
-    return [_btn(f"{n} завтра", f"a:{n}:{item_id}:postpone:1"),
-            _btn("+тиждень", f"a:{n}:{item_id}:postpone:7"),
-            _btn("+місяць", f"a:{n}:{item_id}:postpone:30"),
+def postpone_row(n: int, item_id: int, lang: Optional[str] = None) -> list[dict]:
+    return [_btn(f"{n} {_t('tomorrow', lang)}", f"a:{n}:{item_id}:postpone:1"),
+            _btn(_t("plusWeek", lang), f"a:{n}:{item_id}:postpone:7"),
+            _btn(_t("plusMonth", lang), f"a:{n}:{item_id}:postpone:30"),
             _btn("↩", f"b:{n}:{item_id}")]
 
 
-def done_row(n: int, action: str, event_id: int, due_date: Optional[str] = None) -> list[dict]:
-    label = _DONE_LABEL.get(action, action)
+def done_row(n: int, action: str, event_id: int, due_date: Optional[str] = None,
+             lang: Optional[str] = None) -> list[dict]:
+    label = _done_label(action, lang) or action
     if action.startswith("postpone:") and due_date:
-        label = f"⏭ до {due_date[8:10]}.{due_date[5:7]}"
-    return [_btn(f"{n} {label}", "x"), _btn("↩ скасувати", f"u:{n}:{event_id}")]
+        label = _t("postponedTo", lang, date=f"{due_date[8:10]}.{due_date[5:7]}")
+    return [_btn(f"{n} {label}", "x"), _btn(_t("undo", lang), f"u:{n}:{event_id}")]
 
 
 def keyboard(item_ids: list[int]) -> Optional[dict]:
@@ -74,13 +93,15 @@ def keyboard(item_ids: list[int]) -> Optional[dict]:
 
 def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
     """Один ``callback_query`` → зміна в БД + нова клавіатура. → текст відповіді (для тестів)."""
+    lang = server_lang()          # мова — на момент натиску
     msg = cq.get("message") or {}
     chat = str((msg.get("chat") or {}).get("id", ""))
     data = str(cq.get("data") or "")
     if not chat or chat != tg_bot._chat_id():
         logger.warning("Кнопки брифінгу: натиск з чужого чату — відмова")
-        _answer(cq, "Немає доступу", transport)
-        return "Немає доступу"
+        denied = _t("noAccess", lang)
+        _answer(cq, denied, transport)
+        return denied
     sender = cq.get("from") or {}
     actor = f"tg:{sender.get('id')}" + (f" @{sender['username']}" if sender.get("username") else "")
     parts = data.split(":", 3)
@@ -92,21 +113,21 @@ def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
             pass
         elif kind in ("p", "b") and len(parts) == 3:
             n, iid = int(parts[1]), int(parts[2])
-            new_row = postpone_row(n, iid) if kind == "p" else task_row(n, iid)
+            new_row = postpone_row(n, iid, lang) if kind == "p" else task_row(n, iid)
         elif kind == "a" and len(parts) == 4:
             n, iid, action = int(parts[1]), int(parts[2]), parts[3]
             res = commitments.apply_action(db_path, iid, action, source="bot", actor=actor)
-            new_row = done_row(n, action, res["event_id"], res.get("due_date"))
-            reply = _DONE_LABEL.get(action, "готово")
+            new_row = done_row(n, action, res["event_id"], res.get("due_date"), lang)
+            reply = _done_label(action, lang) or _t("ok", lang)
             logger.info("Кнопки брифінгу: задача %s → %s (подія %s)", iid, action, res["event_id"])
         elif kind == "u" and len(parts) == 3:
             n, eid = int(parts[1]), int(parts[2])
             res = commitments.undo_action(db_path, eid, source="bot", actor=actor)
             new_row = task_row(n, res["item_id"])
-            reply = "↩ скасовано"
+            reply = _t("undone", lang)
             logger.info("Кнопки брифінгу: подію %s скасовано", eid)
         else:
-            reply = "Невідома кнопка"
+            reply = _t("unknown", lang)
     except (LookupError, ValueError) as e:
         reply = str(e)[:180]
         logger.info("Кнопки брифінгу: %s — %s", data, reply)

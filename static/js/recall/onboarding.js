@@ -21,6 +21,7 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
     const LS_KEY = 'recall_onboarding_done';
 
     const onb = {};
@@ -90,15 +91,15 @@
     async function renderOverlay() {
         overlayEl = U.el('div', { class: 'rc-modal-ov' });
         overlayEl.innerHTML = `
-            <div class="rc-modal rc-modal--wide rc-onb" role="dialog" aria-modal="true" aria-label="Початок роботи з Recall">
+            <div class="rc-modal rc-modal--wide rc-onb" role="dialog" aria-modal="true" aria-label="${T('core.onb.title')}">
                 <div class="rc-modal__h">
-                    <i class="fa-solid fa-compass"></i> Початок роботи з Recall
-                    <button class="rc-iconbtn rc-onb__x" id="rcOnbClose" type="button" aria-label="Закрити"><i class="fa-solid fa-xmark"></i></button>
+                    <i class="fa-solid fa-compass"></i> ${T('core.onb.title')}
+                    <button class="rc-iconbtn rc-onb__x" id="rcOnbClose" type="button" aria-label="${T('core.close')}"><i class="fa-solid fa-xmark"></i></button>
                 </div>
-                <p class="rc-onb__lede">Пʼять кроків — і архів готовий до першого дзвінка. Усе опційне й повертається пізніше: іконка <i class="fa-solid fa-graduation-cap"></i> у шапці відкриває це вікно знову.</p>
+                <p class="rc-onb__lede">${T('core.onb.lede')}</p>
                 <div class="rc-onb__list" id="rcOnbList">${UI.skeletonList(5)}</div>
                 <div class="rc-modal__actions">
-                    <button class="rc-btn rc-btn--sm" id="rcOnbSkip">Пропустити</button>
+                    <button class="rc-btn rc-btn--sm" id="rcOnbSkip">${T('core.onb.skip')}</button>
                 </div>
             </div>`;
         document.body.appendChild(overlayEl);
@@ -112,14 +113,14 @@
     function stepRow(cfg) {
         const s = cfg.status; // 'done' | 'pending' | 'unknown'
         const dot = s === 'done'
-            ? '<i class="fa-solid fa-circle-check"></i> Готово'
+            ? '<i class="fa-solid fa-circle-check"></i> ' + T('core.onb.done')
             : s === 'unknown'
-                ? '<i class="fa-regular fa-circle"></i> Невідомо'
-                : '<i class="fa-regular fa-circle"></i> Ще ні';
+                ? '<i class="fa-regular fa-circle"></i> ' + T('core.onb.unknown')
+                : '<i class="fa-regular fa-circle"></i> ' + T('core.onb.notYet');
         return `<div class="rc-onb__step" data-step="${cfg.id}">
             <div class="rc-onb__ico"><i class="${cfg.icon}"></i></div>
             <div class="rc-onb__body">
-                <div class="rc-onb__title">${U.esc(cfg.title)}${cfg.optional ? ' <span class="rc-onb__opt">· опційно</span>' : ''}</div>
+                <div class="rc-onb__title">${U.esc(cfg.title)}${cfg.optional ? ' <span class="rc-onb__opt">' + T('core.onb.optional') + '</span>' : ''}</div>
                 <div class="rc-onb__desc">${cfg.descHTML}</div>
                 <div class="rc-onb__status" data-s="${s}">${dot}</div>
             </div>
@@ -147,34 +148,34 @@
         // communicated by the ✓ line, not button color.
         list.innerHTML = [
             stepRow({
-                id: 'model', icon: 'fa-solid fa-download', title: 'Модель розпізнавання (Whisper)',
-                descHTML: 'Обов’язково для транскрибації. Оберіть і завантажте модель у Налаштуваннях — типова <span class="rc-mono">large-v3-turbo</span>.',
+                id: 'model', icon: 'fa-solid fa-download', title: T('core.onb.model.title'),
+                descHTML: T('core.onb.model.desc'),
                 status: modelDone ? 'done' : 'pending',
-                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="model">Перейти до моделей</button>`,
+                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="model">${T('core.onb.model.go')}</button>`,
             }),
             stepRow({
-                id: 'key', icon: 'fa-solid fa-key', title: 'API-ключ Claude', optional: true,
-                descHTML: 'Для покращення тексту, резюме, RAG-чату та інших Claude-фіч. Без ключа архів і транскрибація й далі працюють локально.',
+                id: 'key', icon: 'fa-solid fa-key', title: T('core.onb.key.title'), optional: true,
+                descHTML: T('core.onb.key.desc'),
                 status: keyDone ? 'done' : 'pending',
-                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="key">${keyDone ? 'Відкрити' : 'Додати ключ'}</button>`,
+                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="key">${keyDone ? T('core.onb.key.open') : T('core.onb.key.add')}</button>`,
             }),
             stepRow({
-                id: 'mic', icon: 'fa-solid fa-microphone', title: 'Дозвіл на мікрофон',
-                descHTML: 'Потрібен для запису дзвінків прямо в браузері. Можна дозволити зараз або пізніше зі сторінки «Запис».',
+                id: 'mic', icon: 'fa-solid fa-microphone', title: T('core.onb.mic.title'),
+                descHTML: T('core.onb.mic.desc'),
                 status: micStatus,
-                actionsHTML: `<button class="rc-btn rc-btn--sm" id="rcOnbMic"${micStatus === 'done' ? ' disabled' : ''}>${micStatus === 'done' ? 'Дозволено' : 'Дати дозвіл'}</button>`,
+                actionsHTML: `<button class="rc-btn rc-btn--sm" id="rcOnbMic"${micStatus === 'done' ? ' disabled' : ''}>${micStatus === 'done' ? T('core.onb.mic.granted') : T('core.onb.mic.grant')}</button>`,
             }),
             stepRow({
                 id: 'telegram', icon: 'fa-brands fa-telegram', title: 'Telegram', optional: true,
-                descHTML: 'Опційне підключення власного акаунта (не бот) — повідомлення обраних чатів підуть у той самий архів.',
+                descHTML: T('core.onb.tg.desc'),
                 status: tgDone ? 'done' : 'pending',
-                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="telegram">${tgDone ? 'Керувати' : 'Підключити'}</button>`,
+                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="telegram">${tgDone ? T('core.onb.manage') : T('core.onb.tg.connect')}</button>`,
             }),
             stepRow({
-                id: 'projects', icon: 'fa-solid fa-sitemap', title: 'Розкладіть напрямки по проєктах', optional: true,
-                descHTML: 'Напрямок можна поділити на проєкти — «Агенція» → «Маяк», «Орбіта»… Необовʼязково: без проєктів усе працює як плаский список напрямків.',
+                id: 'projects', icon: 'fa-solid fa-sitemap', title: T('core.onb.projects.title'), optional: true,
+                descHTML: T('core.onb.projects.desc'),
                 status: projectsDone ? 'done' : 'pending',
-                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="projects">${projectsDone ? 'Керувати' : 'Розкласти'}</button>`,
+                actionsHTML: `<button class="rc-btn rc-btn--sm" data-onb-go="projects">${projectsDone ? T('core.onb.manage') : T('core.onb.projects.arrange')}</button>`,
             }),
         ].join('');
 
@@ -232,28 +233,28 @@
     // no mic indicator lingers in the OS/browser chrome.
     async function requestMic(btn) {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            UI.toast('Браузер не підтримує доступ до мікрофона', 'error');
+            UI.toast(T('core.onb.mic.unsupported'), 'error');
             return;
         }
         btn.disabled = true;
         const old = btn.innerHTML;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Питаю…';
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('core.onb.mic.asking');
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             stream.getTracks().forEach(t => t.stop());
-            btn.textContent = 'Дозволено';
+            btn.textContent = T('core.onb.mic.granted');
             btn.disabled = true; // stays disabled — granted, nothing more to do
             const row = btn.closest('.rc-onb__step');
             const statusEl = row && row.querySelector('.rc-onb__status');
-            if (statusEl) { statusEl.dataset.s = 'done'; statusEl.innerHTML = '<i class="fa-solid fa-circle-check"></i> Готово'; }
-            UI.toast('Доступ до мікрофона надано', 'success');
+            if (statusEl) { statusEl.dataset.s = 'done'; statusEl.innerHTML = '<i class="fa-solid fa-circle-check"></i> ' + T('core.onb.done'); }
+            UI.toast(T('core.onb.mic.ok'), 'success');
         } catch (err) {
             // Gracefully handle refusal/no-device — never throw to the console
             // as an uncaught rejection, and let the user retry (a re-click
             // re-prompts unless the browser itself remembers the block).
             btn.disabled = false; btn.innerHTML = old;
             const denied = err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
-            UI.toast(denied ? 'Доступ до мікрофона відхилено — можна дозволити пізніше в налаштуваннях браузера' : 'Не вдалося отримати доступ до мікрофона', 'error');
+            UI.toast(denied ? T('core.onb.mic.denied') : T('core.onb.mic.fail'), 'error');
         }
     }
 

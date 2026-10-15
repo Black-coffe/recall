@@ -3,6 +3,7 @@
     'use strict';
     const U = window.Recall.util;
     const UI = {};
+    const T = (k, v) => window.Recall.t(k, v);
 
     // — Toast — visible for TOAST_VISIBLE_MS, then fades out over TOAST_FADE_MS.
     const TOAST_VISIBLE_MS = 3200;
@@ -62,11 +63,11 @@
     UI.error = function (msg, opts) {
         opts = opts || {};
         const retryBtn = opts.retry
-            ? `<button type="button" class="rc-btn rc-btn--sm rc-error__retry"><i class="fa-solid fa-rotate-right"></i> Повторити</button>`
+            ? `<button type="button" class="rc-btn rc-btn--sm rc-error__retry"><i class="fa-solid fa-rotate-right"></i> ${T('core.ui.retry')}</button>`
             : '';
         return `<div class="rc-error">
             <div class="rc-error__ico"><i class="fa-solid fa-triangle-exclamation"></i></div>
-            <p>${U.esc(msg || 'Помилка завантаження')}</p>
+            <p>${U.esc(msg || T('core.ui.loadError'))}</p>
             ${retryBtn}
         </div>`;
     };
@@ -159,8 +160,8 @@
         const cur = selected == null ? '' : String(selected);
         const sel = (v) => (String(v) === cur ? ' selected' : '');
         let html = '';
-        if (opts.first === 'all') html += `<option value=""${sel('')}>Усі напрямки</option>`;
-        else if (opts.first !== 'hide') html += `<option value=""${sel('')}>Без напрямку</option>`;
+        if (opts.first === 'all') html += `<option value=""${sel('')}>${T('core.ui.allCats')}</option>`;
+        else if (opts.first !== 'hide') html += `<option value=""${sel('')}>${T('core.ui.noCat')}</option>`;
         let groupOpen = false;
         list.forEach((c) => {
             if (c.level === 'project') {
@@ -173,7 +174,7 @@
         });
         if (groupOpen) html += `</optgroup>`;
         if (opts.newOpt !== false)
-            html += `<option value="${UI.CAT_NEW}" class="rc-opt-new">＋ Новий напрямок…</option>`;
+            html += `<option value="${UI.CAT_NEW}" class="rc-opt-new">${T('core.ui.newCatOpt')}</option>`;
         return html;
     };
 
@@ -224,7 +225,7 @@
         const removable = typeof opts.onRemove === 'function';
         const chip = U.el('span', { class: 'rc-tag' },
             `<span class="rc-tag__dot" style="background:${U.esc(color)}"></span>${U.esc(tag.name)}`
-            + (removable ? `<button type="button" class="rc-tag__x" aria-label="Прибрати тег ${U.esc(tag.name)}">&times;</button>` : ''));
+            + (removable ? `<button type="button" class="rc-tag__x" aria-label="${U.esc(T('core.ui.tag.removeAria', { name: tag.name }))}">&times;</button>` : ''));
         if (removable) chip.querySelector('.rc-tag__x').addEventListener('click', () => opts.onRemove(tag));
         return chip;
     };
@@ -251,19 +252,17 @@
             // при наступному рендері/збереженні.
             const selOpts = names.map((n) => `<option value="${U.esc(n)}" selected>${U.esc(n)}</option>`).join('');
             const selText = names.length
-                ? `<p class="rc-tagpick__error-selected">Вибрані теги: ${names.map(U.esc).join(', ')}</p>`
+                ? `<p class="rc-tagpick__error-selected">${T('core.ui.tags.selected', { names: names.map(U.esc).join(', ') })}</p>`
                 : '';
             return `<div class="rc-tagpick"><select multiple class="rc-tagsel">${selOpts}</select>`
                 + selText
-                + `<div class="rc-tagpick__error"><span>Не вдалося завантажити теги.</span> `
-                + `<button type="button" class="rc-btn rc-btn--sm rc-tagpick__retry">Повторити</button></div></div>`;
+                + `<div class="rc-tagpick__error"><span>${T('core.ui.tags.loadFail')}</span> `
+                + `<button type="button" class="rc-btn rc-btn--sm rc-tagpick__retry">${T('core.ui.retry')}</button></div></div>`;
         }
         const selHtml = list.map((t) => `<option value="${U.esc(t.name)}"${sel.has(t.name) ? ' selected' : ''}>${U.esc(t.name)}</option>`).join('');
         if (!list.length) {
             return `<div class="rc-tagpick"><select multiple class="rc-tagsel"></select>`
-                + `<p class="rc-tagpick__empty">Тегів ще немає. Тег — мітка впоперек напрямків і проєктів `
-                + `(наприклад, AI); запис може мати кілька тегів. Створіть перший у `
-                + `<a href="/settings#rcSetTags">Налаштуваннях → Теги</a> або на сторінці запису.</p></div>`;
+                + `<p class="rc-tagpick__empty">${T('core.ui.tags.empty')}</p></div>`;
         }
         const chips = list.map((t) => {
             // На відміну від UI.tagChip тут немає безумовного inline-фону —
@@ -277,7 +276,7 @@
                 + `<span class="rc-tagpick__dot"></span>${U.esc(t.name)}</button>`;
         }).join('');
         return `<div class="rc-tagpick"><select multiple class="rc-tagsel">${selHtml}</select>`
-            + `<div class="rc-tagpick__chips" role="group" aria-label="Фільтр за тегами">${chips}</div></div>`;
+            + `<div class="rc-tagpick__chips" role="group" aria-label="${T('core.ui.tags.filterAria')}">${chips}</div></div>`;
     };
     // Перемальовує чіпи пікера тегів (21, 24) з поточного стану select.rc-tagsel
     // (option.selected -> aria-pressed + клас is-active). Викликати після
@@ -298,7 +297,7 @@
     // Згорнута підказка «Що це?» біля нового фільтра/контролу. Повертає
     // HTMLElement, вставляється поруч із контролом.
     UI.hint = function (html) {
-        return U.el('details', { class: 'rc-hint' }, `<summary>Що це?</summary>${html}`);
+        return U.el('details', { class: 'rc-hint' }, `<summary>${T('core.ui.hint.what')}</summary>${html}`);
     };
 
     // Перебудувати опції в усіх .rc-catsel на сторінці (зберігаючи поточний вибір)
@@ -322,23 +321,23 @@
         return new Promise((resolve) => {
             const ov = U.el('div', { class: 'rc-modal-ov' });
             const directions = ((window.Recall.state.categories || {}).list || []).filter((c) => c.level !== 'project');
-            const parentOpts = `<option value="">— Це буде напрямок —</option>`
+            const parentOpts = `<option value="">${T('core.ui.newCat.parentNone')}</option>`
                 + directions.map((d) => `<option value="${d.id}">${U.esc(d.name)}</option>`).join('');
             ov.innerHTML = `
-                <div class="rc-modal" role="dialog" aria-modal="true" aria-label="Новий напрямок">
-                    <div class="rc-modal__h"><i class="fa-solid fa-folder-plus"></i> Новий напрямок</div>
-                    <label class="rc-field__label" for="rcNewCatName">Назва</label>
-                    <input class="rc-input" id="rcNewCatName" autocomplete="off" maxlength="60" placeholder="Напр.: Проєкт Альфа">
-                    <label class="rc-field__label" for="rcNewCatParent" style="margin-top:var(--rc-3)">Напрямок</label>
+                <div class="rc-modal" role="dialog" aria-modal="true" aria-label="${T('core.ui.newCat.title')}">
+                    <div class="rc-modal__h"><i class="fa-solid fa-folder-plus"></i> ${T('core.ui.newCat.title')}</div>
+                    <label class="rc-field__label" for="rcNewCatName">${T('core.ui.name')}</label>
+                    <input class="rc-input" id="rcNewCatName" autocomplete="off" maxlength="60" placeholder="${T('core.ui.newCat.namePh')}">
+                    <label class="rc-field__label" for="rcNewCatParent" style="margin-top:var(--rc-3)">${T('core.ui.newCat.category')}</label>
                     <select class="rc-select" id="rcNewCatParent">${parentOpts}</select>
                     <div class="rc-modal__row">
-                        <label class="rc-field__label" for="rcNewCatColor" style="margin:0">Колір</label>
+                        <label class="rc-field__label" for="rcNewCatColor" style="margin:0">${T('core.ui.newCat.color')}</label>
                         <input type="color" id="rcNewCatColor" value="#6c757d">
                     </div>
                     <div class="rc-modal__err" id="rcNewCatErr"></div>
                     <div class="rc-modal__actions">
-                        <button class="rc-btn rc-btn--sm" id="rcNewCatCancel">Скасувати</button>
-                        <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcNewCatSave">Створити</button>
+                        <button class="rc-btn rc-btn--sm" id="rcNewCatCancel">${T('core.cancel')}</button>
+                        <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcNewCatSave">${T('core.create')}</button>
                     </div>
                 </div>`;
             document.body.appendChild(ov);
@@ -365,7 +364,7 @@
                     await UI.bustCategories();
                     close({ id: r.id, name: r.name || name, color: r.color || colorI.value, parent_id: r.parent_id != null ? r.parent_id : parent_id });
                 } catch (e) {
-                    errEl.textContent = (e && e.message) || 'Не вдалося створити напрямок';
+                    errEl.textContent = (e && e.message) || T('core.ui.newCat.fail');
                     saveB.disabled = false; nameI.focus(); nameI.select();
                 }
             };
@@ -446,12 +445,12 @@
     UI.confirmModal = function (opts) {
         opts = opts || {};
         return UI.modal({
-            title: opts.title || 'Підтвердіть дію',
+            title: opts.title || T('core.ui.confirm.title'),
             icon: opts.icon || 'fa-triangle-exclamation',
             bodyHTML: `<p>${U.esc(opts.message || '')}</p>`,
             actions: [
-                { label: opts.cancelLabel || 'Скасувати', value: false },
-                { label: opts.confirmLabel || 'Підтвердити', value: true, primary: true, danger: opts.danger !== false },
+                { label: opts.cancelLabel || T('core.cancel'), value: false },
+                { label: opts.confirmLabel || T('core.ui.confirm.ok'), value: true, primary: true, danger: opts.danger !== false },
             ],
         }).then((v) => !!v);
     };
@@ -462,14 +461,14 @@
     UI.promptModal = function (opts) {
         opts = opts || {};
         return UI.modal({
-            title: opts.title || 'Введіть значення',
+            title: opts.title || T('core.ui.prompt.title'),
             icon: opts.icon || 'fa-pen',
             bodyHTML: `
                 ${opts.label ? `<label class="rc-field__label" for="rcPromptInput">${U.esc(opts.label)}</label>` : ''}
                 <input class="rc-input" id="rcPromptInput" autocomplete="off" maxlength="${opts.maxlength || 120}"
                        placeholder="${U.esc(opts.placeholder || '')}" value="${U.esc(opts.defaultValue || '')}">`,
             actions: [
-                { label: opts.cancelLabel || 'Скасувати', value: null },
+                { label: opts.cancelLabel || T('core.cancel'), value: null },
                 {
                     label: opts.confirmLabel || 'OK', primary: true,
                     getValue: (ov) => ov.querySelector('#rcPromptInput').value.trim(),
@@ -505,22 +504,22 @@
             const ov = U.el('div', { class: 'rc-modal-ov' });
             const canSuggest = typeof opts.suggest === 'function';
             ov.innerHTML = `
-                <div class="rc-modal${canSuggest ? ' rc-modal--wide' : ''}" role="dialog" aria-modal="true" aria-label="Назва й опис">
-                    <div class="rc-modal__h"><i class="fa-solid fa-pen"></i> Назва й опис
-                        ${canSuggest ? `<button class="rc-btn rc-btn--sm rc-meta__suggest" id="rcMetaSuggest" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати</button>` : ''}
+                <div class="rc-modal${canSuggest ? ' rc-modal--wide' : ''}" role="dialog" aria-modal="true" aria-label="${T('core.ui.meta.title')}">
+                    <div class="rc-modal__h"><i class="fa-solid fa-pen"></i> ${T('core.ui.meta.title')}
+                        ${canSuggest ? `<button class="rc-btn rc-btn--sm rc-meta__suggest" id="rcMetaSuggest" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('core.ui.meta.suggest')}</button>` : ''}
                     </div>
                     ${canSuggest ? `<div class="rc-meta__status" id="rcMetaStatus" aria-live="polite"></div>` : ''}
-                    <label class="rc-field__label" for="rcMetaTitle">Назва</label>
+                    <label class="rc-field__label" for="rcMetaTitle">${T('core.ui.name')}</label>
                     <input class="rc-input" id="rcMetaTitle" autocomplete="off" maxlength="200"
-                           placeholder="Назва запису" value="${U.esc(opts.title || '')}">
+                           placeholder="${T('core.ui.meta.namePh')}" value="${U.esc(opts.title || '')}">
                     ${canSuggest ? `<div class="rc-meta__variants" id="rcMetaTitleVars"></div>` : ''}
-                    <label class="rc-field__label" for="rcMetaDesc" style="margin-top:var(--rc-3)">Опис</label>
-                    <textarea class="rc-textarea" id="rcMetaDesc" placeholder="Опис (необов'язково)">${U.esc(opts.description || '')}</textarea>
+                    <label class="rc-field__label" for="rcMetaDesc" style="margin-top:var(--rc-3)">${T('core.ui.meta.desc')}</label>
+                    <textarea class="rc-textarea" id="rcMetaDesc" placeholder="${T('core.ui.meta.descPh')}">${U.esc(opts.description || '')}</textarea>
                     ${canSuggest ? `<div class="rc-meta__variants rc-meta__variants--desc" id="rcMetaDescVars"></div>` : ''}
                     <div class="rc-modal__err" id="rcMetaErr"></div>
                     <div class="rc-modal__actions">
-                        <button class="rc-btn rc-btn--sm" id="rcMetaCancel">Скасувати</button>
-                        <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcMetaSave">Зберегти</button>
+                        <button class="rc-btn rc-btn--sm" id="rcMetaCancel">${T('core.cancel')}</button>
+                        <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcMetaSave">${T('core.save')}</button>
                     </div>
                 </div>`;
             document.body.appendChild(ov);
@@ -544,7 +543,7 @@
                     if (typeof opts.save === 'function') await opts.save(values);
                     close(values);
                 } catch (e) {
-                    errEl.textContent = (e && e.message) || 'Не вдалося зберегти';
+                    errEl.textContent = (e && e.message) || T('core.ui.meta.saveFail');
                     saveB.disabled = false; titleI.focus();
                 }
             };
@@ -574,20 +573,20 @@
                 const ask = async () => {
                     sugB.disabled = true; errEl.textContent = '';
                     statusEl.className = 'rc-meta__status';
-                    statusEl.textContent = 'Локальна модель думає… зазвичай до хвилини';
+                    statusEl.textContent = T('core.ui.meta.thinking');
                     try {
                         const r = await opts.suggest();
                         if (done) return;
                         fill(ov.querySelector('#rcMetaTitleVars'), r.titles, titleI);
                         fill(ov.querySelector('#rcMetaDescVars'), r.descriptions, descI);
                         statusEl.textContent = r.basis === 'excerpts'
-                            ? 'За фрагментами транскрипту: саммарі ще нема, варіанти можуть бути загальними'
-                            : 'Оберіть варіант — він підставиться в поле, його можна поправити';
-                        sugB.innerHTML = '<i class="fa-solid fa-rotate"></i> Ще варіанти';
+                            ? T('core.ui.meta.basisExcerpts')
+                            : T('core.ui.meta.basisPick');
+                        sugB.innerHTML = '<i class="fa-solid fa-rotate"></i> ' + T('core.ui.meta.more');
                     } catch (e) {
                         if (done) return;
                         statusEl.className = 'rc-meta__status is-err';
-                        statusEl.textContent = (e && e.message) || 'Не вдалося отримати варіанти';
+                        statusEl.textContent = (e && e.message) || T('core.ui.meta.suggestFail');
                     } finally {
                         if (!done) sugB.disabled = false;
                     }
@@ -622,7 +621,7 @@
         const t = U.el('div', { class: 'rc-toast rc-toast--action' },
             `<i class="rc-ico fa-solid fa-clock-rotate-left"></i><span></span>
              <button type="button" class="rc-toast__action"></button>
-             <button type="button" class="rc-toast__x" aria-label="Закрити">&times;</button>`);
+             <button type="button" class="rc-toast__x" aria-label="${T('core.close')}">&times;</button>`);
         t.querySelector('span').textContent = msg;
         t.querySelector('.rc-toast__action').textContent = actionLabel;
         wrap.appendChild(t);

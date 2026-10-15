@@ -42,6 +42,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from app import state
 from app.core import settings as _settings
+from app.core.i18n import tr
 from app.services import categories as cat_svc
 from app.utils.paths import safe_path_within
 from telegram_common import CONTROL_TOKEN_HEADER, control_token
@@ -427,9 +428,9 @@ def ingest():
         file_path = _safe_media_path(file_path)
         if not file_path or not os.path.isfile(file_path):
             return jsonify({"success": False,
-                            "error": "file_path відсутній або поза telegram_media/"}), 400
+                            "error": tr("telegram.err.filePath")}), 400
         if state.job_queue is None:
-            return jsonify({"success": False, "error": "Черга завдань недоступна"}), 503
+            return jsonify({"success": False, "error": tr("telegram.err.queueDown")}), 503
 
         # current_app валідний ТУТ (request context) — резолвимо моделі тепер і
         # передаємо у job явно: воркер job_queue біжить у фоновому потоці БЕЗ
@@ -460,7 +461,7 @@ def ingest():
         file_path = _safe_media_path(file_path)
         if not file_path or not os.path.isfile(file_path):
             return jsonify({"success": False,
-                            "error": "file_path відсутній або поза telegram_media/"}), 400
+                            "error": tr("telegram.err.filePath")}), 400
         text, doc_type, structure, failed = _parse_media(file_path, caption, kind)
         tid = _persist(db_path, kind=kind, text=text, prov=prov, category_id=category_id,
                        file_path=file_path, doc_type=doc_type, segments_json=None,
@@ -679,18 +680,18 @@ def tg_chats_upsert():
     Запис прямо в БД → слухач підхопить на наступному refresh (≤30с)."""
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
-        return jsonify({"success": False, "error": "chat_id обов'язковий"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400
     try:
         chat_id = int(data["chat_id"])
     except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "chat_id має бути числом"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdNumber")}), 400
 
     category_id = None
     if "category_id" in data and data["category_id"] not in (None, "", "null"):
         try:
             category_id = int(data["category_id"])
         except (TypeError, ValueError):
-            return jsonify({"success": False, "error": "category_id має бути числом"}), 400
+            return jsonify({"success": False, "error": tr("telegram.err.categoryIdNumber")}), 400
 
     db_path = _db_path()
     with _conn(db_path) as conn:
@@ -742,21 +743,21 @@ def tg_chat_tags_put(chat_id: int):
     """
     data = request.get_json(silent=True) or {}
     if "tags" not in data:
-        return jsonify({"success": False, "error": "tags обов'язковий"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.tagsRequired")}), 400
     raw = data["tags"]
     if not isinstance(raw, (list, tuple, str)):
-        return jsonify({"success": False, "error": "tags: список назв"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.tagsList")}), 400
     names = cat_svc.parse_tags(raw)
     too_long = [n for n in names if len(n) > cat_svc.TAG_NAME_MAX]
     if too_long:
         return jsonify({"success": False,
-                        "error": f"назва тега довша за {cat_svc.TAG_NAME_MAX}: "
-                                 f"{too_long[0]!r}"}), 400
+                        "error": tr("telegram.err.tagTooLong", max=cat_svc.TAG_NAME_MAX,
+                                  name=too_long[0])}), 400
 
     with _conn(_db_path()) as conn:
         if not conn.execute("SELECT 1 FROM tg_monitored_chats WHERE chat_id = ?",
                             (chat_id,)).fetchone():
-            return jsonify({"success": False, "error": "чат не моніториться"}), 404
+            return jsonify({"success": False, "error": tr("telegram.err.chatNotMonitored")}), 404
         changed = cat_svc.apply_chat_tags(conn, chat_id, names)
         tags = cat_svc.chat_tags(conn, chat_id)
     reembed_stats = _schedule_reembed(changed, "chat-tags")
@@ -784,11 +785,11 @@ def tg_chats_toggle():
         return jsonify({"success": False, "error": "forbidden"}), 403
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
-        return jsonify({"success": False, "error": "chat_id обов'язковий"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400
     try:
         chat_id = int(data["chat_id"])
     except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "chat_id має бути числом"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdNumber")}), 400
 
     enabled = 1 if data.get("enabled") else 0
     title = data.get("title")
@@ -928,11 +929,7 @@ def tg_coverage():
         "dialogs_seen": len(live_by_id) if ok else None,
         "dialog_limit": data.get("limit") if ok else None,
         "chats": out,
-        "note": ("behind_messages рахується лише для супергруп (-100…); пропуски в id "
-                 "можуть бути стікерами/службовими повідомленнями, які інжест свідомо "
-                 "не бере. lag_days показує відставання ХВОСТА — дірки в середині "
-                 "історії ним не видно. not_listed при dialogs_seen == dialog_limit "
-                 "може означати просто «не вліз у вікно діалогів»"),
+        "note": tr("telegram.coverage.note"),
     })
 
 
@@ -950,7 +947,7 @@ def tg_edited():
     chat_id, message_id = data.get("chat_id"), data.get("message_id")
     text = (data.get("text") or "").strip()
     if chat_id is None or message_id is None:
-        return jsonify({"success": False, "error": "потрібні chat_id і message_id"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.needMessageId")}), 400
 
     db_path = _db_path()
     tid = _is_duplicate(db_path, chat_id, message_id)
@@ -989,7 +986,7 @@ def tg_deleted():
     chat_id = data.get("chat_id")
     ids = data.get("message_ids") or []
     if chat_id is None or not ids:
-        return jsonify({"success": False, "error": "потрібні chat_id і message_ids"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.needMessageIds")}), 400
 
     with _conn(_db_path()) as conn:
         ph = ",".join("?" * len(ids))
@@ -1049,18 +1046,17 @@ def tg_repair():
     """
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
-        return jsonify({"success": False, "error": "chat_id обов'язковий"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400
     try:
         chat_id = int(data["chat_id"])
         max_messages = max(1, min(int(data.get("max_messages", 200)), 500))
     except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "chat_id/max_messages мають бути числами"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.repairNumbers")}), 400
 
     if not _is_supergroup(chat_id):
         return jsonify({
             "success": False,
-            "error": "ремонт по id доступний лише для супергруп (-100…): у решті чатів "
-                     "message_id з глобальної послідовності акаунта. Для них — /backfill за датами",
+            "error": tr("telegram.err.repairSupergroup"),
         }), 400
 
     live_last_id = None
@@ -1074,7 +1070,7 @@ def tg_repair():
     missing = _missing_ids(_db_path(), chat_id, live_last_id)
     if not missing:
         return jsonify({"success": True, "missing_total": 0, "remaining": 0,
-                        "note": "дірок немає (або чат порожній — тоді це backfill)"})
+                        "note": tr("telegram.gaps.none")})
 
     batch = missing[:max_messages]
     if data.get("dry_run"):
@@ -1095,7 +1091,7 @@ def tg_backfill():
     """Догрузити історію чату (проксі до слухача; сам backfill — Phase 17D)."""
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
-        return jsonify({"success": False, "error": "chat_id обов'язковий"}), 400
+        return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400
     ok, res = _listener_call("/backfill", method="POST", body={
         "chat_id": data.get("chat_id"),
         "limit": data.get("limit", 200),

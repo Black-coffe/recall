@@ -38,8 +38,8 @@ Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0. Code: `app/services/reco
 - **Copilot: one owner per process.** `CopilotService.start` raises `CopilotBusyError` when another
   live recording owns an active copilot row (enforced in the service, not the blueprint). Move is
   end-then-start, not atomic (`COPILOT_MOVE_FAILED`, `ended_from: true`).
-- **Call autoprompt never records on its own (K2, 4.9.0).** `call_watch.py` only asks: «Записати?» starts
-  mic + that one app's sound (`include:[exe]`) solely on a click of a single-use token URL; «Зупинити?» after
+- **Call autoprompt never records on its own (K2, 4.9.0).** `call_watch.py` only asks: "Record?" starts
+  mic + that one app's sound (`include:[exe]`) solely on a click of a single-use token URL; "Stop?" after
   the call ends, then `RECORDING_AUTOSTOP_SILENCE_MIN` of silence on both tracks stops that recording through
   the normal stop path (finalized whole). Only apps on the `RECORDING_AUTOPROMPT_APPS` allow-list can be a
   call; a failed session enumeration holds state rather than reading as «call ended».

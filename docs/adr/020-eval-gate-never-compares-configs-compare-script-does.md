@@ -8,15 +8,15 @@
 
 From `docs/specs/production-rag-wave-b/brief.md`, `## Answers`, item 2:
 
-> 2. **Чем доказываем, что новая модель лучше** — Отдельный скрипт сравнения двух прогонов: два
-> снимка БД (старые векторы и переembedded), гейт по каждому с `--json-out`, сводка таблицей
-> per-item на двух k. Сам гейт не трогаем: его отказ сравнивать разный провенанс — защита,
-> добавленная в Хвиле A именно против тихого сравнения яблок с апельсинами.
+> 2. **How we prove the new model is better** — A separate script that compares two runs: two
+> DB snapshots (old vectors and re-embedded ones), the gate on each with `--json-out`, a per-item
+> summary table on two k values. We do not touch the gate itself: its refusal to compare different
+> provenance is a protection added in Wave A precisely against silently comparing apples to oranges.
 
 And `## Asks`, item 4:
 
-> 4. Боевая база переключается на новую модель только после сравнения двух прогонов eval-гейта на
-> двух k (8 и 12) с per-item diff.
+> 4. The production database switches to the new model only after comparing two eval-gate runs on
+> two k values (8 and 12) with a per-item diff.
 
 ## Options
 
@@ -26,8 +26,8 @@ And `## Asks`, item 4:
    oranges; building A/B comparison into the gate would mean deliberately overriding that
    protection.
 2. Switch the production `.env` to the candidate model/version pair directly, without a formal
-   two-run comparison. Rejected — Ask 4: "Боевая база переключается на новую модель только после
-   сравнения двух прогонов eval-гейта на двух k (8 и 12) с per-item diff."
+   two-run comparison. Rejected — Ask 4: "The production database switches to the new model only after
+   comparing two eval-gate runs on two k values (8 and 12) with a per-item diff."
 3. A separate script (`evals/compare.py`) that runs the existing gate once per snapshot/config and
    diffs their two `--json-out` files afterward, with no verdict of its own. Chosen.
 

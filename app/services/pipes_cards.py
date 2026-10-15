@@ -25,18 +25,22 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Iterable, Optional
 
+from app.core.i18n import server_lang, tr, tr_n
 from app.db.connection import get_db_connection
 from app.services import pipes_privacy
 
 logger = logging.getLogger(__name__)
 
 MAX_CARDS = 5
-NO_DIR = "Без напрямку"
 TASK_LEN = 160
 META_LEN = 60
 
-TITLES = {"weekly_digest": "🗓 Звід тижня", "dropped_commitments": "🕳 Забуті обіцянки",
-          "open_questions": "❓ Питання без відповіді"}
+_TITLE_KEYS = ("weekly_digest", "dropped_commitments", "open_questions")
+
+
+def _t(key: str, **vars) -> str:
+    """Службовий рядок брифінгу мовою налаштування на момент складання."""
+    return tr("telegram.brief." + key, lang=server_lang(), **vars)
 
 #: Задачі зводу: відро → (позначка, ранг терміновості).
 _TASK_KINDS = {"overdue": ("🔴", 0), "this_week": ("🟡", 1), "no_date": ("⚪", 2)}
@@ -89,7 +93,7 @@ class _Dirs:
         return None
 
     def name(self, cat_id: Optional[int]) -> str:
-        return self.cats[cat_id][0] if cat_id in self.cats else NO_DIR
+        return self.cats[cat_id][0] if cat_id in self.cats else _t("noDir")
 
 
 def _load_dirs(db_path: str, task_ids: set[int], rec_ids: set[int]) -> _Dirs:
@@ -133,7 +137,7 @@ def _task_card(it: dict, mark: str, when: str, d: _Dirs, g: _Guard, base: str,
     tid0, cat = d.task.get(_int(it.get("id")), (None, None))
     tid = _int(it.get("transcription_id")) or tid0
     root = d.root(cat)
-    text = g(it.get("task"), TASK_LEN) or "(без тексту)"
+    text = g(it.get("task"), TASK_LEN) or _t("noText")
     head = (_href(f"{base}/transcript/{tid}?task={_int(it['id'])}", text)
             if tid and _int(it.get("id")) else f"<b>{text}</b>")
     meta = [f"{mark} {when}"]
@@ -159,11 +163,11 @@ def _digest_tasks(res: dict, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
                 seen.add(iid)
             due = it.get("due_date")
             if kind == "overdue":
-                when = f"прострочено з {_dm(due)}"
+                when = _t("overdue", date=_dm(due))
             elif kind == "this_week":
-                when = f"до {_dm(due)}"
+                when = _t("thisWeek", date=_dm(due))
             else:
-                when = "без дати"
+                when = _t("noDate")
             # Протерміновані — найстаріший дедлайн першим; без дати — як прийшли.
             cards.append(_task_card(it, mark, when, d, g, base,
                                     (rank, str(due or ""), i)))
@@ -171,7 +175,7 @@ def _digest_tasks(res: dict, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
 
 
 def _dropped(items: list, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
-    return [_task_card(it, "🕳", f"тиша з {_dm(it.get('meeting_date'))}", d, g, base,
+    return [_task_card(it, "🕳", _t("silentSince", date=_dm(it.get("meeting_date"))), d, g, base,
                        (str(it.get("meeting_date") or ""), i))
             for i, it in enumerate(items) if isinstance(it, dict)]
 
@@ -183,18 +187,18 @@ def _questions(items: list, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
             continue
         tid = _int(it.get("transcription_id"))
         cat = d.rec.get(tid) if tid else None
-        text = g(it.get("question"), TASK_LEN) or "(без тексту)"
+        text = g(it.get("question"), TASK_LEN) or _t("noText")
         head = _href(f"{base}/transcript/{tid}", text) if tid else f"<b>{text}</b>"
         meta = []
         if it.get("silence_h") is not None:
-            meta.append(f"🤐 тиша {round(float(it['silence_h']))} год")
+            meta.append(f"🤐 {_t('silentHours', h=round(float(it['silence_h'])))}")
         if it.get("asked_by"):
             meta.append(f"👤 {g(it['asked_by'], META_LEN)}")
         if it.get("chat"):
             meta.append(f"💬 {g(it['chat'], META_LEN)}")
         link = str(it.get("link") or "")
         if link.startswith("https://t.me/"):
-            meta.append(_href(link, "у Telegram"))
+            meta.append(_href(link, _t("inTelegram")))
         root = d.root(cat)
         if cat is not None and cat != root:
             meta.append(f"📁 {g(d.name(cat), META_LEN)}")
@@ -229,7 +233,7 @@ def _blocks(title: str, cards: list[_Card], d: _Dirs, g: _Guard, base: str, *,
         rest = len(group) - MAX_CARDS
         if rest > 0:
             lines.append(_href(f"{base}/tasks?category_id={'none' if root is None else root}",
-                               f"ще {rest} →") if more_link else f"…ще {rest} у Recall")
+                               _t("more", n=rest)) if more_link else _t("moreInRecall", n=rest))
         out.append("\n".join(lines))
     return out
 
@@ -238,13 +242,13 @@ def _stale(items: list, g: _Guard, base: str) -> list[str]:
     items = [it for it in items if isinstance(it, dict)]
     if not items:
         return []
-    lines = [f"<b>💤 Теми, що зникли</b> · {len(items)}"]
+    lines = [f"<b>{_t('stale')}</b> · {len(items)}"]
     for it in items[:MAX_CARDS]:
         name = g(it.get("canonical_name"), META_LEN)
         label = _href(f"{base}/entities/{_int(it['id'])}", name) if _int(it.get("id")) else name
-        lines.append(f"• {label} · тиша {it.get('days_silent', '?')} дн.")
+        lines.append(f"• {label} · {_t('staleDays', days=it.get('days_silent', '?'))}")
     if len(items) > MAX_CARDS:
-        lines.append(f"…ще {len(items) - MAX_CARDS} у Recall")
+        lines.append(_t("moreInRecall", n=len(items) - MAX_CARDS))
     return ["\n".join(lines)]
 
 
@@ -252,14 +256,14 @@ def _corrections(items: list, g: _Guard, base: str) -> list[str]:
     items = [it for it in items if isinstance(it, dict)]
     if not items:
         return []
-    lines = [f"<b>✏️ Виправлення архіву</b> · {len(items)}"]
+    lines = [f"<b>{_t('corrections')}</b> · {len(items)}"]
     for it in items[:MAX_CARDS]:
-        name = g(it.get("target_name") or "запис", META_LEN)
+        name = g(it.get("target_name") or _t("recordWord"), META_LEN)
         tid = _int(it.get("target_id")) if it.get("target_type") == "transcription" else None
         label = _href(f"{base}/transcript/{tid}", name) if tid else f"<b>{name}</b>"
         lines.append(f"• {label}: {g(it.get('body'), TASK_LEN)}")
     if len(items) > MAX_CARDS:
-        lines.append(f"…ще {len(items) - MAX_CARDS} у Recall")
+        lines.append(_t("moreInRecall", n=len(items) - MAX_CARDS))
     return ["\n".join(lines)]
 
 
@@ -291,7 +295,7 @@ def link_base() -> str:
 
 
 def title_for(tools: Iterable[str]) -> str:
-    return " + ".join(TITLES.get(t, t) for t in tools)
+    return " + ".join(_t("title." + t) if t in _TITLE_KEYS else t for t in tools)
 
 
 def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optional[str] = None,
@@ -328,23 +332,29 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
         if not isinstance(res, dict):
             continue
         if any(k in res for k in _TASK_KINDS):
-            body += _blocks("📌 Задачі", _digest_tasks(res, d, g, base), d, g, base,
+            body += _blocks(_t("tasks"), _digest_tasks(res, d, g, base), d, g, base,
                             more_link=True, buttons=buttons)
-        body += _blocks("🕳 Упущено — після зустрічі тиша",
+        body += _blocks(_t("dropped"),
                         _dropped(res.get("dropped") or [], d, g, base), d, g, base,
                         more_link=True, buttons=buttons)
-        body += _blocks("❓ Питання без відповіді",
+        body += _blocks(_t("questions"),
                         _questions(res.get("questions") or [], d, g, base), d, g, base,
                         more_link=False)
         body += _stale(res.get("stale_topics") or [], g, base)
         body += _corrections(res.get("corrections") or [], g, base)
         cov = res.get("coverage")
         if isinstance(cov, dict) and cov.get("total"):
-            body.append(f"<i>З датою — {cov.get('dated', 0)} із {cov['total']} задач архіву.</i>")
-    paras += body or ["Нічого нового."]
+            body.append(f"<i>{_t('coverage', dated=cov.get('dated', 0), total=cov['total'])}</i>")
+    paras += body or [_t("nothingNew")]
     if hidden:
-        paras.append(g(pipes_privacy.hidden_line(hidden)))
+        paras.append(g(tr_n("telegram.brief.hidden", hidden, lang=server_lang())))
     if buttons:
-        from app.services.brief_actions import FOOTER
-        paras.append(f"<i>{html.escape(FOOTER, quote=False)}</i>")
+        from app.services.brief_actions import footer
+        paras.append(f"<i>{html.escape(footer(), quote=False)}</i>")
     return "\n\n".join(paras), sorted(g.leaked)
+
+
+def __getattr__(name: str):
+    if name == "NO_DIR":          # сумісність: назва «без напрямку» залежить від мови
+        return _t("noDir")
+    raise AttributeError(name)

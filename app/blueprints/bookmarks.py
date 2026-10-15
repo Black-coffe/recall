@@ -17,6 +17,7 @@ import logging
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
 
 
@@ -49,18 +50,18 @@ def create_bookmark(transcription_id):
     seg_idx = data.get('segment_index')
     note = data.get('note') or None
     if not isinstance(seg_idx, int) or seg_idx < 0:
-        return jsonify({'success': False, 'error': 'segment_index мусить бути int >= 0'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.bm.seg_index_int')}), 400
 
     with _get_db() as conn:
         tx = tx_repo.get_by_id(conn, transcription_id, columns=('segments',))
         if not tx:
-            return jsonify({'success': False, 'error': 'Транскрипт не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.tx_not_found2')}), 404
         try:
             segments = json.loads(tx['segments']) if tx['segments'] else []
         except json.JSONDecodeError:
             segments = []
         if seg_idx >= len(segments):
-            return jsonify({'success': False, 'error': 'segment_index виходить за межі'}), 400
+            return jsonify({'success': False, 'error': tr('transcript.bm.seg_index_range')}), 400
         seg_start = float(segments[seg_idx].get('start', 0))
 
         c = conn.cursor()
@@ -97,7 +98,7 @@ def delete_bookmark(bookmark_id):
         c = conn.cursor()
         c.execute('DELETE FROM segment_bookmarks WHERE id = ?', (bookmark_id,))
         if c.rowcount == 0:
-            return jsonify({'success': False, 'error': 'Не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
         conn.commit()
     return jsonify({'success': True})
 
@@ -107,12 +108,12 @@ def update_bookmark(bookmark_id):
     data = request.get_json(silent=True) or {}
     note = data.get('note')
     if note is not None and not isinstance(note, str):
-        return jsonify({'success': False, 'error': 'note мусить бути string'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.bm.note_string')}), 400
     with _get_db() as conn:
         c = conn.cursor()
         c.execute('UPDATE segment_bookmarks SET note = ? WHERE id = ?', (note, bookmark_id))
         if c.rowcount == 0:
-            return jsonify({'success': False, 'error': 'Не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
         conn.commit()
     return jsonify({'success': True})
 
@@ -144,9 +145,9 @@ def create_saved_search():
     name = (data.get('name') or '').strip()
     query = data.get('query') or {}
     if not name or len(name) > 100:
-        return jsonify({'success': False, 'error': 'name 1-100 символів'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.bm.name_len')}), 400
     if not isinstance(query, dict):
-        return jsonify({'success': False, 'error': 'query мусить бути object'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.bm.query_object')}), 400
 
     with _get_db() as conn:
         c = conn.cursor()
@@ -156,7 +157,7 @@ def create_saved_search():
                 (name, json.dumps(query, ensure_ascii=False)),
             )
         except Exception:
-            return jsonify({'success': False, 'error': 'Search з таким ім\'ям уже існує'}), 409
+            return jsonify({'success': False, 'error': tr('transcript.bm.search_exists')}), 409
         sid = c.lastrowid
         conn.commit()
     return jsonify({'success': True, 'id': sid}), 201
@@ -168,7 +169,7 @@ def delete_saved_search(search_id):
         c = conn.cursor()
         c.execute('DELETE FROM saved_searches WHERE id = ?', (search_id,))
         if c.rowcount == 0:
-            return jsonify({'success': False, 'error': 'Не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
         conn.commit()
     return jsonify({'success': True})
 
@@ -185,6 +186,6 @@ def touch_saved_search(search_id):
             (search_id,),
         )
         if c.rowcount == 0:
-            return jsonify({'success': False, 'error': 'Не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
         conn.commit()
     return jsonify({'success': True})

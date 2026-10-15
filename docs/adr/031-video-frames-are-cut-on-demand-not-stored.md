@@ -9,16 +9,16 @@ The visual timeline keeps up to 1500 keyframes per recording. Phase 23 stored sc
 keyframes as `keyframes/*.jpg`. The owner's second addendum, recorded in the plan's Assumptions
 (an Assumptions decision, not a Plan delta), changed that. Verbatim:
 
-> **Кадри не зберігаються (доповнення 2).** Оригінал — це саме відео. У БД лежать лише таймкоди, OCR,
-> рамки слів, рамки секретів і описи. Зображення кадру ріжеться з відео на запит (`-ss` перед `-i`, один
-> кадр, ~0.2–0.5 с), рамки секретів зафарбовуються на льоту, кадр стискається (JPEG, `thumb` ≤ 960 px /
-> `full` ≤ 1920 px по ширині) і віддається. Тимчасовий кеш у `%TEMP%` з обмеженням розміру й автоочищенням.
-> Під час аналізу кадри для OCR витягуються в тимчасову теку і видаляються після OCR. Стара схема
-> `keyframes/*.jpg` (1 рядок, #2911) зникає при повторному аналізі.
+> **Frames are not stored (addendum 2).** The original is the video itself. The DB holds only timecodes, OCR,
+> word boxes, secret boxes and descriptions. The frame image is cut from the video on request (`-ss` before `-i`, one
+> frame, ~0.2–0.5 s), the secret boxes are painted over on the fly, the frame is compressed (JPEG, `thumb` ≤ 960 px /
+> `full` ≤ 1920 px wide) and served. A temporary cache in `%TEMP%` with a size limit and auto-cleanup.
+> During analysis, frames for OCR are extracted to a temporary folder and deleted after OCR. The old
+> `keyframes/*.jpg` scheme (1 row, #2911) disappears on re-analysis.
 
 ## Options
 1. Store frame images on disk (the Phase 23 `keyframes/*.jpg` scheme). This is the scheme being
-   replaced. The plan gives no tradeoff for it beyond «Оригінал — це саме відео».
+   replaced. The plan gives no tradeoff for it beyond "The original is the video itself".
 2. Store only metadata and cut each frame from the video on request. This is the one chosen.
 
 ## Decision

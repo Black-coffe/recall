@@ -6,12 +6,12 @@
 
 ## Context
 
-From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, ремонтний
-раунд after `/vulyk-review`, BLOCK critical #1):
+From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, repair
+round after `/vulyk-review`, BLOCK critical #1):
 
-> Шлях коментарів не має мовчки змінювати поведінку при вмиканні морфо-прапорця:
-> `comments.link_entities` лишається на точному матчі, бо замір історії 04 його не
-> бачить і вимикання прапорця вже записаних звʼязків не знімає.
+> The comments path must not silently change behavior when the morph flag is turned on:
+> `comments.link_entities` stays on exact match, because the story 04 measurement does
+> not see it and switching the flag off does not remove links already written.
 
 `TG_ENTITIES_MORPH_ENABLED` is a single env switch shared across the module, but not
 every consumer of entity mentions should be governed by it: `comments.link_entities`

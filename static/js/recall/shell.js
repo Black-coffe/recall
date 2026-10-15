@@ -15,6 +15,7 @@
 
     shell.init = function () {
         if (_inited) return; _inited = true;
+        R.i18n.apply(document);
 
         // Burger (mobile)
         const burger = document.getElementById('rcBurger');
@@ -75,10 +76,10 @@
         bar.id = 'rcUpdBanner';
         bar.className = 'rc-updbar';
         bar.innerHTML = `<i class="fa-solid fa-circle-arrow-up"></i>
-            <span>Доступна новіша версія <b>faster-whisper ${safeVer(s.latest_version)}</b> (у вас ${safeVer(s.installed_version)}) — можливо, зʼявилися нові моделі.</span>
+            <span>${R.t('core.shell.upd.text', { latest: safeVer(s.latest_version), installed: safeVer(s.installed_version) })}</span>
             <code class="rc-mono">${safeVer(s.upgrade_command || 'pip install -U faster-whisper')}</code>
-            <a href="/settings" data-route="settings" class="rc-updbar__link">Моделі →</a>
-            <button class="rc-updbar__x" aria-label="Сховати">&times;</button>`;
+            <a href="/settings" data-route="settings" class="rc-updbar__link">${R.t('core.shell.upd.models')}</a>
+            <button class="rc-updbar__x" aria-label="${R.t('core.shell.hide')}">&times;</button>`;
         main.insertBefore(bar, content);
         bar.querySelector('.rc-updbar__x').addEventListener('click', () => {
             try { sessionStorage.setItem('rcDismissModelUpd', String(s.latest_version || '1')); } catch (_) {}
@@ -110,14 +111,14 @@
         document.querySelectorAll(`[data-count="${key}"]`).forEach(el => {
             el.classList.remove('rc-nav__count--err');
             el.title = '';
-            el.textContent = typeof n === 'number' ? n.toLocaleString('uk') : (n || '');
+            el.textContent = typeof n === 'number' ? R.i18n.num(n) : (n || '');
         });
     }
     function setCountError(key) {
         document.querySelectorAll(`[data-count="${key}"]`).forEach(el => {
             el.classList.add('rc-nav__count--err');
             el.textContent = '–'; // en dash — visually distinct from "0"
-            el.title = 'Не вдалося завантажити';
+            el.title = R.t('core.shell.countFail');
         });
     }
 
@@ -138,12 +139,12 @@
     let connDegradedToastShown = false;
 
     function connLabel(state) {
-        return state === 'offline' ? 'Офлайн' : state === 'degraded' ? 'Сервер не відповідає' : 'Онлайн';
+        return state === 'offline' ? R.t('core.conn.offline') : state === 'degraded' ? R.t('core.conn.degraded') : R.t('core.conn.online');
     }
     function connTitle(state) {
-        return state === 'offline' ? 'Немає мережевого з’єднання'
-            : state === 'degraded' ? 'Сервер не відповідає вчасно — можливо, перевантажений або завис'
-            : 'З’єднання із сервером у нормі';
+        return state === 'offline' ? R.t('core.conn.offlineTitle')
+            : state === 'degraded' ? R.t('core.conn.degradedTitle')
+            : R.t('core.conn.onlineTitle');
     }
     function setConnState(state) {
         const el = document.getElementById('rcConn');
@@ -159,10 +160,10 @@
         if (!changed) return;
         // Toast only on meaningful transitions — never spam on every ping.
         if (state !== 'online' && prev === 'online') {
-            R.ui.toast(state === 'offline' ? 'Немає мережевого з’єднання' : 'Сервер не відповідає', 'error');
+            R.ui.toast(state === 'offline' ? R.t('core.conn.offlineTitle') : R.t('core.conn.degraded'), 'error');
             connDegradedToastShown = true;
         } else if (state === 'online' && connDegradedToastShown) {
-            R.ui.toast('З’єднання відновлено', 'success');
+            R.ui.toast(R.t('core.conn.restored'), 'success');
             connDegradedToastShown = false;
         }
     }
@@ -239,10 +240,10 @@
         t.className = 'rc-toast rc-toast--action rc-toast--call';
         t.innerHTML = '<i class="rc-ico fa-solid ' + (isRec ? 'fa-phone' : 'fa-circle-stop') + '"></i><span></span>' +
             '<div class="rc-toast__actions"></div>' +
-            '<button type="button" class="rc-toast__x" aria-label="Закрити">&times;</button>';
+            '<button type="button" class="rc-toast__x" aria-label="' + R.t('core.close') + '">&times;</button>';
         t.querySelector('span').textContent = isRec
-            ? 'Дзвінок у ' + p.label + '. Записати?'
-            : 'Дзвінок у ' + p.label + ' закінчився. Зупинити запис?';
+            ? R.t('core.call.started', { label: p.label })
+            : R.t('core.call.ended', { label: p.label });
         const acts = t.querySelector('.rc-toast__actions');
         const add = (label, fn) => {
             const b = document.createElement('button');
@@ -256,12 +257,12 @@
             catch (err) { console.warn('[shell] call prompt dismiss failed:', err && err.message); }
         };
         if (isRec) {
-            add('Записати', () => goAction(p.actions.record));
-            add('Інші джерела', () => goAction(p.actions.sources));
-            add('Не потрібно', dismiss);
+            add(R.t('core.call.record'), () => goAction(p.actions.record));
+            add(R.t('core.call.sources'), () => goAction(p.actions.sources));
+            add(R.t('core.call.dismiss'), dismiss);
         } else {
-            add('Зупинити', () => goAction(p.actions.stop));
-            add('Продовжити', () => goAction(p.actions.keep));
+            add(R.t('core.call.stop'), () => goAction(p.actions.stop));
+            add(R.t('core.call.keep'), () => goAction(p.actions.keep));
         }
         // × на «Записати?» = «Не потрібно»; на «Зупинити?» лише ховає плашку тут
         // (автостоп після тиші лишається — ним керує сервер).
@@ -317,7 +318,7 @@
     function promptSwUpdate(reg) {
         if (swUpdateToastShown) return;
         swUpdateToastShown = true;
-        showActionToast('Доступна нова версія Recall', 'Оновити', () => {
+        showActionToast(R.t('core.shell.newVersion'), R.t('core.shell.update'), () => {
             swUpdateRequested = true;
             if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
         });
@@ -332,7 +333,7 @@
         t.className = 'rc-toast rc-toast--action';
         t.innerHTML = '<i class="rc-ico fa-solid fa-circle-arrow-up"></i><span></span>' +
             '<button type="button" class="rc-toast__action"></button>' +
-            '<button type="button" class="rc-toast__x" aria-label="Закрити">&times;</button>';
+            '<button type="button" class="rc-toast__x" aria-label="' + R.t('core.close') + '">&times;</button>';
         t.querySelector('span').textContent = msg;
         t.querySelector('.rc-toast__action').textContent = actionLabel;
         wrap.appendChild(t);

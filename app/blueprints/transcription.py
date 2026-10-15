@@ -25,6 +25,7 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from app import state
+from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
 from app.services import categories as cat_svc
 from app.services import dedup_audio, meta_suggest, record_meta, text_polishing, vocabulary
@@ -95,12 +96,12 @@ def _empty_source_meta(source_type: str) -> dict:
 def resolve_file_source() -> tuple[str, str, dict]:
     """source_type='file': multipart upload, extracting audio if it's a video."""
     if 'audio' not in request.files:
-        raise _SourceResolutionError({"success": False, "error": "Файл не знайдено"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_not_found')}, 400)
     file = request.files['audio']
     if file.filename == '':
-        raise _SourceResolutionError({"success": False, "error": "Файл не вибрано"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_not_selected')}, 400)
     if not allowed_file(file.filename):
-        raise _SourceResolutionError({"success": False, "error": "Непідтримуваний формат файлу"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_format_unsupported')}, 400)
 
     filename = secure_filename(file.filename)
     if not filename:
@@ -114,7 +115,7 @@ def resolve_file_source() -> tuple[str, str, dict]:
     filepath = safe_path_within(upload_dir, os.path.join(upload_dir, filename))
     if filepath is None:
         logger.error(f"Спроба Path Traversal: {filename}")
-        raise _SourceResolutionError({"success": False, "error": "Некоректне ім'я файлу"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.filename_invalid')}, 400)
 
     file.save(filepath)
     source_name = file.filename
@@ -128,7 +129,7 @@ def resolve_file_source() -> tuple[str, str, dict]:
         if not _extract_audio_raw(filepath, audio_filepath, add_log=None):
             if os.path.exists(filepath):
                 os.remove(filepath)
-            raise _SourceResolutionError({"success": False, "error": "Не вдалося витягти аудіо з відео"}, 500)
+            raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_extract_failed')}, 500)
         if os.path.exists(filepath):
             os.remove(filepath)
             logger.info(f"Відео файл видалено: {filepath}")
@@ -142,10 +143,10 @@ def resolve_youtube_source() -> tuple[str, str, dict]:
     """source_type='youtube': previously completed /api/youtube/download by download_id."""
     download_id = request.form.get('download_id')
     if not download_id or download_id not in state.download_progress:
-        raise _SourceResolutionError({"success": False, "error": "Невірний ID завантаження"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.download_id_invalid')}, 400)
     progress = state.download_progress.get(download_id)
     if progress['status'] != 'completed':
-        raise _SourceResolutionError({"success": False, "error": "Завантаження ще не завершено"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.download_unfinished')}, 400)
     filepath = progress['file_path']
     youtube_info = progress['info']
     source_name = youtube_info['title']
@@ -160,19 +161,19 @@ def resolve_recording_source() -> tuple[str, str, dict]:
     """source_type='recording': Phase 9.8, a finalized server-side recording session."""
     sid = request.form.get('recording_session_id')
     if not sid:
-        raise _SourceResolutionError({"success": False, "error": "recording_session_id обов'язковий"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_session_required')}, 400)
     if state.recording_service is None:
-        raise _SourceResolutionError({"success": False, "error": "Recording feature вимкнено"}, 503)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_disabled')}, 503)
     try:
         manifest = state.recording_service.store.read(sid)
     except Exception:
         logger.debug("recording manifest read failed for sid=%s", sid, exc_info=True)
-        raise _SourceResolutionError({"success": False, "error": "Recording сесія не знайдена"}, 404)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_session_not_found')}, 404)
     if manifest.get('status') != 'finalized':
-        raise _SourceResolutionError({"success": False, "error": "Recording ще не finalized"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_not_finalized')}, 400)
     final_mp3 = manifest.get('final_mp3_path')
     if not final_mp3 or not os.path.isfile(final_mp3):
-        raise _SourceResolutionError({"success": False, "error": "Final MP3 не створений"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_mp3_missing')}, 400)
     source_name = manifest.get('name') or manifest.get('auto_name') or sid
     return final_mp3, source_name, _empty_source_meta('recording')
 
@@ -186,20 +187,20 @@ def resolve_library_source() -> tuple[str, str, dict]:
     """
     audio_id = request.form.get('audio_download_id')
     if not audio_id:
-        raise _SourceResolutionError({"success": False, "error": "audio_download_id обов'язковий"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_dl_required')}, 400)
     try:
         audio_id_int = int(audio_id)
     except (TypeError, ValueError):
-        raise _SourceResolutionError({"success": False, "error": "audio_download_id мусить бути числом"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_dl_not_number')}, 400)
     with _get_db() as conn:
         row = conn.execute(
             'SELECT * FROM audio_downloads WHERE id = ?', (audio_id_int,)
         ).fetchone()
     if not row:
-        raise _SourceResolutionError({"success": False, "error": "Запис в Аудіотеці не знайдено"}, 404)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_lib_not_found')}, 404)
     filepath = row['file_path']
     if not filepath or not os.path.isfile(filepath):
-        raise _SourceResolutionError({"success": False, "error": f"Файл відсутній: {filepath}"}, 400)
+        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_missing', path=filepath)}, 400)
     source_name = row['title']
     # Успадковуємо оригінальний source_type щоб transcript у Історії
     # групувався правильно (YouTube → 'youtube', recording → 'recording')
@@ -256,7 +257,7 @@ def transcribe():
 
     resolver = _SOURCE_RESOLVERS.get(source_type)
     if resolver is None:
-        return jsonify({"success": False, "error": "Невірний тип джерела"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.source_type_invalid')}), 400
     try:
         filepath, source_name, meta = resolver()
     except _SourceResolutionError as e:
@@ -288,7 +289,7 @@ def transcribe():
             # 409 замість тихого дубля.
             return jsonify({
                 "success": False,
-                "error": "Транскрипція цього запису вже виконується",
+                "error": tr('transcript.err.already_running'),
                 "error_code": "ALREADY_RUNNING",
                 "active": _existing_job,
             }), 409
@@ -611,7 +612,7 @@ def transcribe():
         # При помилці uploaded file видаляємо — у DB немає transcription'а на нього.
         if source_type == 'file' and filepath and os.path.exists(filepath):
             os.remove(filepath)
-        return jsonify({"success": False, "error": "Помилка транскрибування аудіо"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.transcribe_failed')}), 500
     finally:
         if library_audio_id is not None and state.active_library_transcriptions is not None:
             state.active_library_transcriptions.pop(library_audio_id, None)
@@ -810,7 +811,7 @@ def get_transcription(transcription_id):
             (transcription_id,),
         ).fetchone()
         if not transcription:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
         # Phase 10.3: speaker map (raw_label → speaker info) для UI chip-рендеру.
         speaker_rows = conn.execute('''
             SELECT m.raw_label, m.speaker_id, s.name, s.color, s.is_self
@@ -869,10 +870,10 @@ def patch_transcription_meta(transcription_id):
     """
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return jsonify({"success": False, "error": "Очікується JSON-обʼєкт"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.json_object_expected')}), 400
     if 'title' not in payload and 'description' not in payload:
         return jsonify({"success": False,
-                        "error": "Потрібне хоча б одне поле: title або description"}), 400
+                        "error": tr('transcript.err.title_or_description')}), 400
 
     kwargs = {}
     if 'title' in payload:
@@ -899,7 +900,7 @@ def patch_transcription_meta(transcription_id):
         return jsonify({"success": False, "error": str(e)}), 400
 
     if record is None:
-        return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
     changed = record.pop('changed', False)
     # db_path явно від запиту (той самий, яким відкрито зʼєднання вище): без
@@ -945,8 +946,7 @@ def suggest_transcription_meta(transcription_id):
         return jsonify({
             'success': False,
             'error_code': 'RECORDING_ACTIVE',
-            'error': 'Іде запис — підказка назви буде після його завершення, '
-                     'щоб не зупиняти копілот дзвінка',
+            'error': tr('transcript.err.recording_active'),
         }), 409
 
     try:
@@ -976,7 +976,7 @@ def delete_transcription(transcription_id):
                 (transcription_id,),
             ).fetchone()
             if not row:
-                return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+                return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
             conn.execute(
                 'UPDATE transcriptions SET deleted_at = ? WHERE id = ?',
                 (time.time(), transcription_id),
@@ -985,7 +985,7 @@ def delete_transcription(transcription_id):
         return jsonify({"success": True, "id": transcription_id})
     except Exception as e:
         logger.error(f"Помилка видалення транскрибування: {e}")
-        return jsonify({"success": False, "error": "Помилка видалення транскрибування"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.delete_failed')}), 500
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>/restore', methods=['POST'])
@@ -998,7 +998,7 @@ def restore_transcription(transcription_id):
                 (transcription_id,),
             ).fetchone()
             if not row:
-                return jsonify({"success": False, "error": "Немає що відновлювати"}), 404
+                return jsonify({"success": False, "error": tr('transcript.err.nothing_to_restore')}), 404
             conn.execute(
                 'UPDATE transcriptions SET deleted_at = NULL WHERE id = ?',
                 (transcription_id,),
@@ -1007,7 +1007,7 @@ def restore_transcription(transcription_id):
         return jsonify({"success": True, "id": transcription_id})
     except Exception as e:
         logger.error(f"Помилка відновлення транскрибування: {e}")
-        return jsonify({"success": False, "error": "Помилка відновлення транскрибування"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.restore_failed')}), 500
 
 
 @transcription_bp.route('/api/history/bulk_delete', methods=['POST'])
@@ -1017,11 +1017,11 @@ def bulk_delete_transcriptions():
         data = request.json
         ids = data.get('ids', [])
         if not ids:
-            return jsonify({"success": False, "error": "Не вказано ID для видалення"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.delete_ids_missing')}), 400
         try:
             ids = [int(id) for id in ids]
         except ValueError:
-            return jsonify({"success": False, "error": "Невірний формат ID"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.ids_format_invalid')}), 400
 
         with _get_db() as conn:
             placeholders = ','.join('?' * len(ids))
@@ -1048,12 +1048,12 @@ def bulk_delete_transcriptions():
                 except Exception as e:
                     logger.error(f"Помилка видалення файлу {file_info['file_path']}: {e}")
         return jsonify({
-            "message": f"Видалено {len(files_info)} транскрибувань",
+            "message": tr('transcript.msg.deleted_n', n=len(files_info)),
             "deleted_files": deleted_files,
         })
     except Exception as e:
         logger.error(f"Помилка масового видалення: {e}")
-        return jsonify({"success": False, "error": "Помилка масового видалення"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.bulk_delete_failed')}), 500
 
 
 @transcription_bp.route('/api/history/bulk_export', methods=['POST'])
@@ -1068,11 +1068,11 @@ def bulk_export_transcriptions():
         ids = data.get('ids', [])
         export_format = data.get('format', 'json')
         if not ids:
-            return jsonify({"success": False, "error": "Не вказано ID для експорту"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.export_ids_missing')}), 400
         try:
             ids = [int(id) for id in ids]
         except ValueError:
-            return jsonify({"success": False, "error": "Невірний формат ID"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.ids_format_invalid')}), 400
 
         with _get_db() as conn:
             placeholders = ','.join('?' * len(ids))
@@ -1081,7 +1081,7 @@ def bulk_export_transcriptions():
                 ids,
             ).fetchall()
             if not transcriptions:
-                return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+                return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
             # Phase 10.9: підтягуємо speaker maps для всіх transcripts одним запитом
             speaker_maps_rows = conn.execute(f'''
@@ -1176,7 +1176,7 @@ def bulk_export_transcriptions():
             except ImportError:
                 return jsonify({
                     "success": False,
-                    "error": "python-docx не встановлений",
+                    "error": tr('transcript.err.docx_missing'),
                 }), 500
             export_path = os.path.join(current_app.config['TRANSCRIPTS_FOLDER'], f"bulk_export_{timestamp}.docx")
             doc = Document()
@@ -1278,7 +1278,7 @@ def bulk_export_transcriptions():
                         f.write(item.get('transcript_text', ''))
                         f.write('\n\n')
         else:
-            return jsonify({"success": False, "error": "Непідтримуваний формат експорту"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.export_format_unsupported')}), 400
 
         response = send_file(export_path, as_attachment=True)
 
@@ -1292,7 +1292,7 @@ def bulk_export_transcriptions():
         return response
     except Exception as e:
         logger.error(f"Помилка масового експорту: {e}")
-        return jsonify({"success": False, "error": "Помилка масового експорту"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.bulk_export_failed')}), 500
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/audio', methods=['GET'])
@@ -1308,10 +1308,10 @@ def get_transcription_audio(transcription_id):
             (transcription_id,),
         ).fetchone()
     if not row:
-        return jsonify({"success": False, "error": "Транскрипт не знайдено"}), 404
+        return jsonify({"success": False, "error": tr('transcript.err.tx_not_found2')}), 404
     file_path = row['file_path']
     if not file_path or not os.path.isfile(file_path):
-        return jsonify({"success": False, "error": "Аудіо-файл недоступний"}), 404
+        return jsonify({"success": False, "error": tr('transcript.err.audio_unavailable')}), 404
     # Path-traversal protection: file_path має бути у відомих директоріях
     allowed_roots = [
         current_app.config.get('UPLOAD_FOLDER', ''),
@@ -1360,14 +1360,14 @@ def merge_segments(transcription_id):
     data = request.get_json(silent=True) or {}
     indices = data.get('indices')
     if not isinstance(indices, list) or len(indices) < 2:
-        return jsonify({'success': False, 'error': 'indices мусить бути списком ≥2 елементів'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.indices_list')}), 400
     try:
         indices = sorted(set(int(x) for x in indices))
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'indices — лише числа'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.indices_numbers')}), 400
     # Перевірка послідовності
     if any(indices[k+1] - indices[k] != 1 for k in range(len(indices) - 1)):
-        return jsonify({'success': False, 'error': 'indices мусять бути послідовні'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.indices_sequential')}), 400
 
     with _get_db() as conn:
         row = conn.execute(
@@ -1375,12 +1375,12 @@ def merge_segments(transcription_id):
             (transcription_id,),
         ).fetchone()
         if not row:
-            return jsonify({'success': False, 'error': 'Транскрипт не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.tx_not_found2')}), 404
         segments = json.loads(row['segments']) if row['segments'] else []
         if not segments:
-            return jsonify({'success': False, 'error': 'Сегментів немає'}), 400
+            return jsonify({'success': False, 'error': tr('transcript.err.no_segments')}), 400
         if indices[0] < 0 or indices[-1] >= len(segments):
-            return jsonify({'success': False, 'error': 'indices виходять за межі'}), 400
+            return jsonify({'success': False, 'error': tr('transcript.err.indices_range')}), 400
 
         first, last = segments[indices[0]], segments[indices[-1]]
         merged = {
@@ -1428,7 +1428,7 @@ def split_segment(transcription_id):
         index = int(data.get('index'))
         split_at = float(data.get('split_at_seconds'))
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'index/split_at_seconds невірні'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.split_args_invalid')}), 400
     right_speaker = data.get('right_speaker')  # None = lefthand speaker
 
     with _get_db() as conn:
@@ -1437,10 +1437,10 @@ def split_segment(transcription_id):
             (transcription_id,),
         ).fetchone()
         if not row:
-            return jsonify({'success': False, 'error': 'Транскрипт не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('transcript.err.tx_not_found2')}), 404
         segments = json.loads(row['segments']) if row['segments'] else []
         if index < 0 or index >= len(segments):
-            return jsonify({'success': False, 'error': 'index виходить за межі'}), 400
+            return jsonify({'success': False, 'error': tr('transcript.err.index_range')}), 400
 
         seg = segments[index]
         start = float(seg.get('start', 0))
@@ -1448,7 +1448,7 @@ def split_segment(transcription_id):
         if not (start < split_at < end):
             return jsonify({
                 'success': False,
-                'error': f'split_at ({split_at:.2f}s) має бути всередині сегменту [{start:.2f}, {end:.2f}]',
+                'error': tr('transcript.err.split_inside', split_at=f'{split_at:.2f}', start=f'{start:.2f}', end=f'{end:.2f}'),
             }), 400
 
         text = (seg.get('text') or '').strip()
@@ -1539,7 +1539,7 @@ def _load_speaker_context(
     return segments, has_speakers, speaker_map
 
 
-def _call_claude_endpoint(label: str, fn, *args, error_msg: str = "Помилка Claude API. Перевірте логи.", **kwargs):
+def _call_claude_endpoint(label: str, fn, *args, error_msg: str | None = None, **kwargs):
     """Run a text_polishing.* call with the standard error handling.
 
     Returns (result, None) on success, or (None, (response, status)) on
@@ -1553,7 +1553,7 @@ def _call_claude_endpoint(label: str, fn, *args, error_msg: str = "Помилк�
         return None, (jsonify({"success": False, "error": str(e)}), 400)
     except Exception as e:
         logger.error(f"[{label}] error: {e}", exc_info=True)
-        return None, (jsonify({"success": False, "error": error_msg}), 500)
+        return None, (jsonify({"success": False, "error": error_msg or tr('transcript.err.claude_api_logs')}), 500)
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/polish', methods=['POST'])
@@ -1567,7 +1567,7 @@ def polish_transcription(transcription_id):
     if not text_polishing.is_available():
         return jsonify({
             "success": False,
-            "error": "ANTHROPIC_API_KEY не встановлено. Створіть .env у корені проекту з ключем.",
+            "error": tr('transcript.err.api_key_env'),
         }), 400
 
     data = request.get_json(silent=True) or {}
@@ -1578,7 +1578,7 @@ def polish_transcription(transcription_id):
         row = tx_repo.get_by_id(conn, transcription_id,
                                  columns=['id', 'transcript_text', 'polished_text', 'segments'])
         if not row:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
         if row['polished_text'] and not force:
             return jsonify({"success": True, "polished_text": row['polished_text'], "cached": True})
@@ -1588,7 +1588,7 @@ def polish_transcription(transcription_id):
 
     raw_text = row['transcript_text'] or ''
     if not raw_text.strip() and not has_speakers:
-        return jsonify({"success": False, "error": "Транскрипт порожній"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
 
     if has_speakers:
         logger.info(
@@ -1607,7 +1607,7 @@ def polish_transcription(transcription_id):
 
     polished = result["polished_text"]
     if not polished:
-        return jsonify({"success": False, "error": "Claude повернув порожній текст"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.claude_empty')}), 500
 
     with _get_db() as conn:
         conn.execute(
@@ -1644,7 +1644,7 @@ def summarize_transcription(transcription_id):
     if not text_polishing.is_available():
         return jsonify({
             "success": False,
-            "error": "ANTHROPIC_API_KEY не встановлено. Створіть .env у корені проекту з ключем.",
+            "error": tr('transcript.err.api_key_env'),
         }), 400
 
     data = request.get_json(silent=True) or {}
@@ -1656,7 +1656,7 @@ def summarize_transcription(transcription_id):
             'id', 'transcript_text', 'polished_text', 'segments', 'summary_json',
         ])
         if not row:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
         if row['summary_json'] and not force:
             try:
@@ -1678,7 +1678,7 @@ def summarize_transcription(transcription_id):
 
     body = polished if polished.strip() else (diarized_text or raw_text)
     if not body or not body.strip():
-        return jsonify({"success": False, "error": "Транскрипт порожній"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
 
     result, err = _call_claude_endpoint(
         "summarize", text_polishing.summarize_transcript,
@@ -1724,7 +1724,7 @@ def summarize_transcription(transcription_id):
 def sentiment_transcription(transcription_id):
     """Phase 12.25: per-speaker sentiment analysis. Потребує diarized transcript."""
     if not text_polishing.is_available():
-        return jsonify({"success": False, "error": "ANTHROPIC_API_KEY не встановлено."}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
 
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force', False))
@@ -1733,7 +1733,7 @@ def sentiment_transcription(transcription_id):
     with _get_db() as conn:
         row = tx_repo.get_by_id(conn, transcription_id, columns=['id', 'segments', 'sentiment_json'])
         if not row:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
         if row['sentiment_json'] and not force:
             try:
@@ -1746,16 +1746,16 @@ def sentiment_transcription(transcription_id):
         if not has_speakers:
             return jsonify({
                 "success": False,
-                "error": "Sentiment per speaker потребує діаризованого транскрипту",
+                "error": tr('transcript.err.sentiment_needs_diarization'),
             }), 400
 
     diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
     if not diarized_text.strip():
-        return jsonify({"success": False, "error": "Транскрипт порожній"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
 
     result, err = _call_claude_endpoint(
         "sentiment", text_polishing.analyze_sentiment, diarized_text, model=model_override,
-        error_msg="Помилка Claude API.",
+        error_msg=tr('transcript.err.claude_api'),
     )
     if err:
         return err
@@ -1783,13 +1783,13 @@ def translate_transcription(transcription_id):
     if not text_polishing.is_available():
         return jsonify({
             "success": False,
-            "error": "ANTHROPIC_API_KEY не встановлено.",
+            "error": tr('transcript.err.api_key_unset'),
         }), 400
 
     data = request.get_json(silent=True) or {}
     target_lang = (data.get('target_lang') or '').strip().lower()
     if not target_lang or len(target_lang) > 5:
-        return jsonify({"success": False, "error": "target_lang обов'язковий (e.g. 'en')"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.target_lang_required')}), 400
     model_override = data.get('model')
     force = bool(data.get('force', False))
 
@@ -1798,12 +1798,12 @@ def translate_transcription(transcription_id):
             'id', 'transcript_text', 'polished_text', 'segments', 'language', 'translations_json',
         ])
         if not row:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
         if row['language'] and row['language'].lower() == target_lang:
             return jsonify({
                 "success": False,
-                "error": f"Транскрипт вже на мові '{target_lang}'",
+                "error": tr('transcript.err.already_in_lang', lang=target_lang),
             }), 400
 
         translations = {}
@@ -1832,7 +1832,7 @@ def translate_transcription(transcription_id):
     body_text = polished if polished.strip() else raw_text
 
     if not body_text.strip() and not diarized_text:
-        return jsonify({"success": False, "error": "Транскрипт порожній"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
 
     result, err = _call_claude_endpoint(
         "translate", text_polishing.translate_transcript,
@@ -1843,7 +1843,7 @@ def translate_transcription(transcription_id):
 
     translated = result['translated_text']
     if not translated:
-        return jsonify({"success": False, "error": "Claude повернув порожній текст"}), 500
+        return jsonify({"success": False, "error": tr('transcript.err.claude_empty')}), 500
 
     translations[target_lang] = {
         'text': translated,
@@ -1880,7 +1880,7 @@ def translate_transcription(transcription_id):
 def extract_topics_endpoint(transcription_id):
     """Phase 12.19: витягнути topic tags через Claude. Кеш у topics_json."""
     if not text_polishing.is_available():
-        return jsonify({"success": False, "error": "ANTHROPIC_API_KEY не встановлено."}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
 
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force', False))
@@ -1891,7 +1891,7 @@ def extract_topics_endpoint(transcription_id):
             'id', 'transcript_text', 'polished_text', 'segments', 'topics_json',
         ])
         if not row:
-            return jsonify({"success": False, "error": "Транскрибування не знайдено"}), 404
+            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
         if row['topics_json'] and not force:
             try:
@@ -1908,12 +1908,12 @@ def extract_topics_endpoint(transcription_id):
         diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
 
     if not body_text.strip() and not diarized_text:
-        return jsonify({"success": False, "error": "Транскрипт порожній"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
 
     result, err = _call_claude_endpoint(
         "topics", text_polishing.extract_topics,
         text=body_text, diarized_text=diarized_text, model=model_override,
-        error_msg="Помилка Claude API.",
+        error_msg=tr('transcript.err.claude_api'),
     )
     if err:
         return err
@@ -2083,7 +2083,7 @@ def export_transcript(format):
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.txt"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
             f.write(_comments_text(export_comments))
             if has_speakers and segments:
@@ -2109,7 +2109,7 @@ def export_transcript(format):
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.srt"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
             for i, segment in enumerate(segments, 1):
                 f.write(f"{i}\n")
@@ -2126,7 +2126,7 @@ def export_transcript(format):
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.md"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
         def _fmt_ts(seconds: float) -> str:
             mins, secs = divmod(int(seconds), 60)
@@ -2178,13 +2178,13 @@ def export_transcript(format):
         except ImportError:
             return jsonify({
                 "success": False,
-                "error": "python-docx не встановлений. .venv/Scripts/python.exe -m pip install python-docx",
+                "error": tr('transcript.err.docx_missing_hint'),
             }), 500
 
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.docx"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
         def _fmt_ts(seconds: float) -> str:
             mins, secs = divmod(int(seconds), 60)
@@ -2253,7 +2253,7 @@ def export_transcript(format):
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.json"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
             # Окремим полем, а не вперемішку з сегментами: споживач JSON має
             # бачити, що це інший шар — свідомо написане про запис, а не
@@ -2274,12 +2274,12 @@ def export_transcript(format):
             from reportlab.pdfbase.ttfonts import TTFont
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
         except ImportError:
-            return jsonify({"success": False, "error": "reportlab не встановлений"}), 500
+            return jsonify({"success": False, "error": tr('transcript.err.reportlab_missing')}), 500
 
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.pdf"))
         if not export_path.startswith(transcripts_dir):
             logger.error(f"Спроба Path Traversal при експорті: {export_path}")
-            return jsonify({"success": False, "error": "Некоректне ім'я файлу"}), 400
+            return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
         # Реєструємо Arial для cyrillic. У Windows він є; на інших OS fallback to Helvetica.
         # registerFont — global state; повторні виклики того ж name OK (no-op).
@@ -2371,7 +2371,7 @@ def export_transcript(format):
 
         doc.build(story)
     else:
-        return jsonify({"success": False, "error": "Непідтримуваний формат"}), 400
+        return jsonify({"success": False, "error": tr('transcript.err.format_unsupported')}), 400
 
     response = send_file(export_path, as_attachment=True)
 
@@ -2453,10 +2453,10 @@ def analyze_video_endpoint(tid):
     data = request.get_json(silent=True) or {}
     vision_backend = data.get('vision_backend')
     if vision_backend not in ('local', 'claude', None):
-        return jsonify({'success': False, 'error': 'vision_backend: local або claude'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.vision_backend')}), 400
     method = data.get('method')
     if method not in ('thumbs', 'bisect', None):
-        return jsonify({'success': False, 'error': 'method: thumbs або bisect'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.method_invalid')}), 400
     # Явний vision_backend без describe — запит на опис: так шле UI-чекбокс
     # «Claude-опис» (transcript.js), і до нового конвеєра він описував кадри.
     describe = bool(data['describe']) if 'describe' in data else vision_backend is not None
@@ -2471,14 +2471,14 @@ def analyze_video_endpoint(tid):
         if regions:
             kwargs['ignore_regions'] = [[float(v) for v in r][:4] for r in regions]
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'параметри мають бути числами'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.params_numbers')}), 400
     force = bool(data.get('force', False))
 
     from app.services import video_analysis
     db_path = current_app.config['DATABASE']
     if video_analysis.resolve_recording_video(db_path, tid) is None:
         return jsonify({'success': False, 'reason': 'no video', 'error_code': 'NO_VIDEO',
-                        'error': f'у запису #{tid} немає відео'})
+                        'error': tr('transcript.err.no_video_in_record', tid=tid)})
     if state.job_queue is None:
         return jsonify({'success': False, 'reason': 'job_queue_unavailable'}), 503
 
@@ -2577,14 +2577,14 @@ def get_transcription_video(tid):
         video_info = video_analysis.resolve_recording_video(db_path, tid)
     except Exception as exc:
         logger.error("resolve_recording_video error for tid=%s: %s", tid, exc)
-        return jsonify({'success': False, 'error': 'Не вдалося знайти відео'}), 500
+        return jsonify({'success': False, 'error': tr('transcript.err.video_lookup_failed')}), 500
 
     if video_info is None:
-        return jsonify({'success': False, 'error': 'Відео не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('transcript.err.video_not_found')}), 404
 
     primary_path = video_info.get('primary_video_path')
     if not primary_path or not os.path.isfile(primary_path):
-        return jsonify({'success': False, 'error': 'Файл відео недоступний'}), 404
+        return jsonify({'success': False, 'error': tr('transcript.err.video_unavailable')}), 404
 
     abs_path = os.path.realpath(primary_path)
     if not _check_path_allowed(abs_path):
@@ -2637,9 +2637,9 @@ def get_keyframe_image(tid, kf_id):
                 'WHERE id = ? AND transcription_id = ?', (kf_id, tid)).fetchone()
     except Exception as exc:
         logger.error("keyframe lookup error kf_id=%s tid=%s: %s", kf_id, tid, exc)
-        return jsonify({'success': False, 'error': 'Помилка бази даних'}), 500
+        return jsonify({'success': False, 'error': tr('transcript.err.db_error')}), 500
     if not row:
-        return jsonify({'success': False, 'error': 'Кейфрейм не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('transcript.err.keyframe_not_found')}), 404
     from app.services import video_analysis
     info = video_analysis.resolve_recording_video(current_app.config['DATABASE'], tid) or {}
     t = (float(row['video_time_sec']) + float(info.get('start_offset_sec') or 0.0)) \
@@ -2664,7 +2664,7 @@ def _frame_response(tid, t, size):
         return _timeline_error(exc)
     except Exception:
         logger.exception("кадр tid=%s t=%s не віддано", tid, t)
-        return jsonify({'success': False, 'error': 'Кадр не вдалося вирізати'}), 500
+        return jsonify({'success': False, 'error': tr('transcript.err.frame_cut_failed')}), 500
     buf = io.BytesIO()
     img.save(buf, 'JPEG', quality=82)
     buf.seek(0)
@@ -2694,9 +2694,9 @@ def get_frame_image(tid):
     try:
         t = _float_arg('t')
     except ValueError:
-        return jsonify({'success': False, 'error': 't має бути числом'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.t_number')}), 400
     if t is None:
-        return jsonify({'success': False, 'error': 'потрібен t'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.t_required')}), 400
     return _frame_response(tid, t, request.args.get('size', 'thumb'))
 
 
@@ -2711,12 +2711,12 @@ def get_frames_json(tid):
                         size=request.args.get('size', 'thumb'),
                         include_camera=request.args.get('include_camera') in ('1', 'true'))
     except ValueError:
-        return jsonify({'success': False, 'error': 't/from/to/limit мають бути числами'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.tfl_numbers')}), 400
     except vt.TimelineError as exc:
         return _timeline_error(exc, _video_job_status(tid))
     except Exception:
         logger.exception("кадри tid=%s не віддано", tid)
-        return jsonify({'success': False, 'error': 'Кадри не вдалося вирізати'}), 500
+        return jsonify({'success': False, 'error': tr('transcript.err.frames_cut_failed')}), 500
     return jsonify(res)
 
 
@@ -2733,7 +2733,7 @@ def get_visual_timeline(tid):
                        limit=int(request.args.get('limit', 50)),
                        offset=int(request.args.get('offset', 0)))
     except ValueError:
-        return jsonify({'success': False, 'error': 'числові параметри мають бути числами'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.numeric_params')}), 400
     except vt.TimelineError as exc:
         return _timeline_error(exc)
     running = _video_job_status(tid)
@@ -2758,7 +2758,7 @@ def get_frames_for_text(tid):
                                  window=_float_arg('window') or 5.0,
                                  shift=_float_arg('offset_sec') or 0.0)
     except ValueError:
-        return jsonify({'success': False, 'error': 'числові параметри мають бути числами'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.numeric_params')}), 400
     except vt.TimelineError as exc:
         return _timeline_error(exc)
     return jsonify(res)
@@ -2776,7 +2776,7 @@ def search_visual_endpoint():
                                date_to=request.args.get('date_to'),
                                limit=int(request.args.get('limit', 20)))
     except ValueError:
-        return jsonify({'success': False, 'error': 'transcription_ids/limit мають бути числами'}), 400
+        return jsonify({'success': False, 'error': tr('transcript.err.ids_limit_numbers')}), 400
     except vt.TimelineError as exc:
         return _timeline_error(exc)
     return jsonify(res)

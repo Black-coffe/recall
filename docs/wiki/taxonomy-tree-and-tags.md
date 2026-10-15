@@ -18,13 +18,13 @@ touching any of the ~15 call sites (HTTP, MCP direct-DB, retrieval, research,
 commitments, scope, copilot).
 
 **A node's canonical text identity is its full path, not its bare name.**
-`list_tree` returns `path` ("Напрямок → Проєкт" for a project, "Напрямок" for a
+`list_tree` returns `path` ("Direction → Project" for a project, "Direction" for a
 direction) for every node, and `resolve_node(conn, path) == id` holds for
 every node returned by `list_tree` — this is the invariant a test in story 20
 pins. Node names are unique only **among siblings** (`idx_categories_parent_name`
 on `(COALESCE(parent_id,0), name_norm)`, migration v47 — the *first
 non-additive migration* in this project, table rebuild under `PRAGMA
-foreign_keys=OFF`), not across the whole table: "Маркетинг" under two
+foreign_keys=OFF`), not across the whole table: "Marketing" under two
 different directions can and does coexist. A node name containing the path
 separator (`categories.PATH_SEP = "→"`) is rejected as `bad_name` before write,
 which is what keeps every `path` string parseable back into the node it names.
@@ -64,7 +64,7 @@ with `commit=False` reintroduces that bug class.
 under it, not just the node's own records.** `update_category` returns
 `(node, ids)` where `ids` is the full subtree's living record ids whenever
 `name` or `parent_id` changes — reparenting one path segment changes the
-`"Напрямок → Проєкт"` string baked into every descendant's context prefix
+`"Direction → Project"` string baked into every descendant's context prefix
 (see `rag-context-integrity.md`), so it is treated exactly like a rename, not
 like a metadata-only update. Every `categories`/`tags` writer that mutates
 what a record's prefix would render — including chat-level tag replacement
@@ -73,7 +73,7 @@ changed) — returns the record ids it touched so the caller can hand them to
 `reembed.schedule_records_reembed` (`rag-context-integrity.md`); nothing in
 this module schedules re-embedding itself.
 
-See `memory/map/services.md` (Таксономія section) for the current function
+See `memory/map/services.md` (Taxonomy section) for the current function
 inventory, `docs/wiki/rag-context-integrity.md` for what the path/tags do
 inside the embedded prefix and the epoch-format guard that stops a
 half-migrated prefix format from writing, and

@@ -1,87 +1,87 @@
-# overview — архітектура та процеси
+# overview — architecture and processes
 
-## Три процеси
+## Three processes
 
-Recall — це **монолітний Flask-сервер** + **2 окремі дочірні процеси**:
+Recall is a **monolithic Flask server** + **2 separate child processes**:
 
-1. **`app.py`** — головний Flask (порт 5050). Усі HTTP API, фонові задачі,
-   запис, ко-пілот, RAG. Глобальний стан — у `app/state.py` singleton-ах.
-2. **`telegram_listener.py`** — окремий процес (Telethon/MTProto). Підіймається
-   `app.py` через `subprocess.Popen` (якщо `TELEGRAM_ENABLED` + є `telegram.session`).
-   Контрол-API на localhost:5051; шле повідомлення назад у Flask `/api/telegram/ingest`.
-3. **`mcp_server.py`** — окремий MCP-сервер: **read-first** міст до Recall для
-   Claude Code/Desktop (35 read-only тулзів; write-поверхня прибрана у Волні 1). Stdio-конектор (**default**) спавнить сам клієнт
-   (`claude mcp add`, user-scope) — окремо піднімати не треба; http+ключ — опційно.
-   Гібрид: читає SQLite напряму, а записи/live/AI-дії проксіює на запущений `app.py`.
+1. **`app.py`** — the main Flask app (port 5050). All HTTP APIs, background tasks,
+   recording, copilot, RAG. Global state lives in `app/state.py` singletons.
+2. **`telegram_listener.py`** — a separate process (Telethon/MTProto). Started by
+   `app.py` via `subprocess.Popen` (if `TELEGRAM_ENABLED` + a `telegram.session` exists).
+   Control API on localhost:5051; posts messages back to Flask `/api/telegram/ingest`.
+3. **`mcp_server.py`** — a separate MCP server: a **read-first** bridge to Recall for
+   Claude Code/Desktop (35 read-only tools; the write surface was removed in Wave 1). The stdio connector (**default**) is spawned by the client itself
+   (`claude mcp add`, user-scope) — no need to start it separately; http+key is optional.
+   Hybrid: reads SQLite directly, while writes/live/AI actions are proxied to the running `app.py`.
 
-Усі три читають одну SQLite БД (`whisper_history.db`) та спільні модулі
-`app/services/*` напряму. MCP читає БД без Flask, але для записів/live/AI-дій
-проксіює HTTP на запущений `app.py` (гібрид).
+All three read one SQLite DB (`whisper_history.db`) and the shared `app/services/*`
+modules directly. MCP reads the DB without Flask, but for writes/live/AI actions
+proxies HTTP to the running `app.py` (hybrid).
 
-## Послідовність запуску (`app.py`)
+## Startup sequence (`app.py`)
 
-1. `.env` → logging (RotatingFileHandler + console) → глушіння шумних бібліотек.
-2. Flask + CORS (тільки localhost:5050) → створення папок (upload/transcripts/
+1. `.env` → logging (RotatingFileHandler + console) → silencing noisy libraries.
+2. Flask + CORS (localhost:5050 only) → creating folders (upload/transcripts/
    youtube/documents/telegram_media/recordings).
-3. `whisper_manager` (бекенд auto-detect: faster > openai).
-4. БД + міграції (`app/db/migrations.py`).
-5. Фонові демони: `system_monitor`, `model_updates` (staleness-gated), опц. `file_cleanup`.
-6. `recording_service` (до `RECORDING_MAX_ACTIVE` паралельних сесій) + recovery осиротілих сесій (якщо `RECORDING_ENABLED`).
-7. `live_transcribe_worker` (model='small', interval 8s) — якщо є recording_service.
-8. `copilot_service` + `copilot_worker` — якщо `COPILOT_ENABLED` + LLM доступний.
-9. `app.state.init(**singletons)` — інʼєкція всіх singleton-ів.
-10. Реєстрація 14 blueprints (БЕЗ url_prefix — повні шляхи в маршрутах).
-11. Прикручування rate-limiter-ів до конкретних view-функцій.
-12. Спавн telegram_listener (gated `WERKZEUG_RUN_MAIN`, щоб reloader не дублював).
-13. `app.run(threaded=True)` — кожен SSE-конект у власному потоці.
+3. `whisper_manager` (backend auto-detect: faster > openai).
+4. DB + migrations (`app/db/migrations.py`).
+5. Background daemons: `system_monitor`, `model_updates` (staleness-gated), opt. `file_cleanup`.
+6. `recording_service` (up to `RECORDING_MAX_ACTIVE` parallel sessions) + recovery of orphaned sessions (if `RECORDING_ENABLED`).
+7. `live_transcribe_worker` (model='small', interval 8s) — if there is a recording_service.
+8. `copilot_service` + `copilot_worker` — if `COPILOT_ENABLED` + an LLM is available.
+9. `app.state.init(**singletons)` — injection of all singletons.
+10. Registration of 14 blueprints (WITHOUT url_prefix — full paths in the routes).
+11. Attaching rate limiters to specific view functions.
+12. Spawn of telegram_listener (gated by `WERKZEUG_RUN_MAIN` so the reloader does not duplicate it).
+13. `app.run(threaded=True)` — each SSE connection in its own thread.
 
 **Shutdown** (atexit): stop system_monitor → stop file_cleanup →
-`executor.shutdown(wait=True)` → kill telegram_listener → flush логів.
+`executor.shutdown(wait=True)` → kill telegram_listener → flush logs.
 
-## Наскрізні механізми
+## Cross-cutting mechanisms
 
 - **SSE**: in-memory pub/sub `sse_broker`. Endpoint `/api/events/<process_id>`.
-  `ThreadSafeProgressStore` і `ThreadSafeProcessLogs` авто-публікують у broker.
-  Термінальні події (`complete`/`error`) закривають конект. **Фронт читає SSE через
-  fetch+reader, НЕ EventSource** (werkzeug keep-alive deadlock — див. frontend.md).
-- **Фонові задачі**: `job_queue` поверх `ThreadPoolExecutor(max_workers=2)`. State-машина
-  queued→running→completed/failed/cancelled. Cancel кооперативний (`job.is_cancelled()`).
-- **Логи**: `whisper_app.log` (10MB×5). Глушаться anthropic/httpx/hf; torchaudio→CRITICAL.
-- **Rate-limit**: flask_limiter memory-backed, по IP. 429 → JSON.
-- **Безпека**: security-headers тільки на HTML (CSP не на JSON/файли, щоб не ламати fetch);
-  path-traversal guard; bind за замовчуванням `127.0.0.1` (localhost-only; на весь LAN —
-  лише opt-in через `RECALL_BIND_ALL=1`/`FLASK_HOST=0.0.0.0`, з warning у логах —
-  аутентифікації поки нема, T1.2); shared-secret для telegram IPC.
+  `ThreadSafeProgressStore` and `ThreadSafeProcessLogs` auto-publish to the broker.
+  Terminal events (`complete`/`error`) close the connection. **The frontend reads SSE via
+  fetch+reader, NOT EventSource** (werkzeug keep-alive deadlock — see frontend.md).
+- **Background tasks**: `job_queue` on top of `ThreadPoolExecutor(max_workers=2)`. State machine
+  queued→running→completed/failed/cancelled. Cancel is cooperative (`job.is_cancelled()`).
+- **Logs**: `whisper_app.log` (10MB×5). anthropic/httpx/hf are silenced; torchaudio→CRITICAL.
+- **Rate-limit**: flask_limiter memory-backed, per IP. 429 → JSON.
+- **Security**: security headers on HTML only (CSP not on JSON/files, so as not to break fetch);
+  path-traversal guard; bind defaults to `127.0.0.1` (localhost-only; exposing to the whole LAN is
+  opt-in only via `RECALL_BIND_ALL=1`/`FLASK_HOST=0.0.0.0`, with a warning in the logs —
+  there is no authentication yet, T1.2); shared secret for telegram IPC.
 
-## БД (SQLite, `whisper_history.db`)
+## DB (SQLite, `whisper_history.db`)
 
-Ключові таблиці: `transcriptions` (центральна — усі джерела: file/youtube/recording/
-document/telegram/copilot/meeting_archive), `audio_downloads` (Аудіотека), `segments`/
-speaker-map, `chunks`+embeddings (RAG), `categories` (дерево напрямок→проєкт, `parent_id`,
-v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (граф памʼяті),
-`tags`/`record_tags`/`tg_chat_tags` (v45), `embedding_epochs` (v46 — формат префікса кожної
-пари `(model,version)`), `segment_bookmarks`, `saved_searches`, `tg_monitored_chats`,
-`copilot_sessions`/`topics`/`events`, `ask_log` (v41 — лог питань UI+MCP), `tg_threads`
-(v42 — провенанс сводки нитки), `chunks.context_prefix` (v43), `transcriptions.title`/
+Key tables: `transcriptions` (central — all sources: file/youtube/recording/
+document/telegram/copilot/meeting_archive), `audio_downloads` (Audio library), `segments`/
+speaker-map, `chunks`+embeddings (RAG), `categories` (direction→project tree, `parent_id`,
+v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (memory graph),
+`tags`/`record_tags`/`tg_chat_tags` (v45), `embedding_epochs` (v46 — prefix format of each
+`(model,version)` pair), `segment_bookmarks`, `saved_searches`, `tg_monitored_chats`,
+`copilot_sessions`/`topics`/`events`, `ask_log` (v41 — log of UI+MCP questions), `tg_threads`
+(v42 — provenance of the thread digest), `chunks.context_prefix` (v43), `transcriptions.title`/
 `.description` (v44).
-Доступ — контекст-менеджер `get_db_connection()`. Міграції — `app/db/migrations.py`
-(поточна **v47**: v40 `transcriptions.duplicate_of` — дублі аудіо/YouTube; v41 `ask_log` —
-питання/канал/скоуп/джерела/токени/вартість/оцінка власника (Хвиля A production-RAG,
+Access — the `get_db_connection()` context manager. Migrations — `app/db/migrations.py`
+(current **v47**: v40 `transcriptions.duplicate_of` — audio/YouTube duplicates; v41 `ask_log` —
+question/channel/scope/sources/tokens/cost/owner's rating (production-RAG Wave A,
 16.09.2026); v42 `tg_threads.summary_source_ids_json`/`summary_at`/`summary_model`/
-`summary_msgs` — провенанс сводки нитки; v43 `chunks.context_prefix` + перебудова
-`chunks_fts` на `(context_prefix, text)` (Хвиля B production-RAG, 17.09.2026); v44
-`transcriptions.title`/`.description` (NULL — фолбек на `source_name`, `record_meta.
-display_name()`) + перебудова `transcriptions_fts` на обидві колонки
+`summary_msgs` — provenance of the thread digest; v43 `chunks.context_prefix` + rebuild of
+`chunks_fts` on `(context_prefix, text)` (production-RAG Wave B, 17.09.2026); v44
+`transcriptions.title`/`.description` (NULL — fallback to `source_name`, `record_meta.
+display_name()`) + rebuild of `transcriptions_fts` on both columns
 (`editable-title-description`, 4.5.0, 21.09.2026); v45 `categories.parent_id` + `tags`/
 `record_tags`/`tg_chat_tags` + `transcriptions.suggested_tags_json`; v46 `embedding_epochs`
-(бекфіл наявних пар форматом 1); v47 — **перша неаддитивна міграція проєкту**: перебудова
-`categories` під `PRAGMA foreign_keys=OFF` — знімає глобальний `UNIQUE` на `name_norm`,
-ставить унікальність СЕРЕД БРАТІВ (`directions-projects-tags`, 4.6.0, 22-23.09.2026)).
+(backfill of existing pairs with format 1); v47 — **the project's first non-additive migration**: rebuild of
+`categories` under `PRAGMA foreign_keys=OFF` — drops the global `UNIQUE` on `name_norm`,
+sets uniqueness AMONG SIBLINGS (`directions-projects-tags`, 4.6.0, 22-23.09.2026)).
 
-## Windows-специфіка
+## Windows specifics
 
-- WASAPI-запис через `pyaudiowpatch` (Linux/macOS → recording auto-disabled); ізоляція звуку по
-  застосунку — WASAPI process loopback через comtypes/pycaw (win32-only піни в requirements.txt).
-- Forward-slash у коді; Pathlib транслює. UTF-8 reconfigure stdout у telegram-скриптах.
-- FFmpeg у PATH (відсутній → YouTube вимкнено, решта працює).
-- `os.startfile()` для QR-PNG у telegram_login (грейсфул-фолбек на іншій ОС).
+- WASAPI recording via `pyaudiowpatch` (Linux/macOS → recording auto-disabled); per-application audio
+  isolation — WASAPI process loopback via comtypes/pycaw (win32-only pins in requirements.txt).
+- Forward slash in code; Pathlib translates. UTF-8 reconfigure of stdout in the telegram scripts.
+- FFmpeg in PATH (missing → YouTube disabled, the rest works).
+- `os.startfile()` for the QR PNG in telegram_login (graceful fallback on other OSes).

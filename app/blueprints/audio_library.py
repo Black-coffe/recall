@@ -19,6 +19,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core.i18n import tr
 from app.services import categories as cat_svc
 from app.services import record_meta
 from app.utils.youtube_id import extract_youtube_id
@@ -60,10 +61,10 @@ def download_audio_only():
     end_time = data.get('end_time', None)
 
     if not url:
-        return jsonify({"success": False, "error": "URL не вказано"}), 400
+        return jsonify({"success": False, "error": tr('library.audio.err.no_url')}), 400
     youtube_id = extract_youtube_id(url)
     if not youtube_id:
-        return jsonify({"success": False, "error": "Невірний YouTube URL"}), 400
+        return jsonify({"success": False, "error": tr('library.audio.err.bad_url')}), 400
 
     # Перевіряємо дублікат. T4.6: soft-deleted (deleted_at IS NOT NULL) НЕ
     # рахується дублем — юзер його прибрав, повторне завантаження має пройти
@@ -80,7 +81,7 @@ def download_audio_only():
         return jsonify({
             "success": True,
             "status": "exists",
-            "message": "Це аудіо вже завантажено",
+            "message": tr('library.audio.err.already'),
             "download_id": existing['id'],
             "info": {
                 "title": existing['title'],
@@ -341,7 +342,7 @@ def delete_audio_download(download_id):
         )
         download = c.fetchone()
         if not download:
-            return jsonify({'success': False, 'error': 'Запис не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('library.audio.err.not_found')}), 404
 
         c.execute(
             'UPDATE audio_downloads SET deleted_at = ? WHERE id = ?',
@@ -363,16 +364,16 @@ def patch_audio_download(download_id):
     """
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return jsonify({'success': False, 'error': 'Очікується JSON-обʼєкт'}), 400
+        return jsonify({'success': False, 'error': tr('library.audio.err.json_object')}), 400
     if 'title' not in payload and 'description' not in payload:
         return jsonify({'success': False,
-                        'error': 'Потрібне хоча б одне поле: title або description'}), 400
+                        'error': tr('library.audio.err.need_field')}), 400
 
     updates: dict = {}
     if 'title' in payload:
         raw_title = payload['title']
         if not isinstance(raw_title, str) or not raw_title.strip():
-            return jsonify({'success': False, 'error': 'Назва не може бути порожньою'}), 400
+            return jsonify({'success': False, 'error': tr('library.audio.err.title_empty')}), 400
         try:
             updates['title'] = record_meta.normalize_title(raw_title)
         except ValueError as e:
@@ -391,7 +392,7 @@ def patch_audio_download(download_id):
             (download_id,),
         ).fetchone()
         if not row:
-            return jsonify({'success': False, 'error': 'Запис не знайдено'}), 404
+            return jsonify({'success': False, 'error': tr('library.audio.err.not_found')}), 404
 
         if updates:
             assignments = ', '.join(f'{field} = ?' for field in updates)
@@ -434,7 +435,7 @@ def restore_audio_download(download_id):
             (download_id,),
         )
         if not c.fetchone():
-            return jsonify({'success': False, 'error': 'Немає що відновлювати'}), 404
+            return jsonify({'success': False, 'error': tr('library.audio.err.nothing_restore')}), 404
         c.execute(
             'UPDATE audio_downloads SET deleted_at = NULL WHERE id = ?',
             (download_id,),
@@ -449,7 +450,7 @@ def check_duplicate_audio():
     data = request.json
     url = data.get('url')
     if not url:
-        return jsonify({'success': False, 'error': 'URL не вказано'}), 400
+        return jsonify({'success': False, 'error': tr('library.audio.err.no_url')}), 400
     youtube_id = extract_youtube_id(url)
     if not youtube_id:
         return jsonify({'success': True, 'is_duplicate': False})
@@ -488,10 +489,10 @@ def open_audio_in_explorer(audio_id):
         )
         audio = c.fetchone()
     if not audio:
-        return jsonify({'success': False, 'error': 'Аудіо не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('library.audio.err.audio_missing')}), 404
     file_path = audio['file_path']
     if not os.path.exists(file_path):
-        return jsonify({'success': False, 'error': 'Файл не знайдено на диску'}), 404
+        return jsonify({'success': False, 'error': tr('library.audio.err.file_missing')}), 404
 
     try:
         if os.name == 'nt':
@@ -500,10 +501,10 @@ def open_audio_in_explorer(audio_id):
             folder = os.path.dirname(file_path)
             subprocess.Popen(['xdg-open', folder])
         logger.info(f"Opened in explorer: {file_path}")
-        return jsonify({'success': True, 'message': 'Відкрито в провіднику'})
+        return jsonify({'success': True, 'message': tr('library.audio.err.opened')})
     except Exception as e:
         logger.error(f"Error opening in explorer: {e}")
-        return jsonify({'success': False, 'error': 'Не вдалося відкрити провідник'}), 500
+        return jsonify({'success': False, 'error': tr('library.audio.err.open_failed')}), 500
 
 
 @audio_bp.route('/api/audio/play/<int:audio_id>', methods=['POST'])
@@ -517,10 +518,10 @@ def play_audio_locally(audio_id):
         )
         audio = c.fetchone()
     if not audio:
-        return jsonify({'success': False, 'error': 'Аудіо не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('library.audio.err.audio_missing')}), 404
     file_path = audio['file_path']
     if not os.path.exists(file_path):
-        return jsonify({'success': False, 'error': 'Файл не знайдено на диску'}), 404
+        return jsonify({'success': False, 'error': tr('library.audio.err.file_missing')}), 404
     try:
         if os.name == 'nt':
             os.startfile(file_path)
@@ -528,7 +529,7 @@ def play_audio_locally(audio_id):
             opener = 'open' if sys.platform == 'darwin' else 'xdg-open'
             subprocess.Popen([opener, file_path])
         logger.info(f"Playing audio: {audio['title']}")
-        return jsonify({'success': True, 'message': f"Відтворення: {audio['title']}"})
+        return jsonify({'success': True, 'message': tr('library.audio.err.playing', title=audio['title'])})
     except Exception as e:
         logger.error(f"Error playing audio: {e}")
-        return jsonify({'success': False, 'error': 'Не вдалося відтворити аудіо'}), 500
+        return jsonify({'success': False, 'error': tr('library.audio.err.play_failed')}), 500

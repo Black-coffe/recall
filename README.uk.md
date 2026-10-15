@@ -1,0 +1,267 @@
+[English](README.md)
+
+# 🧠 Recall — пам'ять ваших дзвінків
+
+Локальний RAG-архів усіх ваших розмов. Транскрибує (faster-whisper), діаризує
+(pyannote), будує граф сутностей, витягує задачі та дозволяє питати архів
+природною мовою. Працює повністю на вашій машині — нічого не йде у хмару,
+окрім опційних викликів Claude (polish/enrichment/co-pilot) та щотижневого
+шифрованого backup на Google Drive.
+
+![Phase](https://img.shields.io/badge/phase-19–20-blue)
+![Python](https://img.shields.io/badge/python-3.12-green)
+![GPU](https://img.shields.io/badge/GPU-CUDA_12.1-red)
+![Backend](https://img.shields.io/badge/whisper-faster--whisper-orange)
+![Stack](https://img.shields.io/badge/RAG-local-purple)
+![Backup](https://img.shields.io/badge/backup-restic+GDrive-success)
+
+> Ядро транскрипції — Whisper, тому нижній стек, шляхи й venv історично
+> звуться `whisper`. UI-обличчя — **Recall**, tagline «пам'ять ваших дзвінків».
+
+## ✨ Можливості
+
+- 🎙️ **Транскрипція** — faster-whisper (CTranslate2) з VAD-фільтром (Silero); openai-whisper як fallback. Динамічний каталог ~17 моделей (tiny → large-v3, distilled, turbo).
+- 🗣️ **Діаризація** — pyannote, розділення спікерів + іменування на сторінці запису.
+- 🔴 **Запис** — серверний recorder (мікрофон + system loopback) з live-діаризацією та live-сегментами через SSE.
+- 🎚️ **Паралельні записи з ізоляцією звуку** (4.7.0) — два дзвінки одночасно, у кожного свої мікрофон і системний звук; системний звук по застосунку: «весь / тільки ці / усе, крім цього» (Windows process loopback). Recall показує, що зараз звучить, і питає «Виключити Zoom з цього запису? Лишити в іншому тільки Zoom?» — перемикання на льоту без зупинки запису. Копілот — на одному записі з перенесенням. Джерело звуку — окремий інтерфейс `AudioSource`, під macOS/Linux згодом.
+- 🧩 **Граф сутностей і задачі** — Claude витягує summary / key points / action items / entities; дашборд задач + напрямки (категорії).
+- 🔍 **Vector search + RAG-чат** — e5-large embeddings (1024-dim) + FTS5, гібридний retrieval (RRF + recency + diversity), «питай архів» зі стрімом.
+- 🎬 **YouTube** — завантаження аудіо через **pytubefix** (публічні відео, анонімно), опційна обрізка.
+- 📄 **Документи** (Phase 16) — PDF/DOCX/PPTX/XLSX/CSV/MD/зображення → текст у RAG (OCR через Tesseract).
+- ✈️ **Telegram** (Phase 17) — слухання реального TG-акаунта (Telethon/MTProto) → текст/голос/медіа з обраних чатів у той самий RAG.
+- 🤖 **Живий ко-пілот дзвінка** (Phase 19) — локальна модель (Qwen-14B/Ollama, $0) веде теми, шукає в архіві й ловить протиріччя; Claude верифікує важливе (local-first cascade).
+- 🔌 **MCP-сервер** (Phase 20) — доступ до RAG-архіву прямо з Claude Code / Desktop.
+- 💾 **Backup** — щотижневий шифрований restic-архів на Google Drive.
+
+UI — клієнтський SPA «Recall»: тепла паперова естетика, серіф Fraunces, бурштиновий
+акцент, **тільки світла тема**.
+
+## 🚀 Швидкий старт
+
+### 0. Що потрібно
+
+| Що | Вимога |
+|---|---|
+| ОС | Windows 10/11. Запис звуку й екрана працює тільки на Windows; macOS і Linux не перевірялись — адаптуйте разом із Claude Code |
+| Відеокарта | NVIDIA з CUDA 12.1 (перевірено на RTX 3090). `large-v3` ≈ 10 ГБ відеопам'яті, `large-v3-turbo` ≈ 6 ГБ. Без NVIDIA — `FORCE_CPU=true` у `.env`: працює, але повільно |
+| Програми | Python 3.12, Git, FFmpeg у PATH |
+| Місце на диску | ≈ 6 ГБ на `.venv` + ≈ 4 ГБ моделей (Whisper, e5); з діаризацією ≈ 10 ГБ і більше |
+| Час | 40–90 хв на чистій машині; найдовше — завантаження ≈ 8 ГБ пакетів і моделей |
+
+> **Найпростіше — з Claude Code.** Склонуйте репозиторій, відкрийте в теці Claude Code і попросіть:
+> «Встанови Recall за README.md, запусти й покажи, що він уміє». Команди нижче — те саме, що він виконає.
+
+### 1. Залежності
+
+```cmd
+REM Клонуйте репозиторій
+git clone https://github.com/Black-coffe/recall.git
+cd recall
+
+REM Створіть віртуальне оточення
+python -m venv .venv
+
+REM Інструменти збірки: openai-whisper збирається з вихідників і потребує pkg_resources
+.venv\Scripts\python.exe -m pip install "setuptools<81" wheel
+
+REM PyTorch з CUDA 12.1 (для GPU-прискорення) — ставити ДО requirements.txt,
+REM версія torchaudio обов'язково з тим самим суфіксом +cu121
+.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+REM Решта Python-залежностей (без ізольованої збірки, щоб діяв setuptools<81)
+.venv\Scripts\python.exe -m pip install --no-build-isolation -r requirements.txt
+
+REM Налаштування: копія шаблону, далі — розділ 3
+copy .env.example .env
+```
+
+Перевірка, що все стало як треба (`True`, `2.5.1+cu121` двічі, `av` нижче 19, `pip check` без конфліктів):
+
+```cmd
+.venv\Scripts\python.exe -c "import torch, torchaudio, av; print(torch.cuda.is_available(), torch.__version__, torchaudio.__version__, av.__version__)"
+.venv\Scripts\python.exe -m pip check
+```
+
+> `faster-whisper` закріплено на 1.1.1 свідомо; застосунок пише «update available» — **не оновлюйте**
+> (причина — коментар у `requirements.txt`).
+
+### 2. FFmpeg (обов'язково)
+
+Потрібен для YouTube та обробки довгих аудіо.
+
+**Windows:** завантажте з [ffmpeg.org](https://ffmpeg.org/download.html), розпакуйте
+в `C:\ffmpeg`, додайте `C:\ffmpeg\bin` до PATH. Перевірка: `ffmpeg -version`.
+
+### 3. `.env` — ключі й порт
+
+Усе необов'язкове: без жодного ключа працюють розшифровка, пошук і OCR. У `.env` (його створила команда
+`copy .env.example .env`) розкоментуйте потрібне:
+
+| Змінна | Навіщо | Без неї |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | картки зустрічей, відповіді по архіву, перевірка ко-пілота | ці функції тихо вимкнені |
+| `HF_TOKEN` | діаризація (хто говорить). Токен — huggingface.co/settings/tokens; спершу прийміть ліцензії [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) і [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) | розшифровка без розділення на спікерів |
+| `FLASK_PORT` | порт інтерфейсу, за замовчуванням `5050` | 5050 |
+| `FORCE_CPU` | `true` — без відеокарти | GPU, якщо є |
+
+### 4. Запуск
+
+```cmd
+REM Через лаунчер: зупиняє ВСІ запущені копії Recall (app.py) і відкриває http://localhost:5050
+Recall.bat
+
+REM Або напряму (якщо змінили FLASK_PORT або тримаєте другу копію)
+.venv\Scripts\python.exe app.py
+```
+
+Відкрийте в браузері: **http://localhost:5050**
+
+> `app.py` — єдина точка запуску: він сам піднімає слухача Telegram як дочірній
+> процес (якщо є ключі + сесія). MCP-сервер (`mcp_server.py`) запускається окремо.
+
+### 5. Перший запуск — чого чекати
+
+- Моделі качаються при першому використанні, а не при встановленні: Whisper `large-v3-turbo` (≈ 1,5 ГБ) —
+  на першій розшифровці, e5 (≈ 2,2 ГБ) — на першому пошуку, pyannote (≈ 1,5 ГБ) — на першій діаризації.
+  Перша розшифровка й перший пошук ідуть по 2–3 хв; далі — секунди.
+- Перший пошук одразу після першої розшифровки може повернути порожньо: запис ще індексується. Повторіть
+  за хвилину.
+
+### 6. (Опційно) Telegram ingestion
+
+```cmd
+REM Ключі api_id/api_hash з https://my.telegram.org → у .env:
+REM   TELEGRAM_API_ID=... / TELEGRAM_API_HASH=...
+
+REM Одноразовий QR-логін (створює telegram.session)
+.venv\Scripts\python.exe telegram_login.py
+```
+
+Далі `app.py` автоматично запускає слухача; вибір чатів — у UI (таб «Telegram»).
+
+> README перевіряється тестом `tests/test_install_docs.py`: кожна команда встановлення має збігатися з
+> `requirements.txt` і `.env.example`. Змінили залежність — змініть і тут, інакше тест червоний.
+
+## 🛠️ Технології
+
+- **Backend**: Python 3.12, Flask 3
+- **Транскрипція**: faster-whisper (CTranslate2), openai-whisper (fallback), PyTorch 2.5.1+cu121 / CUDA 12.1
+- **Діаризація**: pyannote.audio + speechbrain
+- **RAG**: e5-large embeddings (sentence-transformers) + SQLite FTS5, брут-форс numpy retrieval
+- **YouTube**: pytubefix
+- **Telegram**: Telethon (MTProto)
+- **Co-pilot LLM**: Ollama / Qwen-14B (локально, $0) + Anthropic Claude (верифікація)
+- **Документи**: PyMuPDF, python-pptx, openpyxl, Tesseract (OCR)
+- **MCP**: fastmcp
+- **Аудіо**: pydub, FFmpeg, pyaudiowpatch (WASAPI-запис)
+- **Backup**: restic + rclone (Google Drive)
+- **Frontend**: vanilla SPA (client router), Service Worker (offline-кеш)
+
+## 📊 Продуктивність
+
+faster-whisper (CTranslate2 + VAD) дає кратне прискорення проти ванільного Whisper.
+На **RTX 3090** рекомендовані `medium` / `large-v3` для якості, `small` / `distil-*`
+для швидкості. Файли >10 хв автоматично йдуть через batched-pipeline; фактична
+швидкість залежить від моделі, мови та GPU.
+
+## 📁 Структура проекту
+
+```
+recall/  (Recall)
+├── app.py                     # Flask: boot, singletons, реєстрація 14 blueprints
+├── config.py                  # Конфіги Dev/Prod/Test + env-прапори
+├── whisper_manager_new.py     # Двигун транскрипції (faster-whisper / openai fallback)
+├── telegram_listener.py       # Окремий процес: слухач Telegram (Telethon/MTProto)
+├── telegram_login.py          # Одноразовий QR-логін у Telegram
+├── telegram_common.py         # Спільний токен Flask↔listener
+├── mcp_server.py              # MCP-сервер: RAG-архів для Claude (Phase 20)
+├── requirements.txt           # Python-залежності
+├── run.bat / Recall.bat       # Запуск для Windows
+├── whisper_history.db         # SQLite база
+├── CLAUDE.md                  # Інструкції для Claude Code + routing-матриця
+├── app/                       # Модульна архітектура
+│   ├── blueprints/            # 14 blueprints (HTTP API)
+│   ├── services/              # Бізнес-логіка (RAG, copilot, recording, …)
+│   ├── db/                    # Підключення + міграції
+│   ├── core/                  # Винятки, логер
+│   └── state.py               # Глобальні singleton-и
+├── templates/
+│   └── shell.html             # SPA-оболонка
+├── static/
+│   ├── js/recall/             # SPA: namespace/router/shell/api/ui + views/*
+│   ├── css/recall.css         # Editorial-каталог, світла тема
+│   └── sw.js                  # Service worker (offline-кеш)
+├── docs/
+│   ├── map/                   # 🗺️ Карта коду
+│   ├── DESIGN_SYSTEM.md
+│   ├── COPILOT_ROADMAP.md
+│   └── MCP_SETUP.md
+├── uploads/  youtube_downloads/  transcripts/  documents/
+├── telegram_media/  recordings/  models/  db_backups/
+└── .venv/
+```
+
+> 🗺️ **Карта коду:** [`memory/map/`](memory/map/README.md) — навігація по модулях для
+> розробників і Claude Code (звіряти перед правкою великих модулів). Технічний
+> довідник стеку + routing-матриця моделей — [`CLAUDE.md`](CLAUDE.md).
+
+## 🔧 API Endpoints (вибірка)
+
+Маршрути розподілені по 14 blueprints у `app/blueprints/*` (повний перелік — у
+[`memory/map/blueprints.md`](memory/map/blueprints.md)).
+
+- **Транскрипція**: `POST /api/transcribe`, `GET /api/history`, `POST /api/transcription/<id>/{polish,summarize,translate,topics}`, `POST /api/export/<format>`
+- **YouTube**: `POST /api/youtube/{info,download}`, `GET /api/youtube/progress/<id>`
+- **Аудіотека**: `GET /api/audio/downloads`, `POST /api/audio/{download,play/<id>}`
+- **Запис**: `POST /api/recording/{start,<sid>/stop,<sid>/save}`, `GET /api/recording/<sid>/stream` (SSE); паралельні записи — `GET /api/recordings/active` (`sessions[]`), `GET /api/recording/apps` (що звучить), `POST /api/recording/<sid>/system-source` (перемкнути джерело на льоту), `POST /api/copilot/move`
+- **Памʼять/RAG**: `GET /api/memory/{search,entities,action-items}`, `POST /api/memory/ask/stream` (SSE)
+- **Документи/Telegram/Дослідження/Co-pilot/Спікери**: `/api/documents/*`, `/api/telegram/*`, `/api/research/*`, `/api/copilot/*`, `/api/speakers/*`
+- **Система**: `GET /api/{health,models,system_info,system_stats,metrics}`
+
+## 🐛 Вирішення проблем
+
+### GPU не використовується
+
+```cmd
+REM Перевірте CUDA
+.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
+
+REM Перевстановіть PyTorch з CUDA 12.1
+.venv\Scripts\python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+```
+
+Примусовий CPU-режим: змінна оточення `FORCE_CPU=true`.
+
+### YouTube не завантажується
+
+1. Перевірте FFmpeg: `ffmpeg -version`
+2. Оновіть pytubefix: `.venv\Scripts\python.exe -m pip install -U pytubefix`
+3. Приватні / age-restricted відео не підтримуються: завантаження анонімне,
+   авторизації в коді нема (`cookies.txt` нічого не вирішує — його ніхто не читає).
+
+### Помилки Unicode в Windows
+
+Бекенд використовує logger замість print; за потреби виставте кодування консолі:
+`chcp 65001`.
+
+## 🔒 Безпека та приватність
+
+- ✅ Дані лежать на вашій машині (SQLite + локальні файли)
+- ✅ Зовнішні виклики тільки до Anthropic API (polish/enrichment/co-pilot) і Google Drive (backup)
+- ✅ Захист від Path Traversal; параметризовані SQL-запити
+- ✅ Валідація вхідних даних; обмеження розміру завантаження (`MAX_CONTENT_LENGTH`, до 20 GB для відео)
+- ✅ Telegram-слухач і MCP — лише localhost + shared-secret / Bearer-ключ
+
+## 📝 Ліцензія
+
+MIT License
+
+## 🤝 Внесок
+
+Pull requests вітаються! Для великих змін спочатку відкрийте issue.
+
+---
+
+**Створено з ❤️ для української спільноти**
+
+📧 Підтримка: [створіть issue](https://github.com/Black-coffe/recall/issues)

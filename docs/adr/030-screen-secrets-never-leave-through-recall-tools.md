@@ -8,28 +8,28 @@
 The visual timeline OCRs every frame of a recording, so passwords, tokens and keys that were on
 screen become text that search, RAG, MCP and Claude could otherwise see. The owner added a
 requirement to the brief: mask them before they reach any of those places. The plan's Assumptions
-(bullet «Секрети з екрана (доповнення власника)») also record why the UI cannot reveal them. This
+(bullet "Secrets from the screen (owner's addendum)") also record why the UI cannot reveal them. This
 is an Assumptions decision, not a Plan delta. Verbatim:
 
-> - Знайдене замінюється на `[🔒 секрет]` у `ocr_text`, у `vision_text`, у чанках `екран`, у стрічці, у
->   Markdown і в усьому MCP. Сирі значення лягають в окрему таблицю `screen_secrets(keyframe_id, kind,
->   value, bbox)`, яку не читає жоден HTTP-ендпоінт і жодна MCP-тулза.
-> - Кадр зі секретом назовні йде лише із зафарбованими рамками (на льоту з відео): `get_frame`, ендпоінт
->   кадру, `describe` через Claude. Незафарбований кадр бачить лише людина у плеєрі відео в UI.
-> - Видача сирих значень: `python -m app.services.screen_secrets reveal <tid> --out <файл>`. Скрипт працює лише
->   з інтерактивного терміналу (`isatty`) після введеного підтвердження, тож Bash агента (без TTY)
->   отримує відмову. Значення пишуться у файл (дефолт — тека профілю користувача поза репо). На stdout
->   іде тільки шлях і кількість.
-> - «Суперадмін» на HTTP не можна відрізнити від агента: localhost довірений (`app/core/auth.py`), MCP і
->   `curl` агента теж ідуть із localhost. Тому кнопки «показати пароль» в UI немає, UI бачить лише
->   «🔒 N секретів, отримати скриптом». Межа захисту: секрети не потрапляють у чат через інструменти
->   Recall. Код, запущений від імені того самого користувача Windows, може прочитати БД напряму, і це
->   задокументовано.
+> - What is found is replaced with `[🔒 секрет]` in `ocr_text`, in `vision_text`, in the `екран` chunks, in the timeline, in
+>   Markdown and across all of MCP. The raw values go into a separate table `screen_secrets(keyframe_id, kind,
+>   value, bbox)`, which no HTTP endpoint and no MCP tool reads.
+> - A frame with a secret leaves only with the boxes painted over (on the fly from the video): `get_frame`, the frame
+>   endpoint, `describe` through Claude. An unpainted frame is seen only by a person in the video player in the UI.
+> - Issuing the raw values: `python -m app.services.screen_secrets reveal <tid> --out <file>`. The script works only
+>   from an interactive terminal (`isatty`) after a typed confirmation, so the agent's Bash (without a TTY)
+>   gets a refusal. The values are written to a file (default — the user's profile folder outside the repo). Only the path
+>   and the count go to stdout.
+> - A "superadmin" over HTTP cannot be told apart from the agent: localhost is trusted (`app/core/auth.py`), MCP and the agent's
+>   `curl` also come from localhost. That is why there is no "show password" button in the UI, the UI sees only
+>   `🔒 N секретів, отримати скриптом` ("N secrets, get with the script"). The protection boundary: secrets do not get into the chat through the Recall
+>   tools. Code run on behalf of the same Windows user can read the DB directly, and this is
+>   documented.
 
-The detector is told to err on the side of hiding: «Помилка йде в бік приховування».
+The detector is told to err on the side of hiding: "the error goes toward hiding".
 
 ## Options
-1. A «показати пароль» button in the UI, rejected by the plan's reasoning: an HTTP superadmin
+1. A "show password" button in the UI, rejected by the plan's reasoning: an HTTP superadmin
    can't be told apart from the agent, because localhost is trusted and MCP and the agent's
    `curl` also come from localhost.
 2. No reveal over HTTP or MCP at all. Raw values come only from a script that needs an

@@ -74,6 +74,10 @@ REGISTRY: tuple[Setting, ...] = (
             scope="config"),
     Setting("FLASK_PORT", "5050", "int", "Сервер",
             "Порт Flask-сервера.", "Порт, на якому слухає app.py.", scope="config"),
+    Setting("RECALL_UI_LANG", "auto", "str", "Сервер",
+            "Мова інтерфейсу: auto (за мовою системи) | uk | en.",
+            "auto: системна uk → українська, інакше English; uk/en — явний вибір, сильніший за auto. "
+            "Змінюється в Налаштуваннях без рестарту."),
     Setting("APP_ENV", "development", "str", "Сервер",
             "Вибір класу конфігурації.",
             "development|production|testing → DevelopmentConfig|ProductionConfig|TestingConfig.",

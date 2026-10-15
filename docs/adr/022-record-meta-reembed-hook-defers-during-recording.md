@@ -9,25 +9,25 @@ while a recording is active — never holding a `job_queue` slot
 
 From `docs/specs/editable-title-description/plan.md`, `## Tradeoffs`:
 
-> **Хук `record_meta.after_meta_update` (01, no-op) замість виклику `reembed` прямо з PATCH**
-> проти «RAG-історія теж править `transcription.py`»: три історії на одному файлі означали б три
-> хвилі; хук дає 02 і 03 в одній хвилі без спільного файлу. Ціна — одна функція-заглушка на два
-> дні життя.
+> **Hook `record_meta.after_meta_update` (01, no-op) instead of calling `reembed` directly from PATCH**
+> versus "the RAG story also edits `transcription.py`": three stories on one file would mean three
+> waves; the hook lets 02 and 03 run in one wave without a shared file. The cost is one stub function for two
+> days of life.
 >
-> **Відкладення re-embed таймером** (слот `job_queue` вільний) проти «задача чекає в слоті»:
-> `ThreadPoolExecutor(max_workers=2)` ділять транскрипція і фіналізація — сплячий re-embed під час
-> запису відібрав би половину пулу. Ціна — модульний набір «очікуючих» id з локом.
+> **Deferring re-embed by timer** (the `job_queue` slot stays free) versus "the task waits in a slot":
+> `ThreadPoolExecutor(max_workers=2)` is shared by transcription and finalization — a sleeping re-embed during
+> a recording would take half the pool. The cost is a module-level set of "pending" ids with a lock.
 
 From the same plan.md, `## Contracts`, C2/C4 (as amended by the round-2 remediation, story 08):
 
-> `after_meta_update(transcription_id: int, *, changed: bool, db_path: str) -> None`: при
+> `after_meta_update(transcription_id: int, *, changed: bool, db_path: str) -> None`: when
 > `changed` → `reembed.schedule_record_reembed(transcription_id, db_path=db_path)` (lazy import);
-> інакше no-op.
+> otherwise no-op.
 >
 > `reembed.schedule_record_reembed(transcription_id: int, *, db_path: str) -> str` → `"queued"`
-> (задача в `job_queue`, kind `reembed_record`), `"deferred"` (запис активний — повтор таймером,
-> слот `job_queue` не зайнятий), `"pending"` (уже чекає — згорнуто), `"skipped"` (mute-режим/нема
-> torch, лог).
+> (task in `job_queue`, kind `reembed_record`), `"deferred"` (recording is active — retry by timer,
+> the `job_queue` slot is not taken), `"pending"` (already waiting — collapsed), `"skipped"` (mute mode/no
+> torch, logged).
 
 ## Options
 

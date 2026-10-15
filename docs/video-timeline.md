@@ -1,198 +1,198 @@
-# Візуальна стрічка відеозапису
+# Visual timeline of a video recording
 
-Що було на екрані запису Recall: мінімальний набір кадрів, що покриває кожну зміну
-картинки з точністю ~1 с, текст з екрана (OCR), опційний опис кадру, і фрази
-транскрипту за той самий інтервал. Доступно в Recall (ендпоінти), через MCP
+What was on the screen of a Recall recording: the minimal set of frames that covers every change
+of the picture with ~1 s precision, the text from the screen (OCR), an optional frame description, and the transcript
+phrases for the same interval. Available in Recall (endpoints), through MCP
 (`video_analyze`, `get_visual_timeline`, `get_frame`, `get_frames_for_text`,
-`search_visual`) і глобальний скіл `recall-video`.
+`search_visual`) and the global skill `recall-video`.
 
-Код: `app/services/video_frames.py` (відбір кадрів), `video_analysis.py` (конвеєр),
-`screen_secrets.py` (секрети), `video_timeline.py` (стрічка, кадри на льоту).
+Code: `app/services/video_frames.py` (frame selection), `video_analysis.py` (pipeline),
+`screen_secrets.py` (secrets), `video_timeline.py` (timeline, on-the-fly frames).
 
-## Звідки відео
+## Where the video comes from
 
-Відео є лише в **записах екрана Recall** (`audio_downloads.has_video = 1`,
-`recording_video_tracks`). Завантажений відеофайл після видобутку звуку видаляється,
-Telegram-відео не качається — у таких записів `error_code: NO_VIDEO`.
+Video exists only in **Recall screen recordings** (`audio_downloads.has_video = 1`,
+`recording_video_tracks`). An uploaded video file is deleted after the audio is extracted,
+Telegram video is not downloaded — such records have `error_code: NO_VIDEO`.
 
-## Алгоритм відбору
+## Selection algorithm
 
-Обидва методи реалізовані, дефолт обраний замірами (нижче).
+Both methods are implemented, the default was chosen by measurements (below).
 
-**`thumbs` (дефолт).** Один прохід декодування: ffmpeg віддає 1 кадр/с у мініатюри
-160×90 grayscale (rawvideo-пайп). Кожна мініатюра порівнюється з **якорем** поточного
-відрізка (його першою мініатюрою), а не лише з попередньою: так ловиться і різка
-зміна, і повільний дрейф (прокрутка), і короткий візит A→B→A.
+**`thumbs` (default).** One decoding pass: ffmpeg outputs 1 frame/s as 160×90 grayscale
+thumbnails (a rawvideo pipe). Each thumbnail is compared with the **anchor** of the current
+segment (its first thumbnail), not just with the previous one: this catches both a sharp
+change, and a slow drift (scrolling), and a short visit A→B→A.
 
-**`bisect`.** Опорні кадри кожні `step` с (seek `-ss` перед `-i`); інтервал із різними
-кінцями ділиться навпіл до `min_res`. **Межа методу:** якщо всередині кроку картинка
-змінилась і повернулась (A→B→A), кінці інтервалу збігаються і зміна губиться.
+**`bisect`.** Reference frames every `step` s (seek `-ss` before `-i`); an interval with different
+ends is split in half down to `min_res`. **The method's limit:** if within a step the picture
+changed and came back (A→B→A), the interval's ends coincide and the change is lost.
 
-**Порівняння.** Частка пікселів маски, що змінились більше ніж на 12 рівнів із 255.
-Маска = усе мінус `ignore_regions` (частки кадру `[x, y, w, h]`) мінус авто-маска:
-піксель, що змінюється в більш ніж 40 % сусідніх пар (годинник у треї, курсор), з
-порівняння виключається.
+**Comparison.** The share of mask pixels that changed by more than 12 levels out of 255.
+Mask = everything minus `ignore_regions` (frame fractions `[x, y, w, h]`) minus the auto-mask:
+a pixel that changes in more than 40 % of neighboring pairs (a clock in the tray, a cursor) is
+excluded from the comparison.
 
-**`settle`.** Серія змін, що йдуть частіше ніж раз на `settle` с (набір тексту,
-прокрутка), — один відрізок. Межа відрізка = перша зміна серії (точність `min_res`),
-кадр-представник — після останньої зміни, тобто вже усталений екран.
+**`settle`.** A series of changes that come more often than once per `settle` s (typing,
+scrolling) is one segment. The segment boundary = the first change of the series (precision `min_res`),
+the representative frame is after the last change, i.e. the already settled screen.
 
-**Представник відрізка** — кадр через 0.7 с після усталення (не пізніше середини
-відрізка). **Тип кадру** — евристика без моделі: `blank` (низький контраст і немає
-тексту), `transition` (відрізок коротший за 2·`min_res`), `camera_only` (тексту < 15
-символів), `slide` (≤ 12 рядків великим шрифтом), інакше `screen_share`. Відомі
-похибки: вікно з малою кількістю тексту класифікується як `camera_only`; слайд із
-дрібним шрифтом — як `screen_share`. **Повтори:** dHash кадру; збіг із НЕсусіднім
-відрізком → `duplicate_of`, у RAG такий кадр не дублюється, опис для нього не
-генерується.
+**The segment's representative** — the frame 0.7 s after settling (no later than the middle of the
+segment). **Frame type** — a heuristic without a model: `blank` (low contrast and no
+text), `transition` (a segment shorter than 2·`min_res`), `camera_only` (text < 15
+characters), `slide` (≤ 12 lines in a large font), otherwise `screen_share`. Known
+errors: a window with little text is classified as `camera_only`; a slide with a
+small font — as `screen_share`. **Repeats:** the frame's dHash; a match with a NON-adjacent
+segment → `duplicate_of`, in RAG such a frame is not duplicated, and no description is
+generated for it.
 
-## Параметри і дефолти
+## Parameters and defaults
 
-| Параметр | Дефолт | Що робить |
+| Parameter | Default | What it does |
 |---|---|---|
-| `method` | `thumbs` | `thumbs` або `bisect` |
-| `threshold` | 0.02 | частка змінених пікселів, з якої кадр «інший» |
-| `settle` | 2 с | серія змін частіше — один відрізок |
-| `min_res` | 1 с | точність межі; `thumbs` бере 1/`min_res` кадрів/с |
-| `step` | 10 с | крок опорних кадрів (`bisect`) |
-| `ignore_regions` | — | `[[x, y, w, h]]` частками кадру, напр. плитки вебкамер |
-| `max_frames` | 1500 | понад стелю найкоротші відрізки зливаються, `capped: true` |
-| `ocr` | так | локальний Tesseract |
-| `describe` | ні | опис кадру vision-моделлю (довго) |
-| `vision_backend` | `local` | `local` (Ollama) або `claude` (кадри йдуть в Anthropic) |
+| `method` | `thumbs` | `thumbs` or `bisect` |
+| `threshold` | 0.02 | the share of changed pixels from which a frame is "different" |
+| `settle` | 2 s | a series of changes more often than this — one segment |
+| `min_res` | 1 s | boundary precision; `thumbs` takes 1/`min_res` frames/s |
+| `step` | 10 s | step of reference frames (`bisect`) |
+| `ignore_regions` | — | `[[x, y, w, h]]` in frame fractions, e.g. webcam tiles |
+| `max_frames` | 1500 | above the ceiling the shortest segments are merged, `capped: true` |
+| `ocr` | yes | local Tesseract |
+| `describe` | no | frame description by a vision model (slow) |
+| `vision_backend` | `local` | `local` (Ollama) or `claude` (frames go to Anthropic) |
 
-Результат зберігається з версією алгоритму і параметрами
-(`transcriptions.video_analysis_params`): ті самі параметри без `force` → готове без
-декодування; інші → перерахунок. Кеш мініатюр — `frames_cache/thumbs.npz` у теці
-сесії запису (зміна порогу не декодує відео вдруге).
+The result is stored with the algorithm version and parameters
+(`transcriptions.video_analysis_params`): the same parameters without `force` → the finished result without
+decoding; different ones → recomputation. The thumbnail cache is `frames_cache/thumbs.npz` in the
+recording session folder (changing the threshold does not decode the video a second time).
 
-## Заміри (13.10.2026, RTX 3090 / 28 потоків CPU, відео 2560×1440 30 fps)
+## Measurements (13.10.2026, RTX 3090 / 28 CPU threads, video 2560×1440 30 fps)
 
-**Декодування.** 10 хв відео в мініатюри 1 fps: CPU 9.3 с, CUDA (`-hwaccel cuda`)
-39 с — на маленьких кадрах копіювання з GPU дорожче за декодування. Один seek-кадр
-— 0.17 с. Ключовий кадр у записах Recall — раз на ~8.3 с, тож режим «лише
-ключові кадри» точності в 1 с не дає.
+**Decoding.** 10 min of video into 1 fps thumbnails: CPU 9.3 s, CUDA (`-hwaccel cuda`)
+39 s — on small frames copying from the GPU costs more than decoding. One seek frame
+— 0.17 s. The keyframe in Recall recordings comes once per ~8.3 s, so a "keyframes
+only" mode does not give 1 s precision.
 
-**`thumbs` проти `bisect`** на 2-годинному записі: `thumbs` 112 с → 893 відрізки;
-`bisect` 876 с → 617 відрізків (у 7.8 раза довше і пропускає A→B→A). Дефолт `thumbs`.
+**`thumbs` versus `bisect`** on a 2-hour recording: `thumbs` 112 s → 893 segments;
+`bisect` 876 s → 617 segments (7.8 times longer and misses A→B→A). The default is `thumbs`.
 
-**Кадрів на запис** (`threshold` 0.02, `settle` 2) проти «1 кадр/с»:
+**Frames per recording** (`threshold` 0.02, `settle` 2) versus "1 frame/s":
 
-| Тривалість | 1 кадр/с | Стрічка |
+| Duration | 1 frame/s | Timeline |
 |---|---|---|
-| 48 с | 48 | 9 |
-| 11 хв | 640 | 52 |
-| 1.3 год | 4 802 | 275 |
-| 2.1 год | 7 442 | 893 |
-| 2.4 год | 8 614 | 1 204 |
-| 3.2 год | 11 658 | 796 |
+| 48 s | 48 | 9 |
+| 11 min | 640 | 52 |
+| 1.3 h | 4 802 | 275 |
+| 2.1 h | 7 442 | 893 |
+| 2.4 h | 8 614 | 1 204 |
+| 3.2 h | 11 658 | 796 |
 
-Записи — увесь робочий стіл: живий термінал, що прокручується кожні кілька секунд, і
-плитки вебкамер. Рух голів у плитках — головне джерело зайвих змін: авто-маска його не
-бере (плитки переїжджають), метрика по контурах перевірена й відкинута (майже без
-виграшу). Проти нього — `ignore_regions` для зони плиток.
+The recordings are the whole desktop: a live terminal that scrolls every few seconds, and
+webcam tiles. Head movement in the tiles is the main source of extra changes: the auto-mask does not
+catch it (the tiles move around), a contour-based metric was tried and rejected (almost no
+gain). Against it — `ignore_regions` for the tile zone.
 
-**Ручна перевірка 20 випадкових змін** на 2-годинному записі (кадр до / кадр після):
-20 із 20 — справжні зміни (прокрутка, перемикання вікон, діалоги, робочий стіл),
-хибних нема. Пропущені зміни такою вибіркою не міряються.
+**A manual check of 20 random changes** on a 2-hour recording (frame before / frame after):
+20 out of 20 are real changes (scrolling, window switching, dialogs, the desktop),
+no false ones. Missed changes are not measured by such a sample.
 
-**OCR.** Tesseract 5.4, `ukr+rus+eng`, кадр 2560 px: стандартні моделі 6.9 с/кадр,
-`tessdata_fast` 4.9 с при тій самій якості на екранній кирилиці (на 1920 px якість
-помітно падає). На час відео-OCR кожен процес tesseract однопотоковий, 16 паралельно:
-**0.59 с/кадр** → ~9 хв на 900 кадрів. Разом 2-годинний запис ≈ 2 хв нарізки + OCR.
+**OCR.** Tesseract 5.4, `ukr+rus+eng`, frame 2560 px: the standard models 6.9 s/frame,
+`tessdata_fast` 4.9 s at the same quality on on-screen Cyrillic (at 1920 px the quality
+drops noticeably). For video OCR each tesseract process is single-threaded, 16 in parallel:
+**0.59 s/frame** → ~9 min per 900 frames. In total a 2-hour recording ≈ 2 min of slicing + OCR.
 
-## Локальна vision-модель (для `describe`)
+## Local vision model (for `describe`)
 
-Дослідження 13.10.2026 (кожне ключове твердження — два джерела: картка моделі на HF,
-сторінка Ollama, незалежний бенчмарк): найсильніша open-source модель, що влазить у
-RTX 3090 24 ГБ, — **`qwen3.8:27b-q4_K_M`** (Qwen3.8-27B, Apache-2.0, серпень 2026, 18 ГБ,
-OmniDocBench 1.5 = 91.1). Швидша — **`qwen3.5:9b-q4_K_M`** (6.6 ГБ, OCRBench 89.2 — лише
-картка моделі). Поточна `qwen2.5vl:7b` — OCRBench 86.4. Обидві нові стоять в Ollama 0.40.2.
-Qwen3.x за замовчуванням «міркує» — для опису кадру треба `think: false`.
+Research of 13.10.2026 (every key claim — two sources: the model card on HF,
+the Ollama page, an independent benchmark): the strongest open-source model that fits on an
+RTX 3090 24 GB is **`qwen3.8:27b-q4_K_M`** (Qwen3.8-27B, Apache-2.0, August 2026, 18 GB,
+OmniDocBench 1.5 = 91.1). The faster one is **`qwen3.5:9b-q4_K_M`** (6.6 GB, OCRBench 89.2 — only the
+model card). The current `qwen2.5vl:7b` — OCRBench 86.4. Both new ones are available in Ollama 0.40.2.
+Qwen3.x "reasons" by default — for a frame description `think: false` is needed.
 
-Дефолт `VIDEO_VISION_MODEL_LOCAL` поки `qwen2.5vl:7b`: замір секунд на кадр і якості на
-кирилиці екрана відкладено, бо GPU під час розробки був зайнятий іншим процесом. Жоден
-бенчмарк кирилицю з екрана не міряє — рішення лише за власним заміром на 20–30 кадрах.
+The default `VIDEO_VISION_MODEL_LOCAL` is still `qwen2.5vl:7b`: a measurement of seconds per frame and of quality on
+on-screen Cyrillic is postponed, because the GPU was busy with another process during development. No
+benchmark measures on-screen Cyrillic — the decision is only by our own measurement on 20–30 frames.
 
-## Що може бути пропущено
+## What may be missed
 
-- зміна коротша за `min_res` (1 с) і зміна всередині серії частіших за `settle` змін —
-  у стрічці лишається усталений кінцевий екран серії;
-- зміна, що зачіпає менше `threshold` площі мініатюри 160×90 — один рядок
-  дрібного тексту може не дотягнути;
-- зміни в `ignore_regions` і в авто-масці мерехтіння;
-- у `bisect` — A→B→A коротше `step`;
-- понад `max_frames` найкоротші відрізки зливаються.
+- a change shorter than `min_res` (1 s) and a change inside a series of changes more frequent than `settle` —
+  the timeline keeps the settled final screen of the series;
+- a change that touches less than `threshold` of the area of the 160×90 thumbnail — one line
+  of small text may fall short;
+- changes in `ignore_regions` and in the flicker auto-mask;
+- in `bisect` — A→B→A shorter than `step`;
+- above `max_frames` the shortest segments are merged.
 
-## Привʼязка до транскрипту
+## Binding to the transcript
 
-Час у стрічці = час у відео + `start_offset_sec` відеодоріжки. Фрази транскрипту, що
-перетинаються з відрізком, — у полі `transcript`. Параметр `offset_sec` зсуває
-транскрипт, якщо фрази «запізнюються»; на записах Recall аудіо й відео стартують
-разом (зсув доріжки ~0.1–0.2 с), тож дефолт 0.
+Time in the timeline = time in the video + the video track's `start_offset_sec`. Transcript phrases that
+intersect with a segment are in the `transcript` field. The `offset_sec` parameter shifts the
+transcript if the phrases "lag behind"; in Recall recordings audio and video start
+together (track offset ~0.1–0.2 s), so the default is 0.
 
-## Секрети з екрана
+## Secrets from the screen
 
-Паролі, токени й ключі з екрана не мають потрапити в чат через інструменти Recall.
+Passwords, tokens and keys from the screen must not get into the chat through Recall tools.
 
-- Детектор без моделі по словах OCR із рамками: «пароль/password/pin/token/secret/
-  api key/ключ» + значення на тому ж рядку; формати `sk-…`, `ghp_…`, `xox?-…`,
-  `AKIA…`, `AIza…`, JWT, Telegram-бот-токен, PRIVATE KEY, `user:pass@` в URL; довгі
-  (≥ 24) рядки з великими, малими й цифрами, крім шляхів і звичайних URL. Помилка
-  йде в бік приховування.
-- Знайдене стає `[🔒 секрет]` у тексті кадру, описі, чанках RAG і всьому, що
-  віддають ендпоінти й MCP. На зображеннях рамки зафарбовані чорним — і в `get_frame`,
-  і на вході опису (локального чи Claude). Кадр запису, який ще не аналізували,
-  OCR-иться на льоту перед видачею.
-- Сирі значення — в таблиці `screen_secrets`; її не читає жоден ендпоінт і жодна
-  MCP-тулза. Отримати їх можна лише у своєму терміналі:
-  `.venv/Scripts/python.exe -m app.services.screen_secrets reveal <id> [--out файл]` —
-  скрипт вимагає інтерактивний термінал і введене підтвердження, пише значення у файл
-  (дефолт `%USERPROFILE%\RecallSecrets\`), у консоль — лише шлях і кількість.
-- **Межа захисту.** Localhost у Recall довірений: браузер, MCP і `curl` агента
-  невідрізні, тому кнопки «показати пароль» в UI немає. Код, запущений від імені того
-  самого користувача Windows, може прочитати БД напряму. Відео цілком
-  (`/api/transcription/<id>/video`, плеєр у UI) не зафарбовується.
+- A detector without a model over OCR words with boxes: `пароль`/`password`/`pin`/`token`/`secret`/
+  `api key`/`ключ` + a value on the same line; the formats `sk-…`, `ghp_…`, `xox?-…`,
+  `AKIA…`, `AIza…`, JWT, a Telegram bot token, PRIVATE KEY, `user:pass@` in a URL; long
+  (≥ 24) strings with uppercase, lowercase and digits, except paths and ordinary URLs. The error
+  goes toward hiding.
+- What is found becomes `[🔒 секрет]` in the frame text, the description, the RAG chunks and everything that
+  the endpoints and MCP return. On images the boxes are painted black — both in `get_frame`,
+  and at the input of the description (local or Claude). A frame of a recording that has not been analyzed yet
+  is OCR'd on the fly before it is served.
+- The raw values are in the `screen_secrets` table; no endpoint and no
+  MCP tool reads it. They can be obtained only in your own terminal:
+  `.venv/Scripts/python.exe -m app.services.screen_secrets reveal <id> [--out file]` —
+  the script requires an interactive terminal and a typed confirmation, writes the values to a file
+  (default `%USERPROFILE%\RecallSecrets\`), and to the console — only the path and the count.
+- **The protection boundary.** Localhost in Recall is trusted: the browser, MCP and the agent's `curl`
+  are indistinguishable, so there is no "show password" button in the UI. Code run on behalf of the
+  same Windows user can read the DB directly. The video as a whole
+  (`/api/transcription/<id>/video`, the player in the UI) is not painted over.
 
-## Куди йдуть дані через MCP
+## Where data goes through MCP
 
-Той, хто кличе MCP, — це Claude. Усе, що повертають `get_visual_timeline`, `get_frame`,
-`get_frames_for_text`, `search_visual` (і кадрові чанки в `search_archive`/`ask_archive`),
-потрапляє в контекст моделі, тобто в Anthropic: текст з екрана, описи, самі кадри.
-«Локально» в параметрі `vision_backend` стосується лише кроку генерації опису. Маскування
-закриває паролі й токени, але не решту змісту екрана — тому на виході MCP стоїть фільтр
-приватного (spec `mcp-visual-privacy`, `app/services/privacy.py`, без моделі):
+Whoever calls MCP is Claude. Everything returned by `get_visual_timeline`, `get_frame`,
+`get_frames_for_text`, `search_visual` (and frame chunks in `search_archive`/`ask_archive`)
+gets into the model's context, i.e. to Anthropic: the text from the screen, descriptions, the frames themselves.
+"Local" in the `vision_backend` parameter concerns only the description-generation step. Masking
+covers passwords and tokens, but not the rest of the screen content — so at the MCP egress there is a privacy
+filter (spec `mcp-visual-privacy`, `app/services/privacy.py`, without a model):
 
-- **Напрямки стоп-листа** — `RECALL_PRIVATE_CATEGORIES` (дефолт `Юридичне,Особисте`). Назва
-  ловиться на будь-якому рівні дерева разом з усіма нащадками. Відео-тулзи на такий запис
-  відповідають `error_code: PRIVATE`; його екранні чанки зникають із `search_archive`,
-  `grep_archive` (і з контексту сусідів) та `ask_archive` — ще до виклику Claude.
-- **Стоп-слова** — `private.txt` у корені (у `.gitignore`; приклад — `private.example.txt`),
-  шлях міняє `RECALL_PRIVATE_WORDS_FILE`. По рядку, регістр не важливий, **морфології нема —
-  пиши основу** («Петренк»). Відрізок, кадр, хіт чи екранний чанк із таким словом прибирається
-  цілком; скільки прибрано — поле `private_hidden`. `get_frame` перевіряє текст саме цього
-  кадру (`frame_text`, живий OCR); кадр, який нічим перевірити (OCR недоступний), не віддається.
-- **Перемикач** `RECALL_MCP_VISUAL`: `images` (дефолт — кадри й текст), `text` (`get_frame`
-  відмовляє `MCP_VISUAL_TEXT_ONLY`), `off` (усі пʼять тулз — `MCP_VISUAL_OFF`, екранних чанків у
-  пошуку нема). Невідоме значення = `off`.
-- **Fail closed**: не вдалося перевірити напрямок або прочитати `private.txt` — візуальне не
-  віддається. Звичайні репліки транскрипту фільтр не чіпає — він лише про візуальне.
+- **Stop-list directions** — `RECALL_PRIVATE_CATEGORIES` (default `Юридичне,Особисте`). The name
+  is matched at any level of the tree together with all descendants. The video tools answer for such a record
+  with `error_code: PRIVATE`; its screen chunks disappear from `search_archive`,
+  `grep_archive` (and from the neighbors' context) and `ask_archive` — before Claude is called.
+- **Stop-words** — `private.txt` in the root (in `.gitignore`; example — `private.example.txt`),
+  the path is changed by `RECALL_PRIVATE_WORDS_FILE`. One per line, case does not matter, **there is no morphology —
+  write the stem** (`Петренк`). A segment, frame, hit or screen chunk with such a word is removed
+  entirely; how much was removed is the `private_hidden` field. `get_frame` checks the text of exactly this
+  frame (`frame_text`, live OCR); a frame that cannot be checked by anything (OCR unavailable) is not served.
+- **The switch** `RECALL_MCP_VISUAL`: `images` (default — frames and text), `text` (`get_frame`
+  refuses with `MCP_VISUAL_TEXT_ONLY`), `off` (all five tools — `MCP_VISUAL_OFF`, no screen chunks in
+  search). An unknown value = `off`.
+- **Fail closed**: it was not possible to check the direction or read `private.txt` — visual material is not
+  served. Ordinary transcript lines are not touched by the filter — it is only about visual material.
 
-UI Recall і локальні скрипти фільтр не зачіпають: у самому інтерфейсі видно все. Той самий
-стоп-лист бере бот K4.
+The Recall UI and local scripts are not affected by the filter: everything is visible in the interface itself. The same
+stop-list is used by the K4 bot.
 
-## Зображення не зберігаються
+## Images are not stored
 
-У БД лише таймкоди, OCR, рамки слів, описи. Кадр ріжеться з відео на запит
-(0.2–0.5 с), стискається (JPEG, `thumb` ≤ 960 px, `full` ≤ 1920 px) і віддається.
-Під час аналізу кадри живуть лише в памʼяті (для опису — у тимчасовому файлі на час
-виклику). Кадри старого конвеєра (Phase 23, `keyframes/*.jpg`) видаляються при
-повторному аналізі.
+The DB holds only timecodes, OCR, word boxes, descriptions. A frame is cut from the video on request
+(0.2–0.5 s), compressed (JPEG, `thumb` ≤ 960 px, `full` ≤ 1920 px) and served.
+During analysis frames live only in memory (for a description — in a temporary file for the duration of
+the call). Frames of the old pipeline (Phase 23, `keyframes/*.jpg`) are deleted on
+re-analysis.
 
-## Вартість
+## Cost
 
-OCR — $0 (локально). Опис локальною моделлю — $0, секунди на кадр на GPU (конкурує з
-Whisper і копілотом). Опис через Claude (`vision_backend: "claude"`) — платний: на
-дефолтній `VIDEO_VISION_MODEL_CLAUDE` (Haiku 4.5, $1/$5 за Mtok у `app/services/pricing.py`)
-кадр ≈ 1.8 тис. токенів на вході + ~200 на виході ≈ 0.3 цента; 300 кадрів ≈ $1 (оцінка за
-тарифом, не рахунок). Тому лише явно.
+OCR — $0 (local). A description by a local model — $0, seconds per frame on the GPU (competes with
+Whisper and the copilot). A description through Claude (`vision_backend: "claude"`) is paid: on the
+default `VIDEO_VISION_MODEL_CLAUDE` (Haiku 4.5, $1/$5 per Mtok in `app/services/pricing.py`)
+a frame ≈ 1.8 thousand input tokens + ~200 output ≈ 0.3 cent; 300 frames ≈ $1 (an estimate by
+the rate, not a bill). So only explicitly.

@@ -8,15 +8,15 @@
 
 From `docs/specs/test-log-isolation/plan.md`:
 
-> Обидва окремі процеси вішають `RotatingFileHandler` на свій бойовий лог на імпорті
-> модуля, безумовно (`telegram_listener.py:56-73`, `mcp_server.py:54-72`). Тести
-> імпортують ці модулі — і пишуть у ті самі файли. Наслідок не косметичний: лог
-> бойового процесу перестає бути свідком при розборі інциденту, що вже коштувало
-> хибного висновку 12.09.2026.
+> Both standalone processes attach a `RotatingFileHandler` to their live log at module import,
+> unconditionally (`telegram_listener.py:56-73`, `mcp_server.py:54-72`). Tests
+> import these modules — and write to the same files. The consequence is not cosmetic: the live
+> process log stops being a witness when analyzing an incident, which already cost
+> a wrong conclusion on 12.09.2026.
 >
-> У застосунку та сама проблема вирішена: `app/core/logger.py:48-56` вмикає файловий
-> хендлер лише під `RECALL_LOG_TO_FILE=1`. Реєстр налаштувань уже знає
-> `PYTEST_CURRENT_TEST` як зовнішню змінну (`app/core/settings.py:608`).
+> In the application the same problem is solved: `app/core/logger.py:48-56` enables the file
+> handler only under `RECALL_LOG_TO_FILE=1`. The settings registry already knows
+> `PYTEST_CURRENT_TEST` as an external variable (`app/core/settings.py:608`).
 
 The registry already listed `PYTEST_CURRENT_TEST` as a known external variable, making it
 the obvious first choice for the gate. It does not work for this case: pytest sets
@@ -26,10 +26,10 @@ collection - and `telegram_listener.py`/`mcp_server.py` install their file handl
 `PYTEST_CURRENT_TEST` is set. The comment added at the fix site (`telegram_listener.py:63-75`)
 records both the failed first choice and the measurement that led to the working one:
 
-> "pytest" у sys.modules pytest кладе одразу при старті, до збору тестів, тож саме він і
-> є надійним індикатором тут. Консольний хендлер лишається і під pytest, але pytest уже
-> повісив на root свої хендлери, тож цей basicConfig() — no-op і StreamHandler не
-> чіпляється зовсім (виміряно).
+> "pytest" in sys.modules is put there by pytest right at startup, before test collection, so it
+> is the reliable indicator here. The console handler stays under pytest too, but pytest has already
+> attached its own handlers to root, so this basicConfig() is a no-op and the StreamHandler is not
+> attached at all (measured).
 
 ## Options
 

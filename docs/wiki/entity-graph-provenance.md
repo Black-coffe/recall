@@ -51,7 +51,7 @@ to two owners without evidence.
 refused outright if the disappearing person row still owns tasks or a
 `speaker_id` — that data has no fallback owner once the person row is gone.
 
-See `memory/map/services.md` (Граф сутностей section) for the current function
+See `memory/map/services.md` (Entity graph section) for the current function
 inventory and file locations, and `docs/adr/001-token-exclusivity-exact-vs-morph-match.md` /
 `docs/adr/002-comments-link-entities-exact-match-only.md` for the decisions behind the
 two provenance rules above.

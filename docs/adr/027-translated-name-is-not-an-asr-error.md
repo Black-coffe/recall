@@ -1,6 +1,6 @@
 # ADR-027: A translated or transliterated name is not an ASR error; the cross-script phonetic key `vocabulary.same_name` decides
 
-- Status: accepted (2026-10-08, власник: «ВСЕ принял все даю тебе» — прийнято разом із трьома місцями поза дельтами плану; shipped in 4.8.0 at ccd3de6)
+- Status: accepted (2026-10-08, owner: "I accept everything, I give it all to you" — accepted together with the three places outside the plan deltas; shipped in 4.8.0 at ccd3de6)
 - Date: 2026-10-08
 - Spec: docs/specs/k1-name-vocabulary
 
@@ -14,24 +14,24 @@ translation of a first name, counted as a Whisper mistake. The owner corrected t
 
 Source delta (plan.md `## Plan deltas`, 2026-10-08, story 01, verbatim):
 
-> 2026-10-08, история 01, поправка владельца («считает ошибкой Whisper любое имя, записанное кириллицей
-> вместо латиницы… нужна система синонимов и система переводов»). Определение «алиас-ошибки» из
-> Assumptions заменено: алиас — то же имя, если совпадает основа ИЛИ фонетический ключ поперёк uk/ru/en
-> (`vocabulary.same_name`: транслит кириллицы, английские диграфы → звук, гласные выброшены, латинское j
-> даёт «дж» и «й»). «Гугл», «Телеграм», «Олексій»/«Алексей», «Julia Bondarenko»/«Юлія» — не ошибки.
-> Цена: гласных ключ не различает, поэтому «Орбос» и «Роботес» из Goal больше не считаются ошибками;
-> «Акмеец», «Тиграм» — по-прежнему ошибки. Отвергнуто: хранимый словарь переводов на весь граф (нужна
-> миграция и Claude на каждую сущность — отдельный шаг, если владелец захочет). Карточка
+> 2026-10-08, story 01, owner's correction ("it counts as a Whisper error any name written in Cyrillic
+> instead of Latin… a system of synonyms and a system of translations is needed"). The definition of "alias-error" from
+> Assumptions is replaced: an alias is the same name if the stem matches OR the phonetic key across uk/ru/en
+> (`vocabulary.same_name`: Cyrillic transliteration, English digraphs → sound, vowels dropped, Latin j
+> gives `дж` and `й`) matches. `Гугл`, `Телеграм`, `Олексій`/`Алексей`, `Julia Bondarenko`/`Юлія` are not errors.
+> The cost: the key does not distinguish vowels, so `Орбос` and `Роботес` from the Goal are no longer counted as errors;
+> `Акмеец`, `Тиграм` are still errors. Rejected: a stored dictionary of translations for the whole graph (needs a
+> migration and Claude for every entity — a separate step if the owner wants it). Defect card
 > `docs/defects/translation-counted-as-asr-error.md` (block).
 
 Any later story that counts ASR errors, scores name accuracy, merges aliases or ranks entities faces
-the same question again: is "Гугл" a wrong "Google", or the same name?
+the same question again: is `Гугл` a wrong "Google", or the same name?
 
 ## Options
 
 1. **Stem match OR cross-script phonetic key, computed at runtime (`vocabulary.same_name`).** No
    migration and no per-entity model call. Cost: the key ignores vowels, so some real mis-hearings
-   ("Орбос", "Роботес") are no longer counted as errors.
+   (`Орбос`, `Роботес`) are no longer counted as errors.
 2. **Stored translation dictionary for the whole graph.** Rejected in the delta: it needs a
    migration and a Claude call per entity. Left as a separate step if the owner wants it.
 
@@ -46,7 +46,7 @@ Easier: Cyrillic/Latin spellings and uk/ru/en forms of a name are treated as one
 stored data, and the defect card `docs/defects/translation-counted-as-asr-error.md` guards the rule.
 
 Harder / debt accepted: the key does not tell vowels apart, so errors that differ only in vowels
-("Орбос", "Роботес") go undetected and drop out of the error-based ranking. Measurement is affected
+(`Орбос`, `Роботес`) go undetected and drop out of the error-based ranking. Measurement is affected
 too: `measure/report.md` scores names both strictly and "with translations", and the two give
 different numbers.
 
@@ -63,4 +63,4 @@ different numbers.
 ## Revisit when
 
 The delta records no trigger. The one it implies is the owner asking for the stored translation
-dictionary (the rejected option), or vowel-only errors such as "Орбос" turning out to matter.
+dictionary (the rejected option), or vowel-only errors such as `Орбос` turning out to matter.

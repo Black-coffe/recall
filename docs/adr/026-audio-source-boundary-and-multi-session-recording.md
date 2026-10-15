@@ -1,6 +1,6 @@
 # ADR-026: `AudioSource` capture boundary, live retarget and multi-session RecordingService
 
-- Status: accepted (2026-09-28, власник: «Делаешь блок решения один» — прийняти ADR-026 з поправками A1–A4; shipped in 4.7.0 at 70fd028)
+- Status: accepted (2026-09-28, owner: "Make the decision block one" — accept ADR-026 with amendments A1–A4; shipped in 4.7.0 at 70fd028)
 - Date: 2026-09-28
 - Spec: docs/specs/parallel-recordings-app-audio
 
@@ -329,7 +329,7 @@ and "2026-09-28 — stage-05 rejection (owner) → story 11":
 > With the owner's real Zoom running, `exclude:[zoom.exe]` excluded the idle real Zoom tree (lowest PID 21900), and a sounding `zoom.exe` stayed in the recording. […] collapse session PIDs to process-tree roots and prefer the tree with an active audio session.
 
 Replaces D1's "PIDs are resolved … the *root* processes of that exe". Rejected (verbatim):
-"widening to multi-app exclude (owner: «только под исправление исключения»)" — Invariant 6
+"widening to multi-app exclude (owner: "only for the fix of the exclusion")" — Invariant 6
 stands.
 
 Invariant: exe → PID resolution goes through audio-session ownership, collapsed to tree

@@ -37,6 +37,7 @@ from urllib.parse import urlencode
 from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, stream_with_context
 
 from app import state
+from app.core.i18n import request_lang, tr
 from app.services import record_meta
 from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
 from app.services.recording.service import (
@@ -75,7 +76,7 @@ _SAVE_FINALIZE_DEADLINE_SEC = 300.0
 def _service_unavailable():
     return jsonify({
         'success': False,
-        'error': 'Recording feature вимкнено (RECORDING_ENABLED=False або PyAudioWPatch не встановлено)',
+        'error': tr('capture.rec.err.disabled'),
         'error_code': 'RECORDING_DISABLED',
     }), 503
 
@@ -96,7 +97,7 @@ def _internal_error_response(error_code: str):
     """
     return jsonify({
         'success': False,
-        'error': 'Внутрішня помилка сервера. Спробуйте пізніше.',
+        'error': tr('core.error.internal'),
         'error_code': error_code,
         'request_id': getattr(g, 'request_id', '-'),
     }), 500
@@ -295,7 +296,7 @@ def _start_session(data: dict):
     if mic_idx is None and sys_idx is None and sys_spec is None:
         return jsonify({
             'success': False,
-            'error': 'Потрібен хоча б один з mic_device_index/system_device_index',
+            'error': tr('capture.rec.err.need_source'),
             'error_code': 'NO_STREAMS',
         }), 400
 
@@ -484,7 +485,7 @@ def set_system_source(session_id: str):
     if reason not in _RETARGET_REASONS:
         return jsonify({
             'success': False,
-            'error': f"reason має бути одним із {list(_RETARGET_REASONS)}",
+            'error': tr('capture.rec.err.invalid_reason', reasons=list(_RETARGET_REASONS)),
             'error_code': 'INVALID_REASON',
         }), 400
     try:
@@ -550,10 +551,10 @@ def _call_watcher():
 def _autoprompt_page(title: str, text: str, code: int):
     """Маленька сторінка для вкладки, яку відкрила кнопка сповіщення."""
     body = (
-        '<!doctype html><html lang="uk"><meta charset="utf-8"><title>Recall</title>'
+        f'<!doctype html><html lang="{request_lang()}"><meta charset="utf-8"><title>Recall</title>'
         '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">'
         f'<h1 style="font-size:1.25rem">{html.escape(title)}</h1><p>{html.escape(text)}</p>'
-        '<p><a href="/record">Відкрити запис у Recall</a></p></body></html>'
+        f'<p><a href="/record">{html.escape(tr("capture.rec.page.open"))}</a></p></body></html>'
     )
     return Response(body, status=code, mimetype='text/html')
 
@@ -593,7 +594,7 @@ def autoprompt_dismiss(prompt_id: str):
     """«Не потрібно» з плашки: підказка зникає, за цей дзвінок не повторюється."""
     watcher = _call_watcher()
     if watcher is None or not watcher.dismiss(prompt_id):
-        return jsonify({'success': False, 'error': 'Підказки вже немає', 'error_code': 'NOT_FOUND'}), 404
+        return jsonify({'success': False, 'error': tr('capture.rec.err.prompt_gone'), 'error_code': 'NOT_FOUND'}), 404
     return jsonify({'success': True})
 
 
@@ -606,8 +607,8 @@ def autoprompt_action(token: str, action: str):
     watcher = _call_watcher()
     info = watcher.consume(token, action) if watcher is not None else None
     if info is None:
-        return _autoprompt_page('Посилання вже не дійсне',
-                                'Цю підказку вже використано, або дзвінок закінчився.', 404)
+        return _autoprompt_page(tr('capture.rec.page.link_expired'),
+                                tr('capture.rec.page.link_expired_text'), 404)
     if action == 'sources':
         query = {'app': info['exe']}
         if info.get('mic_endpoint'):
@@ -619,10 +620,10 @@ def autoprompt_action(token: str, action: str):
         try:
             stop_session(info['session_id'])
         except SessionNotFoundError:
-            return _autoprompt_page('Запис уже зупинено', 'Нічого робити не треба.', 200)
+            return _autoprompt_page(tr('capture.rec.page.already_stopped'), tr('capture.rec.page.nothing_to_do'), 200)
         except Exception as e:
             logger.exception("autoprompt stop crashed: %s", e)
-            return _autoprompt_page('Не вдалося зупинити запис', 'Подробиці — у журналі Recall.', 500)
+            return _autoprompt_page(tr('capture.rec.page.stop_failed'), tr('capture.rec.page.see_log'), 500)
         return redirect('/record')
 
     body: dict = {'system_source': {'mode': 'include', 'apps': [info['exe']]}}
@@ -636,9 +637,9 @@ def autoprompt_action(token: str, action: str):
     if payload.get('success'):
         return redirect('/record')
     if payload.get('error_code') == 'SESSION_LIMIT':
-        return _autoprompt_page('Запис не почато',
-                                f"Уже йде максимум записів ({payload.get('limit')}). Нічого не зупинено.", 409)
-    return _autoprompt_page('Запис не почато', payload.get('error') or 'Подробиці — у журналі Recall.', code)
+        return _autoprompt_page(tr('capture.rec.page.not_started'),
+                                tr('capture.rec.page.limit', limit=payload.get('limit')), 409)
+    return _autoprompt_page(tr('capture.rec.page.not_started'), payload.get('error') or tr('capture.rec.page.see_log'), code)
 
 
 def stop_session(session_id: str, name: str | None = None) -> None:
@@ -689,7 +690,7 @@ def stop_recording(session_id: str):
         'success': True,
         'session_id': session_id,
         'status': 'stopping',
-        'message': 'Finalize пушено у JobQueue. Слідкуйте за status="finalized" через /state або SSE.',
+        'message': tr('capture.rec.stop.message'),
     })
 
 
@@ -733,7 +734,7 @@ def save_recording(session_id: str):
             manifest = store.read(session_id)
         except SessionStoreError:
             return jsonify({
-                'success': False, 'error': 'Сесія не знайдена',
+                'success': False, 'error': tr('capture.rec.err.session_not_found'),
                 'error_code': 'NOT_FOUND',
             }), 404
         status = manifest.get('status')
@@ -742,14 +743,14 @@ def save_recording(session_id: str):
         if status == STATUS_CRASHED:
             return jsonify({
                 'success': False,
-                'error': 'Сесія крашнулась — фінальний файл недоступний',
+                'error': tr('capture.rec.err.crashed'),
                 'error_code': 'CRASHED',
             }), 500
         time.sleep(0.4)
     else:
         return jsonify({
             'success': False,
-            'error': 'Finalize triває довше очікуваного. Спробуйте /save пізніше.',
+            'error': tr('capture.rec.err.finalize_slow'),
             'error_code': 'TIMEOUT',
         }), 504
 
@@ -757,7 +758,7 @@ def save_recording(session_id: str):
     if not final_mp3 or not Path(final_mp3).is_file():
         return jsonify({
             'success': False,
-            'error': 'Final MP3 не створений (можливо порожній запис)',
+            'error': tr('capture.rec.err.no_final'),
             'error_code': 'NO_FINAL',
         }), 500
 
@@ -792,7 +793,7 @@ def save_recording(session_id: str):
     if reg is None:
         return jsonify({
             'success': False,
-            'error': 'Final MP3 не створений (можливо порожній запис)',
+            'error': tr('capture.rec.err.no_final'),
             'error_code': 'NO_FINAL',
         }), 500
 
@@ -901,14 +902,14 @@ def get_live_transcript(session_id: str):
         })
 
     if state.live_transcribe_worker is None:
-        return _unavailable('live-транскрипція вимкнена в цьому інстансі')
+        return _unavailable(tr('capture.rec.live.disabled'))
 
     if not state.live_transcribe_worker.is_active(session_id):
         if status == STATUS_FINALIZED:
             return _unavailable(
-                'сесія завершена — повний текст доступний через транскрипт запису'
+                tr('capture.rec.live.finished')
             )
-        return _unavailable('live-прев\'ю для цієї сесії недоступне')
+        return _unavailable(tr('capture.rec.live.no_preview'))
 
     since_sec = request.args.get('since_sec', type=float)
     since_seq = request.args.get('since_seq', type=int)
@@ -1046,7 +1047,7 @@ def stream_recording_events(session_id: str):
     if err:
         return err
     if state.sse_broker is None:
-        return jsonify({'success': False, 'error': 'SSE broker недоступний'}), 503
+        return jsonify({'success': False, 'error': tr('capture.rec.err.sse')}), 503
 
     channel = f'recording:{session_id}'
 

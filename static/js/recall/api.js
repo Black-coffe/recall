@@ -3,6 +3,8 @@
 (function () {
     'use strict';
     const A = {};
+    const L = (k) => window.Recall.t(k);
+    const LH = () => window.Recall.i18n.headers();
 
     // Default timeout for plain GET requests only (getJSON/A.get). NEVER
     // auto-applied to POST/PATCH/PUT/DELETE (send()) — many of those call
@@ -33,6 +35,7 @@
     }
 
     async function fetchOnce(url, opts) {
+        opts = Object.assign({}, opts, { headers: Object.assign({}, LH(), opts.headers) });
         const res = await fetch(url, opts);
         if (!res.ok) {
             let msg = 'HTTP ' + res.status;
@@ -89,7 +92,7 @@
                 if (externalSignal && externalSignal.aborted) throw err;
                 // Otherwise: network failure or our own timeout fired.
                 const timedOut = !!(timeoutSig && timeoutSig.aborted);
-                const e = new Error(timedOut ? 'Час очікування відповіді вичерпано' : 'Немає з’єднання з сервером');
+                const e = new Error(timedOut ? L('core.api.timeout') : L('core.api.noConnection'));
                 e.isTimeout = timedOut; e.isNetworkError = true; e.cause = err;
                 throw e;
             }
@@ -108,7 +111,7 @@
     }
     // multipart/form-data POST (file upload, /api/transcribe) — same error contract.
     async function postForm(url, formData) {
-        const res = await fetch(url, { method: 'POST', body: formData, headers: { 'Accept': 'application/json' } });
+        const res = await fetch(url, { method: 'POST', body: formData, headers: Object.assign({ 'Accept': 'application/json' }, LH()) });
         if (!res.ok) {
             let msg = 'HTTP ' + res.status;
             try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
@@ -163,6 +166,7 @@
             const xhr = new XMLHttpRequest();
             xhr.open('POST', url);
             xhr.setRequestHeader('Accept', 'application/json');
+            const lh = LH(); for (const k in lh) xhr.setRequestHeader(k, lh[k]);
             if (xhr.upload) {
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable && onUploadProgress) onUploadProgress(Math.round(e.loaded / e.total * 100));
@@ -176,8 +180,8 @@
                 const err = new Error((j && j.error) || ('HTTP ' + xhr.status));
                 err.status = xhr.status; reject(err);
             });
-            xhr.addEventListener('error', () => reject(new Error('Помилка зʼєднання з сервером')));
-            xhr.addEventListener('abort', () => reject(new Error('Завантаження скасовано')));
+            xhr.addEventListener('error', () => reject(new Error(L('core.api.uploadConnError'))));
+            xhr.addEventListener('abort', () => reject(new Error(L('core.api.uploadCancelled'))));
             xhr.send(formData);
         });
     }
@@ -209,7 +213,7 @@
 
     // — Bulk export (returns a file Response; caller handles the blob) —
     A.bulkExport = (ids, format) => fetch('/api/history/bulk_export', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, LH()),
         body: JSON.stringify({ ids, format }),
     });
 
@@ -356,7 +360,7 @@
                 } catch (readErr) {
                     if (externalSignal && externalSignal.aborted) return;   // caller stopped it — clean
                     const idle = !!(internalAc && internalAc.signal.aborted);
-                    throw abruptFail(idle ? 'Зʼєднання неактивне — сервер не відповідає' : 'Зʼєднання з сервером перервано');
+                    throw abruptFail(idle ? L('core.api.sseIdle') : L('core.api.sseBroken'));
                 }
                 if (chunk.done) break;
                 if (watchdog) watchdog.touch();
@@ -380,7 +384,7 @@
         }
 
         if (requireTerminalFrame && !sawTerminal && !(externalSignal && externalSignal.aborted)) {
-            throw abruptFail('З’єднання завершилося без відповіді сервера');
+            throw abruptFail(L('core.api.sseNoReply'));
         }
     }
 
@@ -400,7 +404,7 @@
         try {
             res = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                headers: Object.assign({ 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, LH()),
                 body: JSON.stringify(payload),
                 signal: combined,
             });
@@ -446,7 +450,7 @@
         const combined = combineSignals([signal, internalAc.signal]);
         let res;
         try {
-            res = await fetch(url, { headers: { 'Accept': 'text/event-stream' }, signal: combined });
+            res = await fetch(url, { headers: Object.assign({ 'Accept': 'text/event-stream' }, LH()), signal: combined });
         } catch (err) {
             if (signal && signal.aborted) return;
             throw err;
@@ -509,7 +513,7 @@
                 if (stopped || (outerSignal && outerSignal.aborted)) return;
                 reconnectAttempt++;
                 if (reconnectAttempt > maxRetries) {
-                    if (options.onPermanentFail) options.onPermanentFail(new Error('Досягнуто максимум спроб перепідключення'));
+                    if (options.onPermanentFail) options.onPermanentFail(new Error(L('core.api.sseMaxRetries')));
                     return;
                 }
                 const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, reconnectAttempt - 1));

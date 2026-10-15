@@ -9,17 +9,18 @@
 From `docs/specs/production-rag-wave-a/plan.md`, `## Plan deltas` (2026-09-16, repair
 wave 4 after round-1 review, items #1+#2):
 
-> Бюджет хіта в нитці: `H = min(RAG_THREAD_CHARS, max(RAG_THREAD_MSG_CHARS,
-> RAG_THREAD_CHARS // 2))` — за дефолтів 4 000 проти 1 500 у сусіда, тобто «більший»
-> буквально. Відкинута альтернатива «хіт = max(MSG_CHARS, залишок після сусідів)»: за
-> дефолтів дає хіту рівно 1 500 = сусід, а бриф каже «больший», не «не менший». Сусіди,
-> що не влазять у залишок стелі нитки, відкидаються (найближчі до хіта — першими), а не
-> стискаються до маркера.
+> Hit budget in a thread: `H = min(RAG_THREAD_CHARS, max(RAG_THREAD_MSG_CHARS,
+> RAG_THREAD_CHARS // 2))` — at defaults 4 000 versus 1 500 for a neighbour, i.e.
+> "larger" literally. Rejected alternative "hit = max(MSG_CHARS, leftover after
+> neighbours)": at defaults it gives the hit exactly 1 500 = the neighbour, while the
+> brief says "larger", not "not smaller". Neighbours that do not fit into the
+> remainder of the thread ceiling are dropped (those nearest to the hit first), not
+> compressed to a marker.
 
 Story `production-rag-wave-a-01` gave the found (hit) message the *leftover* of
 `RAG_THREAD_CHARS` after all neighbours were cut to `RAG_THREAD_MSG_CHARS` first. Round-1
-review (#1, #2) showed this violates the brief's own requirement ("найденное сообщение
-получает больший лимит"): at defaults the hit could shrink to a bare truncation marker,
+review (#1, #2) showed this violates the brief's own requirement ("the found message
+gets a larger limit"): at defaults the hit could shrink to a bare truncation marker,
 and with a wider `RAG_THREAD_STITCH` the total window could exceed `RAG_THREAD_CHARS`
 altogether. Story `production-rag-wave-a-06` fixed the allocation order.
 

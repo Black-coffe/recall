@@ -14,10 +14,10 @@
     const R = window.Recall, U = R.util, UI = R.ui;
 
     const LANGS = [
-        { v: 'uk', l: 'Українська' },
-        { v: 'en', l: 'English' },
-        { v: 'ru', l: 'Русский' },
-        { v: 'auto', l: 'Авто-визначення' },
+        { v: 'uk', l: 'capture.lang.uk' },
+        { v: 'en', l: 'capture.lang.en' },
+        { v: 'ru', l: 'capture.lang.ru' },
+        { v: 'auto', l: 'capture.lang.auto' },
     ];
     const DEFAULT_MODEL = 'large-v3-turbo';
 
@@ -37,10 +37,10 @@
 
     function bgNoticeHTML(label) {
         return `<div class="rc-note">
-            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> Транскрибую «${U.esc(label)}» у фоні</div>
-            <p>Можна закрити цю вкладку або перейти в інший розділ — запис з'явиться в Історії, коли транскрипція завершиться.</p>
+            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> ${U.esc(R.t('capture.common.bgTitle', { label }))}</div>
+            <p>${R.t('capture.common.bgText')}</p>
             <div class="rc-note__actions">
-                <button class="rc-btn rc-btn--primary" id="rcYtGoHistory">Перейти в Історію</button>
+                <button class="rc-btn rc-btn--primary" id="rcYtGoHistory">${R.t('capture.common.goHistory')}</button>
             </div>
         </div>`;
     }
@@ -79,9 +79,9 @@
         const from = parseTime((document.getElementById('rcYtFrom') || {}).value);
         const to = parseTime((document.getElementById('rcYtTo') || {}).value);
         const dur = st && st.info && st.info.duration;
-        if (!Number.isFinite(from) || !Number.isFinite(to)) throw new Error('Вкажіть час початку і кінця (мм:сс)');
-        if (to <= from) throw new Error('Кінець має бути пізніше за початок');
-        if (dur && to > dur + 1) throw new Error('Кінець виходить за межі відео (' + U.fmtDuration(dur) + ')');
+        if (!Number.isFinite(from) || !Number.isFinite(to)) throw new Error(R.t('capture.yt.errTimes'));
+        if (to <= from) throw new Error(R.t('capture.yt.errOrder'));
+        if (dur && to > dur + 1) throw new Error(R.t('capture.yt.errBeyond', { dur: U.fmtDuration(dur) }));
         return { start: from, end: to };
     }
 
@@ -92,13 +92,13 @@
         const fromRaw = ((document.getElementById('rcYtFrom') || {}).value || '').trim();
         const toRaw = ((document.getElementById('rcYtTo') || {}).value || '').trim();
         if (!fromRaw && !toRaw) {
-            note.innerHTML = 'Формат: <b>мм:сс</b> або <b>год:хв:сс</b> (чи секунди).';
+            note.innerHTML = R.t('capture.yt.trimFormat');
             note.classList.remove('is-err');
             return;
         }
         try {
             const t = readTrim();
-            note.innerHTML = `Фрагмент: <b>${U.fmtDuration(t.start)}</b> – <b>${U.fmtDuration(t.end)}</b> · тривалість <b>${U.fmtDuration(t.end - t.start)}</b>`;
+            note.innerHTML = R.t('capture.yt.trimFragment', { from: U.fmtDuration(t.start), to: U.fmtDuration(t.end), len: U.fmtDuration(t.end - t.start) });
             note.classList.remove('is-err');
         } catch (e) {
             note.textContent = e.message;
@@ -113,9 +113,9 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-brands fa-youtube" style="color:var(--rc-src-youtube)"></i> Додати у архів · YouTube</div>
-                <h1 class="rc-pagehead__title">З YouTube в архів</h1>
-                <p class="rc-pagehead__lede">Вставте посилання — Recall завантажить аудіо, транскрибує його й збереже у Бібліотеку з повним провенансом. Готовий запис відкриється як сторінка в Історії.</p>
+                <div class="rc-eyebrow"><i class="fa-brands fa-youtube" style="color:var(--rc-src-youtube)"></i> ${R.t('capture.yt.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${R.t('capture.yt.title')}</h1>
+                <p class="rc-pagehead__lede">${R.t('capture.yt.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
@@ -123,7 +123,7 @@
                     <input id="rcYtUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false"
                            placeholder="https://youtube.com/watch?v=…" value="${U.esc(st.url)}">
                 </div>
-                <button class="rc-btn rc-btn--primary" id="rcYtFetch"><i class="fa-solid fa-arrow-right"></i> Отримати відео</button>
+                <button class="rc-btn rc-btn--primary" id="rcYtFetch"><i class="fa-solid fa-arrow-right"></i> ${R.t('capture.yt.fetch')}</button>
             </div>
             <div id="rcYtBody"></div>`;
 
@@ -154,10 +154,10 @@
         const body = ctx.mount.querySelector('#rcYtBody');
         if (!body) return;
         if (!url) { body.innerHTML = ''; return; }
-        if (!/youtu\.?be/i.test(url)) UI.toast('Це не схоже на YouTube-посилання', 'error');
+        if (!/youtu\.?be/i.test(url)) UI.toast(R.t('capture.yt.notYoutube'), 'error');
 
         st.url = url; st.info = null; st.busy = false;
-        body.innerHTML = `<div class="rc-yt__loading rc-mono"><i class="fa-solid fa-spinner fa-spin"></i> Отримую дані відео…</div>`;
+        body.innerHTML = `<div class="rc-yt__loading rc-mono"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('capture.yt.loading')}</div>`;
         // reflect into the URL for deep-linking / refresh, without a re-render
         R.router.replace('/youtube?url=' + encodeURIComponent(url));
 
@@ -165,7 +165,7 @@
             const info = await R.api.youtubeInfo(url);
             if (!ctx.isCurrent()) return;
             if (!info || info.success === false) {
-                body.innerHTML = UI.error((info && info.error) || 'Не вдалося отримати відео');
+                body.innerHTML = UI.error((info && info.error) || R.t('capture.yt.fetchFailed'));
                 return;
             }
             st.info = info;
@@ -189,7 +189,7 @@
             const sel = m.name === DEFAULT_MODEL ? ' selected' : '';
             return `<option value="${U.esc(m.name)}"${sel}>${U.esc(m.name)}${hint ? ' — ' + U.esc(hint) : ''}</option>`;
         }).join('');
-        const langOpts = LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${l.l}</option>`).join('');
+        const langOpts = LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${R.t(l.l)}</option>`).join('');
         const catOpts = UI.catOptions('', { first: 'none' });
 
         const thumb = info.thumbnail
@@ -201,55 +201,55 @@
                 <div class="rc-yt__preview">
                     ${thumb}
                     <div class="rc-yt__meta">
-                        <div class="rc-eyebrow">Відео</div>
-                        <div class="rc-yt__title">${U.esc(info.title || 'Без назви')}</div>
+                        <div class="rc-eyebrow">${R.t('capture.yt.video')}</div>
+                        <div class="rc-yt__title">${U.esc(info.title || R.t('capture.yt.noTitle'))}</div>
                         <div class="rc-yt__sub rc-mono">${U.esc(info.author || '')}${info.duration ? ' · ' + U.fmtDuration(info.duration) : ''}</div>
                         ${info.description ? `<p class="rc-yt__desc">${U.esc(info.description)}</p>` : ''}
                     </div>
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcYtTitle">Назва (необовʼязково)</label>
-                        <input class="rc-input" id="rcYtTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(info.title || 'як у відео')}">
+                        <label class="rc-field__label" for="rcYtTitle">${R.t('capture.common.titleOpt')}</label>
+                        <input class="rc-input" id="rcYtTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(info.title || R.t('capture.yt.asInVideo'))}">
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcYtDesc">Опис (необовʼязково)</label>
-                        <textarea class="rc-textarea" id="rcYtDesc" maxlength="4000" placeholder="Короткий опис запису…"></textarea>
+                        <label class="rc-field__label" for="rcYtDesc">${R.t('capture.common.descOpt')}</label>
+                        <textarea class="rc-textarea" id="rcYtDesc" maxlength="4000" placeholder="${R.t('capture.common.descPh')}"></textarea>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcYtModel">Модель розпізнавання</label>
+                        <label class="rc-field__label" for="rcYtModel">${R.t('capture.common.model')}</label>
                         <select class="rc-select" id="rcYtModel">${modelOpts}</select>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcYtLang">Мова</label>
+                        <label class="rc-field__label" for="rcYtLang">${R.t('capture.common.language')}</label>
                         <select class="rc-select" id="rcYtLang">${langOpts}</select>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcYtCat">Напрямок</label>
+                        <label class="rc-field__label" for="rcYtCat">${R.t('capture.common.category')}</label>
                         <select class="rc-select rc-catsel" id="rcYtCat" data-cat-first="none">${catOpts}</select>
                     </div>
                     <label class="rc-check" for="rcYtDiar">
-                        <input type="checkbox" id="rcYtDiar"> <span>Розрізняти спікерів (діаризація)</span>
+                        <input type="checkbox" id="rcYtDiar"> <span>${R.t('capture.common.diarize')}</span>
                     </label>
                     <label class="rc-check" for="rcYtTrim">
-                        <input type="checkbox" id="rcYtTrim"> <span>Обрізати: транскрибувати лише фрагмент</span>
+                        <input type="checkbox" id="rcYtTrim"> <span>${R.t('capture.yt.trim')}</span>
                     </label>
                     <div class="rc-yt__trim" id="rcYtTrimFields" hidden>
                         <div class="rc-field">
-                            <label class="rc-field__label" for="rcYtFrom">Початок</label>
+                            <label class="rc-field__label" for="rcYtFrom">${R.t('capture.yt.from')}</label>
                             <input class="rc-input rc-input--sm" id="rcYtFrom" inputmode="numeric" autocomplete="off" placeholder="0:00">
                         </div>
                         <div class="rc-field">
-                            <label class="rc-field__label" for="rcYtTo">Кінець</label>
-                            <input class="rc-input rc-input--sm" id="rcYtTo" inputmode="numeric" autocomplete="off" placeholder="${info.duration ? U.fmtDuration(info.duration) : 'мм:сс'}">
+                            <label class="rc-field__label" for="rcYtTo">${R.t('capture.yt.to')}</label>
+                            <input class="rc-input rc-input--sm" id="rcYtTo" inputmode="numeric" autocomplete="off" placeholder="${info.duration ? U.fmtDuration(info.duration) : R.t('capture.yt.timePh')}">
                         </div>
-                        <div class="rc-yt__trimnote rc-mono" id="rcYtTrimNote">Формат: <b>мм:сс</b> або <b>год:хв:сс</b> (чи секунди).</div>
+                        <div class="rc-yt__trimnote rc-mono" id="rcYtTrimNote">${R.t('capture.yt.trimFormat')}</div>
                     </div>
                 </div>
                 <div class="rc-yt__actions">
-                    <button class="rc-btn" id="rcYtBack"><i class="fa-solid fa-arrow-left"></i> Інше відео</button>
+                    <button class="rc-btn" id="rcYtBack"><i class="fa-solid fa-arrow-left"></i> ${R.t('capture.yt.another')}</button>
                     <div class="rc-yt__spacer"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcYtStart"><i class="fa-solid fa-wand-magic-sparkles"></i> Транскрибувати та зберегти</button>
+                    <button class="rc-btn rc-btn--primary" id="rcYtStart"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.common.transcribeSave')}</button>
                 </div>
             </div>
             <div id="rcYtRun"></div>`;
@@ -305,7 +305,7 @@
             if (trim) { dl.start_time = trim.start; dl.end_time = trim.end; }
             const r = await R.api.youtubeDownload(dl);
             if (!ctx.isCurrent()) return;
-            if (!r || !r.download_id) { fail(ctx, (r && r.error) || 'Не вдалося запустити завантаження'); return; }
+            if (!r || !r.download_id) { fail(ctx, (r && r.error) || R.t('capture.yt.startFailed')); return; }
             pollDownload(ctx, r.download_id);
         } catch (err) {
             if (ctx.isCurrent()) fail(ctx, err && err.message);
@@ -315,7 +315,7 @@
     function runHTML() {
         return `<div class="rc-run">
             <div class="rc-run__head">
-                <span class="rc-run__stage" id="rcRunStage">Підготовка…</span>
+                <span class="rc-run__stage" id="rcRunStage">${R.t('capture.yt.prepare')}</span>
                 <span class="rc-run__pct rc-mono" id="rcRunPct">0%</span>
             </div>
             <div class="rc-progress"><div class="rc-progress__fill" id="rcRunFill"></div></div>
@@ -340,20 +340,20 @@
             if (!ctx.isCurrent()) return;
             const status = p.status;
             if (status === 'downloading') {
-                setStage('Завантаження аудіо…');
+                setStage(R.t('capture.yt.downloadingAudio'));
                 setProgress(Math.round(p.percent || 0), false);
                 setHint([p.speed, p.eta && ('ETA ' + p.eta)].filter(Boolean).join('  ·  '));
                 _poll = setTimeout(() => pollDownload(ctx, id), 600);
             } else if (status === 'processing') {
-                setStage('Обробка аудіо…'); setProgress(100, false); setHint('Конвертація у MP3');
+                setStage(R.t('capture.yt.processingAudio')); setProgress(100, false); setHint(R.t('capture.yt.convertMp3'));
                 _poll = setTimeout(() => pollDownload(ctx, id), 600);
             } else if (status === 'starting') {
-                setStage('Підготовка…'); setProgress(0, false); setHint('Запуск завантаження');
+                setStage(R.t('capture.yt.prepare')); setProgress(0, false); setHint(R.t('capture.yt.startingDownload'));
                 _poll = setTimeout(() => pollDownload(ctx, id), 600);
             } else if (status === 'completed') {
                 transcribe(ctx, id);
             } else if (status === 'error') {
-                fail(ctx, p.error || 'Помилка завантаження');
+                fail(ctx, p.error || R.t('capture.yt.downloadFailed'));
             } else {
                 _poll = setTimeout(() => pollDownload(ctx, id), 1000);
             }
@@ -398,11 +398,11 @@
         bgJob = { label };
         const run = ctx.mount.querySelector('#rcYtRun');
         if (run) { run.innerHTML = bgNoticeHTML(label); wireBgNotice(run); }
-        UI.toast('Завантаження готове — транскрибую «' + label + '» у фоні. Можна закрити вкладку: запис зʼявиться в Історії.', 'info');
+        UI.toast(R.t('capture.yt.downloadedBg', { label }), 'info');
 
         R.api.transcribe(fd).then((result) => {
             bgJob = null;
-            UI.toast('Готово — «' + label + '» збережено у Бібліотеці', 'success');
+            UI.toast(R.t('capture.common.done', { label }), 'success');
             if (!ctx.isCurrent()) return;
             cleanup();
             st.busy = false;
@@ -413,7 +413,7 @@
             else R.router.navigate('/library');
         }).catch((err) => {
             bgJob = null;
-            UI.toast('Транскрипція «' + label + '» не вдалась: ' + ((err && err.message) || 'помилка'), 'error');
+            UI.toast(R.t('capture.common.failed', { label, error: (err && err.message) || R.t('capture.common.errorWord') }), 'error');
             if (!ctx.isCurrent()) return;
             fail(ctx, err && err.message);
         });
@@ -427,14 +427,14 @@
         setSettingsDisabled(ctx, false);
         const run = ctx.mount.querySelector('#rcYtRun');
         if (run) {
-            run.innerHTML = UI.error(msg || 'Помилка')
-                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcYtRetry"><i class="fa-solid fa-rotate-right"></i> Спробувати ще раз</button></div>`;
+            run.innerHTML = UI.error(msg || R.t('capture.common.error'))
+                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcYtRetry"><i class="fa-solid fa-rotate-right"></i> ${R.t('capture.common.retry')}</button></div>`;
             const retry = run.querySelector('#rcYtRetry');
             if (retry) retry.addEventListener('click', () => start(ctx));
         }
         const m = String(msg || '');
-        if (/cookies/i.test(m)) UI.toast('Потрібен свіжий cookies.txt у корені проєкту', 'error');
-        else if (/ffmpeg/i.test(m)) UI.toast('FFmpeg не знайдено в PATH', 'error');
+        if (/cookies/i.test(m)) UI.toast(R.t('capture.yt.needCookies'), 'error');
+        else if (/ffmpeg/i.test(m)) UI.toast(R.t('capture.yt.noFfmpeg'), 'error');
     }
 
     R.views.youtube = { render, destroy() { cleanup(); st = null; } };

@@ -6,22 +6,22 @@
 
 ## Context
 K2 puts buttons outside the Recall tab: a Windows notification and an in-tab banner offer
-«Записати» / «Не потрібно» while a call runs, and «Зупинити» once it goes quiet. Each button is a
+"Record" / "Not needed" while a call runs, and "Stop" once it goes quiet. Each button is a
 URL on `127.0.0.1` carrying a token (`/api/recording/autoprompt/<token>/<action>`), so the token
 is the only thing that separates a deliberate click from any other local request. The plan first
 gave it a fixed 10 minutes. Plan delta of story 01, verbatim:
 
-> Было (Assumptions, критерий истории 01): токен живёт 10 мин. Стало: токен живёт, пока жив его
-> звонок («Записати?») или наблюдение за записью («Зупинити?»), жёсткий потолок 3 ч; одноразовость
-> и 128-битная случайность без изменений. Почему: «Записати?» висит на экране весь звонок
-> (уведомление-напоминание), и кнопка, молча мёртвая на 11-й минуте разговора, — ровно тот пропуск,
-> против которого K2. Отвергнуто: 10 мин (мёртвая кнопка посреди звонка).
+> Was (Assumptions, criterion of story 01): the token lives 10 min. Now: the token lives as long as its
+> call is alive ("Record?") or the watch on the recording ("Stop?"), a hard ceiling of 3 h; single use
+> and 128-bit randomness unchanged. Why: "Record?" hangs on the screen for the whole call
+> (a reminder notification), and a button silently dead at the 11th minute of the conversation is exactly the miss
+> K2 exists against. Rejected: 10 min (a dead button in the middle of a call).
 
 ## Options
 1. Fixed 10 minutes - a short window, but the reminder toast stays on screen for the whole call,
    so the button dies silently mid-call: the missed recording K2 exists to prevent.
-2. Lives as long as the thing it acts on (the call for «Записати?», the watched recording for
-   «Зупинити?»), hard ceiling 3 h - the button works whenever it is visible; the ceiling bounds a
+2. Lives as long as the thing it acts on (the call for "Record?", the watched recording for
+   "Stop?"), hard ceiling 3 h - the button works whenever it is visible; the ceiling bounds a
    prompt whose call end was never seen.
 
 ## Decision

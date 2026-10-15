@@ -43,6 +43,8 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core.i18n import tr, ui_lang_setting
+
 
 logger = logging.getLogger(__name__)
 settings_bp = Blueprint('settings_api', __name__)
@@ -99,21 +101,21 @@ def save_anthropic_key():
     data = request.get_json(silent=True) or {}
     raw = data.get('api_key')
     if not isinstance(raw, str):
-        return jsonify({'success': False, 'error': 'api_key мусить бути рядком'}), 400
+        return jsonify({'success': False, 'error': tr('core.settings.api_key_not_string')}), 400
     key = raw.strip()
     if not key:
-        return jsonify({'success': False, 'error': 'Порожній ключ'}), 400
+        return jsonify({'success': False, 'error': tr('core.settings.api_key_empty')}), 400
     if not _KEY_RE.match(key):
         return jsonify({
             'success': False,
-            'error': 'Не схоже на ключ Anthropic (має починатись з "sk-ant-", без пробілів/переносів рядків)',
+            'error': tr('core.settings.api_key_format'),
         }), 400
 
     try:
         _set_env_var('ANTHROPIC_API_KEY', key)
     except Exception as e:
         logger.error("Не вдалось зберегти ANTHROPIC_API_KEY у .env: %s", e)  # NB: помилка, НЕ сам ключ
-        return jsonify({'success': False, 'error': 'Не вдалося записати .env'}), 500
+        return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
 
     # Скидаємо мемоізований anthropic-клієнт (якщо стара збірка з іншим/
     # відсутнім ключем уже встигла закешуватись) — щоб наступний polish/
@@ -132,7 +134,7 @@ def clear_anthropic_key():
         _unset_env_var('ANTHROPIC_API_KEY')
     except Exception as e:
         logger.error("Не вдалось прибрати ANTHROPIC_API_KEY з .env: %s", e)
-        return jsonify({'success': False, 'error': 'Не вдалося записати .env'}), 500
+        return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
     from app.services import text_polishing
     text_polishing._client = None
     return jsonify({'success': True, 'configured': False})
@@ -145,12 +147,12 @@ def test_anthropic_key():
     ганяти сирий секрет туди-сюди зайвий раз)."""
     api_key = os.environ.get('ANTHROPIC_API_KEY')
     if not api_key:
-        return jsonify({'success': False, 'ok': False, 'error': 'Ключ ще не збережено'}), 400
+        return jsonify({'success': False, 'ok': False, 'error': tr('core.settings.key_not_saved')}), 400
 
     try:
         import anthropic
     except ImportError:
-        return jsonify({'success': False, 'ok': False, 'error': 'Пакет anthropic не встановлено на сервері'}), 500
+        return jsonify({'success': False, 'ok': False, 'error': tr('core.settings.anthropic_missing')}), 500
 
     from app.services import models as _models
     from app.services.claude_retry import call_with_retry
@@ -168,14 +170,14 @@ def test_anthropic_key():
         )
         return jsonify({'success': True, 'ok': True})
     except anthropic.AuthenticationError:
-        return jsonify({'success': True, 'ok': False, 'error': 'Ключ недійсний (401)'})
+        return jsonify({'success': True, 'ok': False, 'error': tr('core.settings.key_invalid')})
     except anthropic.PermissionDeniedError:
-        return jsonify({'success': True, 'ok': False, 'error': 'Ключ без дозволу (403) — перевірте план/ліміти акаунту'})
+        return jsonify({'success': True, 'ok': False, 'error': tr('core.settings.key_forbidden')})
     except Exception as e:
         # Мережа/timeout/несподіване — не витягуємо саму помилку SDK у сирому
         # вигляді (може містити частини запиту), лише коротке повідомлення.
         logger.warning("test_anthropic_key: помилка з'єднання: %s", e)
-        return jsonify({'success': True, 'ok': False, 'error': 'Не вдалося з’єднатися з Anthropic API'})
+        return jsonify({'success': True, 'ok': False, 'error': tr('core.settings.anthropic_unreachable')})
 
 
 # ---------------------------------------------------------------- T5.2: Co-pilot toggle
@@ -189,13 +191,13 @@ def toggle_copilot():
     data = request.get_json(silent=True) or {}
     enabled = data.get('enabled')
     if not isinstance(enabled, bool):
-        return jsonify({'success': False, 'error': 'enabled мусить бути true/false'}), 400
+        return jsonify({'success': False, 'error': tr('core.settings.enabled_not_bool')}), 400
 
     try:
         _set_env_var('COPILOT_ENABLED', '1' if enabled else '0')
     except Exception as e:
         logger.error("Не вдалось записати COPILOT_ENABLED у .env: %s", e)
-        return jsonify({'success': False, 'error': 'Не вдалося записати .env'}), 500
+        return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
 
     from app import state
     live_now = state.copilot_service is not None
@@ -205,3 +207,25 @@ def toggle_copilot():
         'live_enabled': live_now,
         'restart_required': live_now != enabled,
     })
+
+
+# ---------------------------------------------------------------- UI language
+
+@settings_bp.route('/api/settings/ui-lang', methods=['GET'])
+def get_ui_lang():
+    return jsonify({'success': True, 'value': ui_lang_setting()})
+
+
+@settings_bp.route('/api/settings/ui-lang', methods=['POST'])
+def set_ui_lang():
+    """Записати RECALL_UI_LANG (auto|uk|en) у .env; діє одразу (читається з environ на кожен запит)."""
+    data = request.get_json(silent=True) or {}
+    value = data.get('value')
+    if value not in ('auto', 'uk', 'en'):
+        return jsonify({'success': False, 'error': tr('core.settings.ui_lang_invalid')}), 400
+    try:
+        _set_env_var('RECALL_UI_LANG', value)
+    except Exception as e:
+        logger.error("Не вдалось записати RECALL_UI_LANG у .env: %s", e)
+        return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
+    return jsonify({'success': True, 'value': value})

@@ -1,4 +1,4 @@
-# ADR-008: Реєстр — єдине джерело правила парсингу булевих прапорців, не лише їхніх дефолтів
+# ADR-008: The registry is the sole source of the boolean-flag parsing rule, not only of their defaults
 
 - Status: proposed
 - Date: 2026-09-06
@@ -6,55 +6,55 @@
 
 ## Context
 
-Із `## Plan deltas` спека `config-registry-fix` (2026-09-06, «falsy-звуження уніфікації булевих
-парсерів»):
+From `## Plan deltas` of the `config-registry-fix` spec (2026-09-06, "falsy narrowing of the
+unification of boolean parsers"):
 
-> Рішення: зафіксувати: уніфікація на `settings.env_bool` (truthy `1/true/yes/on`) звужує поведінку
-> на сміттєвих значеннях — `COPILOT_ENABLED`, `RECORDING_ENABLED`, `RECALL_LOCAL_TRUSTED` зі значенням
-> поза truthy-набором (напр. `ага`) тепер дають `False`; до уніфікації відповідні ad-hoc парсери
-> (`{'1','true','True'}` без `.lower()`, інверсні перевірки на `{'0','false','no'}` тощо) на тому
-> самому сміттєвому вході давали `True`.
+> Decision: record that unification on `settings.env_bool` (truthy `1/true/yes/on`) narrows behavior
+> on junk values — `COPILOT_ENABLED`, `RECORDING_ENABLED`, `RECALL_LOCAL_TRUSTED` with a value
+> outside the truthy set (e.g. `ага`) now give `False`; before the unification the corresponding ad-hoc parsers
+> (`{'1','true','True'}` without `.lower()`, inverse checks against `{'0','false','no'}`, etc.) on the same
+> junk input gave `True`.
 >
-> Що відкинуто: повертати ad-hoc парсери заради збереження випадкової старої поведінки на
-> сміттєвих значеннях — суперечило б самій меті реєстру як єдиного джерела правила парсингу.
+> What was rejected: bringing the ad-hoc parsers back to preserve the accidental old behavior on
+> junk values — that would contradict the very purpose of the registry as the single source of the parsing rule.
 
-Той самий клас дефекту повторився в раунді 3 (`docs/specs/config-registry-fix-r3/plan.md`, дельта
-«`app.py` увійшов у Files раунду 3 — три булеві парсери повз реєстр закриті»): `RECALL_BIND_ALL`,
-`RECALL_PRELOAD_WHISPER`, `RECALL_LOG_TO_FILE` мали власні парсери повз реєстр ще у трьох файлах
-(`app.py`, `whisper_preload.py`, `app/core/logger.py`), і `RECALL_PRELOAD_WHISPER` до переведення
-на `env_bool` був інверсним — сміттєве значення трактувалось як `True`, після переведення
-трактується як `False`. Три раунди поспіль ловили один і той самий клас: булевий прапорець, який
-читається не через реєстр.
+The same defect class repeated in round 3 (`docs/specs/config-registry-fix-r3/plan.md`, the delta
+"`app.py` entered the Files of round 3 — three boolean parsers bypassing the registry closed"): `RECALL_BIND_ALL`,
+`RECALL_PRELOAD_WHISPER`, `RECALL_LOG_TO_FILE` had their own parsers bypassing the registry in three more files
+(`app.py`, `whisper_preload.py`, `app/core/logger.py`), and `RECALL_PRELOAD_WHISPER` before the move
+to `env_bool` was inverted — a junk value was treated as `True`, after the move
+it is treated as `False`. Three rounds in a row caught one and the same class: a boolean flag that is
+read not through the registry.
 
 ## Options
 
-Нема жодних записаних — план фіксує обраний вигляд рішення (унормувати всі читання на
-`settings.env_bool`), а не альтернативи, які зважувались.
+None recorded - the plan fixes the chosen shape of the decision (normalize all reads onto
+`settings.env_bool`), not the alternatives that were weighed.
 
 ## Decision
 
-Правило парсингу булевого прапорця (яке рядкове значення означає `True`/`False`) визначається рівно
-один раз — у `settings.env_bool` — і жодна ділянка коду не має власного інверсного чи truthy-набору
-поза ним. Це стосується не лише дефолтного значення прапорця (те, що вже покриває реєстр як сховище
-дефолтів), а самого правила читання рядка з `os.environ`. Ціна уніфікації — зміна поведінки на
-сміттєвих значеннях — приймається свідомо і фіксується в дельті, а не мовчки.
+The rule for parsing a boolean flag (which string value means `True`/`False`) is defined exactly
+once — in `settings.env_bool` — and no part of the code has its own inverse or truthy set
+outside it. This applies not only to the default value of a flag (which the registry already covers as a store of
+defaults), but to the very rule of reading a string from `os.environ`. The cost of unification — a change of behavior on
+junk values — is accepted deliberately and recorded in the delta, not silently.
 
 ## Consequences
 
-Легше: новий булевий прапорець за визначенням читається однаково скрізь, куди б його не додали;
-розбіжність двох парсерів того самого прапорця (як у `RECALL_PRELOAD_WHISPER` до і після) стає
-структурно неможливою. Важче: перенесення наявного ad-hoc парсера на `env_bool` завжди несе ризик
-змінити поведінку саме на межових/сміттєвих значеннях — цей ризик не усувається уніфікацією, а
-переноситься в явний, задокументований момент переходу.
+Easier: a new boolean flag by definition is read the same way everywhere it is added;
+divergence of two parsers of the same flag (as in `RECALL_PRELOAD_WHISPER` before and after) becomes
+structurally impossible. Harder: moving an existing ad-hoc parser onto `env_bool` always carries a risk of
+changing behavior exactly on edge/junk values — this risk is not removed by unification, but
+is moved to an explicit, documented moment of transition.
 
 ## Invariants created
 
-Жодна ділянка коду не читає булевий env-прапорець власним `if value in {...}`/`not in {...}` —
-кожне читання булевого прапорця йде через `settings.env_bool(name)`. Зміна набору truthy/falsy
-значень відбувається рівно один раз, у цій функції, і одразу застосовується до всіх прапорців.
+No part of the code reads a boolean env flag with its own `if value in {...}`/`not in {...}` —
+every read of a boolean flag goes through `settings.env_bool(name)`. A change to the set of truthy/falsy
+values happens exactly once, in this function, and immediately applies to all flags.
 
 ## Revisit when
 
-Знадобиться прапорець із семантикою, ширшою за truthy/falsy рядок (наприклад, тризначна логіка
-`on|off|auto`) — тоді `env_bool` не підходить за конструкцією, і питання «де ще одне джерело
-правила парсингу» постане знову для нового типу.
+A flag is needed with semantics wider than a truthy/falsy string (for example, three-valued logic
+`on|off|auto`) — then `env_bool` does not fit by construction, and the question "where is another source of the
+parsing rule" will arise again for the new type.

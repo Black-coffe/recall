@@ -6,13 +6,13 @@
 
 ## Context
 
-From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, ремонтний
-раунд after `/vulyk-review`, BLOCK critical #1):
+From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, repair
+round after `/vulyk-review`, BLOCK critical #1):
 
-> Оснастка заміру не має змінювати файл знімка, який міряє, включно з його
-> заголовком: функції, що відкривають власне читально-писальне зʼєднання
-> (`get_db_connection` з `PRAGMA journal_mode=WAL`), працюють з тимчасовою копією, а
-> не зі знімком.
+> Measurement tooling must not modify the snapshot file it measures, including its
+> header: functions that open their own read-write connection
+> (`get_db_connection` with `PRAGMA journal_mode=WAL`) work on a temporary copy, not
+> on the snapshot.
 
 `evals/graph_links.py` (story 04) measures graph links on a DB snapshot in two
 configurations (exact-only / exact+morph) and diffs them. The project's shared

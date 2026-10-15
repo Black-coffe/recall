@@ -7,9 +7,7 @@
 
     // C9: три різні осі фільтра — той самий текст пояснення, що й на
     // Бібліотеці/Медіатеці/Задачах/Графі/Дослідженні.
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. '
-        + 'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: '
-        + 'відповідь будується лише з записів, що підходять під усі обрані фільтри. Період — за датою запису.';
+    const FILTER_HINT = () => R.t('knowledge.ask.filterHint');
 
     async function render(ctx) {
         if (abortCtl) { try { abortCtl.abort(); } catch (_) {} abortCtl = null; }
@@ -25,19 +23,19 @@
         };
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow">RAG · по всьому архіву</div>
-                <h1 class="rc-pagehead__title">Запитай архів</h1>
-                <p class="rc-pagehead__lede">Відповіді будуються СУВОРО з вашого архіву, з клікабельними цитатами на конкретні записи.</p>
+                <div class="rc-eyebrow">${R.t('knowledge.ask.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${R.t('knowledge.ask.title')}</h1>
+                <p class="rc-pagehead__lede">${R.t('knowledge.ask.lede')}</p>
             </div>
             <div class="rc-ask__bar">
-                <textarea id="rcAskInput" placeholder="Спитай: «що вирішили щодо запуску «Маяка»?», «які задачі на Олену?», «де обговорювали бюджет Polaris?»…">${U.esc(preset)}</textarea>
-                <button class="rc-btn rc-btn--primary" id="rcAskGo"><i class="fa-solid fa-paper-plane"></i> Спитати</button>
+                <textarea id="rcAskInput" placeholder="${U.esc(R.t('knowledge.ask.placeholder'))}">${U.esc(preset)}</textarea>
+                <button class="rc-btn rc-btn--primary" id="rcAskGo"><i class="fa-solid fa-paper-plane"></i> ${R.t('knowledge.ask.go')}</button>
             </div>
             <div class="rc-toolbar" id="rcAskFilters">
                 <select class="rc-select rc-catsel" id="rcAskCat" data-cat-first="all">${UI.catOptions(state.category_id, { first: 'all' })}</select>
                 <div id="rcAskTagsWrap">${UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-tagsel"></select>'}</div>
-                <input type="date" class="rc-input rc-select--sm" id="rcAskSince" value="${U.esc(state.since)}" title="Записи з дати">
-                <input type="date" class="rc-input rc-select--sm" id="rcAskUntil" value="${U.esc(state.until)}" title="Записи по дату">
+                <input type="date" class="rc-input rc-select--sm" id="rcAskSince" value="${U.esc(state.since)}" title="${U.esc(R.t('knowledge.ask.sinceTitle'))}">
+                <input type="date" class="rc-input rc-select--sm" id="rcAskUntil" value="${U.esc(state.until)}" title="${U.esc(R.t('knowledge.ask.untilTitle'))}">
             </div>
             <div id="rcAskHint"></div>
             <div id="rcAskOut"></div>`;
@@ -48,7 +46,7 @@
         catSel.value = state.category_id;
         catSel.addEventListener('change', () => { state.category_id = catSel.value; sync(input.value); });
         const tagSel = ctx.mount.querySelector('#rcAskTagsWrap select');
-        if (tagSel) { tagSel.setAttribute('aria-label', 'Фільтр за тегами'); tagSel.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSel) { tagSel.setAttribute('aria-label', R.t('knowledge.ask.tagsAria')); tagSel.title = R.t('knowledge.ask.tagsTitle'); }
         if (tagSel) tagSel.addEventListener('change', () => {
             state.tags = Array.from(tagSel.selectedOptions).map(o => o.value).filter(Boolean);
             sync(input.value);
@@ -58,7 +56,7 @@
         sinceEl.addEventListener('change', () => { state.since = sinceEl.value; sync(input.value); });
         untilEl.addEventListener('change', () => { state.until = untilEl.value; sync(input.value); });
         const hintBox = ctx.mount.querySelector('#rcAskHint');
-        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT()));
         go.addEventListener('click', () => ask(ctx, input.value));
         input.addEventListener('keydown', (e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); ask(ctx, input.value); }
@@ -84,12 +82,11 @@
     // Пояснення активного зрізу — для «нічого не знайшлось».
     function filterExplain() {
         const bits = [];
-        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
-        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
-        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(R.t('knowledge.ask.explainIn', { path: p })); }
+        if (state.tags.length) bits.push(R.t('knowledge.ask.explainTags', { tags: state.tags.join(', ') }));
+        if (state.since || state.until) bits.push(R.t('knowledge.ask.explainPeriod', { from: state.since || '…', to: state.until || '…' }));
         if (!bits.length) return null;
-        return 'Архів не дав джерел ' + bits.join(' ') + '. Напрямок тягне свої проєкти, проєкт — лише себе, '
-            + 'тег ріже впоперек: зніміть напрямок/проєкт, тег або період — і спитайте ширше.';
+        return R.t('knowledge.ask.explain', { bits: bits.join(' ') });
     }
 
     function setBusy(ctx, flag) {
@@ -97,8 +94,8 @@
         if (!go) return;
         go.disabled = flag;
         go.innerHTML = flag
-            ? '<i class="fa-solid fa-spinner fa-spin"></i> Зачекайте…'
-            : '<i class="fa-solid fa-paper-plane"></i> Спитати';
+            ? '<i class="fa-solid fa-spinner fa-spin"></i> ' + R.t('knowledge.ask.wait')
+            : '<i class="fa-solid fa-paper-plane"></i> ' + R.t('knowledge.ask.go');
     }
 
     async function ask(ctx, q) {
@@ -118,7 +115,7 @@
         // citation numbering into this answer (T4.2 race fix).
         const sources = [];
 
-        out.innerHTML = `<div class="rc-ask__answer" id="rcAnswer"><span class="rc-mono" style="color:var(--rc-ink-3)"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю в архіві…</span></div>
+        out.innerHTML = `<div class="rc-ask__answer" id="rcAnswer"><span class="rc-mono" style="color:var(--rc-ink-3)"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.ask.searching')}</span></div>
             <div id="rcAskRate"></div>
             <div id="rcAskSources" style="margin-top:16px"></div>`;
         const answerEl = out.querySelector('#rcAnswer');
@@ -140,10 +137,10 @@
                 } else if (event === 'error') {
                     answerEl.innerHTML = UI.error(
                         data.code === 'sse_broken'
-                            ? 'Зʼєднання перервано, спробуйте знову'
-                            : (data.error || 'Помилка RAG'));
+                            ? R.t('knowledge.ask.connBroken')
+                            : (data.error || R.t('knowledge.ask.ragError')));
                 } else if (event === 'done') {
-                    if (!text) answerEl.textContent = 'Порожня відповідь.';
+                    if (!text) answerEl.textContent = R.t('knowledge.ask.empty');
                     if (!sources.length) {
                         const why = filterExplain();
                         if (why) {
@@ -164,7 +161,7 @@
             // (myCtl.signal.aborted, e.g. leaving the page) resolves silently
             // and never lands here.
             if (ctx.isCurrent() && !myCtl.signal.aborted) {
-                answerEl.innerHTML = UI.error((err && err.message) || 'Зʼєднання перервано, спробуйте знову');
+                answerEl.innerHTML = UI.error((err && err.message) || R.t('knowledge.ask.connBroken'));
             }
         } finally {
             if (abortCtl === myCtl) { abortCtl = null; busy = false; setBusy(ctx, false); }
@@ -196,10 +193,10 @@
         const box = ctx.mount.querySelector('#rcAskRate');
         if (!box || !askId) return;
         box.innerHTML = `<div class="rc-ask__rate">
-                <span class="rc-ask__rate-lede">Відповідь корисна?</span>
-                <button class="rc-btn rc-btn--ghost" data-rating="1" title="Корисна">👍</button>
-                <button class="rc-btn rc-btn--ghost" data-rating="-1" title="Погана">👎</button>
-                <input type="text" class="rc-ask__rate-note" placeholder="Замітка (необовʼязково)">
+                <span class="rc-ask__rate-lede">${R.t('knowledge.ask.rateLede')}</span>
+                <button class="rc-btn rc-btn--ghost" data-rating="1" title="${U.esc(R.t('knowledge.ask.rateGood'))}">👍</button>
+                <button class="rc-btn rc-btn--ghost" data-rating="-1" title="${U.esc(R.t('knowledge.ask.rateBad'))}">👎</button>
+                <input type="text" class="rc-ask__rate-note" placeholder="${U.esc(R.t('knowledge.ask.ratePlaceholder'))}">
                 <span class="rc-ask__rate-state"></span>
             </div>`;
         const stateEl = box.querySelector('.rc-ask__rate-state');
@@ -212,9 +209,9 @@
                     await R.api.rateAsk(askId, rating, noteEl.value.trim());
                     box.querySelectorAll('button[data-rating]').forEach(b =>
                         b.classList.toggle('rc-btn--primary', b === btn));
-                    stateEl.textContent = 'оцінено';
+                    stateEl.textContent = R.t('knowledge.ask.rated');
                 } catch (err) {
-                    stateEl.textContent = (err && err.message) || 'не вдалося зберегти';
+                    stateEl.textContent = (err && err.message) || R.t('knowledge.ask.rateFail');
                 } finally {
                     box.querySelectorAll('button[data-rating]').forEach(b => b.disabled = false);
                 }
@@ -225,7 +222,7 @@
     function renderSources(ctx, sources) {
         const box = ctx.mount.querySelector('#rcAskSources');
         if (!box || !sources.length) return;
-        box.innerHTML = `<div class="rc-eyebrow" style="margin-bottom:8px">Джерела · ${sources.length}</div>
+        box.innerHTML = `<div class="rc-eyebrow" style="margin-bottom:8px">${R.t('knowledge.ask.sources')} · ${sources.length}</div>
             <div class="rc-tags">${sources.map((s, i) =>
                 `<a class="rc-entity" href="/transcript/${U.slug(s.transcription_id, s.display_name || s.source_name)}">
                     <span class="rc-entity__type">[${i + 1}]</span>${U.esc(s.display_name || s.source_name || ('#' + s.transcription_id))}</a>`

@@ -1,23 +1,23 @@
-# Файл: WhisperUI/requirements.txt
-# Путь: WhisperUI/requirements.txt
-# Описание: Python зависимости проекта
+# File: WhisperUI/requirements.txt
+# Path: WhisperUI/requirements.txt
+# Description: Python dependencies of the project
 
 flask==3.0.0
 
 # Whisper backends
-# faster-whisper (CTranslate2) — основной backend, 3-5x быстрее на GPU. WHISPER_BACKEND=faster (default).
-# openai-whisper — референсный fallback. WHISPER_BACKEND=openai.
+# faster-whisper (CTranslate2) — the main backend, 3-5x faster on GPU. WHISPER_BACKEND=faster (default).
+# openai-whisper — the reference fallback. WHISPER_BACKEND=openai.
 #
-# ВАЖНО: пины ниже — community-verified-stable combo для нашего стека
-# (torch 2.5.1+cu121 / cuDNN 9.1.0). НЕ снимать верхнюю границу!
-# faster-whisper 1.2.x + ctranslate2 4.7.x роняли процесс нативно
-# (exit 0xC0000409 / STATUS_STACK_BUFFER_OVERRUN) под sustained CUDA-инференсом
-# на Windows — особенно в live-preview, где сотни коротких transcribe() подряд.
-# 1.1.1 + 4.6.0 — проверенно стабильны на этом torch/cuDNN.
+# IMPORTANT: the pins below are a community-verified-stable combo for our stack
+# (torch 2.5.1+cu121 / cuDNN 9.1.0). Do NOT remove the upper bound!
+# faster-whisper 1.2.x + ctranslate2 4.7.x crashed the process natively
+# (exit 0xC0000409 / STATUS_STACK_BUFFER_OVERRUN) under sustained CUDA inference
+# on Windows — especially in live-preview, where hundreds of short transcribe() calls run in a row.
+# 1.1.1 + 4.6.0 — verified stable on this torch/cuDNN.
 # Ref: https://github.com/SYSTRAN/faster-whisper/issues/1293
 faster-whisper==1.1.1
 ctranslate2==4.6.0
-# PyAV 19.x ламає розшифровку з faster-whisper 1.1.1 (open() got an unexpected keyword 'metadata_errors').
+# PyAV 19.x breaks transcription with faster-whisper 1.1.1 (open() got an unexpected keyword 'metadata_errors').
 av<19
 openai-whisper==20231117
 
@@ -31,30 +31,30 @@ flask-cors==4.0.0
 werkzeug==3.0.1
 numpy
 python-dotenv>=1.0.0
-pytubefix>=10.11.0  # YouTube downloads (WEB-клієнт + botGuard PO-token)
-yt-dlp>=2026.8.19  # запасний завантажувач для відео, які YouTube ріже без PO-token
+pytubefix>=10.11.0  # YouTube downloads (WEB client + botGuard PO-token)
+yt-dlp>=2026.8.19  # fallback downloader for videos YouTube cuts off without a PO-token
 yt-dlp>=2023.12.30
-psutil>=5.9.0  # Для мониторинга системных ресурсов
-pydub>=0.25.1  # Для работы с аудио (разбивка на чанки)
+psutil>=5.9.0  # For monitoring system resources
+pydub>=0.25.1  # For working with audio (splitting into chunks)
 
-# Phase 4.4: опциональный Claude-постпроцессинг (исправление пунктуации, абзацев).
-# Активируется только при наличии ANTHROPIC_API_KEY в .env.
+# Phase 4.4: optional Claude post-processing (fixing punctuation, paragraphs).
+# Activated only when ANTHROPIC_API_KEY is present in .env.
 anthropic>=0.40.0
 
-# Phase 6: rate limiting per IP. Polish always-limited (защита кошелька от
-# случайного infinite loop), остальные endpoints — мягкие лимиты.
+# Phase 6: rate limiting per IP. Polish is always limited (protecting the wallet from
+# an accidental infinite loop), the other endpoints have soft limits.
 flask-limiter>=3.5.0
 
-# Phase 6.4: pytest для unit-тестов. Не required в production —
-# опциональная dev-зависимость. Запуск: .venv/Scripts/python.exe -m pytest
+# Phase 6.4: pytest for unit tests. Not required in production —
+# an optional dev dependency. Run: .venv/Scripts/python.exe -m pytest
 pytest>=8.0  # dev-only
 
 # Phase 9: WASAPI loopback recording (system audio + microphone).
-# Форк PyAudio з підтримкою WASAPI loopback на Windows. Wheel'и є для
-# Python 3.8-3.12 ТІЛЬКИ під win32. На Linux/Mac імпорт впаде, тому
-# обмежуємо install через platform marker. RECORDING_ENABLED autodetect
-# через try/except import — на не-Windows feature просто вимкнеться,
-# інша частина додатку продовжить працювати.
+# A PyAudio fork with WASAPI loopback support on Windows. Wheels exist for
+# Python 3.8-3.12 ONLY for win32. On Linux/Mac the import would fail, so
+# we restrict the install via a platform marker. RECORDING_ENABLED autodetects
+# via try/except import — on non-Windows the feature is simply turned off,
+# the rest of the app keeps working.
 PyAudioWPatch>=0.2.12.6 ; sys_platform == "win32"
 
 # ADR-026: per-app system audio via WASAPI process loopback (in-process comtypes client in
@@ -64,90 +64,90 @@ pycaw==20260927 ; sys_platform == "win32"
 comtypes==1.4.17 ; sys_platform == "win32"
 
 # Phase 10: speaker diarization via pyannote.audio.
-# Потребує HF_TOKEN у .env та прийнятої ліцензії pyannote/speaker-diarization-3.1
-# і pyannote/segmentation-3.0 на Hugging Face. Перше завантаження моделі ~1.5GB
-# у ~/.cache/torch/pyannote (потім кешується). На RTX 3090 ~0.05x realtime.
+# Requires HF_TOKEN in .env and an accepted license for pyannote/speaker-diarization-3.1
+# and pyannote/segmentation-3.0 on Hugging Face. The first model download is ~1.5GB
+# into ~/.cache/torch/pyannote (cached afterwards). On an RTX 3090 ~0.05x realtime.
 #
-# Жорсткі pin'и через chain несумісностей:
-# - pyannote 3.4.0 → ламає API hf_hub_download
-# - pyannote 4.x → тягне torch 2.11 (без CUDA wheels на момент v10)
-# - speechbrain 1.1.x → lazy import k2_fsa ламає inspect.stack() при завантаженні моделі
-# - huggingface_hub 1.x → видалив use_auth_token= параметр
+# Hard pins because of a chain of incompatibilities:
+# - pyannote 3.4.0 → breaks the hf_hub_download API
+# - pyannote 4.x → pulls torch 2.11 (no CUDA wheels at the time of v10)
+# - speechbrain 1.1.x → lazy import of k2_fsa breaks inspect.stack() when loading the model
+# - huggingface_hub 1.x → removed the use_auth_token= parameter
 pyannote.audio==3.3.2
 speechbrain==1.0.2
 huggingface_hub>=0.25,<1.0
 
-# Phase 10.11: DOCX експорт для діаризованих транскриптів
-# (через app/blueprints/transcription.py format='docx').
-# Phase 16A: той самий python-docx переіспользується для ПАРСИНГУ .docx
-# документів у document_parser.py (параграфи + таблиці → markdown).
+# Phase 10.11: DOCX export for diarized transcripts
+# (via app/blueprints/transcription.py format='docx').
+# Phase 16A: the same python-docx is reused for PARSING .docx
+# documents in document_parser.py (paragraphs + tables → markdown).
 python-docx>=1.0.0
 
-# Phase 16A: підвантаження документів (PDF). PyMuPDF (import fitz) — постранічний
-# витяг тексту. Чиста C-залежність БЕЗ torch/transformers → НЕ чіпає крихку
-# цепочку пінів (torch 2.5.1 / transformers<5 / hf_hub<1.0 / sentence-transformers
-# 3.4.1). Парсинг .md/.txt/.docx працює без неї; PDF деградує м'яко якщо не стоїть.
+# Phase 16A: document upload (PDF). PyMuPDF (import fitz) — page-by-page text
+# extraction. A pure C dependency WITHOUT torch/transformers → does NOT touch the fragile
+# chain of pins (torch 2.5.1 / transformers<5 / hf_hub<1.0 / sentence-transformers
+# 3.4.1). Parsing .md/.txt/.docx works without it; PDF degrades gracefully if it is not installed.
 PyMuPDF>=1.24.0
 
-# Phase 16B: парсинг презентацій (.pptx) — текст слайдів + нотатки доповідача.
-# Чистий Python (lxml), БЕЗ torch/transformers. Lazy guarded import — PPTX
-# деградує м'яко якщо не встановлено.
+# Phase 16B: presentation parsing (.pptx) — slide text + speaker notes.
+# Pure Python (lxml), WITHOUT torch/transformers. Lazy guarded import — PPTX
+# degrades gracefully if not installed.
 python-pptx>=0.6.21
 
-# Phase 16C: парсинг таблиць (.xlsx) — аркуші → markdown-таблиці. Чистий Python,
-# БЕЗ torch/transformers. CSV читається вбудованим csv (без залежності). Lazy
-# guarded import — XLSX деградує м'яко якщо openpyxl не встановлено.
+# Phase 16C: spreadsheet parsing (.xlsx) — sheets → markdown tables. Pure Python,
+# WITHOUT torch/transformers. CSV is read by the built-in csv (no dependency). Lazy
+# guarded import — XLSX degrades gracefully if openpyxl is not installed.
 openpyxl>=3.1.0
 
-# Phase 16D: OCR для скан-PDF і зображень. pytesseract — тонка обгортка над
-# СИСТЕМНИМ tesseract.exe (треба встановити окремо + мовні пакети ukr/rus/eng
-# у PATH), БЕЗ torch/transformers (на відміну від surya/docTR) → не чіпає піни.
-# Pillow — завантаження зображень. Lazy guarded: без tesseract OCR просто
-# вимикається (ocr_available()=False), решта парсингу працює.
+# Phase 16D: OCR for scanned PDFs and images. pytesseract — a thin wrapper over the
+# SYSTEM tesseract.exe (must be installed separately + the ukr/rus/eng language packs
+# in PATH), WITHOUT torch/transformers (unlike surya/docTR) → does not touch the pins.
+# Pillow — image loading. Lazy guarded: without tesseract OCR is simply
+# turned off (ocr_available()=False), the rest of parsing works.
 pytesseract>=0.3.10
 Pillow>=10.0.0
 
-# Phase 12.13: PDF експорт
+# Phase 12.13: PDF export
 reportlab>=4.0.0
 
-# Phase 17: Telegram ingestion — слухання реального TG-АКАУНТА (не бота) через
-# MTProto. Telethon тримає одну сесію (telegram.session) і віддає real-time
-# events + завантаження медіа. Окремий процес telegram_listener.py (asyncio),
-# Flask спілкується з ним по localhost control-API. Чистий Python (немає torch/
-# transformers) → не чіпає крихку цепочку пінів. Опційна залежність: без неї
-# Telegram-feature просто вимикається, решта додатку працює.
+# Phase 17: Telegram ingestion — listening to a real TG ACCOUNT (not a bot) over
+# MTProto. Telethon holds a single session (telegram.session) and delivers real-time
+# events + media downloads. A separate process telegram_listener.py (asyncio),
+# Flask talks to it over a localhost control API. Pure Python (no torch/
+# transformers) → does not touch the fragile chain of pins. Optional dependency: without it
+# the Telegram feature is simply turned off, the rest of the app works.
 telethon>=1.36.0
-# QR-логін у telegram_login.py (qrcode рендерить PNG; Pillow вже в deps нижче).
+# QR login in telegram_login.py (qrcode renders PNG; Pillow is already in deps below).
 qrcode>=7.0
 
-# Phase 13B: локальні embeddings для семантичного RAG-пошуку архіву (Meeting Memory).
-# Модель за замовч.: intfloat/multilingual-e5-large (1024-dim, UA/RU, safetensors).
-# Перше використання тягне ~2.2GB у ~/.cache/huggingface. Рахується на RTX 3090.
+# Phase 13B: local embeddings for semantic RAG search of the archive (Meeting Memory).
+# Default model: intfloat/multilingual-e5-large (1024-dim, UA/RU, safetensors).
+# The first use pulls ~2.2GB into ~/.cache/huggingface. Runs on an RTX 3090.
 #
-# КРИТИЧНІ ПІНИ — chain несумісностей з нашим torch 2.5.1+cu121 (кожен перевірено):
-# 1. sentence-transformers 5.x → тягне torchcodec, чиї нативні DLL НЕ вантажаться
-#    на torch 2.5.1 (libtorchcodec_core*.dll FileNotFound) → import падає. → 3.x.
-# 2. transformers 5.x → вимагає huggingface_hub>=1.0, що ЛАМАЄ pyannote pin
-#    (hub 1.x видалив use_auth_token=). Тримаємо <5 → hub лишається 0.36.x (<1.0).
-# 3. transformers>=4.56 блокує torch.load(.bin) на torch<2.6 (CVE-2025-32434).
-#    Тому EMBED_MODEL мусить мати safetensors. bge-m3 має ЛИШЕ pytorch_model.bin →
-#    не годиться; e5-large має model.safetensors → ОК. use_safetensors=True у коді.
+# CRITICAL PINS — a chain of incompatibilities with our torch 2.5.1+cu121 (each verified):
+# 1. sentence-transformers 5.x → pulls torchcodec, whose native DLLs do NOT load
+#    on torch 2.5.1 (libtorchcodec_core*.dll FileNotFound) → the import fails. → 3.x.
+# 2. transformers 5.x → requires huggingface_hub>=1.0, which BREAKS the pyannote pin
+#    (hub 1.x removed use_auth_token=). We keep <5 → hub stays 0.36.x (<1.0).
+# 3. transformers>=4.56 blocks torch.load(.bin) on torch<2.6 (CVE-2025-32434).
+#    So EMBED_MODEL must have safetensors. bge-m3 has ONLY pytorch_model.bin →
+#    not suitable; e5-large has model.safetensors → OK. use_safetensors=True in the code.
 sentence-transformers==3.4.1
 transformers>=4.41,<5
-# production-rag-wave-b-04: пара EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B (перемикач
-# через .env, дефолт коду лишається e5-large) вимагає архітектуру Qwen3 у
-# transformers — вона зʼявилась ще ДО поточного нижнього піна >=4.41, тож нижню
-# межу тут НЕ бампаємо: .venv на момент цього запису вже стоїть на transformers
-# 4.57.6/sentence-transformers 3.4.1, обидва достатні для завантаження чекпойнта
-# (перевірено реальним прогоном — Implementation notes нижче). Той самий пін
-# 1024-dim/safetensors, що й для e5-large, тож ланцюжок несумісностей вище не
-# зачіпається.
-# T6.4 (Волна 4): опційний RAG-чат rerank (app/services/reranker.py) — CrossEncoder
-# з ТОГО Ж пакету sentence-transformers, НОВА залежність НЕ потрібна. Модель за
-# замовч. BAAI/bge-reranker-v2-m3 (~2.3GB, HF): перевірено — має ЛИШЕ model.safetensors
-# (без pytorch_model.bin), тож сумісна з тими самими пінами вище (torch 2.5.1 /
-# transformers<5). OFF за замовчуванням (RECALL_RERANK_ENABLED) — модель НЕ тягнеться,
-# поки прапорець не увімкнено і rerank жодного разу не викликано (lazy, як e5-large).
+# production-rag-wave-b-04: the pair EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B (switched
+# via .env, the code default stays e5-large) requires the Qwen3 architecture in
+# transformers — it appeared BEFORE the current lower pin >=4.41, so we do NOT bump the lower
+# bound here: at the time of this entry .venv already sits on transformers
+# 4.57.6/sentence-transformers 3.4.1, both sufficient to load the checkpoint
+# (verified by a real run — Implementation notes below). The same 1024-dim/safetensors
+# pin as for e5-large, so the chain of incompatibilities above is
+# not affected.
+# T6.4 (Wave 4): optional RAG chat rerank (app/services/reranker.py) — a CrossEncoder
+# from the SAME sentence-transformers package, a NEW dependency is NOT needed. Default
+# model BAAI/bge-reranker-v2-m3 (~2.3GB, HF): verified — it has ONLY model.safetensors
+# (no pytorch_model.bin), so it is compatible with the same pins above (torch 2.5.1 /
+# transformers<5). OFF by default (RECALL_RERANK_ENABLED) — the model is NOT pulled
+# until the flag is turned on and rerank has been called at least once (lazy, like e5-large).
 
-# MCP server (Phase 20) — локальний доступ Claude до RAG-архіву
+# MCP server (Phase 20) — local access of Claude to the RAG archive
 fastmcp>=3.3,<4

@@ -1,85 +1,85 @@
-# Безпека даних Recall
+# Recall Data Security
 
-> Recall — **локальний** архів дзвінків: транскрипти, action items та граф сутностей
-> (імена людей/організацій) зберігаються на машині користувача. Зовнішні виклики —
-> лише опційно до Anthropic API (polish/enrichment/copilot) та Google Drive (backup).
-> Цей документ описує поточну модель безпеки й відповідальність користувача.
+> Recall is a **local** call archive: transcripts, action items and the entity graph
+> (names of people/organizations) are stored on the user's machine. External calls are
+> only optional, to the Anthropic API (polish/enrichment/copilot) and Google Drive (backup).
+> This document describes the current security model and the user's responsibility.
 
-## 1. Мережевий доступ (реалізовано)
+## 1. Network access (implemented)
 
-- **Bind за замовчуванням `127.0.0.1`** (Волна 0, T1.1) — сервер слухає лише локальний
-  інтерфейс. Мережева експозиція вмикається свідомо (`RECALL_BIND_ALL=1` або
-  `FLASK_HOST=0.0.0.0`) і тоді вимагає безпечного `SECRET_KEY` (інакше hard-fail).
-- **Auth-гейт на `/api/*`** (Волна 1, T1.2): локальні запити (`127.0.0.1`/`::1`) при
-  `RECALL_LOCAL_TRUSTED=1` проходять; віддалені — вимагають `RECALL_API_KEY`
-  (`X-Recall-Api-Key` або `Authorization: Bearer`). Fail-closed, якщо ключ не заданий.
-- **Import-folder allowlist** (Волна 1, T1.3): читання файлів з диска обмежене
-  `RECALL_IMPORT_ROOTS` (deny-by-default) — немає читання довільних шляхів з LAN.
+- **Bind to `127.0.0.1` by default** (Wave 0, T1.1) — the server listens on the local
+  interface only. Network exposure is enabled deliberately (`RECALL_BIND_ALL=1` or
+  `FLASK_HOST=0.0.0.0`) and then requires a safe `SECRET_KEY` (otherwise hard-fail).
+- **Auth gate on `/api/*`** (Wave 1, T1.2): local requests (`127.0.0.1`/`::1`) with
+  `RECALL_LOCAL_TRUSTED=1` pass; remote ones require `RECALL_API_KEY`
+  (`X-Recall-Api-Key` or `Authorization: Bearer`). Fail-closed if no key is set.
+- **Import-folder allowlist** (Wave 1, T1.3): reading files from disk is restricted to
+  `RECALL_IMPORT_ROOTS` (deny-by-default) — no reading of arbitrary paths from the LAN.
 
-## 2. Шифрування даних у стані спокою (encryption-at-rest)
+## 2. Encryption at rest
 
-### Поточний стан (свідомий trade-off)
+### Current state (a deliberate trade-off)
 
-| Дані | Стан на диску |
+| Data | State on disk |
 |---|---|
-| `whisper_history.db` (SQLite: транскрипти, entities, action items) | **Plaintext** |
-| Аудіо/відео файли (`downloads/`, записи, ingest) | **Plaintext** |
-| Щотижневий backup (restic → Google Drive) | **Шифрований** (restic AES) |
+| `whisper_history.db` (SQLite: transcripts, entities, action items) | **Plaintext** |
+| Audio/video files (`downloads/`, recordings, ingest) | **Plaintext** |
+| Weekly backup (restic → Google Drive) | **Encrypted** (restic AES) |
 
-**Тобто шифрується лише backup, а «жива» БД і медіа — ні.** Це усвідомлене рішення:
-Recall — desktop-like локальне ПЗ для однокористувацької машини, і шифрування «живої»
-БД (SQLCipher) зачепило б доступ усіх трьох процесів (`app.py`, `telegram_listener.py`,
-`mcp_server.py`), схему підключення та backup-скрипт. Замість цього **захист даних у
-стані спокою покладається на повнодискове шифрування ОС** (див. нижче).
+**That is, only the backup is encrypted, while the "live" DB and media are not.** This is a conscious decision:
+Recall is desktop-like local software for a single-user machine, and encrypting the "live"
+DB (SQLCipher) would affect access for all three processes (`app.py`, `telegram_listener.py`,
+`mcp_server.py`), the connection scheme and the backup script. Instead, **protection of data at
+rest relies on the OS full-disk encryption** (see below).
 
-### 🔴 Рекомендація: увімкніть BitLocker (обов'язково для чутливих даних)
+### 🔴 Recommendation: enable BitLocker (mandatory for sensitive data)
 
-Оскільки БД і медіа зберігаються у відкритому вигляді, **крадіжка/втрата ноутбука або
-доступ іншого користувача тієї ж машини = повний витік усіх розмов**. Щоб це закрити,
-увімкніть повнодискове шифрування:
+Because the DB and media are stored in plain form, **theft/loss of a laptop or
+access by another user of the same machine = a full leak of all conversations**. To close this,
+enable full-disk encryption:
 
 **Windows (BitLocker):**
-1. `Параметри` → `Конфіденційність і безпека` → `Шифрування пристрою`; або
-   `Панель керування` → `Шифрування диска BitLocker` → `Увімкнути BitLocker` для диска,
-   де лежить проєкт і `whisper_history.db`.
-2. Збережіть ключ відновлення в надійному місці (Microsoft-акаунт / друкована копія /
-   USB — **не** на тому ж диску).
-3. Дочекайтесь завершення шифрування; переконайтесь, що статус — «Увімкнено».
+1. `Settings` → `Privacy & security` → `Device encryption`; or
+   `Control Panel` → `BitLocker Drive Encryption` → `Turn on BitLocker` for the drive
+   that holds the project and `whisper_history.db`.
+2. Store the recovery key in a safe place (Microsoft account / printed copy /
+   USB — **not** on the same drive).
+3. Wait for the encryption to finish; make sure the status is "On".
 
-**Альтернативи:** VeraCrypt (крос-платформно), FileVault (macOS), LUKS (Linux) —
-якщо проєкт запускається не на Windows.
+**Alternatives:** VeraCrypt (cross-platform), FileVault (macOS), LUKS (Linux) —
+if the project is run on something other than Windows.
 
-> **Відповідальність користувача.** Recall не примушує й не перевіряє повнодискове
-> шифрування. Захист `whisper_history.db` та медіа у стані спокою — на стороні
-> користувача/адміністратора машини. Для NDA-чутливих даних BitLocker (або еквівалент)
-> вважайте обов'язковим.
+> **User responsibility.** Recall does not enforce or verify full-disk
+> encryption. Protecting `whisper_history.db` and media at rest is up to the
+> user/administrator of the machine. For NDA-sensitive data, treat BitLocker (or an equivalent)
+> as mandatory.
 
-### Коли потрібен Варіант А (SQLCipher, шифрування самої БД)
+### When Option A is needed (SQLCipher, encrypting the DB itself)
 
-Повнодискове шифрування захищає від фізичної крадіжки, але **не** від інших процесів/
-користувачів у вже розблокованій сесії. Якщо з'явиться enterprise-клиент з
-compliance-вимогою (шифрування на рівні застосунку, а не лише диска) — тоді доцільно
-перейти на **SQLCipher** (Варіант А з `REMEDIATION_PLAN` T1.6). Це L-задача: зачіпає
-з'єднання всіх трьох процесів, backup-скрипт і pin залежностей; починати лише за явним
-рішенням власника й реальною потребою. Поки такої вимоги немає — Варіант Б (цей
-документ + BitLocker) є прийнятим станом.
+Full-disk encryption protects against physical theft, but **not** against other processes/
+users in an already unlocked session. If an enterprise client appears with a
+compliance requirement (application-level encryption, not just disk-level), it would make sense to
+move to **SQLCipher** (Option A from `REMEDIATION_PLAN` T1.6). This is an L-sized task: it affects
+the connections of all three processes, the backup script and dependency pinning; start it only on an explicit
+owner decision and a real need. Until there is such a requirement, Option B (this
+document + BitLocker) is the accepted state.
 
-## 3. Зовнішні виклики та приватність
+## 3. External calls and privacy
 
-- **Anthropic API** — лише коли задано `ANTHROPIC_API_KEY` (polish/enrichment/copilot-
-  ескалація). Ключ зберігається в `.env` (gitignored), не логується (лише довжина),
-  не повертається клієнту. Дані дзвінків надсилаються в Anthropic лише для явно
-  запитаних операцій обробки.
-- **Google Drive** — лише для щотижневого шифрованого restic-backup, за налаштуванням
-  користувача.
-- **Telegram (MTProto)** — слухання реального акаунта; `telegram.session` — чутливий
-  файл (доступ до акаунта), тримайте його локально, не комітьте (gitignored).
-- **`.env`** ніколи не комітиться (gitignored). Він містить `SECRET_KEY`,
-  `ANTHROPIC_API_KEY`, Telegram-ключі — усе чутливе.
+- **Anthropic API** — only when `ANTHROPIC_API_KEY` is set (polish/enrichment/copilot
+  escalation). The key is stored in `.env` (gitignored), is not logged (length only),
+  and is not returned to the client. Call data is sent to Anthropic only for explicitly
+  requested processing operations.
+- **Google Drive** — only for the weekly encrypted restic backup, as configured by
+  the user.
+- **Telegram (MTProto)** — listening to a real account; `telegram.session` is a sensitive
+  file (access to the account), keep it local, do not commit it (gitignored).
+- **`.env`** is never committed (gitignored). It contains `SECRET_KEY`,
+  `ANTHROPIC_API_KEY`, Telegram keys — all sensitive.
 
-## 4. Діагностика без витоку
+## 4. Diagnostics without leaks
 
-При зборі діагностичного пакета (T8.1) / логів — транскрипти, PII та ключі не
-включаються (redaction). Файлові логи процесів (`whisper_ui.log`,
-`telegram_listener.log`, `mcp_server.log`) можуть містити метадані операцій, але не
-повний вміст дзвінків; переглядайте перед надсиланням розробнику.
+When assembling a diagnostic bundle (T8.1) / logs, transcripts, PII and keys are not
+included (redaction). The processes' file logs (`whisper_ui.log`,
+`telegram_listener.log`, `mcp_server.log`) may contain operation metadata but not the
+full content of calls; review them before sending to the developer.

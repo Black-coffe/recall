@@ -25,6 +25,7 @@ import torch
 from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request
 
 from app import state
+from app.core.i18n import tr, ui_lang_setting
 from app.services import text_polishing
 from app.services.models import get_default_model
 from app.utils.proc import NO_WINDOW
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 system_bp = Blueprint('system', __name__)
 
 # Спільне з /api/health — одна версія на весь blueprint (T8.1).
-APP_VERSION = "4.15.0"
+APP_VERSION = "4.16.1"
 
 
 @system_bp.route('/', defaults={'_path': ''}, methods=['GET'])
@@ -52,7 +53,7 @@ def app_shell(_path):
         abort(404)
     if current_app.config.get('HEADLESS'):
         return jsonify(error="headless", hint="API-only profile"), 404
-    return render_template('shell.html')
+    return render_template('shell.html', ui_lang=ui_lang_setting())
 
 
 @system_bp.route('/favicon.ico')
@@ -161,7 +162,7 @@ def ready_check():
             "profile": current_app.config.get('PROFILE', 'desktop'),
             "version": APP_VERSION,
             "checks": {},
-            "error": "робота not initialised",
+            "error": "ready-state not initialised",
         }), 503
 
     checks = dict(робота)
@@ -195,10 +196,10 @@ def download_model():
     data = request.json
     model_name = data.get('model_name')
     if not model_name:
-        return jsonify({"success": False, "error": "Не вказано модель"}), 400
+        return jsonify({"success": False, "error": tr("core.system.model_missing")}), 400
     if state.whisper_manager.download_model(model_name):
-        return jsonify({"success": True, "message": f"Модель {model_name} успішно завантажена"})
-    return jsonify({"success": False, "error": "Помилка завантаження моделі"}), 500
+        return jsonify({"success": True, "message": tr("core.system.model_downloaded", model=model_name)})
+    return jsonify({"success": False, "error": tr("core.system.model_download_failed")}), 500
 
 
 @system_bp.route('/api/models/update-status', methods=['GET'])
@@ -338,7 +339,7 @@ def get_system_stats():
         return jsonify(state.system_monitor.get_snapshot())
     except Exception as e:
         logger.error(f"Помилка отримання статистики: {e}")
-        return jsonify({"success": False, "error": "Помилка отримання статистики системи"}), 500
+        return jsonify({"success": False, "error": tr("core.system.stats_failed")}), 500
 
 
 @system_bp.route('/api/polish/availability', methods=['GET'])
@@ -352,25 +353,25 @@ def polish_availability():
                 "id": "claude-opus-4-8",
                 "label": "Opus 4.8",
                 "tier": "premium",
-                "speed": "повільно (1-3 хв)",
-                "cost_hint": "≈ $0.20 / 15K симв.",
-                "note": "Найвища якість. Adaptive thinking. Дорого і повільно для звичайної редактури.",
+                "speed": tr('settings.polish.slow'),
+                "cost_hint": tr('settings.polish.cost_opus'),
+                "note": tr('settings.polish.note_opus'),
             },
             {
                 "id": "claude-sonnet-4-6",
                 "label": "Sonnet 4.6",
                 "tier": "balanced",
-                "speed": "середньо (30-60с)",
-                "cost_hint": "≈ $0.10 / 15K симв.",
-                "note": "Збалансовано. Підходить для більшості постпроцесингу.",
+                "speed": tr('settings.polish.medium'),
+                "cost_hint": tr('settings.polish.cost_sonnet'),
+                "note": tr('settings.polish.note_sonnet'),
             },
             {
                 "id": "claude-haiku-4-5",
                 "label": "Haiku 4.5",
                 "tier": "fast",
-                "speed": "швидко (10-20с)",
-                "cost_hint": "≈ $0.025 / 15K симв.",
-                "note": "Швидко і дешево. Без adaptive thinking. Якість 90%+ на простих задачах редактури.",
+                "speed": tr('settings.polish.fast'),
+                "cost_hint": tr('settings.polish.cost_haiku'),
+                "note": tr('settings.polish.note_haiku'),
             },
         ],
     })

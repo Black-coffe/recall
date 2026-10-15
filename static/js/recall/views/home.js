@@ -2,22 +2,23 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
 
     async function render(ctx) {
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow">Recall · архів памʼяті</div>
-                <h1 class="rc-pagehead__title" style="font-size:var(--rc-t-display)">Памʼять усього.</h1>
-                <p class="rc-pagehead__lede">Семантичний архів — дзвінки, файли, документи, Telegram. Питай природною мовою, знаходь людей і проєкти, відстежуй домовленості.</p>
+                <div class="rc-eyebrow">${T('library.home.eyebrow')}</div>
+                <h1 class="rc-pagehead__title" style="font-size:var(--rc-t-display)">${T('library.home.title')}</h1>
+                <p class="rc-pagehead__lede">${T('library.home.lede')}</p>
             </div>
             <div class="rc-ask__bar" style="margin-bottom:32px">
-                <textarea id="rcHomeAsk" placeholder="Спитай архів: «що вирішили щодо запуску «Маяка»?», «які задачі на Олену?»…"></textarea>
+                <textarea id="rcHomeAsk" placeholder="${U.esc(T('library.home.askPh'))}"></textarea>
                 <button class="rc-btn rc-btn--primary" id="rcHomeAskGo"><i class="fa-solid fa-paper-plane"></i></button>
             </div>
             <div class="rc-stats" id="rcHomeStats"></div>
             <div class="rc-pagehead__row" style="margin-bottom:12px">
-                <h2 style="font-size:var(--rc-t-h2)">Останні записи</h2>
-                <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/library">Уся бібліотека <i class="fa-solid fa-arrow-right"></i></a>
+                <h2 style="font-size:var(--rc-t-h2)">${T('library.home.recent')}</h2>
+                <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/library">${T('library.home.all')} <i class="fa-solid fa-arrow-right"></i></a>
             </div>
             <div class="rc-list" id="rcHomeRecent"></div>`;
 
@@ -37,13 +38,13 @@
             if (!ctx.isCurrent()) return;
             const sum = (o) => o ? Object.values(o).reduce((a, b) => a + (b || 0), 0) : 0;
             const tiles = [
-                { n: s.transcriptions ? s.transcriptions.total : 0, l: 'Записів', href: '/library' },
-                { n: sum(s.entities_significant), l: 'Сутностей', href: '/entities' },
-                { n: s.action_items ? s.action_items.open : 0, l: 'Відкритих задач', href: '/tasks' },
-                { n: s.chunks || 0, l: 'Фрагментів у пошуку', href: '/ask' },
+                { n: s.transcriptions ? s.transcriptions.total : 0, l: T('library.home.tile.records'), href: '/library' },
+                { n: sum(s.entities_significant), l: T('library.home.tile.entities'), href: '/entities' },
+                { n: s.action_items ? s.action_items.open : 0, l: T('library.home.tile.tasks'), href: '/tasks' },
+                { n: s.chunks || 0, l: T('library.home.tile.chunks'), href: '/ask' },
             ];
             box.innerHTML = tiles.map(t =>
-                `<div class="rc-stat" data-href="${t.href}"><div class="rc-stat__n">${(t.n || 0).toLocaleString('uk')}</div><div class="rc-stat__l">${t.l}</div></div>`
+                `<div class="rc-stat" data-href="${t.href}"><div class="rc-stat__n">${R.i18n.num(t.n || 0)}</div><div class="rc-stat__l">${t.l}</div></div>`
             ).join('');
             box.querySelectorAll('.rc-stat').forEach(el => el.addEventListener('click', () => R.router.navigate(el.dataset.href)));
         } catch (err) {
@@ -51,7 +52,7 @@
             // T5.5: a failed stats load must read as "broken, retry" — not
             // silently blank, which a user can't tell apart from "archive is
             // genuinely empty" (zero-value tiles already render fine above).
-            box.innerHTML = UI.error((err && err.message) || 'Не вдалося завантажити статистику', { retry: true });
+            box.innerHTML = UI.error((err && err.message) || T('library.home.statsFail'), { retry: true });
             UI.bindErrorRetry(box, () => renderStats(ctx));
         }
     }
@@ -67,10 +68,10 @@
             if (!rows.length) {
                 // T5.5: empty archive is a dead end without a direct way forward.
                 const actions = [
-                    { label: 'Завантажити аудіо', icon: 'fa-upload', href: '/upload', primary: true },
-                    { label: 'Записати дзвінок', icon: 'fa-microphone', href: '/record' },
+                    { label: T('library.home.upload'), icon: 'fa-upload', href: '/upload', primary: true },
+                    { label: T('library.home.record'), icon: 'fa-microphone', href: '/record' },
                 ];
-                box.innerHTML = UI.empty('Архів порожній', 'Додайте перший запис — завантажте аудіо чи файл, або запишіть дзвінок просто зараз.', 'fa-box-open', actions);
+                box.innerHTML = UI.empty(T('library.home.empty.title'), T('library.home.empty.body'), 'fa-box-open', actions);
                 return;
             }
             box.innerHTML = rows.map(t => {

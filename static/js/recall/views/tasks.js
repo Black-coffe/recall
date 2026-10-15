@@ -15,31 +15,32 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
 
     const STATUSES = [
-        { k: 'open', label: 'Відкриті' },
-        { k: 'done', label: 'Виконані' },
+        { k: 'open', label: T('knowledge.tasks.status.open') },
+        { k: 'done', label: T('knowledge.tasks.status.done') },
         // Трек 1: sweep_stale переводить давно протерміноване у 'stale'. Без
         // цього чипа тисячі таких задач недосяжні з UI взагалі.
-        { k: 'stale', label: 'Застарілі' },
-        { k: 'cancelled', label: 'Скасовані' },
-        { k: 'all', label: 'Усі' },
+        { k: 'stale', label: T('knowledge.tasks.status.stale') },
+        { k: 'cancelled', label: T('knowledge.tasks.status.cancelled') },
+        { k: 'all', label: T('knowledge.tasks.status.all') },
     ];
     // Період — за датою запису-джерела. «all» = без ліміту по часу.
     const PERIODS = [
-        { k: '24h', label: '24 години' },
-        { k: '7d', label: '7 днів' },
-        { k: 'month', label: 'Місяць' },
-        { k: 'year', label: 'Рік' },
-        { k: 'all', label: 'Усі' },
+        { k: '24h', label: T('knowledge.tasks.period.24h') },
+        { k: '7d', label: T('knowledge.tasks.period.7d') },
+        { k: 'month', label: T('knowledge.tasks.period.month') },
+        { k: 'year', label: T('knowledge.tasks.period.year') },
+        { k: 'all', label: T('knowledge.tasks.period.all') },
     ];
     // Порядок = порядок терміновості. `lead` — скільки рядків показуємо одразу;
     // «Без дати» згорнуте, бо це археологія, а не план на сьогодні.
     const BUCKETS = [
-        { k: 'overdue', label: 'Протерміновано', tone: 'err', lead: 25 },
-        { k: 'soon', label: 'Найближчі 7 днів', tone: 'accent', lead: 50 },
-        { k: 'later', label: 'Пізніше', tone: 'plain', lead: 25 },
-        { k: 'no_date', label: 'Без дати', tone: 'muted', lead: 0 },
+        { k: 'overdue', label: T('knowledge.tasks.bucket.overdue'), tone: 'err', lead: 25 },
+        { k: 'soon', label: T('knowledge.tasks.bucket.soon'), tone: 'accent', lead: 50 },
+        { k: 'later', label: T('knowledge.tasks.bucket.later'), tone: 'plain', lead: 25 },
+        { k: 'no_date', label: T('knowledge.tasks.bucket.noDate'), tone: 'muted', lead: 0 },
     ];
     const PAGE = 50;    // скільки дотягуємо за один «показати ще»
 
@@ -49,8 +50,7 @@
 
     // C9: той самий фільтр-бар, що на Бібліотеці/Медіатеці/Графі, дубльований
     // навмисно (09 — лише спільні хелпери, не спільний компонент фільтр-бару).
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
-        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+    const FILTER_HINT = T('knowledge.tasks.filterHint');
 
     async function render(ctx) {
         cats = await UI.loadCategories();
@@ -73,9 +73,9 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow">Дашборд</div>
-                <h1 class="rc-pagehead__title">Задачі</h1>
-                <p class="rc-pagehead__lede">Домовленості, що прозвучали у дзвінках. Згруповані за часом до дії — спершу протерміноване, далі найближчий тиждень.</p>
+                <div class="rc-eyebrow">${T('knowledge.tasks.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${T('knowledge.tasks.title')}</h1>
+                <p class="rc-pagehead__lede">${T('knowledge.tasks.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-filterbar rc-toolbar__grow" id="rcTaskFilters"></div>
@@ -83,12 +83,12 @@
             </div>
             <div class="rc-toolbar" id="rcTaskTagPeriod">
                 <div id="rcTaskTagsWrap">${tagSel}</div>
-                <input type="date" class="rc-input rc-select--sm" id="rcTaskSince" value="${U.esc(state.since)}" title="Записи з дати">
-                <input type="date" class="rc-input rc-select--sm" id="rcTaskUntil" value="${U.esc(state.until)}" title="Записи по дату">
+                <input type="date" class="rc-input rc-select--sm" id="rcTaskSince" value="${U.esc(state.since)}" title="${T('knowledge.filter.sinceTitle')}">
+                <input type="date" class="rc-input rc-select--sm" id="rcTaskUntil" value="${U.esc(state.until)}" title="${T('knowledge.filter.untilTitle')}">
             </div>
             <div id="rcTaskHint"></div>
             <div class="rc-periodrow">
-                <span class="rc-periodrow__lbl rc-mono"><i class="fa-regular fa-clock"></i> Період</span>
+                <span class="rc-periodrow__lbl rc-mono"><i class="fa-regular fa-clock"></i> ${T('knowledge.tasks.period')}</span>
                 <div class="rc-period" id="rcTaskPeriod"></div>
             </div>
             <div class="rc-ownerrow" id="rcTaskOwners"></div>
@@ -118,7 +118,7 @@
         catSel.addEventListener('change', () => { state.category_id = catSel.value; reset(); sync(); load(ctx); });
 
         const tagSelEl = ctx.mount.querySelector('#rcTaskTagsWrap select');
-        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', T('core.ui.tags.filterAria')); tagSelEl.title = T('knowledge.filter.tagsTitle'); }
         if (tagSelEl) tagSelEl.addEventListener('change', () => {
             state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
             reset(); sync(); load(ctx);
@@ -192,7 +192,7 @@
 
             renderOwners(ctx);
             listEl.innerHTML = BUCKETS.map(b => bucketHTML(b, data[b.k])).filter(Boolean).join('')
-                || UI.empty('Нічого не знайдено', 'Спробуйте інший статус, напрямок або період.', 'fa-clipboard-check');
+                || UI.empty(T('knowledge.tasks.nothing'), T('knowledge.tasks.nothingHint'), 'fa-clipboard-check');
             wire(ctx);
         } catch (err) {
             if (!ctx.isCurrent()) return;
@@ -214,7 +214,7 @@
         const top = owners.slice(0, 8);
         const active = state.owner && !top.some(o => o.owner === state.owner)
             ? [owners.find(o => o.owner === state.owner) || { owner: state.owner, n: 0 }] : [];
-        box.innerHTML = `<span class="rc-ownerrow__lbl rc-mono"><i class="fa-regular fa-user"></i> Власник</span>`
+        box.innerHTML = `<span class="rc-ownerrow__lbl rc-mono"><i class="fa-regular fa-user"></i> ${T('knowledge.tasks.owner')}</span>`
             + top.concat(active).map(o =>
                 `<button class="rc-chip${state.owner === o.owner ? ' is-active' : ''}" data-owner="${U.esc(o.owner)}">${U.esc(o.owner)} <span class="rc-chip__n">${o.n}</span></button>`
             ).join('');
@@ -231,7 +231,7 @@
             </div>`;
         if (!isOpen) return `<section class="rc-bucket is-collapsed">${head}</section>`;
         const more = rows.length < n
-            ? `<div class="rc-bucket__more"><button class="rc-btn rc-btn--sm" data-more="${b.k}">Показати ще ${Math.min(PAGE, n - rows.length)} з ${n - rows.length}</button></div>`
+            ? `<div class="rc-bucket__more"><button class="rc-btn rc-btn--sm" data-more="${b.k}">${T('knowledge.tasks.showMore', { count: Math.min(PAGE, n - rows.length), left: n - rows.length })}</button></div>`
             : '';
         return `<section class="rc-bucket">${head}
             <div class="rc-list rc-bucket__list">${rows.map(a => taskHTML(a, b)).join('')}</div>${more}</section>`;
@@ -267,10 +267,10 @@
         }
         // Пілюля лише на винятках. Дефолтний 'open' не показуємо взагалі.
         const flags = [
-            a.status === 'stale' ? '<span class="rc-task__flag" data-s="stale">застаріло</span>' : '',
-            a.status === 'done' ? '<span class="rc-task__flag" data-s="done">виконано</span>' : '',
-            a.status === 'cancelled' ? '<span class="rc-task__flag" data-s="cancelled">скасовано</span>' : '',
-            a.dup_of ? '<span class="rc-task__flag" data-s="dup">дубль</span>' : '',
+            a.status === 'stale' ? '<span class="rc-task__flag" data-s="stale">' + T('knowledge.tasks.flag.stale') + '</span>' : '',
+            a.status === 'done' ? '<span class="rc-task__flag" data-s="done">' + T('knowledge.tasks.flag.done') + '</span>' : '',
+            a.status === 'cancelled' ? '<span class="rc-task__flag" data-s="cancelled">' + T('knowledge.tasks.flag.cancelled') + '</span>' : '',
+            a.dup_of ? '<span class="rc-task__flag" data-s="dup">' + T('knowledge.tasks.flag.dup') + '</span>' : '',
         ].filter(Boolean).join('');
 
         // Дату зустрічі підписуємо явно: без підпису вона у тому ж форматі, що
@@ -278,7 +278,7 @@
         const metaBits = [
             owner ? `<span class="rc-task__owner">${U.esc(owner)}</span>` : '',
             src,
-            a.meeting_date ? `<span class="rc-mono">з ${U.esc(U.fmtDueDate(a.meeting_date))}</span>` : '',
+            a.meeting_date ? `<span class="rc-mono">${T('knowledge.tasks.fromDate', { date: U.esc(U.fmtDueDate(a.meeting_date)) })}</span>` : '',
         ].filter(Boolean).join('<span class="sep">·</span>');
 
         return `<div class="rc-task" data-id="${a.id}">
@@ -288,9 +288,9 @@
                 <div class="rc-rec__meta">${metaBits}</div>
             </div>
             <div class="rc-task__acts">
-                ${a.status !== 'done' ? `<button class="rc-iconbtn" data-act="done" title="Виконано" aria-label="Позначити виконаним"><i class="fa-solid fa-check"></i></button>` : ''}
-                ${a.status !== 'open' ? `<button class="rc-iconbtn" data-act="open" title="Повернути у роботу" aria-label="Повернути у роботу"><i class="fa-solid fa-rotate-left"></i></button>` : ''}
-                ${a.status !== 'cancelled' ? `<button class="rc-iconbtn" data-act="cancelled" title="Знято з порядку денного" aria-label="Зняти задачу"><i class="fa-solid fa-xmark"></i></button>` : ''}
+                ${a.status !== 'done' ? `<button class="rc-iconbtn" data-act="done" title="${T('knowledge.tasks.act.done')}" aria-label="${T('knowledge.tasks.act.doneAria')}"><i class="fa-solid fa-check"></i></button>` : ''}
+                ${a.status !== 'open' ? `<button class="rc-iconbtn" data-act="open" title="${T('knowledge.tasks.act.reopen')}" aria-label="${T('knowledge.tasks.act.reopen')}"><i class="fa-solid fa-rotate-left"></i></button>` : ''}
+                ${a.status !== 'cancelled' ? `<button class="rc-iconbtn" data-act="cancelled" title="${T('knowledge.tasks.act.cancel')}" aria-label="${T('knowledge.tasks.act.cancelAria')}"><i class="fa-solid fa-xmark"></i></button>` : ''}
             </div>
         </div>`;
     }
@@ -312,7 +312,7 @@
                 const k = btn.dataset.more;
                 shown[k] = bucketLimit(k) + PAGE;
                 btn.disabled = true;
-                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Завантаження…';
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('knowledge.tasks.loading');
                 load(ctx);
             });
         });
@@ -323,7 +323,7 @@
                     const id = row.dataset.id, newStatus = btn.dataset.act;
                     try {
                         await R.api.setActionStatus(id, newStatus);
-                        UI.toast('Статус оновлено', 'success');
+                        UI.toast(T('knowledge.tasks.statusUpdated'), 'success');
                         load(ctx);
                         R.shell.loadCounts();
                     } catch (err) { UI.toast(err.message, 'error'); }
@@ -339,19 +339,19 @@
     //   3. дефолт + записи є → справді «все під контролем»
     function filterExplain() {
         const bits = [];
-        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
-        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
-        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(T('knowledge.filter.inCat', { path: p })); }
+        if (state.tags.length) bits.push(T('knowledge.filter.withTags', { tags: state.tags.join(', ') }));
+        if (state.since || state.until) bits.push(T('knowledge.filter.period', { from: state.since || '…', to: state.until || '…' }));
         if (!bits.length) return null;
-        return 'Немає задач ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період — і спробуйте ширше.';
+        return T('knowledge.tasks.explain', { bits: bits.join(' ') });
     }
 
     async function renderEmpty(ctx) {
         const narrowed = !!(state.category_id || state.tags.length || state.since || state.until || state.owner || (state.period && state.period !== 'all'));
         const nonDefaultStatus = state.status !== 'open';
         if (narrowed || nonDefaultStatus) {
-            listEl.innerHTML = UI.empty('Задач немає',
-                filterExplain() || 'Немає задач за цим фільтром — спробуйте розширити напрямок/період/власника або змінити статус.', 'fa-clipboard-check');
+            listEl.innerHTML = UI.empty(T('knowledge.tasks.none'),
+                filterExplain() || T('knowledge.tasks.noneFiltered'), 'fa-clipboard-check');
             return;
         }
         let hasRecords = true;
@@ -363,14 +363,14 @@
         if (!ctx.isCurrent()) return;
         if (!hasRecords) {
             const actions = [
-                { label: 'Завантажити аудіо', icon: 'fa-upload', href: '/upload', primary: true },
-                { label: 'Записати дзвінок', icon: 'fa-microphone', href: '/record' },
+                { label: T('knowledge.tasks.uploadAudio'), icon: 'fa-upload', href: '/upload', primary: true },
+                { label: T('knowledge.tasks.recordCall'), icon: 'fa-microphone', href: '/record' },
             ];
-            listEl.innerHTML = UI.empty('Архів ще порожній',
-                'Задачі зʼявляться тут автоматично, коли Claude обробить перші записи.', 'fa-box-open', actions);
+            listEl.innerHTML = UI.empty(T('knowledge.tasks.emptyArchive'),
+                T('knowledge.tasks.emptyArchiveHint'), 'fa-box-open', actions);
         } else {
-            listEl.innerHTML = UI.empty('Усе під контролем',
-                'Відкритих задач немає — усі виконані, зняті або застаріли.', 'fa-clipboard-check');
+            listEl.innerHTML = UI.empty(T('knowledge.tasks.allClear'),
+                T('knowledge.tasks.allClearHint'), 'fa-clipboard-check');
         }
     }
 

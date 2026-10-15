@@ -3,95 +3,95 @@ name: recall-video
 description: Use whenever the user wants to know what was ON SCREEN in a Recall recording — screen share, slides, code, 1C/Excel/browser forms — or wants frames, screenshots or a step-by-step from a call video. Works through the recall MCP tools video_analyze, get_visual_timeline, get_frame, get_frames_for_text, search_visual. Triggers — RU: посмотри видео записи, что было на экране, что он показывал, покажи что показывали, вытащи кадры, кадры из звонка, скриншоты из записи, разложи запись по кадрам, оцифруй видео, запись N посмотри видео, где на экране была форма, пошаговая инструкция по записи; UK: подивись відео запису, що було на екрані, що він показував, витягни кадри, кадри з дзвінка, скріншоти із запису, розклади запис по кадрах, оцифруй відео; EN: watch the recording video, what was on screen, what did he show, extract frames, frames from the call, screenshots from the recording, split recording into frames, digitize the video, step by step from the recording. Wrong keyboard layout variants are fine, e.g. rflhs (кадры), 'rhfy (экран).
 ---
 
-# Recall: що було на екрані
+# Recall: what was on the screen
 
-Recall записує не лише звук, а й екран. Ці тулзи дають **візуальну стрічку**:
-мінімальний набір кадрів (по одному на кожну зміну картинки, точність ~1 с),
-текст з екрана (OCR), і фрази транскрипту за той самий час.
+Recall records not only sound but also the screen. These tools give a **visual timeline**:
+a minimal set of frames (one per picture change, precision ~1 s),
+the text from the screen (OCR), and the transcript phrases for the same time.
 
-Відео є лише в **записах екрана Recall** (source_type `recording`). Завантажені
-файли і Telegram відео не мають — там `error_code: NO_VIDEO`.
+Video exists only in **Recall screen recordings** (source_type `recording`). Uploaded
+files and Telegram have no video — there it is `error_code: NO_VIDEO`.
 
-## Порядок роботи
+## Workflow
 
-1. **Знайди запис.** `search_archive` / `list_recent(source_type="recording")` /
-   номер від людини («запис #8564»).
-2. **Нарізка.** `video_analyze(id)` → `job_id` (або `ready: true`, якщо вже нарізано).
-   Чекай через `get_job_status(job_id)`: `meta.progress.stage` frames → ocr → done.
-   2 год запису ≈ 2 хв нарізки + кілька хвилин OCR. Не викликай повторно з іншими
-   параметрами без причини — це перерахунок.
-3. **Стрічка текстом.** `get_visual_timeline(id, limit=30)` — сторінками через
-   `next_offset`, або вузьким вікном `from_sec`/`to_sec`. Читай `ocr_text`,
-   `frame_type`, `transcript`. `format="markdown"` — якщо треба віддати людині.
-4. **Кадри очима — лише для ключових моментів.** `get_frame(id, t=frame_time)`
-   або пачкою `get_frame(id, from_sec=…, to_sec=…, limit=6)`. `size="full"` — коли
-   треба прочитати дрібний текст, інакше `thumb`.
-5. **Висновок** спирай і на текст, і на кадри, з таймкодами `ГГ:ХХ:СС`.
+1. **Find the recording.** `search_archive` / `list_recent(source_type="recording")` /
+   a number from the person («recording #8564»).
+2. **Slicing.** `video_analyze(id)` → `job_id` (or `ready: true` if already sliced).
+   Wait via `get_job_status(job_id)`: `meta.progress.stage` frames → ocr → done.
+   A 2-hour recording ≈ 2 min of slicing + a few minutes of OCR. Do not call it again with other
+   parameters without a reason — that is a recalculation.
+3. **The timeline as text.** `get_visual_timeline(id, limit=30)` — page by page via
+   `next_offset`, or a narrow window `from_sec`/`to_sec`. Read `ocr_text`,
+   `frame_type`, `transcript`. `format="markdown"` — if you need to hand it to the person.
+4. **Frames by eye — only for key moments.** `get_frame(id, t=frame_time)`
+   or a batch `get_frame(id, from_sec=…, to_sec=…, limit=6)`. `size="full"` — when
+   you need to read small text, otherwise `thumb`.
+5. **Base the conclusion** on both the text and the frames, with `HH:MM:SS` timecodes.
 
-Інші входи:
-- «Що було на екрані, коли сказали X» → `get_frames_for_text(id, query="X")` →
+Other entry points:
+- «What was on the screen when X was said» → `get_frames_for_text(id, query="X")` →
   `get_frame(id, t=…)`.
-- «Де/коли показували форму Y» по всьому архіву → `search_visual("Y")` → `get_frame`.
-- Те саме видно в `search_archive` / `ask_archive`: джерело «кадр ГГ:ХХ:СС», спікер «екран».
+- «Where/when was form Y shown» across the whole archive → `search_visual("Y")` → `get_frame`.
+- The same is visible in `search_archive` / `ask_archive`: the source is «frame HH:MM:SS», the speaker is «screen».
 
-## Економія контексту
+## Saving context
 
-- Не тягни всі кадри: 2 години — це сотні кадрів. Спершу текстова стрічка, потім
-  3–10 картинок у ключових місцях.
-- `duplicate_of` — той самий екран уже був, його картинку не бери вдруге.
-- `camera_only` і `blank` за замовчуванням сховані (`include_camera=true` — показати).
+- Do not pull all the frames: 2 hours means hundreds of frames. First the text timeline, then
+  3–10 pictures at the key places.
+- `duplicate_of` — the same screen was already there, do not take its picture a second time.
+- `camera_only` and `blank` are hidden by default (`include_camera=true` — show them).
 
-## Опис кадрів (дорого — лише на прохання)
+## Frame descriptions (expensive — only on request)
 
-`video_analyze(id, describe=True)` додає опис кожного кадру vision-моделлю. Це
-секунди на кадр, тобто десятки хвилин на довгий запис. Дефолтно сам крок опису
-робить локальна модель. `vision_backend="claude"` шле кадри в Anthropic ще й на
-крок опису і коштує грошей — лише якщо людина прямо попросила. Тулзи читання опис
-**не генерують**: є — віддають, нема — `description: null`.
+`video_analyze(id, describe=True)` adds a vision-model description of each frame. It is
+seconds per frame, i.e. tens of minutes for a long recording. By default the description
+step itself is done by a local model. `vision_backend="claude"` also sends the frames to Anthropic for
+the description step and costs money — only if the person asked for it directly. The reading tools do not
+**generate** descriptions: if there is one, they return it; if not, `description: null`.
 
-**Куди йдуть дані.** Усе, що ти отримуєш від цих тулз — текст з екрана, описи,
-кадри з `get_frame`, — вже у твоєму контексті, тобто в Anthropic. «Локально»
-стосується лише кроку генерації опису. Тому не тягни кадри й OCR без потреби, а
-якщо людина каже, що запис чутливий, — питай, перш ніж відкривати кадри.
+**Where the data goes.** Everything you get from these tools — screen text, descriptions,
+frames from `get_frame` — is already in your context, i.e. at Anthropic. «Locally»
+applies only to the description-generation step. So do not pull frames and OCR without need, and
+if the person says the recording is sensitive — ask before opening frames.
 
-## Приватне не віддається
+## Private is not given out
 
-`error_code: PRIVATE` — запис у приватному напрямку (за замовчуванням «Юридичне», «Особисте»):
-його кадрів і тексту з екрана через MCP немає. `MCP_VISUAL_OFF` / `MCP_VISUAL_TEXT_ONLY` —
-власник вимкнув візуальне чи лише кадри (`RECALL_MCP_VISUAL`). `private_hidden: N` — N
-відрізків/кадрів прибрано за стоп-словами. Не обходь фільтр (інші тулзи, інші вікна, `t`
-поруч) — скажи людині, що це видно лише в самому Recall.
+`error_code: PRIVATE` — the recording is in a private direction (by default `Юридичне`, `Особисте`):
+its frames and screen text are not available through MCP. `MCP_VISUAL_OFF` / `MCP_VISUAL_TEXT_ONLY` —
+the owner turned off visuals, or only frames (`RECALL_MCP_VISUAL`). `private_hidden: N` — N
+segments/frames were removed by stop-words. Do not bypass the filter (other tools, other windows, `t`
+nearby) — tell the person that this is visible only in Recall itself.
 
-## Секрети з екрана
+## Secrets from the screen
 
-Паролі, токени, ключі з екрана в тексті показані як `[🔒 секрет]`, на кадрах —
-чорні прямокутники. Сирих значень через MCP немає і не буде. Якщо людині потрібне
-значення — скажи, що його можна отримати лише самій у своєму терміналі:
-`.venv/Scripts/python.exe -m app.services.screen_secrets reveal <id>` (пише у файл,
-не в консоль). Не намагайся запускати це сам — без інтерактивного терміналу скрипт
-відмовить, і так задумано.
+Passwords, tokens and keys from the screen are shown in text as `[🔒 секрет]` and as
+black rectangles on frames. The raw values are not available through MCP and never will be. If the person needs
+the value — say that only they can get it themselves in their own terminal:
+`.venv/Scripts/python.exe -m app.services.screen_secrets reveal <id>` (writes to a file,
+not to the console). Do not try to run it yourself — without an interactive terminal the script
+refuses, and that is by design.
 
-## Шаблони підсумків
+## Summary templates
 
-**Покрокова інструкція за записом**
+**Step-by-step instruction from a recording**
 ```
-## <що робимо> — запис #N (дата)
-1. ГГ:ХХ:СС — <дія> (екран: <вікно/форма>, кадр: t=…) — «<що сказали>»
+## <what we do> — recording #N (date)
+1. HH:MM:SS — <action> (screen: <window/form>, frame: t=…) — «<what was said>»
 2. …
-Обмеження: зміни коротші ~1 с і зміни в зонах, виключених з порівняння, могли не потрапити.
+Limitation: changes shorter than ~1 s and changes in zones excluded from comparison may not have made it in.
 ```
 
-**Протокол зустрічі з візуальними доказами**
+**Meeting protocol with visual evidence**
 ```
-## Протокол — запис #N
-- Рішення: … — показували: <OCR-уривок> (ГГ:ХХ:СС)
-- Задачі: … — на екрані: …
-```
-
-**Пошук моменту, де показували X**
-```
-X показували в записі #N о ГГ:ХХ:СС (<тип кадру>): «<уривок з екрана>».
-Тоді говорили: «…». Кадр: get_frame(N, t=…)
+## Protocol — recording #N
+- Decision: … — shown: <OCR excerpt> (HH:MM:SS)
+- Tasks: … — on screen: …
 ```
 
-Якщо кадр не підтверджує текст (OCR помилився) — кажи про це прямо, не домислюй.
+**Finding the moment when X was shown**
+```
+X was shown in recording #N at HH:MM:SS (<frame type>): «<excerpt from the screen>».
+At that time they said: «…». Frame: get_frame(N, t=…)
+```
+
+If a frame does not confirm the text (OCR was wrong) — say so directly, do not guess.

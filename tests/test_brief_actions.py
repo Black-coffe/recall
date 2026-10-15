@@ -195,3 +195,30 @@ def test_queued_presses_on_same_task_show_latest_with_working_undo(db):
     assert _status(db, 11)[0] == "cancelled" and row[0]["text"].startswith("1 🚫")
     ba.handle(_cq(row[1]["callback_data"]), db_path=db, transport=f)
     assert _status(db, 11)[0] == "done" and _rows(f)[0] == ba.task_row(1, 11)
+
+
+# --- english-i18n-08: кнопки й відповіді мовою налаштування ----------------------
+
+def test_en_foreign_chat_refused_in_english(db, monkeypatch):
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    f = Fake()
+    assert ba.handle(_cq("a:1:11:done", chat="999"), db_path=db, transport=f) == "No access"
+    assert f.of("answerCallbackQuery")[0]["text"] == "No access"
+    assert _status(db, 11)[0] == "open"
+
+
+def test_en_row_after_done_and_postpone_labels(db, monkeypatch):
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    f = Fake()
+    reply = ba.handle(_cq("a:2:12:done"), db_path=db, transport=f)
+    assert reply == "✅ done" and _status(db, 12)[0] == "done"
+    row = _rows(f)[1]
+    assert row[0]["text"] == "2 ✅ done" and row[1]["text"] == "↩ undo"
+    assert row[0]["callback_data"] == "x" and row[1]["callback_data"].startswith("u:2:")
+    labels = [b["text"] for b in ba.postpone_row(1, 11)]
+    assert labels[:3] == ["1 tomorrow", "+week", "+month"]
+    assert all(len(b["text"].encode()) <= 64 for b in ba.postpone_row(1, 11))
+    # callback_data однакові в обох мовах
+    monkeypatch.setenv("RECALL_UI_LANG", "uk")
+    assert [b["callback_data"] for b in ba.postpone_row(1, 11)] == [
+        b["callback_data"] for b in ba.postpone_row(1, 11, "en")]

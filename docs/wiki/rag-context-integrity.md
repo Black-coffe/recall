@@ -17,7 +17,7 @@ occupied real top-k slots with identical text. Wave B (17.09.2026, spec
 **A duplicate record stays in the archive but never in search.**
 `transcriptions.duplicate_of` (migration v40, `app/db/migrations.py`) points a
 copy at its original; the record is never deleted and keeps its own comments,
-file and tasks (UI shows "дубль #N", `static/js/recall/views/library.js`).
+file and tasks (UI shows "duplicate #N", `static/js/recall/views/library.js`).
 `app.services.dedup_audio.hash_for(source_type, text)` computes the dedup key
 only for `file`/`youtube`/`recording` — Telegram and documents have their own
 dedup and are deliberately excluded. `find_original(conn, content_hash_value,
@@ -85,7 +85,7 @@ surface.
 **The chunk's context prefix goes into the vector and into BM25, never into a
 citation.** `app.services.embeddings.build_context_prefix(meta, chunk)` builds a header of
 up to four lines from database fields alone: line 1 — type, title/chat, date,
-speaker/author, the "Напрямок → Проєкт" path, and a thread-label/page tail; then
+speaker/author, the "Direction → Project" path, and a thread-label/page tail; then
 an optional `теги: a, b, c` line (up to 5 tag names by `name_norm`, whole line
 capped at 60 chars, truncated on a whole tag boundary); then an optional
 `опис: …` line carrying the owner's own `transcriptions.description` (flattened
@@ -194,7 +194,7 @@ un-migrated DB is handled by dropping input lists by their `comment_*` label,
 not by slicing the list positionally — a positional slice would also drop
 rewrite-variant lists that got appended earlier in the same call.
 
-See `memory/map/services.md` (RAG section, Дедуп section) for current line-level
+See `memory/map/services.md` (RAG section, Deduplication section) for current line-level
 detail and `docs/wiki/entity-graph-provenance.md` for the sibling rule that a
 single mention can only ever belong to one graph entity — the same "one truth
 owns the slot" shape as duplicate exclusion here.

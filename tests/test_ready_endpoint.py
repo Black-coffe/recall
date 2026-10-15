@@ -80,7 +80,7 @@ class TestReadyEndpoint:
         data = r.get_json()
         assert data['ready'] is False
         assert data['checks'] == {}
-        assert data['error'] == 'робота not initialised'
+        assert data['error'] == 'ready-state not initialised'
 
     def test_pending_state_is_503(self, client, monkeypatch):
         """Дефолтні pending/False значення → не готово, 503."""

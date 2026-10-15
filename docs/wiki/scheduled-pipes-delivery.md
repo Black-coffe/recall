@@ -9,7 +9,7 @@ last-verified: 2026-10-15
 
 A pipe is `pipes/<name>.md` (frontmatter + prompt). `app/services/pipes.py` runs it on a cron and sends the result through `app/services/tg_bot.py` to `TELEGRAM_BOT_CHAT_ID` only. The Bot API is not end-to-end encrypted, so the bot is a third-party channel and the privacy filter is mandatory.
 
-Brief format (K5, 4.14.0): the message is composed by code in `app/services/pipes_cards.py`, not by the model. It is HTML (`parse_mode=HTML`, tags `b`, `i`, `a` only). Tasks are grouped into blocks by root direction (top of the `categories.parent_id` tree), at most 5 cards per block and a "ще N →" link to `/tasks?category_id=` for the rest. A card is what, who, due, source, linked to `/transcript/<id>?task=<task id>` (the page scrolls to and highlights the task). Claude writes only 1-2 plain lines of "headline" (`clean_headline` strips markdown). Links use `RECALL_PUBLIC_URL` (phone-reachable, e.g. a `tailscale serve` address), falling back to `RECALL_API_URL`. Blocks are separated by blank lines and `tg_bot.split_text` splits only there, so no part breaks a tag.
+Brief format (K5, 4.14.0): the message is composed by code in `app/services/pipes_cards.py`, not by the model. It is HTML (`parse_mode=HTML`, tags `b`, `i`, `a` only). Tasks are grouped into blocks by root direction (top of the `categories.parent_id` tree), at most 5 cards per block and a "N more →" link to `/tasks?category_id=` for the rest. A card is what, who, due, source, linked to `/transcript/<id>?task=<task id>` (the page scrolls to and highlights the task). Claude writes only 1-2 plain lines of "headline" (`clean_headline` strips markdown). Links use `RECALL_PUBLIC_URL` (phone-reachable, e.g. a `tailscale serve` address), falling back to `RECALL_API_URL`. Blocks are separated by blank lines and `tg_bot.split_text` splits only there, so no part breaks a tag.
 
 Invariants:
 - Data functions are a closed read-only registry (`pipes.TOOLS`). A pipe naming anything else does not load. No write tool and no arbitrary MCP tool is reachable.
@@ -24,7 +24,7 @@ Invariants:
 - Opening the links from a phone goes through `tailscale serve`, which presents the request as 127.0.0.1. `app/core/auth.py` treats a localhost request carrying `X-Forwarded-For` or `Tailscale-User-Login` as proxied: it passes only if the single XFF address is in `RECALL_PROXY_ALLOWED_IPS` or a valid `RECALL_API_KEY` is sent; otherwise 401.
 
 Task buttons (K5, 4.15.0): tasks in a brief are numbered and the message carries an inline keyboard (done / cancelled / postpone 1, 7, 30 days, undo). Presses arrive by `getUpdates` long-polling (`brief_actions.ButtonPoller`, `callback_query` only), not a webhook: Recall has no public address. A press made while the PC sleeps waits up to 24 h at Telegram and applies on wake; the brief footer says so.
-- A press is accepted only from `TELEGRAM_BOT_CHAT_ID`; any other chat gets "Немає доступу" and changes nothing.
+- A press is accepted only from `TELEGRAM_BOT_CHAT_ID`; any other chat gets "No access" and changes nothing.
 - Status and due date change only through `commitments.apply_action` / `undo_action` (bot and web `PATCH /api/memory/action-items/<id>`), which write the change and its `action_item_events` row in one transaction. Undo reverts only the latest event of a task. MCP stays read-only; the pipe registry stays read-only.
 - `tg_bot.whoami` sets `allowed_updates` explicitly because Telegram remembers the poller's `callback_query`-only filter.
 

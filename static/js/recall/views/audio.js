@@ -8,34 +8,34 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
     const PER_PAGE = 20;
     const DEFAULT_MODEL = 'large-v3-turbo';
 
     const SOURCES = [
-        { k: '', label: 'Усі', c: 'all' },
+        { k: '', label: T('library.aud.src.all'), c: 'all' },
         { k: 'youtube', label: 'YouTube', c: 'youtube' },
-        { k: 'recording', label: 'Запис', c: 'recording' },
-        { k: 'file', label: 'Файл', c: 'file' },
+        { k: 'recording', label: T('library.aud.src.recording'), c: 'recording' },
+        { k: 'file', label: T('library.aud.src.file'), c: 'file' },
     ];
     const LANGS = [
-        { v: 'auto', l: 'Авто-визначення' }, { v: 'uk', l: 'Українська' },
-        { v: 'en', l: 'English' }, { v: 'ru', l: 'Русский' },
+        { v: 'auto', l: T('library.aud.lang.auto') }, { v: 'uk', l: T('library.aud.lang.uk') },
+        { v: 'en', l: T('library.aud.lang.en') }, { v: 'ru', l: T('library.aud.lang.ru') },
     ];
 
     // C9: спільна для екрана підказка + пояснення порожньої видачі (той самий
     // текст, що й у library.js — дублюємо навмисно, спільний компонент фільтр-
     // бару поза 09 не збираємо).
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
-        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+    const FILTER_HINT = T('library.filterHint');
 
     function filterExplain(st) {
         if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
         const bits = [];
-        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push('у «' + p + '»'); }
-        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
-        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push(T('library.lib.explain.in', { path: p })); }
+        if (st.tags.length) bits.push(T('library.lib.explain.tags', { tags: st.tags.join(', ') }));
+        if (st.since || st.until) bits.push(T('library.lib.explain.period', { from: st.since || '…', to: st.until || '…' }));
         if (!bits.length) return null;
-        return 'Нічого не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період фільтра.';
+        return T('library.aud.explain.none', { bits: bits.join(' ') });
     }
 
     let listEl = null, state = null, _models = null, cats = null;
@@ -78,22 +78,22 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-solid fa-compact-disc"></i> Архів · Медіа</div>
-                <h1 class="rc-pagehead__title">Медіатека</h1>
-                <p class="rc-pagehead__lede">Завантажене аудіо, відеозаписи та збережені записи. Прослухайте у системному плеєрі, транскрибуйте у текст (піде в Історію) або відкрийте наявний транскрипт.</p>
+                <div class="rc-eyebrow"><i class="fa-solid fa-compact-disc"></i> ${T('library.aud.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${T('library.aud.title')}</h1>
+                <p class="rc-pagehead__lede">${T('library.aud.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
-                    <input id="rcAudSearch" type="search" placeholder="Пошук за назвою або автором…" value="${U.esc(state.search)}">
+                    <input id="rcAudSearch" type="search" placeholder="${U.esc(T('library.aud.searchPh'))}" value="${U.esc(state.search)}">
                 </div>
                 <select class="rc-select rc-catsel" id="rcAudCat" data-cat-first="all">${catOpts}</select>
             </div>
             <div class="rc-filterbar" id="rcAudSources"></div>
             <div class="rc-toolbar" id="rcAudTagPeriod">
                 <div id="rcAudTagsWrap">${tagSel}</div>
-                <input type="date" class="rc-input rc-select--sm" id="rcAudSince" value="${U.esc(state.since)}" title="Записи з дати">
-                <input type="date" class="rc-input rc-select--sm" id="rcAudUntil" value="${U.esc(state.until)}" title="Записи по дату">
+                <input type="date" class="rc-input rc-select--sm" id="rcAudSince" value="${U.esc(state.since)}" title="${U.esc(T('library.lib.sinceTitle'))}">
+                <input type="date" class="rc-input rc-select--sm" id="rcAudUntil" value="${U.esc(state.until)}" title="${U.esc(T('library.lib.untilTitle'))}">
             </div>
             <div id="rcAudHint"></div>
             <div class="rc-list" id="rcAudList"></div>
@@ -113,7 +113,7 @@
         catSel.addEventListener('change', () => { state.category_id = catSel.value; state.page = 1; sync(); load(ctx); });
 
         const tagSelEl = ctx.mount.querySelector('#rcAudTagsWrap select');
-        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', T('library.lib.tagsAria')); tagSelEl.title = T('library.lib.tagsTitle'); }
         if (tagSelEl) tagSelEl.addEventListener('change', () => {
             state.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
             state.page = 1; sync(); load(ctx);
@@ -159,7 +159,7 @@
         const trChip = un || state.transcribed === '0'
             ? `<span class="rc-filterbar__sep" aria-hidden="true"></span>
                <button class="rc-chip${state.transcribed === '0' ? ' is-active' : ''}" data-tr="1"
-                       title="Показати лише те, що ще не перетворене на текст">Без транскрипта <span class="rc-chip__n">${un}</span></button>`
+                       title="${U.esc(T('library.aud.noTranscriptTitle'))}">${T('library.aud.noTranscript')} <span class="rc-chip__n">${un}</span></button>`
             : '';
         sb.innerHTML = src + trChip;
     }
@@ -186,12 +186,12 @@
             if (!rows.length) {
                 const explain = filterExplain(state);
                 if (state.transcribed === '0') {
-                    listEl.innerHTML = UI.empty('Усе транскрибовано',
-                        explain ? 'У цьому зрізі не лишилось файлів без тексту. ' + explain
-                                : 'У цьому зрізі не лишилось файлів без тексту.', 'fa-circle-check');
+                    listEl.innerHTML = UI.empty(T('library.aud.empty.doneTitle'),
+                        explain ? T('library.aud.empty.doneBody') + ' ' + explain
+                                : T('library.aud.empty.doneBody'), 'fa-circle-check');
                 } else {
-                    listEl.innerHTML = UI.empty('Медіатека порожня',
-                        explain || (state.search || state.source_type ? 'Спробуйте змінити фільтр чи пошук.' : 'Завантажте аудіо з YouTube або зробіть запис — і воно зʼявиться тут.'),
+                    listEl.innerHTML = UI.empty(T('library.aud.empty.title'),
+                        explain || (state.search || state.source_type ? T('library.aud.empty.change') : T('library.aud.empty.add')),
                         'fa-compact-disc');
                 }
                 return;
@@ -253,12 +253,12 @@
         if (!row) return;
         const actions = row.querySelector('.rc-aud__actions');
         if (!actions) return;
-        const stage = entry && entry.stage === 'diarizing' ? 'Розпізнаю голоси…' : 'Транскрибується…';
+        const stage = entry && entry.stage === 'diarizing' ? T('library.aud.stage.diarizing') : T('library.aud.stage.transcribing');
         let pill = actions.querySelector('[data-act="tr-status"]');
         if (pill) { pill.querySelector('.rc-tr-stage').textContent = stage; return; }
         // замінюємо «Транскрибувати» / «Транскрипт» на нерухомий статус-pill
         const btn = actions.querySelector('[data-act="transcribe"]') || actions.querySelector('[data-act="open-tr"]');
-        const pillHTML = `<span class="rc-btn rc-btn--sm is-transcribing" data-act="tr-status" title="Транскрипція триває у фоні"><i class="fa-solid fa-spinner fa-spin"></i> <span class="rc-tr-stage">${stage}</span></span>`;
+        const pillHTML = `<span class="rc-btn rc-btn--sm is-transcribing" data-act="tr-status" title="${U.esc(T('library.aud.statusTitle'))}"><i class="fa-solid fa-spinner fa-spin"></i> <span class="rc-tr-stage">${stage}</span></span>`;
         if (btn) btn.outerHTML = pillHTML;
         else actions.insertAdjacentHTML('afterbegin', pillHTML);
     }
@@ -276,14 +276,14 @@
         // бейджем ЗАПИС — дослівний повтор без жодної інформації.
         const meta = [
             UI.srcBadge(st),
-            d.has_video ? `<span class="rc-vidbadge">&#x1F4F9; Відео</span>` : '',
+            d.has_video ? `<span class="rc-vidbadge">&#x1F4F9; ${T('library.aud.video')}</span>` : '',
             dur ? `<span class="rc-rec__sig">${U.fmtDuration(dur)}</span>` : '',
             // `author` осмислений лише для YouTube (канал). Для локальних
             // записів у БД лежить літерал «Локальний запис» — дослівний повтор
             // бейджа ЗАПИС поруч, тобто нуль інформації на кожному рядку.
             (st === 'youtube' && d.author) ? `<span>${U.esc(d.author)}</span>` : '',
             `<span>${U.fmtDate(d.created_at)}</span>`,
-            d.transcription_id ? '' : `<span class="rc-rec__warn">без транскрипта</span>`,
+            d.transcription_id ? '' : `<span class="rc-rec__warn">${T('library.aud.noTranscriptBadge')}</span>`,
             state && state.category_id ? '' : UI.catChip(d.category_id),
         ].filter(Boolean).join('<span class="sep">·</span>');
         // d.tags — таксономічні теги (C4, з привʼязаного транскрипту), НЕ
@@ -293,27 +293,27 @@
             ? `<div class="rc-tags" style="margin-top:6px">${tags.map(tg => `<span class="rc-tag"${tg.color ? ` style="border-color:${U.esc(tg.color)}"` : ''}>${U.esc(tg.name)}</span>`).join('')}</div>`
             : '';
         const tr = d.transcription_id
-            ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> Транскрипт</button>`
-            : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> Транскрибувати</button>`;
+            ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> ${T('library.aud.transcript')}</button>`
+            : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.aud.transcribe')}</button>`;
         // Запис без власної назви, але з транскриптом — локальна модель пропонує
         // варіанти. Без транскрипту пропозиція прийде сама після транскрибації.
         const name = d.transcription_id && UI.isUnnamedRecording(d)
-            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" title="Локальна модель запропонує назву й опис"><i class="fa-solid fa-wand-magic-sparkles"></i> Запропонувати назву</button>`
+            ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" title="${U.esc(T('library.aud.suggestTitle'))}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.aud.suggest')}</button>`
             : '';
         return `<div class="rc-aud" data-id="${d.id}">
             <span class="rc-rec__rail">${thumb}</span>
             <div class="rc-rec__body">
-                <div class="rc-rec__title">${U.esc(d.title || ('Аудіо #' + d.id))}</div>
+                <div class="rc-rec__title">${U.esc(d.title || T('library.aud.fallback', { id: d.id }))}</div>
                 <div class="rc-rec__meta">${meta}</div>
                 ${tagsHTML}
                 <div class="rc-aud__run" hidden></div>
             </div>
             <div class="rc-aud__actions">
                 ${name}${tr}
-                <button class="rc-iconbtn" data-act="play" title="Відтворити у системному плеєрі" aria-label="Відтворити"><i class="fa-solid fa-play"></i></button>
-                <button class="rc-iconbtn" data-act="explorer" title="Показати у Провіднику" aria-label="Показати у Провіднику"><i class="fa-solid fa-folder-open"></i></button>
-                <button class="rc-iconbtn" data-act="edit" title="Редагувати назву й опис" aria-label="Редагувати назву й опис"><i class="fa-solid fa-pen"></i></button>
-                <button class="rc-iconbtn rc-rec__del" data-act="delete" title="Видалити файл" aria-label="Видалити файл"><i class="fa-solid fa-trash"></i></button>
+                <button class="rc-iconbtn" data-act="play" title="${U.esc(T('library.aud.play'))}" aria-label="${U.esc(T('library.aud.playAria'))}"><i class="fa-solid fa-play"></i></button>
+                <button class="rc-iconbtn" data-act="explorer" title="${U.esc(T('library.aud.explorer'))}" aria-label="${U.esc(T('library.aud.explorer'))}"><i class="fa-solid fa-folder-open"></i></button>
+                <button class="rc-iconbtn" data-act="edit" title="${U.esc(T('library.lib.editMeta'))}" aria-label="${U.esc(T('library.lib.editMeta'))}"><i class="fa-solid fa-pen"></i></button>
+                <button class="rc-iconbtn rc-rec__del" data-act="delete" title="${U.esc(T('library.aud.deleteFile'))}" aria-label="${U.esc(T('library.aud.deleteFile'))}"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>`;
     }
@@ -330,21 +330,21 @@
         if (trBtn) trBtn.addEventListener('click', () => openTranscribePanel(ctx, row, d));
 
         act('play').addEventListener('click', async () => {
-            try { await R.api.audioPlay(d.id); UI.toast('Відтворення у системному плеєрі', 'info'); }
-            catch (e) { UI.toast(e.message || 'Не вдалося відтворити', 'error'); }
+            try { await R.api.audioPlay(d.id); UI.toast(T('library.aud.playing'), 'info'); }
+            catch (e) { UI.toast(e.message || T('library.aud.playFail'), 'error'); }
         });
         act('explorer').addEventListener('click', async () => {
             try { await R.api.audioExplorer(d.id); }
-            catch (e) { UI.toast(e.message || 'Не вдалося відкрити Провідник', 'error'); }
+            catch (e) { UI.toast(e.message || T('library.aud.explorerFail'), 'error'); }
         });
         act('edit').addEventListener('click', () => openAudioMeta(ctx, d, { autoSuggest: false }));
         const sugBtn = act('suggest');
         if (sugBtn) sugBtn.addEventListener('click', () => openAudioMeta(ctx, d, { autoSuggest: true }));
         act('delete').addEventListener('click', async () => {
             const ok = await UI.confirmModal({
-                title: 'Видалити з медіатеки',
-                message: `Видалити «${d.title || ('#' + d.id)}» з диска? Це часто єдина копія файлу — вона одразу приховається; протягом короткого часу можна відновити (сповіщення знизу).`,
-                confirmLabel: 'Видалити',
+                title: T('library.aud.del.title'),
+                message: T('library.aud.del.message', { title: d.title || ('#' + d.id) }),
+                confirmLabel: T('library.aud.del.confirm'),
             });
             if (!ok) return;
             row.style.opacity = '0.4';
@@ -354,17 +354,17 @@
                 const res = await R.api.audioDelete(d.id);
                 const delId = (res && res.id) || d.id;
                 row.remove();
-                UI.actionToast('Аудіо видалено', 'Скасувати', async () => {
+                UI.actionToast(T('library.aud.del.done'), T('library.aud.del.undo'), async () => {
                     try {
                         await R.api.post(`/api/audio/downloads/${delId}/restore`);
-                        UI.toast('Аудіо відновлено', 'success');
+                        UI.toast(T('library.aud.del.restored'), 'success');
                         load(ctx);
-                    } catch (e) { UI.toast((e && e.message) || 'Не вдалося відновити', 'error'); }
+                    } catch (e) { UI.toast((e && e.message) || T('library.aud.del.restoreFail'), 'error'); }
                 });
             } catch (e) {
                 row.style.opacity = '';
                 row.querySelectorAll('button').forEach(b => b.disabled = false);
-                UI.toast(e.message || 'Не вдалося видалити', 'error');
+                UI.toast(e.message || T('library.aud.del.fail'), 'error');
             }
         });
     }
@@ -392,7 +392,7 @@
         });
         if (!res) return;
         if (ctx.isCurrent()) load(ctx);
-        UI.toast('Збережено', 'success');
+        UI.toast(T('library.aud.saved'), 'success');
     }
 
     // Після транскрибації запису без назви: чекаємо саммарі Claude (enrichment
@@ -434,7 +434,7 @@
 
     function openTranscribePanel(ctx, row, d) {
         if (activeIds.has(d.id) || pendingIds.has(d.id)) {
-            UI.toast('Цей запис уже транскрибується', 'info');
+            UI.toast(T('library.aud.alreadyRunning'), 'info');
             return;
         }
         const run = row.querySelector('.rc-aud__run');
@@ -447,8 +447,8 @@
         run.innerHTML = `<div class="rc-aud__tr">
             <select class="rc-select rc-select--sm" data-tr="model">${modelOpts}</select>
             <select class="rc-select rc-select--sm" data-tr="lang">${langO}</select>
-            <button class="rc-btn rc-btn--primary rc-btn--sm" data-tr="go">Транскрибувати</button>
-            <button class="rc-btn rc-btn--sm" data-tr="cancel">Скасувати</button>
+            <button class="rc-btn rc-btn--primary rc-btn--sm" data-tr="go">${T('library.aud.transcribe')}</button>
+            <button class="rc-btn rc-btn--sm" data-tr="cancel">${T('library.aud.cancel')}</button>
         </div>`;
         run.querySelector('[data-tr="cancel"]').addEventListener('click', () => { run.hidden = true; run.innerHTML = ''; });
         run.querySelector('[data-tr="go"]').addEventListener('click', () => {
@@ -470,7 +470,7 @@
         pendingIds.add(d.id);
         run.hidden = true; run.innerHTML = '';
         markRowTranscribing(d.id, null);   // миттєвий pill; реальну стадію дасть поллінг
-        UI.toast('Транскрибую «' + (d.title || '') + '» у фоні — статус видно тут', 'info');
+        UI.toast(T('library.aud.bgToast', { title: d.title || '' }), 'info');
 
         const fd = new FormData();
         fd.append('source_type', 'library');
@@ -480,10 +480,10 @@
 
         const wantName = UI.isUnnamedRecording(d);
         R.api.transcribe(fd).then((res) => {
-            UI.toast('Транскрипцію «' + (d.title || '') + '» збережено', 'success');
+            UI.toast(T('library.aud.trSaved', { title: d.title || '' }), 'success');
             if (wantName) autoSuggestAfterTranscribe(ctx, d, res && res.transcription_id);
         }).catch((err) => {
-            UI.toast((err && err.message) || 'Не вдалося транскрибувати «' + (d.title || '') + '»', 'error');
+            UI.toast((err && err.message) || T('library.aud.trFail', { title: d.title || '' }), 'error');
         }).finally(() => {
             pendingIds.delete(d.id);
             // якщо сервер так і не підхопив задачу (activeIds її не бачив) —
@@ -494,10 +494,10 @@
 
     function pagerHTML(d) {
         const total = d.total_pages || 1, page = d.page || 1;
-        if (total <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${d.total || 0} файлів</span></div>`;
+        if (total <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${T('library.aud.pager.total', { count: d.total || 0, num: R.i18n.num(d.total || 0) })}</span></div>`;
         const prev = page > 1 ? `<button class="rc-btn rc-btn--sm" data-page="${page - 1}"><i class="fa-solid fa-chevron-left"></i></button>` : '';
         const next = page < total ? `<button class="rc-btn rc-btn--sm" data-page="${page + 1}"><i class="fa-solid fa-chevron-right"></i></button>` : '';
-        return `<div class="rc-pager">${prev}<span class="rc-pager__info">стор. ${page} / ${total} · ${d.total} файлів</span>${next}</div>`;
+        return `<div class="rc-pager">${prev}<span class="rc-pager__info">${T('library.aud.pager.page', { page: R.i18n.num(page), pages: R.i18n.num(total), total: T('library.aud.pager.total', { count: d.total, num: R.i18n.num(d.total) }) })}</span>${next}</div>`;
     }
 
     R.views.audio = {

@@ -8,21 +8,21 @@
 
 From `docs/specs/production-rag-wave-a/plan.md`, `## Contracts` (ask_log):
 
-> Вартість у `ask_log` рахується за таблицею цін у коді (Opus 5 $5/$25, Sonnet 5 $2/$10,
-> Haiku 4.5 $1/$5 за MTok, кеш-читання 0.1× input; F8 гриля); невідома модель → NULL.
+> The cost in `ask_log` is computed from the price table in code (Opus 5 $5/$25, Sonnet 5 $2/$10,
+> Haiku 4.5 $1/$5 per MTok, cache read 0.1× input; grill F8); unknown model → NULL.
 
 And from the repair-wave delta after round-1 review (review #9):
 
-> Тариф Sonnet 5 (review #9): вартість у `ask_log` рахує `app/services/pricing.py`
-> ($3/$15 за MTok), не таблиця $2/$10 з Assumptions; таблицю в `rag.py` не дублювали
-> свідомо (T6.2).
+> Sonnet 5 rate (review #9): the cost in `ask_log` is computed by `app/services/pricing.py`
+> ($3/$15 per MTok), not the $2/$10 table from Assumptions; the table in `rag.py` was deliberately
+> not duplicated (T6.2).
 
 And from story `production-rag-wave-a-04` (`## Implementation notes`):
 
-> Ціни не дублював у `rag.py` (відхилення від букви контракту): взяв
-> `app/services/pricing.py` — він існує саме тому, що дубльована таблиця тарифів колись
-> рахувала за ціною чужої моделі (T6.2). `_ask_cost` додає лише контрактну поведінку
-> «модель поза таблицею → NULL» (замість фолбеку pricing на дефолтний тариф).
+> I did not duplicate the prices in `rag.py` (a deviation from the letter of the contract): I took
+> `app/services/pricing.py` — it exists precisely because a duplicated rate table once
+> computed at the price of another model (T6.2). `_ask_cost` adds only the contractual behavior
+> "model outside the table → NULL" (instead of pricing's fallback to the default rate).
 
 `app/services/pricing.py:estimate_cost` itself falls back to `DEFAULT_PRICE_MODEL`'s price
 for any model not in `MODEL_PRICES` - a defensible choice for its original callers, who

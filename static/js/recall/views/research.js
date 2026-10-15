@@ -12,17 +12,15 @@
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
     const MODELS = [
-        { v: 'haiku', l: 'Haiku 4.5 — дешева, швидка (рекомендовано)' },
-        { v: 'sonnet', l: 'Sonnet 4.6 — якісніша, дорожча' },
+        { v: 'haiku', l: () => R.t('knowledge.research.modelHaiku') },
+        { v: 'sonnet', l: () => R.t('knowledge.research.modelSonnet') },
     ];
 
     let state = null, abortCtl = null, lastPreview = null;
 
     // C9: напрямок/проєкт/тег — три різні осі; той самий текст, що на решті
     // екранів (09 дає спільні хелпери, не спільний компонент фільтр-бару).
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. '
-        + 'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: '
-        + 'лишається те, що підходить під усі обрані фільтри. Період — за датою запису-джерела.';
+    const FILTER_HINT = () => R.t('knowledge.research.filterHint');
 
     async function render(ctx) {
         await UI.loadCategories();
@@ -39,37 +37,37 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-solid fa-magnifying-glass-chart"></i> Архів · Дослідження</div>
-                <h1 class="rc-pagehead__title">Дослідження бренду</h1>
-                <p class="rc-pagehead__lede">Зібрати з УСІХ джерел (дзвінки, документи, Telegram, YouTube, записи) кожну згадку бренду чи теми — і вивантажити у великий <b>.md</b>: дослівні оригінали за датою або стисле AI-саммарі.</p>
+                <div class="rc-eyebrow"><i class="fa-solid fa-magnifying-glass-chart"></i> ${R.t('knowledge.research.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${R.t('knowledge.research.title')}</h1>
+                <p class="rc-pagehead__lede">${R.t('knowledge.research.lede')}</p>
             </div>
 
             <section class="rc-research__form">
-                <label class="rc-research__lbl">Бренд / тема <span class="rc-research__hint">варіанти написання через кому</span></label>
+                <label class="rc-research__lbl">${R.t('knowledge.research.brand')} <span class="rc-research__hint">${R.t('knowledge.research.brandHint')}</span></label>
                 <input class="rc-input" id="rcResQ" type="text" autocomplete="off"
-                    placeholder="Polaris, Поларіс, поларис" value="${U.esc(state.q)}">
+                    placeholder="${R.t('knowledge.research.brandExample')}" value="${U.esc(state.q)}">
 
                 <div class="rc-research__row">
                     <div class="rc-research__field">
-                        <label class="rc-research__lbl">Напрямок / проєкт</label>
+                        <label class="rc-research__lbl">${R.t('knowledge.research.cat')}</label>
                         <select class="rc-select rc-catsel" id="rcResCat" data-cat-first="all">${UI.catOptions(state.category_id, { first: 'all' })}</select>
                     </div>
                     <div class="rc-research__field">
-                        <label class="rc-research__lbl">Теги</label>
+                        <label class="rc-research__lbl">${R.t('knowledge.research.tags')}</label>
                         ${UI.tagOptions ? UI.tagOptions(state.tags) : '<select multiple class="rc-tagsel"></select>'}
                     </div>
                     <div class="rc-research__field">
-                        <label class="rc-research__lbl">Період</label>
-                        <input type="date" class="rc-input rc-select--sm" id="rcResSince" value="${U.esc(state.since)}" title="Записи з дати">
-                        <input type="date" class="rc-input rc-select--sm" id="rcResUntil" value="${U.esc(state.until)}" title="Записи по дату">
+                        <label class="rc-research__lbl">${R.t('knowledge.research.period')}</label>
+                        <input type="date" class="rc-input rc-select--sm" id="rcResSince" value="${U.esc(state.since)}" title="${U.esc(R.t('knowledge.ask.sinceTitle'))}">
+                        <input type="date" class="rc-input rc-select--sm" id="rcResUntil" value="${U.esc(state.until)}" title="${U.esc(R.t('knowledge.ask.untilTitle'))}">
                     </div>
                     <div class="rc-research__field">
-                        <label class="rc-research__lbl">Модель саммарі</label>
+                        <label class="rc-research__lbl">${R.t('knowledge.research.model')}</label>
                         <select class="rc-select" id="rcResModel">
-                            ${MODELS.map(m => `<option value="${m.v}"${m.v === state.model ? ' selected' : ''}>${m.l}</option>`).join('')}
+                            ${MODELS.map(m => `<option value="${m.v}"${m.v === state.model ? ' selected' : ''}>${m.l()}</option>`).join('')}
                         </select>
                     </div>
-                    <button class="rc-btn rc-btn--primary" id="rcResFind"><i class="fa-solid fa-magnifying-glass"></i> Знайти згадки</button>
+                    <button class="rc-btn rc-btn--primary" id="rcResFind"><i class="fa-solid fa-magnifying-glass"></i> ${R.t('knowledge.research.find')}</button>
                 </div>
                 <div id="rcResHint"></div>
             </section>
@@ -77,7 +75,7 @@
             <div id="rcResOut"></div>`;
 
         const hintBox = ctx.mount.querySelector('#rcResHint');
-        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT));
+        if (hintBox && UI.hint) hintBox.appendChild(UI.hint(FILTER_HINT()));
 
         const qEl = ctx.mount.querySelector('#rcResQ');
         const find = ctx.mount.querySelector('#rcResFind');
@@ -126,12 +124,11 @@
     // Порожня видача з активними фільтрами — пояснити, ЩО саме звужує.
     function filterExplain() {
         const bits = [];
-        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push('у «' + p + '»'); }
-        if (state.tags.length) bits.push('з тегами «' + state.tags.join(', ') + '»');
-        if (state.since || state.until) bits.push('за період ' + (state.since || '…') + ' – ' + (state.until || '…'));
+        if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(R.t('knowledge.ask.explainIn', { path: p })); }
+        if (state.tags.length) bits.push(R.t('knowledge.ask.explainTags', { tags: state.tags.join(', ') }));
+        if (state.since || state.until) bits.push(R.t('knowledge.ask.explainPeriod', { from: state.since || '…', to: state.until || '…' }));
         if (!bits.length) return null;
-        return 'Нічого ' + bits.join(' ') + '. Напрямок тягне свої проєкти, проєкт — лише себе, тег ріже впоперек: '
-            + 'зніміть напрямок/проєкт, тег або період — і спробуйте ширше.';
+        return R.t('knowledge.research.explain', { bits: bits.join(' ') });
     }
 
     async function preview(ctx) {
@@ -139,8 +136,8 @@
         state.q = (qEl.value || '').trim();
         sync();
         const out = ctx.mount.querySelector('#rcResOut');
-        if (!state.q) { out.innerHTML = UI.empty('Введіть бренд або тему', 'Напр.: Polaris, Поларіс, поларис', 'fa-magnifying-glass'); return; }
-        out.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> Шукаю згадки по всьому архіву…</div>`;
+        if (!state.q) { out.innerHTML = UI.empty(R.t('knowledge.research.enterTitle'), R.t('knowledge.research.enterSub'), 'fa-magnifying-glass'); return; }
+        out.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.research.searching')}</div>`;
         try {
             const data = await R.api.researchPreview(Object.assign({ q: state.q }, axes()));
             if (!ctx.isCurrent()) return;
@@ -161,16 +158,16 @@
         const out = ctx.mount.querySelector('#rcResOut');
         const st = data.stats || { records: 0, mentions: 0, by_source: {} };
         if (!st.records) {
-            out.innerHTML = UI.empty('Згадок не знайдено',
+            out.innerHTML = UI.empty(R.t('knowledge.research.noneTitle'),
                 filterExplain()
-                || `За «${U.esc((data.terms || []).join(', '))}» нічого. Спробуйте інші варіанти написання або зніміть фільтр напрямку.`,
+                || R.t('knowledge.research.noneSub', { terms: U.esc((data.terms || []).join(', ')) }),
                 'fa-ghost');
             return;
         }
         const terms = (data.terms || []).join(', ');
         out.innerHTML = `
             <div class="rc-research__summary">
-                <div class="rc-research__big"><b>${st.mentions}</b> згадок у <b>${st.records}</b> записах
+                <div class="rc-research__big">${R.t('knowledge.research.mentions', { count: st.mentions })} ${R.t('knowledge.research.inRecords', { count: st.records })}
                     <span class="rc-research__terms">«${U.esc(terms)}»</span></div>
                 <div class="rc-filterbar">${srcChips(st.by_source)}</div>
             </div>
@@ -179,15 +176,15 @@
                 <button class="rc-research__exp" data-exp="originals">
                     <div class="rc-research__exp-ic"><i class="fa-solid fa-file-arrow-down"></i></div>
                     <div>
-                        <div class="rc-research__exp-t">Експорт оригіналів</div>
-                        <div class="rc-research__exp-s">Дослівні фрагменти за датою (свіже згори) + посилання на оригінали. <b>0 токенів, без AI.</b></div>
+                        <div class="rc-research__exp-t">${R.t('knowledge.research.expOrig')}</div>
+                        <div class="rc-research__exp-s">${R.t('knowledge.research.expOrigSub')}</div>
                     </div>
                 </button>
                 <button class="rc-research__exp" data-exp="summary">
                     <div class="rc-research__exp-ic"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
                     <div>
-                        <div class="rc-research__exp-t">AI-саммарі</div>
-                        <div class="rc-research__exp-s">Структурований звіт по всіх джерелах. Дешева модель, тільки по знайдених фрагментах.</div>
+                        <div class="rc-research__exp-t">${R.t('knowledge.research.expSum')}</div>
+                        <div class="rc-research__exp-s">${R.t('knowledge.research.expSumSub')}</div>
                     </div>
                 </button>
             </div>
@@ -195,7 +192,7 @@
             <div id="rcResExport"></div>
 
             <details class="rc-research__details"${data.sample && data.sample.length ? '' : ' hidden'}>
-                <summary>Знайдені записи (${st.records}${data.truncated ? ', показано перші 50' : ''})</summary>
+                <summary>${R.t('knowledge.research.found')} (${st.records}${data.truncated ? R.t('knowledge.research.firstFifty') : ''})</summary>
                 <div class="rc-list rc-research__list">${(data.sample || []).map(sampleRow).join('')}</div>
             </details>`;
 
@@ -209,7 +206,7 @@
     function sampleRow(r) {
         const ic = U.SRC_ICON[r.source_type] || 'fa-solid fa-file-lines';
         const who = r.who ? ` · ${U.esc(r.who)}` : '';
-        const badge = r.title_only ? `<span class="rc-research__badge">у назві</span>` : `<span class="rc-research__badge">${r.mentions}×</span>`;
+        const badge = r.title_only ? `<span class="rc-research__badge">${R.t('knowledge.research.inTitle')}</span>` : `<span class="rc-research__badge">${r.mentions}×</span>`;
         return `<div class="rc-research__rowi" data-open="${r.id}">
             <i class="${ic} rc-research__rowic"></i>
             <div class="rc-research__rowbody">

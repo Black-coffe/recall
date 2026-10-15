@@ -4,40 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Recall** — локальний RAG-архів дзвінків. Flask web app, дані лежать на машині
-користувача, зовнішні виклики опційні: Anthropic API (polish/enrichment/копілот)
-і Google Drive (щотижневий шифрований backup).
+**Recall** — a local RAG archive of calls. Flask web app; the data stays on the user's
+machine; external calls are optional: Anthropic API (polish/enrichment/co-pilot)
+and Google Drive (weekly encrypted backup).
 
-Можливості:
-- **Транскрипція**: faster-whisper backend (CTranslate2), на RTX 3090 medium ≈ 80× realtime.
-- **Запис**: серверний recorder (mic + system loopback) з live-діаризацією і live-сегментами через SSE.
-- **Сутності та граф**: pyannote для діаризації, Claude витягує summary/key_points/action_items/entities.
-- **Vector search + RAG-чат**: e5-large embeddings (1024-dim), гібридний retrieval (RRF + recency + diversity), `/api/memory/ask` SSE-стрім.
-- **YouTube** через pytubefix (анонімно, без авторизації).
+Capabilities:
+- **Transcription**: faster-whisper backend (CTranslate2); on an RTX 3090, medium ≈ 80× realtime.
+- **Recording**: server-side recorder (mic + system loopback) with live diarization and live segments over SSE.
+- **Entities and graph**: pyannote for diarization; Claude extracts summary/key_points/action_items/entities.
+- **Vector search + RAG chat**: e5-large embeddings (1024-dim), hybrid retrieval (RRF + recency + diversity), `/api/memory/ask` SSE stream.
+- **YouTube** via pytubefix (anonymous, no sign-in), with yt-dlp as a download fallback.
 - **VAD filter** (Silero) + **FTS5 search** + **Claude polish**.
-- **Дашборд задач** (action_items) + напрямки (категорії), bulk-розмітка і k-NN auto-suggest.
-- **Document ingestion**: PDF/DOCX/PPTX/XLSX/CSV/MD/зображення → текст у RAG (OCR через Tesseract).
-- **Telegram ingestion**: слухання реального TG-АКАУНТА (MTProto/Telethon, НЕ бот) — text/voice/audio/photo/video/документи з обраних чатів → той самий RAG-пайплайн. Окремий процес `telegram_listener.py`, керований з `app.py`; control-API + UI-вибір чатів; backfill історії.
-- **Живий ко-пілот дзвінка** (`app/services/copilot/`): під час запису локальна модель (Qwen-14B через Ollama, $0 API) веде топік-стейт-машину на ембеддингах, диспетчеризує RAG-пошук і ловить протиріччя/питання/факти → віджет оператора з картками й діями. Claude верифікує лише позначене важливим (local-first cascade), з бюджетом і safety-sweep. Гейтиться `COPILOT_ENABLED`; усе деградує (нема Ollama/ключа → whisper-only працює).
-- **Зобовʼязання** (`app/services/commitments.py`): дедлайни задач розгортаються з сирої фрази («завтра», «до кінця тижня», «Q3 2026») в ISO-дату відносно дати зустрічі + клас точності; власники звʼязані з графом; дублі/протухле позначені.
-- **Двошаровий скоуп** (`app/services/scope.py`): напрямки за Telegram-чатами + зріз за проєктом/людиною як обʼєднання графа `meeting_entities`, текстової згадки і однойменного напрямку — наскрізно в `/api/memory/ask`, MCP `ask_archive(project=…)` і копілоті.
-- **MCP-сервер** (`mcp_server.py`): 30 read-only тулзів (14 автономних direct-DB + 16 проксі на `app.py`). Свідомо read-first: write/action-тулзи не додаються.
-- **Backup**: щотижневий шифрований restic-архів на Google Drive (`scripts/backup.ps1`).
+- **Task dashboard** (action_items) + directions (categories), bulk labelling and k-NN auto-suggest.
+- **Document ingestion**: PDF/DOCX/PPTX/XLSX/CSV/MD/images → text into RAG (OCR via Tesseract).
+- **Telegram ingestion**: listens to a real Telegram ACCOUNT (MTProto/Telethon, NOT a bot) — text/voice/audio/photo/video/documents from selected chats → the same RAG pipeline. A separate process `telegram_listener.py`, managed by `app.py`; control API + chat selection in the UI; history backfill.
+- **Live call co-pilot** (`app/services/copilot/`): while recording, a local model (Qwen-14B via Ollama, $0 API) runs a topic state machine on embeddings, dispatches RAG searches and catches contradictions/questions/facts → an operator widget with cards and actions. Claude verifies only what is flagged important (local-first cascade), with a budget and a safety sweep. Gated by `COPILOT_ENABLED`; everything degrades gracefully (no Ollama/key → whisper-only still works).
+- **Commitments** (`app/services/commitments.py`): task deadlines are resolved from the raw phrase ("tomorrow", "by the end of the week", "Q3 2026") into an ISO date relative to the meeting date + a precision class; owners are linked to the graph; duplicates/stale items are flagged.
+- **Two-layer scope** (`app/services/scope.py`): directions by Telegram chat + a project/person slice as the union of the `meeting_entities` graph, text mentions and the same-named direction — end to end in `/api/memory/ask`, MCP `ask_archive(project=…)` and the co-pilot.
+- **MCP server** (`mcp_server.py`): 41 read-only tools (17 standalone direct-DB + 24 proxied to `app.py`). Deliberately read-first: no write/action tools are added.
+- **Backup**: weekly encrypted restic archive on Google Drive (`scripts/backup.ps1`).
 
 ## Development Commands
 
 ```bash
-# Run application (Windows) — ЄДИНА точка запуску.
-# app.py сам піднімає слухача Telegram як дочірній процес (якщо є ключі + сесія).
+# Run application (Windows) — the ONLY entry point.
+# app.py starts the Telegram listener itself as a child process (if keys + session exist).
 .venv/Scripts/python.exe app.py
 
 # --- Telegram ingestion ---
-# 1. Ключі api_id/api_hash з https://my.telegram.org → у .env:
+# 1. api_id/api_hash keys from https://my.telegram.org → into .env:
 #      TELEGRAM_API_ID=... / TELEGRAM_API_HASH=...
-# 2. Одноразовий інтерактивний логін (створює telegram.session):
+# 2. One-time interactive login (creates telegram.session):
 .venv/Scripts/python.exe telegram_login.py
-# 3. Далі app.py автоматично запускає слухача. Вибір чатів — у UI (таб «Telegram»).
-# Слухача можна гонять і вручну (CLI): list / enable <id> / disable <id> / status
+# 3. From then on app.py starts the listener automatically. Chat selection is in the UI ("Telegram" tab).
+# The listener can also be run by hand (CLI): list / enable <id> / disable <id> / status
 .venv/Scripts/python.exe telegram_listener.py list
 
 # Install dependencies
@@ -52,26 +52,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install PyTorch with CUDA 12.1
 .venv/Scripts/python.exe -m pip install torch==2.5.1+cu121 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Run tests (offline, no GPU needed). Падінь бути НЕ має.
+# Run tests (offline, no GPU needed). There must be NO failures.
 .venv/Scripts/python.exe -m pytest -q -m "not slow"
-# Кореневі скрипти pytest НЕ збирає (pytest.ini: testpaths = tests) — гонити окремо:
+# pytest does NOT collect the root scripts (pytest.ini: testpaths = tests) — run them separately:
 .venv/Scripts/python.exe test_categories.py
 .venv/Scripts/python.exe test_copilot_dispatcher.py
 .venv/Scripts/python.exe test_recording_devices.py
 .venv/Scripts/python.exe test_video_capture.py
 
-# Офлайн-проходи по даних (усі ідемпотентні, усі з --dry-run):
-.venv/Scripts/python.exe -m app.services.commitments backfill --dry-run   # дедлайни → ISO-дати
-.venv/Scripts/python.exe -m app.services.commitments digest               # понеділковий звід
-.venv/Scripts/python.exe -m app.services.scope apply-chats --dry-run      # TG-чати → напрямки
-.venv/Scripts/python.exe -m app.services.scope label-rest --claude --dry-run  # автопозначення решти
+# Offline passes over the data (all idempotent, all with --dry-run):
+.venv/Scripts/python.exe -m app.services.commitments backfill --dry-run   # deadlines → ISO dates
+.venv/Scripts/python.exe -m app.services.commitments digest               # Monday digest
+.venv/Scripts/python.exe -m app.services.scope apply-chats --dry-run      # TG chats → directions
+.venv/Scripts/python.exe -m app.services.scope label-rest --claude --dry-run  # auto-label the rest
 ```
 
 ## Architecture
 
 ### Application Structure
 
-The application uses a **modular Flask blueprint architecture**. The entry point `app.py` (~1130 lines) boots the app, owns global singletons, and registers 14 blueprints; all API endpoints live in `app/blueprints/*` with business logic in `app/services/*`. See `docs/map/` for the full module map.
+The application uses a **modular Flask blueprint architecture**. The entry point `app.py` (~1130 lines) boots the app, owns global singletons, and registers 14 blueprints; all API endpoints live in `app/blueprints/*` with business logic in `app/services/*`. See `memory/map/` for the full module map.
 
 ### Core Components
 
@@ -93,7 +93,7 @@ The application uses a **modular Flask blueprint architecture**. The entry point
    - Service layer `app/services/*` (database, transcription, RAG, copilot, recording, …)
    - Global singletons via `app/state.py` (avoids circular imports)
    - Custom exceptions (`app/core/exceptions.py`) + rotating logger (`app/core/logger.py`)
-   - Module map: `docs/map/` (overview/root/blueprints/services/copilot/recording/frontend)
+   - Module map: `memory/map/` (overview/root/blueprints/services/copilot/recording/frontend)
 
 4. **Configuration** (`config.py`)
    - Environment-based configs: Development, Production, Testing
@@ -104,7 +104,7 @@ The application uses a **modular Flask blueprint architecture**. The entry point
    - `templates/shell.html` — SPA shell (sidebar/topbar, `#view` mount point)
    - `static/js/recall/*` — namespace/router/shell/api/ui/util/cmdk + `views/*.js` (15 screens). SSE via fetch+reader, NOT EventSource.
    - `static/css/recall.css` — editorial-catalog design, light theme only, `rc-*` class prefix
-   - Service worker `static/sw.js`. Details: `docs/map/frontend.md`
+   - Service worker `static/sw.js`. Details: `memory/map/frontend.md`
 
 ### Background Task System
 
@@ -116,21 +116,21 @@ The application uses a **modular Flask blueprint architecture**. The entry point
 
 ### YouTube Integration
 
-YouTube functionality uses **pytubefix** with extensive error handling (NOT yt-dlp).
-Production code — `_download_youtube_core` (`app/blueprints/youtube.py` →
+YouTube functionality uses **pytubefix** with extensive error handling; **yt-dlp is a download fallback only**
+(some videos are served only to clients with a PO token). Production code — `_download_youtube_core` (`app/blueprints/youtube.py` →
 `app/services/youtube_pytubefix.py`).
 
 - **Download Strategy**: Full download first, then post-process trimming
 - **Stream Selection**: `yt.streams.filter(only_audio=True).order_by('abr').desc().first()`
-- **Авторизації НЕМА (і cookies.txt не існує)**: `YouTube(...)` викликається без
-  auth-параметрів, дефолтний клієнт pytubefix — `ANDROID_VR`, який саме тому й
-  обраний, що не потребує входу. У `YouTube.__init__` параметра для cookies нема
-  взагалі. Якщо колись знадобиться авторизований доступ, підтримувані шляхи —
-  `use_oauth=True` + `token_file` або `use_po_token` з верифікатором. Не cookies.
+- **There is NO sign-in (and no cookies.txt)**: `YouTube(...)` is called without
+  auth parameters; the default pytubefix client is `ANDROID_VR`, chosen precisely
+  because it needs no sign-in. `YouTube.__init__` has no cookies parameter at all.
+  If authorized access is ever needed, the supported paths are
+  `use_oauth=True` + `token_file` or `use_po_token` with a verifier. Not cookies.
 - **Post-download Trimming**: pydub AudioSegment
 - **MP3 Conversion**: FFmpeg subprocess (libmp3lame, 320/256/192/128 kbps)
 - **Backend choice**: `WHISPER_BACKEND=faster` (default) — faster-whisper; `=openai` — fallback
-- **Polish**: optional Claude API postprocessing — `ANTHROPIC_API_KEY` у `.env`
+- **Polish**: optional Claude API postprocessing — `ANTHROPIC_API_KEY` in `.env`
 
 ### Database Schema
 
@@ -189,17 +189,17 @@ tags TEXT  -- JSON array
 - **Quality options**: 128/192/256/320 kbps
 
 ### Security Measures
-- Bind `127.0.0.1` за замовчуванням; мережевий bind — свідомий opt-in
-  (`RECALL_BIND_ALL=1` / `FLASK_HOST=0.0.0.0`) і вимагає явного `SECRET_KEY`
-- Auth-гейт на `/api/*` (`app/core/auth.py`): віддалені запити вимагають `RECALL_API_KEY`
-- Allowlist коренів для `import-folder` (`RECALL_IMPORT_ROOTS`, deny-by-default)
+- Binds `127.0.0.1` by default; a network bind is a deliberate opt-in
+  (`RECALL_BIND_ALL=1` / `FLASK_HOST=0.0.0.0`) and requires an explicit `SECRET_KEY`
+- Auth gate on `/api/*` (`app/core/auth.py`): remote requests require `RECALL_API_KEY`
+- Root allowlist for `import-folder` (`RECALL_IMPORT_ROOTS`, deny-by-default)
 - Path traversal protection: `os.path.abspath(path).startswith(base_path)`
 - SQL injection prevention: all queries use parameterized statements
 - File validation: `secure_filename()` + ALLOWED_EXTENSIONS check
 - Input validation: bounded pagination (MAX_PAGE=1000)
 - File size limit: `MAX_CONTENT_LENGTH` (up to 20GB, for video)
 
-Повна модель безпеки — `docs/SECURITY.md`.
+Full security model: `docs/SECURITY.md`.
 
 ### Error Handling
 - **Rule: no bare `except` without a log.** Every `except Exception` must either
@@ -256,13 +256,14 @@ tags TEXT  -- JSON array
 ## Common Issues & Solutions
 
 ### YouTube Download Failures
-1. **Stream not found**: pytubefix може не знайти audio-only stream — оновити pytubefix.
-2. **403 Forbidden / "Sign in to confirm"**: cookies тут НЕ допоможуть (їх ніхто не
-   читає). Спершу оновити pytubefix — блокування зазвичай означає, що клієнт
-   `ANDROID_VR` застарів. Якщо не допомогло, потрібен `use_oauth=True` +
-   `token_file` — це правка `_download_youtube_core`, зараз не реалізовано.
+1. **Stream not found**: pytubefix may fail to find an audio-only stream — update pytubefix.
+2. **403 Forbidden / "Sign in to confirm"**: cookies will NOT help (nothing reads them).
+   Blocking is often per video, not per machine: such videos are served only to clients
+   with a PO token. Metadata is covered by cycling clients (needs Node.js in PATH), the
+   download by the yt-dlp fallback; if yt-dlp fails too, `pip install -U yt-dlp`. The next
+   rung is `use_oauth=True` + `token_file`, not implemented.
 3. **Update pytubefix**: `.venv/Scripts/python.exe -m pip install -U pytubefix`
-4. **Age-restricted / private**: анонімний клієнт їх не візьме.
+4. **Age-restricted / private**: anonymous clients cannot fetch them.
 5. **FFmpeg missing**: Check FFmpeg is in PATH or project directory.
 
 ### GPU Not Detected
@@ -309,17 +310,17 @@ tags TEXT  -- JSON array
 
 **Optional:**
 - NVIDIA GPU with CUDA 12.1 for acceleration
-- Tesseract OCR (для зображень і сканів у document ingestion)
-- Ollama + Qwen-14B (для копілота; без нього копілот просто вимкнений)
+- Tesseract OCR (for images and scans in document ingestion)
+- Ollama + Qwen-14B (for the co-pilot; without it the co-pilot is simply off)
 
 ## Performance Benchmarks
 
 ### RTX 3090
 
 **faster-whisper** (default, CTranslate2 + VAD) — `medium` ≈ **80× realtime**.
-Фактична швидкість залежить від моделі, мови та довжини аудіо.
+Actual speed depends on the model, the language and the audio length.
 
-**openai-whisper** (legacy / fallback) — у десятки разів повільніше:
+**openai-whisper** (legacy / fallback) — tens of times slower:
 tiny ~32×, base ~16×, small ~6×, medium ~2×, large ~1×.
 
 ### Audio Processing Limits

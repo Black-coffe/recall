@@ -6,53 +6,53 @@
 
 ## Context
 
-Ревʼю раунду 3 (`directions-projects-tags`, critical 1) знайшло, що `commitments_coverage`
-могла порахувати знаменник по одній множині записів, поки `items`/`window_matched` того ж
-відповіді йшли по іншій, звуженій `category_id`/`tags`/`since`/`until`. Plan deltas хвилі 5
-записують рішення так:
+The round 3 review (`directions-projects-tags`, critical 1) found that `commitments_coverage`
+could compute the denominator over one set of records while the `items`/`window_matched` of the same
+response went over another, narrowed by `category_id`/`tags`/`since`/`until`. The Plan deltas of wave 5
+record the decision as follows:
 
-> **Рішення 1 — знаменник `coverage` (критичне 1):** обрано «та сама множина по всіх осях», не
-> «докстринг називає, що ігнорується»: памʼятка `derived-claims-need-second-source` існує саме
-> через цифри поруч зі списком з іншої множини; докстринг уже обіцяє «знаменник під тими ж
-> фільтрами». C6 переписано: `commitments_coverage(tags, since, until)` + один хелпер
-> `_scope_clauses` для обох читачів (закриває мінор 11 без окремого тесту на контракт `" AND "`).
-> Історія 12 звузила це в нотатках («якщо coverage приймає…» було умовним) — план тоді дельти не
-> записав; тепер записано.
+> **Decision 1 — the `coverage` denominator (critical 1):** "the same set on all axes" was chosen, not
+> "the docstring names what is ignored": the memory note `derived-claims-need-second-source` exists precisely
+> because of figures placed next to a list that come from a different set; the docstring already promises "the denominator under the same
+> filters". C6 is rewritten: `commitments_coverage(tags, since, until)` + one helper
+> `_scope_clauses` for both readers (closes minor 11 without a separate test of the `" AND "` contract).
+> Story 12 narrowed this in its notes ("if coverage accepts…" was conditional) — the plan did not
+> record the delta then; it is recorded now.
 
-і в резюме хвилі 5:
+and in the wave 5 summary:
 
-> **Контракти змінено (для 16/17/18/19):** … C6 — знаменник по всіх осях, спільний хелпер.
+> **Contracts changed (for 16/17/18/19):** … C6 — the denominator over all axes, a shared helper.
 
-Ця специфіка (`commitments.py`, `_scope_clauses`) закриває один читач. Клас бага — «похідне
-число (total/coverage/count), показане поруч зі списком, порахованe по іншій множині фільтрів,
-ніж сам список» — уже стався тричі до цієї спеки під іншими іменами (памʼятка
-`derived-claims-need-second-source`: граф покриває 26% TG, коефіцієнт довіри рахувався не по
-тій самій вибірці, що список у відповіді). Наступний читач, який покаже total/coverage поруч зі
-списком (новий дашборд, нова MCP-тулза), може повторити той самий дефект у файлі, де спільного
-хелпера `commitments.py` немає.
+This spec (`commitments.py`, `_scope_clauses`) closes one reader. The bug class — "a derived
+number (total/coverage/count) shown next to a list, computed over a different set of filters
+than the list itself" — has already happened three times before this spec under other names (the memory note
+`derived-claims-need-second-source`: the graph covers 26% of TG, the trust coefficient was computed not over
+the same sample as the list in the response). The next reader that shows a total/coverage next to a
+list (a new dashboard, a new MCP tool) may repeat the same defect in a file where there is no shared
+`commitments.py` helper.
 
 ## Options
 
-1. **Чинити — той самий хелпер, що будує SQL для списку, будує і для знаменника** (обрано).
-2. Документувати розбіжність у докстрингу («знаменник ігнорує ці фільтри») — відкинуто: докстринг
-   уже обіцяв протилежне, а цифра поруч зі звуженим списком все одно виглядає як довідна.
+1. **Fix — the same helper that builds the SQL for the list also builds it for the denominator** (chosen).
+2. Document the discrepancy in the docstring ("the denominator ignores these filters") — rejected: the docstring
+   already promised the opposite, and a number next to a narrowed list still looks like a reference figure.
 
-Інших варіантів делта не називає.
+The delta names no other options.
 
 ## Decision
 
-Будь-яка похідна метрика типу «total»/«coverage»/«window_matched»/«count», яку API або MCP-тулза
-показує поруч зі списком записів, зобовʼязана рахуватись по **тій самій** множині фільтрів
-(`category_id`, `tags`, `since`, `until`, …), що і сам список — через один спільний
-SQL-фрагмент-білдер на домен (у `commitments.py` це `_scope_clauses`), а не через окремий
-підзапит, що збирає власний набір умов. Дублювання умов фільтра для «числа» і для «списку» в
-одному ендпоїнті заборонено.
+Any derived metric of the "total"/"coverage"/"window_matched"/"count" kind that an API or an MCP tool
+shows next to a list of records must be computed over the **same** set of filters
+(`category_id`, `tags`, `since`, `until`, …) as the list itself — through one shared
+SQL-fragment builder per domain (in `commitments.py` this is `_scope_clauses`), not through a separate
+subquery that assembles its own set of conditions. Duplicating the filter conditions for the "number" and for the "list" in
+one endpoint is forbidden.
 
 ## Consequences
 
-Легше: коли клас бага повторюється (список + число поруч), фікс — «використай той самий білдер»,
-а не аудит SQL руками. Важче: не записано — делта не називає, у що це коштує сьогоднішньому коду
-за межами `commitments.py`.
+Easier: when the bug class recurs (a list + a number next to it), the fix is "use the same builder",
+not a manual SQL audit. Harder: not recorded — the delta does not name what this costs today's code
+outside `commitments.py`.
 
 ## Invariants created
 
@@ -62,4 +62,4 @@ SQL-фрагмент-білдер на домен (у `commitments.py` це `_sc
 
 ## Revisit when
 
-Не записано — делта не називає конкретний тригер для перегляду.
+Not recorded — the delta does not name a specific trigger for revisiting.

@@ -10,32 +10,33 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
     const PER_PAGE = 30;
 
     // Порядок = вага в ранжуванні (див. /api/comments/meta). «Усі» першим,
     // далі від найважчого типу до найлегшого — щоб перший осмислений зріз
     // під рукою був саме той, який найдорожчий.
     const KINDS = [
-        { k: '', label: 'Усі' },
-        { k: 'correction', label: 'Виправлення' },
-        { k: 'decision', label: 'Рішення' },
-        { k: 'note', label: 'Нотатки' },
-        { k: 'context', label: 'Контекст' },
-        { k: 'question', label: 'Питання' },
+        { k: '', label: T('knowledge.cmv.kind.all') },
+        { k: 'correction', label: T('knowledge.cmv.kind.correction') },
+        { k: 'decision', label: T('knowledge.cmv.kind.decision') },
+        { k: 'note', label: T('knowledge.cmv.kind.note') },
+        { k: 'context', label: T('knowledge.cmv.kind.context') },
+        { k: 'question', label: T('knowledge.cmv.kind.question') },
     ];
     const TARGETS = [
-        { k: '', label: 'Будь-яка картка' },
-        { k: 'transcription', label: 'Записи' },
-        { k: 'audio_download', label: 'Медіатека' },
-        { k: 'recording_session', label: 'Сесії запису' },
-        { k: 'action_item', label: 'Задачі' },
-        { k: 'entity', label: 'Сутності' },
+        { k: '', label: T('knowledge.cmv.target.any') },
+        { k: 'transcription', label: T('knowledge.cmv.target.transcription') },
+        { k: 'audio_download', label: T('knowledge.cmv.target.audio') },
+        { k: 'recording_session', label: T('knowledge.cmv.target.session') },
+        { k: 'action_item', label: T('knowledge.cmv.target.task') },
+        { k: 'entity', label: T('knowledge.cmv.target.entity') },
     ];
     const PERIODS = [
-        { k: '', label: 'Увесь час' },
-        { k: '7', label: 'Тиждень' },
-        { k: '30', label: 'Місяць' },
-        { k: '90', label: 'Квартал' },
+        { k: '', label: T('knowledge.cmv.period.all') },
+        { k: '7', label: T('knowledge.cmv.period.week') },
+        { k: '30', label: T('knowledge.cmv.period.month') },
+        { k: '90', label: T('knowledge.cmv.period.quarter') },
     ];
 
     let listEl = null, state = null, last = null;
@@ -51,14 +52,14 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-regular fa-comment-dots"></i> Архів · Ваш голос</div>
-                <h1 class="rc-pagehead__title">Коментарі</h1>
-                <p class="rc-pagehead__lede">Те, що ви самі написали про записи: уточнення, виправлення, акценти. У пошуку й відповідях це важить більше за сам транскрипт — а «виправлення» прямо скасовують те, що в записі сказано.</p>
+                <div class="rc-eyebrow"><i class="fa-regular fa-comment-dots"></i> ${T('knowledge.cmv.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${T('knowledge.cmv.title')}</h1>
+                <p class="rc-pagehead__lede">${T('knowledge.cmv.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
-                    <input id="rcCmSearch" type="search" placeholder="Пошук по тексту коментарів…" value="${U.esc(state.search)}">
+                    <input id="rcCmSearch" type="search" placeholder="${U.esc(T('knowledge.cmv.searchPh'))}" value="${U.esc(state.search)}">
                 </div>
                 <select class="rc-select" id="rcCmTarget">${TARGETS.map(t =>
                     `<option value="${t.k}"${t.k === state.target_type ? ' selected' : ''}>${t.label}</option>`).join('')}</select>
@@ -143,11 +144,11 @@
             if (!rows.length) {
                 listEl.innerHTML = UI.empty(
                     state.kind || state.search || state.target_type || state.days
-                        ? 'Нічого не знайдено'
-                        : 'Коментарів ще немає',
+                        ? T('knowledge.cmv.nothing')
+                        : T('knowledge.cmv.none'),
                     state.kind || state.search || state.target_type || state.days
-                        ? 'Спробуйте змінити фільтр.'
-                        : 'Відкрийте будь-який запис і напишіть уточнення — воно одразу почне впливати на пошук і відповіді.',
+                        ? T('knowledge.cmv.tryFilter')
+                        : T('knowledge.cmv.noneHint'),
                     'fa-comment-dots');
                 return;
             }
@@ -186,10 +187,10 @@
         const meta = [
             `<span class="rc-cmrow__kind rc-cmrow__kind--${U.esc(c.kind)}">${U.esc(KIND_LABEL[c.kind] || c.kind)}</span>`,
             c.pinned ? '<span class="rc-cmrow__pin"><i class="fa-solid fa-thumbtack"></i></span>' : '',
-            c.source === 'live' ? '<span class="rc-cmrow__live">під час дзвінка</span>' : '',
+            c.source === 'live' ? `<span class="rc-cmrow__live">${T('knowledge.cmv.live')}</span>` : '',
             ts ? `<span class="rc-mono">${ts}</span>` : '',
             `<span>${U.esc(U.fmtDate(c.created_at))}</span>`,
-            c.indexed ? '' : '<span class="rc-rec__warn">не в пошуку</span>',
+            c.indexed ? '' : `<span class="rc-rec__warn">${T('knowledge.cmv.notIndexed')}</span>`,
         ].filter(Boolean).join('<span class="sep">·</span>');
         return `<div class="rc-cmrow" data-id="${c.id}"${href ? ` data-href="${U.esc(href)}"` : ''}>
             <div class="rc-cmrow__body">
@@ -217,10 +218,10 @@
         const total = d.total || 0;
         const pages = Math.max(1, Math.ceil(total / (d.limit || PER_PAGE)));
         const page = state.page;
-        if (pages <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${total} ${U.plural(total, ['коментар', 'коментарі', 'коментарів'])}</span></div>`;
+        if (pages <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${T('knowledge.cmt.count', { count: total })}</span></div>`;
         const prev = page > 1 ? `<button class="rc-btn rc-btn--sm" data-page="${page - 1}"><i class="fa-solid fa-chevron-left"></i></button>` : '';
         const next = page < pages ? `<button class="rc-btn rc-btn--sm" data-page="${page + 1}"><i class="fa-solid fa-chevron-right"></i></button>` : '';
-        return `<div class="rc-pager">${prev}<span class="rc-pager__info">стор. ${page} / ${pages} · ${total} ${U.plural(total, ['коментар', 'коментарі', 'коментарів'])}</span>${next}</div>`;
+        return `<div class="rc-pager">${prev}<span class="rc-pager__info">${T('knowledge.cmv.page', { page: page, pages: pages })} · ${T('knowledge.cmt.count', { count: total })}</span>${next}</div>`;
     }
 
     R.views.comments = {

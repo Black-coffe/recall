@@ -9,12 +9,12 @@
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
 
-    const TYPE_BADGE = { user: 'Особа', group: 'Група', channel: 'Канал', chat: 'Чат' };
+    const TYPE_BADGE = { user: 'telegram.type.user', group: 'telegram.type.group', channel: 'telegram.type.channel', chat: 'telegram.type.chat' };
     const FILTERS = [
-        { key: 'all', label: 'Усі' },
-        { key: 'tracked', label: 'Відстежувані' },
-        { key: 'marked', label: 'З напрямком' },
-        { key: 'unmarked', label: 'Без розмітки' },
+        { key: 'all', label: 'telegram.filter.all' },
+        { key: 'tracked', label: 'telegram.filter.tracked' },
+        { key: 'marked', label: 'telegram.filter.marked' },
+        { key: 'unmarked', label: 'telegram.filter.unmarked' },
     ];
 
     // [{ id, title, type, username, first_name, last_name, phone, bot, deleted,
@@ -31,28 +31,23 @@
         dialogs = []; filter = 'all'; query = null; live = false;
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-brands fa-telegram" style="color:var(--rc-src-telegram)"></i> Додати у архів · Telegram</div>
+                <div class="rc-eyebrow"><i class="fa-brands fa-telegram" style="color:var(--rc-src-telegram)"></i> ${R.t('telegram.eyebrow')}</div>
                 <div class="rc-pagehead__row">
                     <h1 class="rc-pagehead__title">Telegram</h1>
                     <div style="display:flex;gap:8px">
-                        <button class="rc-btn rc-btn--sm" id="rcTgNewCat"><i class="fa-solid fa-plus"></i> Новий напрямок</button>
-                        <button class="rc-btn rc-btn--sm" id="rcTgReload"><i class="fa-solid fa-rotate"></i> Оновити список</button>
+                        <button class="rc-btn rc-btn--sm" id="rcTgNewCat"><i class="fa-solid fa-plus"></i> ${R.t('telegram.newCategory')}</button>
+                        <button class="rc-btn rc-btn--sm" id="rcTgReload"><i class="fa-solid fa-rotate"></i> ${R.t('telegram.reload')}</button>
                     </div>
                 </div>
-                <p class="rc-pagehead__lede">Оберіть чати для архівації — текст, голосові, фото, відео й документи підуть у той самий семантичний пошук.</p>
+                <p class="rc-pagehead__lede">${R.t('telegram.lede')}</p>
             </div>
             <div id="rcTgStatus" class="rc-tgstatus"></div>
             <div class="rc-tginfo" style="display:flex;gap:10px;align-items:flex-start;border:1px solid var(--rc-hairline);border-radius:var(--rc-r-2);padding:var(--rc-3) var(--rc-4);margin-bottom:var(--rc-4);font-size:var(--rc-t-sm);line-height:1.55;background:var(--rc-surface-2)">
                 <i class="fa-solid fa-circle-info" style="color:var(--rc-warn);margin-top:2px;flex:none"></i>
                 <div>
-                    <strong>Що це технічно означає.</strong> Recall підключається до вашого <u>реального</u> Telegram-акаунта
-                    протоколом MTProto (бібліотека Telethon) — <strong>не через бота</strong>. Слухач бачить усе, що бачите ви
-                    у вибраних нижче чатах (текст, голосові, фото, відео, документи), і надсилає це у локальний архів.
+                    ${R.t('telegram.info.what')}
                     <br>
-                    <strong>Ризик.</strong> Telegram офіційно не підтримує автоматизовані клієнти на звичайному акаунті;
-                    надто активне читання історії (backfill) великими партіями теоретично може призвести до тимчасового
-                    обмеження акаунта. Recall притримує швидкість між повідомленнями, але ризик не нульовий — почніть
-                    з невеликого обсягу backfill і некритичного чату.
+                    ${R.t('telegram.info.risk')}
                 </div>
             </div>
             <div id="rcTgNewCatBar"></div>
@@ -60,7 +55,7 @@
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
                     <input id="rcTgSearch" type="search" autocomplete="off"
-                        placeholder="Імʼя, @нік або телефон…" aria-label="Пошук чату за імʼям, @ніком або телефоном">
+                        placeholder="${R.t('telegram.search.placeholder')}" aria-label="${R.t('telegram.search.aria')}">
                 </div>
             </div>
             <div class="rc-filterbar" id="rcTgFilters"></div>
@@ -113,23 +108,17 @@
         if (s && s.alive) {
             const who = s.me ? U.esc(s.me.name || '') : '';
             box.className = 'rc-tgstatus is-online';
-            box.innerHTML = `<i class="fa-solid fa-circle-check"></i> Слухач активний${who ? ' — ' + who : ''} · моніторю ${(s.monitored || []).length} чат(ів)`;
+            box.innerHTML = `<i class="fa-solid fa-circle-check"></i> ${R.t('telegram.status.online', { who: who ? ' — ' + who : '', count: (s.monitored || []).length })}`;
         } else {
             box.className = 'rc-tgstatus is-offline';
             box.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px;width:100%">
-                <div><i class="fa-solid fa-circle-xmark"></i> Слухач вимкнений — показано лише збережені чати.</div>
+                <div><i class="fa-solid fa-circle-xmark"></i> ${R.t('telegram.status.offline')}</div>
                 <details style="font-size:var(--rc-t-xs);color:var(--rc-ink-2)">
-                    <summary style="cursor:pointer;color:var(--rc-accent-deep)">Як підключити слухач Telegram</summary>
+                    <summary style="cursor:pointer;color:var(--rc-accent-deep)">${R.t('telegram.setup.title')}</summary>
                     <ol style="margin:6px 0 0 18px;padding:0;line-height:1.7">
-                        <li>Отримайте <code>api_id</code> і <code>api_hash</code> на
-                            <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>
-                            (розділ «API development tools») і додайте їх у <code>.env</code> як
-                            <code>TELEGRAM_API_ID</code> / <code>TELEGRAM_API_HASH</code>.</li>
-                        <li>Один раз виконайте в консолі проєкту
-                            <code>.venv/Scripts/python.exe telegram_login.py</code> — введіть номер телефону і код
-                            підтвердження з Telegram; це створить файл сесії.</li>
-                        <li>Перезапустіть застосунок (<code>app.py</code>) — він сам підніме слухача автоматично, і
-                            тут з'явиться повний список діалогів.</li>
+                        <li>${R.t('telegram.setup.step1')}</li>
+                        <li>${R.t('telegram.setup.step2')}</li>
+                        <li>${R.t('telegram.setup.step3')}</li>
                     </ol>
                 </details>
             </div>`;
@@ -253,7 +242,7 @@
         const c = counts(items);
         if (fb) {
             fb.innerHTML = FILTERS.map(f =>
-                `<button class="rc-chip${filter === f.key ? ' is-active' : ''}" data-filter="${f.key}">${f.label} <span class="rc-chip__n">${c[f.key]}</span></button>`).join('');
+                `<button class="rc-chip${filter === f.key ? ' is-active' : ''}" data-filter="${f.key}">${R.t(f.label)} <span class="rc-chip__n">${c[f.key]}</span></button>`).join('');
             fb.querySelectorAll('.rc-chip').forEach(b => b.addEventListener('click', () => { filter = b.dataset.filter; paintList(ctx); }));
         }
         const listEl = ctx.mount.querySelector('#rcTgList');
@@ -261,21 +250,21 @@
         const shown = items.filter(x => matchFilter(x.d));
         shown.sort((a, b) => ((a.hit ? a.hit.rank : 0) - (b.hit ? b.hit.rank : 0))
             || (b.d.monitored - a.d.monitored)
-            || displayTitle(a.d).localeCompare(displayTitle(b.d), 'uk'));
+            || R.i18n.compare(displayTitle(a.d), displayTitle(b.d)));
         if (!shown.length) { listEl.innerHTML = emptyHTML(); return; }
         listEl.innerHTML = `<div class="rc-tglist">` + shown.map(x => rowHTML(x.d, x.hit)).join('') + `</div>`;
         bindRows(ctx, listEl);
     }
 
     function emptyHTML() {
-        if (!query) return UI.empty('Немає чатів', 'Спробуйте інший фільтр або оновіть список.', 'fa-comment-slash');
-        let sub = 'Шукаю за імʼям, @ніком і номером телефону.';
+        if (!query) return UI.empty(R.t('telegram.empty.title'), R.t('telegram.empty.sub'), 'fa-comment-slash');
+        let sub = R.t('telegram.empty.searchHint');
         if (query.phone && !dialogs.some(d => d.phone !== undefined)) {
             sub = live
-                ? 'Цей слухач ще не віддає номери телефонів — перезапустіть слухача Telegram, щоб шукати за номером.'
-                : 'Номери телефонів видно лише з активним слухачем Telegram.';
+                ? R.t('telegram.empty.noPhonesLive')
+                : R.t('telegram.empty.noPhonesOffline');
         }
-        return UI.empty(`Нічого не знайдено за «${query.raw}»`, sub, 'fa-magnifying-glass');
+        return UI.empty(R.t('telegram.empty.notFound', { query: query.raw }), sub, 'fa-magnifying-glass');
     }
 
     function catOptions(sel) {
@@ -284,15 +273,15 @@
 
     function displayTitle(d) {
         if (d.title) return d.title;
-        if (d.deleted) return 'Видалений акаунт';
+        if (d.deleted) return R.t('telegram.deletedAccount');
         if (d.username) return '@' + d.username;
-        return 'Без назви';
+        return R.t('telegram.untitled');
     }
     function typeLabel(d) {
-        if (d.bot) return 'Бот';
+        if (d.bot) return R.t('telegram.type.bot');
         // видалений акаунт приходить без імені, і _chat_type_of бачить у ньому «chat»
-        if (d.deleted) return 'Особа';
-        return TYPE_BADGE[d.type] || d.type || '';
+        if (d.deleted) return R.t('telegram.type.user');
+        return TYPE_BADGE[d.type] ? R.t(TYPE_BADGE[d.type]) : (d.type || '');
     }
 
     function rowHTML(d, hit) {
@@ -310,15 +299,15 @@
         return `<div class="rc-tgrow-wrap" data-wrap="${d.id}">
             <div class="rc-tgrow" data-id="${d.id}">
                 <label class="rc-tgrow__check">
-                    <input type="checkbox" ${d.monitored ? 'checked' : ''} data-act="toggle" aria-label="Слухати чат «${U.esc(title)}»">
+                    <input type="checkbox" ${d.monitored ? 'checked' : ''} data-act="toggle" aria-label="${U.esc(R.t('telegram.row.listen', { title }))}">
                     <span class="rc-tgrow__who">
                         <span class="rc-tgrow__title${d.title ? '' : ' is-untitled'}" title="${U.esc(title)}">${U.esc(title)}</span>
                         <span class="rc-tgrow__meta">${meta}</span>
                     </span>
                 </label>
                 <div class="rc-tgrow__ctrl">
-                    <select class="rc-select rc-select--sm rc-catsel" data-cat-first="none" data-act="category" aria-label="Напрямок чату">${catOptions(d.category_id)}</select>
-                    <button class="rc-iconbtn" data-act="backfill" title="Догрузити історію чату" aria-label="Догрузити історію чату"><i class="fa-solid fa-clock-rotate-left"></i></button>
+                    <select class="rc-select rc-select--sm rc-catsel" data-cat-first="none" data-act="category" aria-label="${R.t('telegram.row.category')}">${catOptions(d.category_id)}</select>
+                    <button class="rc-iconbtn" data-act="backfill" title="${R.t('telegram.row.backfill')}" aria-label="${R.t('telegram.row.backfill')}"><i class="fa-solid fa-clock-rotate-left"></i></button>
                 </div>
             </div>
             <div class="rc-tgbf" data-bf="${d.id}" style="display:none"></div>
@@ -331,12 +320,12 @@
     // Архів (відфільтрований по цьому чату), де видно нові записи по мірі появи.
     function backfillPanelHTML(d) {
         return `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 0;font-size:var(--rc-t-xs);color:var(--rc-ink-2)">
-            <label style="display:flex;align-items:center;gap:6px">Обсяг:
+            <label style="display:flex;align-items:center;gap:6px">${R.t('telegram.bf.volume')}
                 <input type="number" class="rc-input rc-select--sm" style="width:90px" min="20" max="2000" step="20" value="200" data-bf-limit>
-                повідомлень
+                ${R.t('telegram.bf.messages')}
             </label>
-            <button class="rc-btn rc-btn--sm rc-btn--primary" data-bf-start>Почати догрузку</button>
-            <button class="rc-btn rc-btn--sm" data-bf-cancel>Скасувати</button>
+            <button class="rc-btn rc-btn--sm rc-btn--primary" data-bf-start>${R.t('telegram.bf.start')}</button>
+            <button class="rc-btn rc-btn--sm" data-bf-cancel>${R.t('core.cancel')}</button>
             <span data-bf-status></span>
         </div>`;
     }
@@ -354,20 +343,19 @@
             const startBtn = panel.querySelector('[data-bf-start]');
             const statusEl = panel.querySelector('[data-bf-status]');
             startBtn.disabled = true;
-            statusEl.textContent = 'Запускаю…';
+            statusEl.textContent = R.t('telegram.bf.starting');
             try {
                 await R.api.post('/api/telegram/backfill', { chat_id: d.id, limit });
                 const libHref = `/library?source_type=telegram&tg_chat=${encodeURIComponent(d.title || '')}`;
                 panel.innerHTML = `<div style="padding:4px 0;line-height:1.6">
                     <i class="fa-solid fa-circle-check" style="color:var(--rc-ok)"></i>
-                    Запущено — до ${limit} повідомлень. Це фоновий процес, може тривати кілька хвилин; повідомлення
-                    з'являтимуться в архіві поступово. <a href="${libHref}">Перевірити прогрес у Бібліотеці</a>.
+                    ${R.t('telegram.bf.started', { limit })} <a href="${libHref}">${R.t('telegram.bf.checkLibrary')}</a>.
                 </div>`;
-                UI.toast('Догрузку історії запущено', 'success');
+                UI.toast(R.t('telegram.bf.toast'), 'success');
             } catch (e) {
                 startBtn.disabled = false;
                 statusEl.textContent = '';
-                UI.toast(e.message || 'Догрузка недоступна (потрібен слухач)', 'info');
+                UI.toast(e.message || R.t('telegram.bf.unavailable'), 'info');
             }
         });
     }
@@ -389,7 +377,7 @@
                         title: d.title || null, username: d.username || null, chat_type: d.type || null,
                     });
                     d.monitored = chk.checked;
-                    UI.toast(chk.checked ? 'Чат увімкнено для слухання' : 'Чат вимкнено', 'success');
+                    UI.toast(chk.checked ? R.t('telegram.toast.enabled') : R.t('telegram.toast.disabled'), 'success');
                     paintCounts(ctx);
                 } catch (e) { UI.toast(e.message, 'error'); chk.checked = !chk.checked; }
             });
@@ -397,7 +385,7 @@
                 try {
                     await R.api.post('/api/telegram/chats', { chat_id: id, category_id: sel.value === '' ? null : Number(sel.value) });
                     d.category_id = sel.value === '' ? null : Number(sel.value);
-                    UI.toast('Напрямок чату збережено', 'success');
+                    UI.toast(R.t('telegram.toast.categorySaved'), 'success');
                     paintCounts(ctx);
                 } catch (e) { UI.toast(e.message, 'error'); }
             });
@@ -417,9 +405,9 @@
         if (!bar) return;
         if (bar.innerHTML) { bar.innerHTML = ''; return; }
         bar.innerHTML = `<div class="rc-newcat">
-            <input class="rc-input" id="rcTgCatName" placeholder="Назва нового напрямку…" autocomplete="off">
-            <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcTgCatSave">Створити</button>
-            <button class="rc-btn rc-btn--sm" id="rcTgCatCancel">Скасувати</button>
+            <input class="rc-input" id="rcTgCatName" placeholder="${R.t('telegram.newcat.placeholder')}" autocomplete="off">
+            <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcTgCatSave">${R.t('core.create')}</button>
+            <button class="rc-btn rc-btn--sm" id="rcTgCatCancel">${R.t('core.cancel')}</button>
         </div>`;
         const input = bar.querySelector('#rcTgCatName');
         input.focus();
@@ -432,8 +420,8 @@
                 R.state.categories = null;            // bust shared cache
                 cats = await UI.loadCategories();
                 close(); paintList(ctx);
-                UI.toast(`Напрямок «${name}» створено`, 'success');
-            } catch (e) { UI.toast(e.message || 'Не вдалось створити напрямок', 'error'); }
+                UI.toast(R.t('telegram.newcat.created', { name }), 'success');
+            } catch (e) { UI.toast(e.message || R.t('telegram.newcat.failed'), 'error'); }
         };
         bar.querySelector('#rcTgCatSave').addEventListener('click', save);
         bar.querySelector('#rcTgCatCancel').addEventListener('click', close);

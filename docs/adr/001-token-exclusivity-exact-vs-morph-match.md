@@ -6,16 +6,16 @@
 
 ## Context
 
-From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, ремонтний
-раунд after `/vulyk-review`, BLOCK critical #1):
+From `docs/specs/entity-graph-tg/plan.md`, `## Plan deltas` (21.08.2026, repair
+round after `/vulyk-review`, BLOCK critical #1):
 
-> Тригер: `lead-review` довів, що при `TG_ENTITIES_MORPH_ENABLED=1` одна згадка
-> зараховується двом сутностям, коли точний збіг довший за одне слово, і що тест
-> гарда 1 не може почервоніти.
+> Trigger: `lead-review` proved that with `TG_ENTITIES_MORPH_ENABLED=1` one mention
+> is credited to two entities when the exact match is longer than one word, and that
+> the guard 1 test cannot go red.
 >
-> Кожен токен, спожитий точним збігом, має бути закритий для морфо-гілки незалежно
-> від того, зі скількох слів складається назва, що його спожила; тест гарда 1 має
-> падати, якщо гард 1 прибрати.
+> Every token consumed by an exact match must be closed to the morph branch regardless
+> of how many words the name that consumed it consists of; the guard 1 test must
+> fail if guard 1 is removed.
 
 This concretizes the long-standing graph invariant "one writing cannot be credited
 to two entities" (`memory/entity-merge-moves-names-to-aliases.md`) for the new morph

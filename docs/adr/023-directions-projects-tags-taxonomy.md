@@ -1,4 +1,4 @@
-# ADR-023: Двошарова таксономія (напрямок → проєкт) і теги — один резолвер, одна таблиця, точковий re-embed через версію ембедингів
+# ADR-023: A two-layer taxonomy (direction → project) and tags — one resolver, one table, point re-embed through the embeddings version
 
 - Status: proposed
 - Date: 2026-09-22
@@ -6,92 +6,92 @@
 
 ## Context
 
-Рішення власника з грилю (brief.md `## Answers`) вже зафіксовані і тут не переглядаються:
-проєкт — другий рівень тієї самої таблиці `categories` через `parent_id`; теги — вручну +
-підказка Claude при збагаченні + успадкування від TG-чату; розбір фрази робить агент через
-MCP; зміна напрямку/проєкту/тегів → точковий re-embed, префікс чанка отримує
-«напрямок → проєкт → теги» для всіх типів записів.
+The owner's decisions from the grill (brief.md `## Answers`) are already fixed and are not revisited here:
+a project is the second level of the same `categories` table through `parent_id`; tags are manual +
+a Claude hint during enrichment + inheritance from a TG chat; the phrase is parsed by the agent through
+MCP; a change of direction/project/tags → point re-embed, the chunk prefix gets
+"direction → project → tags" for all record types.
 
-Цей ADR закриває **як саме**. Сили, що тиснуть (перевірено по коду 22.09.2026):
+This ADR settles **how exactly**. The forces at play (checked against the code on 22.09.2026):
 
-- Фільтр за `category_id` живе у ~15 місцях без спільного хелпера: `retrieval.py:227-232,
-  281-287` (два рази — vector і FTS), `research.py:136-140`, `commitments.py:927-929`,
-  `audio_library.py:160-162` (через COALESCE-підзапит `cat_subq`), `/api/history`,
-  `/api/memory/entities`, `/api/memory/action-items`, `/api/telegram/chats`, а в
-  `mcp_server.py` — прямий SQL у `list_recent` (`:603-604`), `list_categories` (`:663`),
-  `search_history`. HTTP-гілка і direct-DB тулзи MCP не ділять код. Парсер `_parse_category`
-  скопійований двічі (`memory.py:72`, `research.py:96`).
-- `retrieval.search` приймає одне `category_id`; `scope_tids` — «другий шар», який
-  навмисно не знає про граф (`retrieval.py:196-199`).
-- Нормалізація імен: `memory.py:_norm_cat` (casefold + стиск пробілів) і
-  `scope.py:_norm_name` (NFKC + casefold) — два різні ключі до однієї колонки `name_norm`.
-- Хук re-embed (`record_meta.after_meta_update` → `reembed.schedule_record_reembed`)
-  викликається лише з PATCH назви/опису. Зміна `category_id` — одиночна (`memory.py:245`),
-  bulk (`:277/:280`), merge (`:59-66`), `scope.apply_chat_categories` (`:172-176`, один
-  UPDATE на тисячі рядків), `scope.label_uncategorized` (`:340`) — вектори не оновлює.
-  `_null_category_refs`/`_reassign_category_refs` не чіпають `audio_downloads.category_id`.
-- Префікс чанка (`embeddings.build_context_prefix:630-641`) кладе назву напрямку **лише
-  для дзвінків**; TG отримує нитку, документ — сторінку. `_load_prefix_meta:668-678` —
-  один JOIN на `categories`, тегів немає.
-- Масовий re-embed кришить FTS5 (`chunks_fts optimize` наприкінці — вже в `reembed.run`);
-  ADR-022 — точковий re-embed відкладається на час живого запису.
-- `ask_archive(project=…)` і `scope.scope_filter_ids` вже означають «сутність графа /
-  вільний текст», у графі 1092 сутності типу `project`. Новий рівень ієрархії теж зветься
-  «проєкт».
-- Golden-set (`evals/golden_io.py:60-72`) знає лише `category_id`; гейт (`gate.py:228-237`)
-  передає його у `retrieval.search` як є.
-- Живі числа: 29 категорій, «Фонд Робота» записів (≈більша частина архіву), решта — хвіст.
+- The filter by `category_id` lives in ~15 places without a shared helper: `retrieval.py:227-232,
+  281-287` (twice — vector and FTS), `research.py:136-140`, `commitments.py:927-929`,
+  `audio_library.py:160-162` (through the COALESCE subquery `cat_subq`), `/api/history`,
+  `/api/memory/entities`, `/api/memory/action-items`, `/api/telegram/chats`, and in
+  `mcp_server.py` — direct SQL in `list_recent` (`:603-604`), `list_categories` (`:663`),
+  `search_history`. The HTTP branch and the direct-DB MCP tools do not share code. The parser `_parse_category`
+  is copied twice (`memory.py:72`, `research.py:96`).
+- `retrieval.search` accepts one `category_id`; `scope_tids` is the "second layer", which
+  deliberately knows nothing about the graph (`retrieval.py:196-199`).
+- Name normalization: `memory.py:_norm_cat` (casefold + whitespace collapse) and
+  `scope.py:_norm_name` (NFKC + casefold) — two different keys for one column `name_norm`.
+- The re-embed hook (`record_meta.after_meta_update` → `reembed.schedule_record_reembed`)
+  is called only from the PATCH of title/description. A change of `category_id` — single (`memory.py:245`),
+  bulk (`:277/:280`), merge (`:59-66`), `scope.apply_chat_categories` (`:172-176`, one
+  UPDATE over thousands of rows), `scope.label_uncategorized` (`:340`) — does not update the vectors.
+  `_null_category_refs`/`_reassign_category_refs` do not touch `audio_downloads.category_id`.
+- The chunk prefix (`embeddings.build_context_prefix:630-641`) puts the direction name **for calls
+  only**; TG gets the thread, a document gets the page. `_load_prefix_meta:668-678` is
+  one JOIN on `categories`, no tags.
+- A mass re-embed crumbles FTS5 (`chunks_fts optimize` at the end — already in `reembed.run`);
+  ADR-022 — a point re-embed is deferred for the duration of a live recording.
+- `ask_archive(project=…)` and `scope.scope_filter_ids` already mean "a graph entity /
+  free text", the graph has entities of type `project`. The new hierarchy level is also called
+  "project".
+- The golden set (`evals/golden_io.py:60-72`) knows only `category_id`; the gate (`gate.py:228-237`)
+  passes it to `retrieval.search` as is.
+- Live numbers: 29 categories, "Фонд Робота" records (≈more than half of the archive), the rest is a tail.
 
 ## Options
 
-### A. Розкриття «напрямок = він сам + його проєкти»
+### A. Expanding "direction = itself + its projects"
 
-1. Рекурсивний CTE / `IN (SELECT …)` руками в кожному місці — нуль нових модулів, але
-   15 копій одного підзапиту у двох процесах, що не діляться кодом; розʼїдуться на першій
-   правці (та сама пастка, що з `lower()` у кириличному grep).
-2. **Один SQL-only модуль `app/services/categories.py` з функцією-фрагментом, яку кличе
-   кожне місце фільтра** — ті самі 15 місць правляться один раз (заміна `col = ?` на виклик),
-   далі семантика живе в одній функції; імпортується і з `mcp_server.py` (без torch).
-3. Денормалізована `root_category_id` на 4 таблицях — швидкий фільтр, але кожен reparent/
-   merge/переїзд мусить синхронізувати колонку в 4 таблицях; дорога скасувати, а виграшу у
-   швидкості на SQLite з 6 тис. записів немає.
+1. A recursive CTE / `IN (SELECT …)` by hand in every place — zero new modules, but
+   15 copies of one subquery in two processes that do not share code; they will drift apart on the first
+   edit (the same trap as `lower()` in a Cyrillic grep).
+2. **One SQL-only module `app/services/categories.py` with a fragment function that every
+   filter place calls** — the same 15 places are edited once (replacing `col = ?` with a call),
+   afterwards the semantics live in one function; imported from `mcp_server.py` too (no torch).
+3. A denormalized `root_category_id` on 4 tables — a fast filter, but every reparent/
+   merge/move must synchronize the column in 4 tables; expensive to undo, and there is no gain in
+   speed on SQLite with 6 thousand records.
 
-### B. Схема тегів
+### B. Tag schema
 
-1. Тег як рядок у `entities` типу `topic` — таблиця вже є, але там 2663 шумних тем, ручного
-   контролю словника немає, а `meeting_entities` існує лише для збагачених (~16 %) записів.
-2. **Окремі таблиці `tags` + `record_tags` + `tg_chat_tags`; кріплення лише до
-   `transcriptions`; підказки Claude — окрема колонка `suggested_tags_json`, у `record_tags`
-   тільки підтверджене** — контрольований словник, фільтри без умов на статус.
-3. JSON-масив тегів у колонці `transcriptions.tags_json` — найменше таблиць, але фільтр
-   «тег AI» стає `LIKE`/`json_each` у 15 місцях, а перейменування тегу — прохід по всіх рядках.
+1. A tag as a row in `entities` of type `topic` — the table already exists, but it has 2663 noisy topics, there is no
+   manual control of the vocabulary, and `meeting_entities` exists only for enriched (~16 %) records.
+2. **Separate tables `tags` + `record_tags` + `tg_chat_tags`; attachment only to
+   `transcriptions`; Claude's hints are a separate column `suggested_tags_json`, only the
+   confirmed ones go into `record_tags`** — a controlled vocabulary, filters without conditions on status.
+3. A JSON array of tags in the column `transcriptions.tags_json` — the fewest tables, but the filter
+   "tag AI" becomes `LIKE`/`json_each` in 15 places, and renaming a tag is a pass over all rows.
 
-### C. Зіткнення назв
+### C. Name collision
 
-1. Новий параметр `project_id` поруч із наявним `project` — два параметри в одне слово, агент
-   плутатиме гарантовано.
-2. **`category_id` приймає id будь-якого вузла (напрямок або проєкт), нового параметра немає;
-   `project` лишається сутністю графа/вільним текстом** — жоден наявний виклик не ламається.
-3. Перейменувати `project` → `entity` зі зворотним аліасом — чистіше, але це правка контракту
-   9 тулзів заради слова, і `ask_log`/golden-set уже містять `project`.
+1. A new parameter `project_id` next to the existing `project` — two parameters for one word, the agent
+   will confuse them guaranteed.
+2. **`category_id` accepts the id of any node (direction or project), there is no new parameter;
+   `project` stays a graph entity/free text** — no existing call breaks.
+3. Rename `project` → `entity` with a backward alias — cleaner, but it is an edit of the contract of
+   9 tools for the sake of a word, and `ask_log`/the golden set already contain `project`.
 
-### D. Re-embed і префікс
+### D. Re-embed and prefix
 
-1. Точковий хук на кожен запис при кожному UPDATE — на переїзді 4051 TG-записів це 4051
-   постановка в чергу і 4051 DELETE+INSERT по FTS без `optimize`.
-2. **Хук лише для «поточної пари» ембедингів + батч-задача для масових змін + сама зміна
-   формату префікса ходить як нова епоха `EMBED_VERSION` (номер — у `.env`, строго вище
-   бойової пари) через наявний `reembed.run`** — масову
-   перебудову робить механізм, який уже вміє optimize в кінці та знімок→гейт→бойова.
-3. Спеціальний прапорець «міграція, хуки вимкнені» — зайвий стан, який хтось забуде зняти.
+1. A point hook on every record on every UPDATE — on the move of 4051 TG records that is 4051
+   queue submissions and 4051 DELETE+INSERT on FTS without `optimize`.
+2. **A hook only for the "current pair" of embeddings + a batch task for mass changes + the change of
+   the prefix format itself goes as a new epoch `EMBED_VERSION` (the number is in `.env`, strictly above the
+   live pair) through the existing `reembed.run`** — the mass
+   rebuild is done by the mechanism that already knows optimize at the end and snapshot→gate→live.
+3. A special flag "migration, hooks off" — an extra state that someone will forget to clear.
 
 ## Decision
 
-### A. Один резолвер — `app/services/categories.py`
+### A. One resolver — `app/services/categories.py`
 
-Новий модуль **без torch/anthropic на рівні імпорту** (памʼятка `mcp-stdio-no-heavy-models`),
-куди переїжджають і наявні `_norm_cat`/`_norm_name`, `_parse_category`,
-`_null_category_refs`/`_reassign_category_refs`:
+A new module **without torch/anthropic at import level** (memory note `mcp-stdio-no-heavy-models`),
+into which the existing `_norm_cat`/`_norm_name`, `_parse_category`,
+`_null_category_refs`/`_reassign_category_refs` move:
 
 ```python
 def parse_filter(raw) -> int | str | None            # '5'→5, 'none'→'none', ''/'all'/None→None
@@ -99,33 +99,33 @@ def filter_sql(column: str, value) -> tuple[str, list]
     # None  → ("", [])
     # 'none'→ (f" AND {column} IS NULL", [])
     # int   → (f" AND {column} IN (SELECT id FROM categories WHERE id = ? OR parent_id = ?)", [v, v])
-def norm_name(name: str) -> str                      # NFKC + strip + стиск пробілів + casefold
-def subtree_ids(conn, category_id: int) -> list[int]  # [self, *children] — для UI-лічильників і тестів
+def norm_name(name: str) -> str                      # NFKC + strip + whitespace collapse + casefold
+def subtree_ids(conn, category_id: int) -> list[int]  # [self, *children] — for UI counters and tests
 ```
 
-Дерево має **рівно два рівні**: `parent_id` може вказувати лише на вузол із `parent_id IS
-NULL` (перевірка в PATCH/POST категорії, 400 інакше). Тому `id = ? OR parent_id = ?` — це
-повне розкриття без CTE; для проєкта (листка) той самий фрагмент повертає лише його. `column`
-— будь-який вираз, у т.ч. `cat_subq` з `audio_library.py`.
+The tree has **exactly two levels**: `parent_id` may point only at a node with `parent_id IS
+NULL` (checked in PATCH/POST of a category, 400 otherwise). Therefore `id = ? OR parent_id = ?` is the
+full expansion without a CTE; for a project (a leaf) the same fragment returns only itself. `column`
+is any expression, including `cat_subq` from `audio_library.py`.
 
-Всі 15 місць фільтра (список у Context) замінюють свою гілку `= ? / IS NULL` на
-`filter_sql(...)`. `retrieval.search` **зберігає сигнатуру** `category_id` — семантика
-«вузол + його проєкти» реалізується всередині `_vector_search`/`_fts_search` тим самим
-хелпером, тож HTTP-проксі, `gate.py`, `copilot/dispatcher` і MCP-проксі не правляться.
-`scope.scope_filter_ids:438-441` (збіг назви з категорією) шукає вузол за `name_norm` і далі
-теж кличе `filter_sql`. Обидва старі нормалізатори стають імпортом `categories.norm_name`
-(єдина різниця — NFKC + стиск пробілів разом; для наявних 29 імен ключ не змінюється,
-`name_norm` не перераховуємо).
+All 15 filter places (the list is in Context) replace their `= ? / IS NULL` branch with
+`filter_sql(...)`. `retrieval.search` **keeps the signature** `category_id` — the semantics
+"node + its projects" is implemented inside `_vector_search`/`_fts_search` by the same
+helper, so the HTTP proxy, `gate.py`, `copilot/dispatcher` and the MCP proxy are not edited.
+`scope.scope_filter_ids:438-441` (a name match with a category) looks the node up by `name_norm` and then
+also calls `filter_sql`. Both old normalizers become an import of `categories.norm_name`
+(the only difference — NFKC + whitespace collapse together; for the existing 29 names the key does not change,
+we do not recompute `name_norm`).
 
-Відкинуто: (1) — 15 копій у двох процесах; (3) — синхронізація 4 таблиць при кожному
-reparent, дороге скасування.
+Rejected: (1) — 15 copies in two processes; (3) — synchronizing 4 tables on every
+reparent, expensive to undo.
 
-### B. Теги
+### B. Tags
 
-Міграція **v45** (аддитивна, `PRAGMA table_info` перед кожним кроком):
+Migration **v45** (additive, `PRAGMA table_info` before every step):
 
 ```sql
-ALTER TABLE categories ADD COLUMN parent_id INTEGER;            -- NULL = напрямок
+ALTER TABLE categories ADD COLUMN parent_id INTEGER;            -- NULL = direction
 CREATE INDEX idx_categories_parent ON categories(parent_id);
 CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
                    name_norm TEXT NOT NULL UNIQUE, color TEXT,
@@ -137,48 +137,52 @@ CREATE TABLE record_tags (transcription_id INTEGER NOT NULL, tag_id INTEGER NOT 
 CREATE INDEX idx_record_tags_tag ON record_tags(tag_id);
 CREATE TABLE tg_chat_tags (chat_id INTEGER NOT NULL, tag_id INTEGER NOT NULL,
                            PRIMARY KEY (chat_id, tag_id));
-ALTER TABLE transcriptions ADD COLUMN suggested_tags_json TEXT;   -- підказки Claude, ще не прийняті
+ALTER TABLE transcriptions ADD COLUMN suggested_tags_json TEXT;   -- Claude's hints, not yet accepted
 ```
 
-- **Кріплення — лише `transcriptions`.** Аудіо в Медіатеці показує теги свого останнього
-  транскрипту тим самим COALESCE-шляхом, що й напрямок (`audio_library.py:132-136`);
-  нетранскрибований запис тегів не має. Копілот-сесія тегів не має.
-- **Підказки живуть окремо від істини.** При збагаченні (`enrichment._persist_card`) Claude
-  отримує наявний словник тегів (як `_ask_claude_category` отримує список напрямків) і
-  повертає ≤5 назв → `suggested_tags_json`. Прийняття одним кліком переносить у
-  `record_tags` із `source='claude'`; фільтри читають **тільки** `record_tags`, тому жодне
-  місце фільтра не знає про статус підказки.
-- **`source` потрібен для відвʼязування.** Зняття тега з чату видаляє лише рядки
-  `source='chat'` цього чату; ручні лишаються (те саме правило «один слот — один
-  власник», що в `entity-graph-provenance`). Привʼязка тега до чату — ретроактивно, як
-  `apply_chat_categories`; новий інжест TG копіює `tg_chat_tags` чату у `record_tags`
-  поруч із успадкуванням `category_id`.
-- Кілька тегів у фільтрі — **OR** (будь-який із); перетин із `category_id` — AND. Це «обʼєднати
-  тегами» з брифу; перетин тегів не просили.
-- **Колір є, опису/іконки немає.** Колір — бо чіп `.rc-chip` + `.rc-cat__dot` уже так
-  малюється; опис — четверте вільне поле, яке ніхто не читатиме.
-- **Теги ортогональні дереву.** Видалення/злиття напрямку `record_tags` не чіпає взагалі.
-  Видалення тега каскадує в app-коді (`record_tags`, `tg_chat_tags`); злиття тегів — `INSERT OR
-  IGNORE` + DELETE, як у категорій.
+- **Attachment — `transcriptions` only.** Audio in the Media library shows the tags of its latest
+  transcript through the same COALESCE path as the direction (`audio_library.py:132-136`);
+  an untranscribed recording has no tags. A copilot session has no tags.
+- **Hints live separately from the truth.** During enrichment (`enrichment._persist_card`) Claude
+  receives the existing tag vocabulary (as `_ask_claude_category` receives the list of directions) and
+  returns ≤5 names → `suggested_tags_json`. Accepting with one click moves them into
+  `record_tags` with `source='claude'`; the filters read **only** `record_tags`, so no
+  filter place knows about the status of a hint.
+- **`source` is needed for unbinding.** Removing a tag from a chat deletes only the rows
+  `source='chat'` of that chat; manual ones stay (the same "one slot — one
+  owner" rule as in `entity-graph-provenance`). Binding a tag to a chat is retroactive, like
+  `apply_chat_categories`; a new TG ingest copies the chat's `tg_chat_tags` into `record_tags`
+  next to inheriting `category_id`.
+- Several tags in a filter — **OR** (any of them); the intersection with `category_id` — AND. This is "combine
+  by tags" from the brief; an intersection of tags was not asked for.
+- **There is a colour, no description/icon.** Colour — because the chip `.rc-chip` + `.rc-cat__dot` is already drawn that way;
+  description — a fourth free field that nobody would read.
+- **Tags are orthogonal to the tree.** Deleting/merging a direction does not touch `record_tags` at all.
+  Deleting a tag cascades in app code (`record_tags`, `tg_chat_tags`); merging tags — `INSERT OR
+  IGNORE` + DELETE, as with categories.
 
-Відкинуто: (1) `entities.topic` — шумний словник і покриття 16 %; (3) JSON-колонка —
-`LIKE` у 15 місцях.
+Rejected: (1) `entities.topic` — a noisy vocabulary and 16 % coverage; (3) a JSON column —
+`LIKE` in 15 places.
 
-### C. Іменування
+### C. Naming
 
-- **`category_id` — id будь-якого вузла** (напрямок або проєкт) у HTTP і MCP. Нового
-  параметра `project_id` немає. `list_categories` (HTTP і MCP) віддає дерево: `id, name,
-  slug, color, icon, parent_id, level ('direction'|'project'), items` (власні) і
-  `items_total` (піддерево); MCP-версія перестає губити color/icon.
-- **`project` не перейменовуємо** і не змінюємо семантику: сутність графа ∪ текстова згадка ∪
-  однойменний вузол дерева (з проєктами). Раз назва проєкта тепер ще й вузол — `project="NOVA"`
-  чесно захоплює і піддерево, це задокументована частина обʼєднання.
-- Нові параметри там, де вже є `category_id` (`search_archive`, `list_recent`,
-  `list_action_items`, `ask_archive`, `research_*`, `search_history`, `grep_archive` — цьому
-  ще й `category_id`): `tags: Optional[str]` (назви через кому, як `project`), `since`/`until`
-  (ISO-дата, по `meeting_date`). Розбір «за тиждень» — робить агент, Recall дат не парсить.
-- **Текст для docstring кожного тулза з обома параметрами (дослівно):**
+- **`category_id` — the id of any node** (direction or project) in HTTP and MCP. There is no new
+  parameter `project_id`. `list_categories` (HTTP and MCP) returns the tree: `id, name,
+  slug, color, icon, parent_id, level ('direction'|'project'), items` (own) and
+  `items_total` (subtree); the MCP version stops losing color/icon.
+- **We do not rename `project`** and do not change its semantics: a graph entity ∪ a text mention ∪
+  a same-named tree node (with projects). Since a project name is now also a node, `project="NOVA"`
+  honestly captures the subtree as well, which is a documented part of the union.
+- New parameters wherever `category_id` already exists (`search_archive`, `list_recent`,
+  `list_action_items`, `ask_archive`, `research_*`, `search_history`, `grep_archive` — this one
+  also gets `category_id`): `tags: Optional[str]` (names comma-separated, like `project`), `since`/`until`
+  (ISO date, by `meeting_date`). Parsing "for a week" is done by the agent, Recall does not parse dates.
+- **The docstring text for every tool with both parameters (verbatim).** The docstrings in
+  `mcp_server.py` are Ukrainian (the agent relays them to the owner) and `tests/test_mcp_taxonomy.py`
+  reads this block as the source of truth, so it is a quoted interface string, not prose, and stays
+  as the code has it:
 
+  <!-- verbatim:start — Текст для docstring (quoted from mcp_server.py, kept in the code's language) -->
   > `category_id` — id **напрямку або проєкту** з `list_categories`; напрямок автоматично
   > включає всі свої проєкти, проєкт — лише себе. Це рівень ієрархії архіву.
   > `project` — **не** проєкт ієрархії, а назва сутності графа або вільний текст («Маяк»,
@@ -186,184 +190,191 @@ ALTER TABLE transcriptions ADD COLUMN suggested_tags_json TEXT;   -- підка�
   > архіву — передай його id у `category_id`, не назву у `project`.
   > `tags` — назви тегів через кому; кілька = будь-який із них. Поєднання з `category_id` —
   > перетин («тег AI лише в цьому напрямку»).
+  <!-- verbatim:end -->
 
-Відкинуто: (1) `project_id` — плутанина гарантована; (3) перейменування `project` — правка
-9 контрактів і `ask_log` заради слова.
+  In English, for the reader: `category_id` is the id of a direction or a project from `list_categories`
+  (a direction includes all its projects, a project only itself — the archive's hierarchy level);
+  `project` is not a hierarchy project but a graph-entity name or free text that narrows to records
+  mentioning it (to narrow to a project as a section, pass its id in `category_id`); `tags` are tag names
+  comma-separated, several = any of them, and combined with `category_id` it is an intersection.
 
-### D. Re-embed і префікс
+Rejected: (1) `project_id` — confusion is guaranteed; (3) renaming `project` — an edit of
+9 contracts and `ask_log` for the sake of a word.
 
-- **Формат префікса змінюється для всіх типів → це нова епоха ембедингів.** Хвіст рядка 1
-  стає `Напрямок → Проєкт` (або лише напрямок) **для всіх типів**, далі типоспецифічне
-  (`нитка: …` / `стор. N`), далі `теги: a, b, c` (≤5 тегів, ≤60 символів — стеля, як у
-  `_PREFIX_DESCRIPTION_MAX`). `_load_prefix_meta` — self-JOIN `categories parent`
-  + `GROUP_CONCAT` по `record_tags`. Масову перебудову архіву робить **наявний**
-  `reembed.run` (знімок на старій епосі → знімок на новій → `evals.gate` → `evals.compare`
-  → бойова з `--yes-live`), він уже кличе `optimize_chunk_index` один раз наприкінці.
-  Нічого нового для масового шляху не пишемо.
-- **Номер епохи — акт конфігурації, не правка коду.** Читається з БД, ставиться в `.env`:
+### D. Re-embed and prefix
+
+- **The prefix format changes for all types → this is a new embeddings epoch.** The tail of line 1
+  becomes `Напрямок → Проєкт` (or the direction alone) **for all types**, then the type-specific part
+  (`нитка: …` / `стор. N`), then `теги: a, b, c` (≤5 tags, ≤60 characters — a ceiling, like
+  `_PREFIX_DESCRIPTION_MAX`). `_load_prefix_meta` — a self-JOIN of `categories parent`
+  + `GROUP_CONCAT` over `record_tags`. The mass rebuild of the archive is done by the **existing**
+  `reembed.run` (snapshot on the old epoch → snapshot on the new → `evals.gate` → `evals.compare`
+  → live with `--yes-live`), which already calls `optimize_chunk_index` once at the end.
+  We write nothing new for the mass path.
+- **The epoch number is an act of configuration, not a code edit.** It is read from the DB and set in `.env`:
   `SELECT embedding_model, embedding_version, COUNT(*) FROM transcriptions GROUP BY 1, 2`
-  — станом на 22.09.2026 бойова тримає `(intfloat/multilingual-e5-large, 4)` на живих даних (+7 на старій 2), тож **бойова 4 → 5 у `.env`** (крок 1 рунбука нижче). Номер
-  беруть **строго вище** будь-якої пари, що вже є в БД. **ADR-016 дотримано: дефолт коду не
-  змінюється** — `embeddings.EMBED_VERSION` і реєстр `app/core/settings.py` лишаються на `2`,
-  епохи вище бойова проходила лише рядком `.env`. **ADR-017: пін розділяє формати лише за
-  нового номера** — під номером, який у БД уже є, новий префікс ляже в стару епоху,
-  `reembed.run --dry-run` покаже 0 stale, а точкові хуки тихо змішають два формати в одній
-  вибірці `retrieval.search`.
-- **Точковий хук фільтрує за парою.** `reembed.schedule_records_reembed(ids, *, db_path,
-  reason)` — новий батч-варіант поверх `schedule_record_reembed`: пропускає id, чия пара
-  `(embedding_model, embedding_version)` ≠ поточна (їх і так підбере `run`); ≤20 id → по
-  одному через наявний точковий шлях (з відкладенням ADR-022); >20 → одна задача
-  `reembed_batch`, яка ітерує id, знімає їх із `_pending_ids` на старті кожного, і кличе
-  `optimize_chunk_index` один раз наприкінці; відкладення під час запису — те саме
-  `_recording_active()` + таймер.
-- **Єдині письменники таксономії.** `categories.set_category(conn, ids, cid) -> list[int]`,
+  — as of 22.09.2026 the live one holds `(intfloat/multilingual-e5-large, 4)` on live data (+7 on the old 2), so **live 4 → 5 in `.env`** (step 1 of the runbook below). The number is
+  taken **strictly above** any pair already in the DB. **ADR-016 is respected: the code default does not
+  change** — `embeddings.EMBED_VERSION` and the registry `app/core/settings.py` stay at `2`,
+  the live one went through the epochs above only via a `.env` line. **ADR-017: the pin separates formats only
+  with a new number** — under a number that already exists in the DB, the new prefix would land in the old epoch,
+  `reembed.run --dry-run` would show 0 stale, and the point hooks would quietly mix two formats in one
+  sample of `retrieval.search`.
+- **The point hook filters by pair.** `reembed.schedule_records_reembed(ids, *, db_path,
+  reason)` — a new batch variant on top of `schedule_record_reembed`: it skips ids whose pair
+  `(embedding_model, embedding_version)` ≠ current (`run` will pick those up anyway); ≤20 ids → one
+  by one through the existing point path (with the ADR-022 deferral); >20 → one task
+  `reembed_batch`, which iterates the ids, removes each from `_pending_ids` at its start, and calls
+  `optimize_chunk_index` once at the end; deferral during a recording — the same
+  `_recording_active()` + timer.
+- **The only taxonomy writers.** `categories.set_category(conn, ids, cid) -> list[int]`,
   `categories.set_tags(conn, tid, add, remove, source) -> bool`, `categories.reparent(...)`,
-  `apply_chat_tags(...)` — повертають id записів, чий префікс змінився; кожен HTTP/CLI-виклик
-  після `commit` передає їх у `schedule_records_reembed`. `memory.py:245/277/280`, merge,
-  `scope.apply_chat_categories:172-176`, `scope.label_uncategorized:340` переводяться на ці
-  функції. Reparent/перейменування вузла змінює префікс усього піддерева — це теж
-  `schedule_records_reembed(subtree records)`; у день розкладки всі вони — no-op (пара
-  стара), і архів перебудовує один `run`.
-- **Гард формату, а не ручний порядок кроків.** Код оголошує `embeddings.PREFIX_FORMAT`
-  (факт коду, не налаштування), а БД памʼятає формат КОЖНОЇ епохи —
-  `embedding_epochs(model, version, prefix_format)`, міграція **v46**, бекфіл стемплює все,
-  що існувало до неї, форматом 1. Збіг номера епохи зі старішим форматом = **відмова
-  писати** (ERROR у лозі, запис лишається без чанків і його підбере `run`; `reembed.run`
-  відмовляється стартувати, включно з `--dry-run`), а не тихе змішування двох форматів в
-  одній вибірці `retrieval.search` (ADR-017). Дефолт `EMBED_VERSION` при цьому не
-  рухається — ADR-016 чинний.
-- Порядок дня міграції: `EMBED_VERSION=5` в `.env` → **`python -m app.services.reembed
-  epoch-check` → exit 0** (`--db` за замовчуванням бойова, режим `mode=ro`; CLI читає
-  ОТОЧЕННЯ ПРОЦЕСУ, а не `.env`, тож у тій самій сесії спершу `$env:EMBED_VERSION="5"`) →
-  рестарт (накочуються v45+v46) → власник розкладає 29 імен у Налаштуваннях →
+  `apply_chat_tags(...)` — return the ids of records whose prefix changed; every HTTP/CLI call
+  after `commit` passes them to `schedule_records_reembed`. `memory.py:245/277/280`, merge,
+  `scope.apply_chat_categories:172-176`, `scope.label_uncategorized:340` are moved to these
+  functions. Reparenting/renaming a node changes the prefix of the whole subtree — that too is
+  `schedule_records_reembed(subtree records)`; on the day of the layout all of them are no-ops (the pair
+  is old), and the archive is rebuilt by one `run`.
+- **A format guard, not a manual order of steps.** The code declares `embeddings.PREFIX_FORMAT`
+  (a fact of the code, not a setting), and the DB remembers the format of EVERY epoch —
+  `embedding_epochs(model, version, prefix_format)`, migration **v46**, the backfill stamps everything
+  that existed before it with format 1. An epoch number that coincides with an older format = **a refusal
+  to write** (ERROR in the log, the record stays without chunks and `run` will pick it up; `reembed.run`
+  refuses to start, including `--dry-run`), not a quiet mixing of two formats in
+  one sample of `retrieval.search` (ADR-017). The default `EMBED_VERSION` does not
+  move — ADR-016 stands.
+- The order of the migration day: `EMBED_VERSION=5` in `.env` → **`python -m app.services.reembed
+  epoch-check` → exit 0** (`--db` defaults to the live one, mode `mode=ro`; the CLI reads the
+  PROCESS ENVIRONMENT, not `.env`, so in the same session first `$env:EMBED_VERSION="5"`) →
+  restart (v45+v46 roll out) → the owner lays out the 29 names in Settings →
   `scope apply-chats --dry-run` → apply → `label-rest --dry-run` →
-  apply → `reembed.run` (знімок → гейт → бойова). Забутий `.env` більше не тихий: перший же
-  новий транскрипт дасть ERROR і лишиться без чанків, а `epoch-check` — exit 1
-  `format_mismatch`. Вікно деградації векторної гілки до FTS —
-  тривалість `run` (≈2–3 год на 6 тис. записів при 45 зап/хв); для особистого інструмента
-  прийнятно, робиться за один вечір.
+  apply → `reembed.run` (snapshot → gate → live). A forgotten `.env` is no longer silent: the very first
+  new transcript will give an ERROR and stay without chunks, and `epoch-check` — exit 1
+  `format_mismatch`. The window of degradation of the vector branch to FTS is
+  the duration of `run` (≈2–3 h on 6 thousand records at 45 rec/min); acceptable for a personal tool,
+  done in one evening.
 
-Відкинуто: (1) — 4051 постановка в чергу і FTS без optimize; (3) — прапорець, який забудуть.
+Rejected: (1) — 4051 queue submissions and FTS without optimize; (3) — a flag that will be forgotten.
 
-### E. Міграція і безпека
+### E. Migration and safety
 
-- v45 — тільки DDL, **жодного переносу даних**; розкладка — руками власника через
-  `PATCH /api/memory/categories/<id>` (нове поле `parent_id`) і через `chat_categories.local.json`,
-  де рядок чату отримує опційне `"parent": "Фонд Робота"` — `_ensure_categories` створює
-  відсутній вузол під ним. Назва вузла унікальна **по всій таблиці** (наявний UNIQUE
-  `name_norm`): проєкт «Маркетинг» не може існувати у двох напрямках — свідоме спрощення.
+- v45 — DDL only, **no data transfer**; the layout is done by the owner by hand through
+  `PATCH /api/memory/categories/<id>` (new field `parent_id`) and through `chat_categories.local.json`,
+  where a chat row gets an optional `"parent": "Фонд Робота"` — `_ensure_categories` creates
+  the missing node under it. A node name is unique **across the whole table** (the existing UNIQUE
+  `name_norm`): the project "Маркетинг" cannot exist in two directions — a deliberate simplification.
 
-  > **Замінено 2026-09-22 (v47, хвиля 6).** Спрощення не пережило першої ж розкладки живого
-  > архіву: «Маркетинг» потрібен і під «Фонд Робота», і під «Фріланс». Унікальність тепер
-  > **серед братів** — напрямки між собою, проєкти одного батька між собою; напрямок і чужий
-  > проєкт можуть збігатись. Міграція v47 перебудовує `categories` (inline `UNIQUE COLLATE
-  > NOCASE` з v15 не знімається ALTER'ом), ставить `idx_categories_parent_name` UNIQUE на
-  > `(COALESCE(parent_id, 0), name_norm)` і лишає `slug UNIQUE`; `PRAGMA foreign_keys=OFF` на
-  > час перебудови обовʼязковий — з FK увімкненими `DROP TABLE categories` спрацьовує як
-  > DELETE і мовчки зануляє `tg_monitored_chats.category_id` (`ON DELETE SET NULL`, v18).
-  > Дубль ловить Python-перевірка серед братів ДО запису (`categories.
-  > _assert_free_sibling_name`), тож 409 називає напрямок, у якому зайнято, і несе
-  > `conflict {id, path}`; індекс лишається останнім рубежем, а не основним контролем.
+  > **Replaced 2026-09-22 (v47, wave 6).** The simplification did not survive the very first layout of the live
+  > archive: "Маркетинг" is needed both under "Фонд Робота" and under "Фріланс". Uniqueness is now
+  > **among siblings** — directions among themselves, projects of one parent among themselves; a direction and another's
+  > project may coincide. Migration v47 rebuilds `categories` (the inline `UNIQUE COLLATE
+  > NOCASE` from v15 cannot be dropped by ALTER), puts `idx_categories_parent_name` UNIQUE on
+  > `(COALESCE(parent_id, 0), name_norm)` and leaves `slug UNIQUE`; `PRAGMA foreign_keys=OFF` for
+  > the duration of the rebuild is mandatory — with FKs on, `DROP TABLE categories` acts like
+  > DELETE and silently nulls `tg_monitored_chats.category_id` (`ON DELETE SET NULL`, v18).
+  > A duplicate is caught by a Python check among siblings BEFORE the write (`categories.
+  > _assert_free_sibling_name`), so the 409 names the direction in which it is taken and carries
+  > `conflict {id, path}`; the index stays the last line of defence, not the main control.
   >
-  > **Канонічна текстова назва вузла — повний шлях «Напрямок → Проєкт»** (роздільник
-  > `categories.PATH_SEP`, той самий `→`, що в контекстному префіксі чанка). Його несе
-  > поле `path` кожного елемента `list_tree` — HTTP `GET /api/memory/categories` і MCP
-  > `list_categories`. Гола назва лишається дозволеним входом, але розвʼязує її ОДИН
-  > резолвер — `categories.resolve_node(conn, text)`: один збіг → він, нуль → `None`,
-  > кілька → `CategoryError('ambiguous')` з `.candidates` (перелік шляхів).
+  > **The canonical textual name of a node is the full path "Direction → Project"** (separator
+  > `categories.PATH_SEP`, the same `→` as in the chunk context prefix). It is carried by the
+  > field `path` of every `list_tree` item — HTTP `GET /api/memory/categories` and MCP
+  > `list_categories`. A bare name remains an allowed input, but it is resolved by ONE
+  > resolver — `categories.resolve_node(conn, text)`: one match → it, zero → `None`,
+  > several → `CategoryError('ambiguous')` with `.candidates` (a list of paths).
   >
-  > Неоднозначність ніколи не тиха: HTTP віддає 409 `{"error":"ambiguous","candidates":[…]}`
-  > (`/api/memory/categories`, `/api/memory/ask`, `/api/memory/ask/stream` — останній
-  > розвʼязує `project` ДО генератора, бо зі стріма 409 уже не повернути), MCP
-  > `ask_archive` — ноту з тими самими шляхами, карта чатів (`_ensure_categories`) і арбітр
-  > (`_ask_claude_category`) пропускають рядок і друкують шляхи у звіті, `_title_matchers`
-  > не робить із такої назви сигналу. Ніхто не бере «перший збіг», не обʼєднує піддерева
-  > тезок і не віддає порожньо.
+  > Ambiguity is never silent: HTTP returns 409 `{"error":"ambiguous","candidates":[…]}`
+  > (`/api/memory/categories`, `/api/memory/ask`, `/api/memory/ask/stream` — the last one
+  > resolves `project` BEFORE the generator, because a 409 cannot be returned from a stream), MCP
+  > `ask_archive` — a note with the same paths, the chat map (`_ensure_categories`) and the arbiter
+  > (`_ask_claude_category`) skip the row and print the paths in the report, `_title_matchers`
+  > does not make a signal out of such a name. Nobody takes "the first match", merges the subtrees
+  > of namesakes or returns empty.
   >
-  > Рядок карти чатів із `parent` більше не reparent-ить чужий однойменний вузол — створює
-  > власний під указаним напрямком. І навпаки: **reparent ставить усе піддерево в точковий
-  > re-embed так само, як перейменування** — шлях стоїть у префіксі чанка, тож після
-  > переїзду вектори тезок розходяться саме по ньому.
+  > A chat-map row with `parent` no longer reparents another's same-named node — it creates its
+  > own under the specified direction. And conversely: **a reparent puts the whole subtree into a point
+  > re-embed just like a rename** — the path is in the chunk prefix, so after a
+  > move the vectors of namesakes diverge precisely by it.
   >
-  > **Доповнено 2026-09-22 (хвиля 7, історія 22)** — чотири уточнення, кожне за знахідкою
-  > ради раунду 5:
+  > **Added 2026-09-22 (wave 7, story 22)** — four refinements, each for a finding
+  > of the round 5 council:
   >
-  > 1. **Старшинство резолву.** `resolve_node` спершу шукає ТОЧНИЙ канонічний шлях, і лише
-  >    потім голу назву по всіх вузлах. Канонічний шлях напрямку — його гола назва, тож
-  >    напрямок-тезка («Маркетинг» поруч із чужим «Фріланс → Маркетинг») досяжний своїм
-  >    імʼям, а не `ambiguous` назавжди. Інваріант: `resolve_node(node["path"]) == node["id"]`
-  >    для КОЖНОГО елемента `list_tree`, і кожен рядок `.candidates` резолвиться назад у свій
-  >    вузол — перелік, який сам себе повертає в `ambiguous`, це глухий кут.
-  > 2. **`→` у назві вузла заборонений** (`CategoryError('bad_name')` ДО запису, 400).
-  >    Вузол «Фонд → Клієнти» ламає шлях з обох боків: сам не резолвиться за власною назвою,
-  >    а канонічний шлях його дитини стає тричастинним (`split_path` рахує рівно дві частини).
-  > 3. **Карта чатів резолвить рядок ПАРОЮ `(parent, category)`**, не голою назвою: два рядки
-  >    «Маркетинг» під різними напрямками — це два вузли і дві привʼязки. `--dry-run` перелічує
-  >    ВСІ вузли, які створить реальний прохід (план рахується з того самого резолву, не
-  >    звіркою назв із усією таблицею «до»), кожен зі шляхом і нотою «тезка існує: …».
-  > 4. **FK-гард v47 — захисний.** Виміряно: міграцію ганяє сирий `sqlite3.connect` в
-  >    `init_database`, де `PRAGMA foreign_keys` = 0; `foreign_keys=ON` вмикає інше зʼєднання
-  >    (`app/db/connection.py:40`). Тому `PRAGMA foreign_keys=OFF` у v47 нічого не несе на
-  >    чинному шляху і тримається на випадок виклику на FK-ON зʼєднанні; сама пастка доведена
-  >    тестом на зібраному руками FK-ON зʼєднанні. Слово «обовʼязковий» вище читати як
-  >    «обовʼязковий для будь-якого зʼєднання, де FK увімкнені».
+  > 1. **Resolution precedence.** `resolve_node` first looks for the EXACT canonical path, and only
+  >    then the bare name across all nodes. The canonical path of a direction is its bare name, so
+  >    a namesake direction ("Маркетинг" next to another's "Фріланс → Маркетинг") is reachable by its own
+  >    name, not `ambiguous` forever. Invariant: `resolve_node(node["path"]) == node["id"]`
+  >    for EVERY item of `list_tree`, and every row of `.candidates` resolves back to its own
+  >    node — a list that returns itself into `ambiguous` is a dead end.
+  > 2. **`→` in a node name is forbidden** (`CategoryError('bad_name')` BEFORE the write, 400).
+  >    A node "Фонд → Клієнти" breaks the path from both sides: it does not resolve by its own name,
+  >    and the canonical path of its child becomes three-part (`split_path` counts exactly two parts).
+  > 3. **The chat map resolves a row by the PAIR `(parent, category)`**, not a bare name: two rows
+  >    "Маркетинг" under different directions are two nodes and two bindings. `--dry-run` lists
+  >    ALL the nodes that the real pass will create (the plan is computed from the same resolution, not by
+  >    checking names against the whole "before" table), each with a path and a note "namesake exists: …".
+  > 4. **The v47 FK guard is defensive.** Measured: the migration is run by a raw `sqlite3.connect` in
+  >    `init_database`, where `PRAGMA foreign_keys` = 0; `foreign_keys=ON` is turned on by another connection
+  >    (`app/db/connection.py:40`). Therefore `PRAGMA foreign_keys=OFF` in v47 carries nothing on the
+  >    current path and is kept in case of a call on an FK-ON connection; the trap itself is proven
+  >    by a test on a hand-built FK-ON connection. Read the word "mandatory" above as
+  >    "mandatory for any connection where FKs are enabled".
   >
-  > **Доповнено 2026-09-22 (хвиля 8, історія 26)** — за радою раунду 6:
+  > **Added 2026-09-22 (wave 8, story 26)** — per the round 6 council:
   >
-  > 1. **`--dry-run` карти чатів — той самий писальний шлях із відкотом**, а не окремо
-  >    виведений план. Три раунди поспіль окрема гілка розходилась із реальним проходом
-  >    (нота `namesake`, порядок рядків). Письменники `create_category`, `set_category`,
-  >    `apply_chat_tags`, `ensure_tag` мають ключ `commit=False`; `apply_chat_categories`
-  >    виконує їх на одному зʼєднанні й закінчує `commit()` або `rollback()` (re-embed — лише
-  >    в реальному). `categories_created` — журнал фактичних створень проходу. Відкинуто:
-  >    проксі-зʼєднання з no-op `commit` (прихована магія) і копію БД `VACUUM INTO` на кожне
-  >    превʼю. Резолв детермінований: спершу рядки з `parent`, потім голі — по дереву, що вже
-  >    містить ці створення. `ambiguous` ключується парою рядка: рядок із `parent`
-  >    неоднозначним не буває.
-  > 2. **Правило `→` безумовне** — `update_category` перевіряє його і при reparent без
-  >    перейменування (звичайний reparent лишається дозволеним).
-  > 3. **Два входи — два правила, свідомо.** *Адресація* — людина чи тулз передає скоуп
-  >    (`resolve_node`, `scope_filter_ids`, карта чатів): точний канонічний шлях спершу, тож
-  >    голе імʼя напрямку = цей напрямок; це «один збіг», а не «напрямок завжди виграє».
-  >    *Висновок із вільного тексту* — `_title_matchers`, згадка в заголовку, яку автор не
-  >    адресував: назви з тезками пропускаються зовсім.
-- `_null_category_refs`/`_reassign_category_refs` переїжджають у `categories.py` і
-  **закривають дірку** з `audio_downloads.category_id` (той самий цикл по таблицях).
-- **Видалення/злиття вузла з дітьми — відмова (409)**, поки проєкти не перенесені або не
-  видалені окремо. Відкинуто каскад (несподіване зникнення проєктів) і тихий підйом дітей у
-  корінь (ховає помилку).
-- **Приори k-NN не агрегуємо.** `categorize.suggest_category` голосує по `category_id` сусіда
-  як є — вузол може бути напрямком чи проєктом, і саме проєкт власник хоче бачити в підказці;
-  `_prior_correct` рахує частки по вузлах як зараз — після переїзду записів у проєкти «Фонд»
-  зменшиться, і перекос гіганта, який цей коефіцієнт душить, зменшиться разом із ним.
-  Змінюються лише два входи: `_title_matchers` уже читає всі вузли (проєкти потрапляють
-  автоматично), а арбітр `_ask_claude_category` отримує список у вигляді шляхів
-  «Напрямок → Проєкт», щоб обирати проєкт, а не лише корінь.
-- `_prime_system_prompt` MCP і `catOptions()` фронта отримують те саме дерево з
-  `list_categories` (optgroup напрямок → проєкти з відступом); `research.js` переходить на
-  `catOptions` замість ручної збірки.
+  > 1. **The chat map `--dry-run` is the same write path with a rollback**, not a separately
+  >    derived plan. Three rounds in a row a separate branch diverged from the real pass
+  >    (the `namesake` note, the order of rows). The writers `create_category`, `set_category`,
+  >    `apply_chat_tags`, `ensure_tag` have a key `commit=False`; `apply_chat_categories`
+  >    runs them on one connection and ends with `commit()` or `rollback()` (re-embed — only
+  >    in the real one). `categories_created` is a log of the pass's actual creations. Rejected:
+  >    a proxy connection with a no-op `commit` (hidden magic) and a `VACUUM INTO` copy of the DB for every
+  >    preview. Resolution is deterministic: first the rows with `parent`, then the bare ones — against the tree that already
+  >    contains these creations. `ambiguous` is keyed by the row's pair: a row with `parent`
+  >    is never ambiguous.
+  > 2. **The `→` rule is unconditional** — `update_category` checks it on a reparent without
+  >    a rename too (an ordinary reparent stays allowed).
+  > 3. **Two inputs — two rules, deliberately.** *Addressing* — a person or a tool passes a scope
+  >    (`resolve_node`, `scope_filter_ids`, the chat map): the exact canonical path first, so
+  >    a bare direction name = this direction; this is "one match", not "a direction always wins".
+  >    *Inference from free text* — `_title_matchers`, a mention in a title that the author did not
+  >    address: names with namesakes are skipped entirely.
+- `_null_category_refs`/`_reassign_category_refs` move into `categories.py` and
+  **close the hole** with `audio_downloads.category_id` (the same loop over tables).
+- **Deleting/merging a node with children is a refusal (409)** until the projects are moved or
+  deleted separately. Rejected: a cascade (unexpected disappearance of projects) and a quiet lift of children to
+  the root (hides a mistake).
+- **We do not aggregate the k-NN priors.** `categorize.suggest_category` votes by the neighbour's `category_id`
+  as is — a node may be a direction or a project, and it is the project that the owner wants to see in a hint;
+  `_prior_correct` computes shares per node as now — after records move into projects the "Фонд"
+  will shrink, and the skew of the giant, which this coefficient suppresses, will shrink with it.
+  Only two inputs change: `_title_matchers` already reads all nodes (projects get in
+  automatically), and the arbiter `_ask_claude_category` receives the list as paths
+  "Direction → Project", to choose a project and not only the root.
+- The MCP `_prime_system_prompt` and the frontend's `catOptions()` receive the same tree from
+  `list_categories` (optgroup direction → projects indented); `research.js` switches to
+  `catOptions` instead of assembling by hand.
 
-### F. Мірило
+### F. The yardstick
 
-Golden-set отримує два опційні поля: `tags: list[str]` і `expected_leak: 0` (константа,
-пояснення нижче). `gate._search` передає `tags=` у `retrieval.search`. Гейт для кожного
-пункту з `category_id` або `tags` додатково рахує **`filter_leak`** — кількість чанків у
-видачі, чий запис не лежить у піддереві `category_id` або не має жодного з `tags`; будь-який
-пункт із `filter_leak > 0` — FAIL незалежно від recall. Це доводить, що фільтр не пропускає
-чуже, без жодної ручної розмітки; `recall_at_k` на тих самих пунктах доводить, що він не
-ховає своє. Мінімальний набір у `golden_set.local.json`: ≥3 пункти, де очікуваний запис
-лежить у **проєкті**, а `category_id` — його **напрямок** (доказ розкриття); ≥3 пункти з
-`tags`; ≥2 з `tags` + `category_id`. `slice` не розширюємо; `compare.py` не чіпаємо.
+The golden set gets two optional fields: `tags: list[str]` and `expected_leak: 0` (a constant,
+explained below). `gate._search` passes `tags=` to `retrieval.search`. For every
+item with `category_id` or `tags` the gate additionally computes **`filter_leak`** — the number of chunks in
+the results whose record does not lie in the subtree of `category_id` or has none of the `tags`; any item
+with `filter_leak > 0` is a FAIL regardless of recall. This proves that the filter does not let the foreign through,
+without any manual labelling; `recall_at_k` on the same items proves that it does not
+hide its own. The minimum set in `golden_set.local.json`: ≥3 items where the expected record
+lies in a **project** and `category_id` is its **direction** (proof of expansion); ≥3 items with
+`tags`; ≥2 with `tags` + `category_id`. We do not extend `slice`; we do not touch `compare.py`.
 
 ## Consequences
 
-Легше: один модуль тримає семантику фільтра для HTTP і MCP; `retrieval.search`, гейт,
-копілот і проксі-тулзи не змінюють сигнатур; масова перебудова векторів — уже перевірений
-шлях Волни B. Важче: 15 механічних правок у двох процесах (рутинна, але має бути повною —
-пропущене місце виглядатиме як «проєкт зник із фільтра»); вікно деградації до FTS на час
-`run`; unique-назва вузла по всій таблиці; вимога «два рівні» перевіряється в app-коді, а не
-схемою. Прийнятий борг: `grep_archive` і `archive_grep` досі не фільтрують `duplicate_of`
-(відома дірка з wiki) — додаючи туди `category_id`/`tags`, дублі не чіпаємо.
+Easier: one module holds the filter semantics for HTTP and MCP; `retrieval.search`, the gate,
+the copilot and the proxy tools do not change signatures; the mass rebuild of vectors is the already proven
+path of Wave B. Harder: 15 mechanical edits in two processes (routine, but must be complete —
+a missed place will look like "the project vanished from the filter"); the degradation window to FTS for the duration of
+`run`; a node name unique across the whole table; the "two levels" requirement is checked in app code, not by
+the schema. Accepted debt: `grep_archive` and `archive_grep` still do not filter `duplicate_of`
+(a known hole from the wiki) — adding `category_id`/`tags` there, we do not touch duplicates.
 
 ## Invariants created
 
@@ -371,13 +382,13 @@ Golden-set отримує два опційні поля: `tags: list[str]` і `
   a row whose own `parent_id IS NULL`; the API rejects anything else (400). A node name is
   unique across the whole table (`name_norm`), not per parent.
 
-  > **Замінено 2026-09-22 (v47, хвиля 6).** A node name is unique **among its siblings**
+  > **Replaced 2026-09-22 (v47, wave 6).** A node name is unique **among its siblings**
   > (`idx_categories_parent_name` UNIQUE on `(COALESCE(parent_id, 0), name_norm)`), not across
   > the table; `slug` stays globally unique. The two-level rule itself is unchanged. The
-  > canonical textual name of a node is its full path «Напрямок → Проєкт» (`path` in
+  > canonical textual name of a node is its full path "Direction → Project" (`path` in
   > `list_tree`); every reader that used to resolve a node by its bare name goes through
   > `categories.resolve_node`, which raises `ambiguous` with the list of paths instead of
-  > picking «the first match», merging namesakes or answering empty.
+  > picking "the first match", merging namesakes or answering empty.
 - **Every category filter goes through `app.services.categories.filter_sql`.** A direction
   id means the direction plus all its projects; a project id means the project alone. No
   reader (HTTP, MCP direct-DB, retrieval, research, commitments, copilot) writes its own
@@ -415,12 +426,12 @@ Golden-set отримує два опційні поля: `tags: list[str]` і `
 - The same project name is needed under two directions — the table-wide `name_norm` UNIQUE
   must become `(parent_id, name_norm)`.
 
-  > **Настало 2026-09-22 (v47, хвиля 6).** Зроблено саме так:
-  > `idx_categories_parent_name` UNIQUE на `(COALESCE(parent_id, 0), name_norm)`
-  > (`COALESCE`, бо в UNIQUE-індексі NULL-и не конфліктують — напрямки інакше лишились би
-  > без унікальності між собою). Наступний перегляд цього пункту — коли знадобиться третій
-  > рівень (перший пункт списку).
-- Tag filtering needs AND semantics ("AI and інвестори") or tag counts exceed a few hundred —
+  > **Came to pass 2026-09-22 (v47, wave 6).** It was done exactly this way:
+  > `idx_categories_parent_name` UNIQUE on `(COALESCE(parent_id, 0), name_norm)`
+  > (`COALESCE`, because NULLs do not conflict in a UNIQUE index — otherwise directions would remain
+  > without uniqueness among themselves). The next revisit of this item is when a third
+  > level is needed (the first item of the list).
+- Tag filtering needs AND semantics ("AI and `інвестори`") or tag counts exceed a few hundred —
   the OR-only `tags` parameter and the flat `tags` table without hierarchy get reopened.
 - `reembed.run` over the archive takes longer than an evening (archive ≫ 6k records) — the
   degradation window during the `EMBED_VERSION` bump needs a shadow-column strategy instead.

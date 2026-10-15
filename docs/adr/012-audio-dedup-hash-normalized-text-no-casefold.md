@@ -8,23 +8,23 @@
 
 From `docs/specs/production-rag-wave-a/plan.md`, `## Assumptions`:
 
-> Дедуп на інжесті — для `file`/`youtube`/`recording`; `telegram` і `document` не чіпаємо
-> (у TG свій ключ chat_id+msg_id, документи вже дедуплюються). Хеш — той самий
-> `document_parser.content_hash` над нормалізованим `transcript_text`.
+> Dedup at ingest — for `file`/`youtube`/`recording`; we do not touch `telegram` and `document`
+> (TG has its own key chat_id+msg_id, documents are already deduplicated). The hash is the same
+> `document_parser.content_hash` over the normalized `transcript_text`.
 >
-> Дубль на інжесті НЕ відхиляється (аудіо вже транскрибовано, гроші витрачені): запис
-> зберігається з `duplicate_of` і одразу поза пошуком. Чанки/ембеддинги дубля не будуються.
+> A duplicate at ingest is NOT rejected (the audio is already transcribed, the money is spent): the record
+> is saved with `duplicate_of` and immediately kept out of search. Chunks/embeddings of the duplicate are not built.
 
 And from story `production-rag-wave-a-02` (`## Implementation notes`):
 
-> `document_parser.content_hash()` хешує СИРИЙ текст — тому для аудіо він викликається як
+> `document_parser.content_hash()` hashes the RAW text — so for audio it is called as
 > `content_hash(_normalize_text(text))`.
 
 And from story `production-rag-wave-a-07` (`## Goal`, repair round item #3), extending the
 same invariant to enrichment:
 
-> Жоден шлях індексації чи збагачення не створює чанків, ембеддингів або платної картки
-> Claude для запису з `duplicate_of IS NOT NULL`.
+> No indexing or enrichment path creates chunks, embeddings or a paid Claude card
+> for a record with `duplicate_of IS NOT NULL`.
 
 Two properties of this design are easy to re-litigate by accident in a future story: that
 the hash is computed over `_normalize_text(text)` (not raw text, and not casefolded on top
@@ -61,7 +61,7 @@ their own dedup keys).
 
 A duplicate audio/YouTube upload costs nothing extra after the first transcription (no
 enrichment call, no embeddings) but is not silently lost - the row and its metadata
-survive, visible in the Library as "дубль #N". The known accepted debt: if the *original*
+survive, visible in the Library as "duplicate #N". The known accepted debt: if the *original*
 of a duplicate group is later deleted, the duplicate does not get re-promoted to take its
 place - it stays excluded from search until a human intervenes. `grep_archive` and other
 surfaces outside `retrieval.search` do not filter duplicates in this wave.

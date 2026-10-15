@@ -9,14 +9,14 @@
 From `docs/specs/production-rag-wave-a/plan.md`, `## Requirements` quoted in story
 `production-rag-wave-a-03`:
 
-> Контекст собирается в хронологическом порядке; в промпте: позднейшая версия ведёт,
-> ранняя показывается как «было», комментарий владельца выше обеих.
+> Context is assembled in chronological order; in the prompt: the later version leads,
+> the earlier one is shown as "was", the owner's comment ranks above both.
 
 And the repair-wave delta refining chunk ordering within one record (review #6, story
 `production-rag-wave-a-09`):
 
-> Хронологія: «чанки однієї записи — за позицією» історія 03 реалізувала як порядок
-> ретривалу — ремонт 09 повертає `chunk_index` (контракт уточнено вище).
+> Chronology: story 03 implemented "chunks of one record — by position" as retrieval
+> order — repair 09 returns `chunk_index` (contract clarified above).
 
 `order_citables()` previously ordered non-comment sources by retrieval rank (relevance),
 which meant two chunks describing the same agreement at different dates could appear in

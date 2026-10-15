@@ -1,92 +1,92 @@
 # Recall MCP Server
 
-Локальний MCP-сервер (`mcp_server.py`) — **read-first міст** до Recall для
-Claude Code / Claude Desktop. Окремий процес, реюз сервісів `app.services.*` та
-готових HTTP-ендпоінтів — без дублювання логіки. **29 read-only інструментів**
-(жодного create/update/delete — свідоме рішення власника, 02.07.2026; write-тулзи
-фізично видалені, нові не додаються).
+A local MCP server (`mcp_server.py`) — a **read-first bridge** to Recall for
+Claude Code / Claude Desktop. A separate process that reuses the `app.services.*` services and
+the existing HTTP endpoints — no logic duplication. **29 read-only tools**
+(no create/update/delete — a deliberate owner decision, 02.07.2026; write tools
+were physically removed and new ones are not added).
 
-## Архітектура (гібрид) — хто працює без `app.py`, а хто ні
+## Architecture (hybrid) — what works without `app.py` and what does not
 
-Немає єдиного правила «усі READ незалежні» — це залежить від конкретного тула:
-8 читають SQLite напряму (autonomos), 16 інших — HTTP-проксі на запущений
-`app.py` (зокрема й флагманський `search_archive`).
+There is no single rule "all READs are independent" — it depends on the specific tool:
+8 read SQLite directly (autonomous), the other 16 are HTTP proxies to a running
+`app.py` (including the flagship `search_archive`).
 
-**Direct-DB, автономні — працюють БЕЗ запущеного `app.py` (8):**
+**Direct-DB, autonomous — work WITHOUT a running `app.py` (8):**
 `get_transcript`, `get_original_file`, `list_recent`, `list_categories`,
 `list_entities`, `get_entity`, `list_action_items`, `weekly_digest`,
 `list_dropped_commitments`, `list_stale_topics`, `research_export`.
-Ці тули відкривають SQLite напряму через `get_db_connection`/`app.services.research`
-і не роблять жодного HTTP-виклику.
+These tools open SQLite directly via `get_db_connection`/`app.services.research`
+and make no HTTP calls.
 
-**HTTP-proxy, потребують запущеного `app.py` (16):**
+**HTTP proxy, need a running `app.py` (16):**
 `search_archive`, `ask_archive`, `suggest_category`, `research_preview`,
 `research_summary`, `search_history`, `get_archive_stats`, `list_speakers`,
 `get_speaker_stats`, `get_speaker_timeline`, `list_bookmarks`, `list_saved_searches`,
 `get_job_status`, `get_active_recording`, `copilot_availability`, `telegram_status`.
-Усі викликають `_api()`/`_sse_collect()` → `http://127.0.0.1:5050`. Причина —
-свідома: `search_archive`/`ask_archive` не тягнуть e5/torch у stdio-процес (тепла
-модель вже живе в пам'яті `app.py`), а `get_job_status`/`get_active_recording`/
-`copilot_availability`/`telegram_status` читають стан живих підсистем, якого
-просто немає в SQLite.
+All of them call `_api()`/`_sse_collect()` → `http://127.0.0.1:5050`. The reason is
+deliberate: `search_archive`/`ask_archive` do not pull e5/torch into the stdio process (the warm
+model already lives in `app.py` memory), while `get_job_status`/`get_active_recording`/
+`copilot_availability`/`telegram_status` read the state of live subsystems, which
+simply is not in SQLite.
 
-Якщо `app.py` не піднятий — proxy-інструменти повертають зрозумілу помилку
-(`{"error": "Recall (app.py) не запущений…"}`), а не падають; direct-DB тули
-працюють як завжди.
+If `app.py` is not running, the proxy tools return a clear error
+(`{"error": "Recall (app.py) не запущений…"}`) instead of crashing; direct-DB tools
+work as usual.
 
-> **Тільки читання.** MCP не робить жодних create/update/delete ні напряму, ні
-> через проксі — усі зміни стану робить UI Recall.
+> **Read-only.** MCP performs no create/update/delete, neither directly nor
+> through the proxy — all state changes are made by the Recall UI.
 
-## Каталог інструментів (27)
+## Tool catalog (27)
 
-- **Ядро архіву (direct-DB, 7):** `get_transcript`, `get_original_file`,
+- **Archive core (direct-DB, 7):** `get_transcript`, `get_original_file`,
   `list_recent`, `list_categories`, `list_entities`, `get_entity`, `research_export`.
-- **Зобовʼязання (direct-DB, 4 — Трек 1):** `weekly_digest(owner)` — понеділковий звід
-  одним викликом; `list_action_items(window=this_week|next_week|overdue|soon|no_date|all,
-  owner, category_id, status)`; `list_dropped_commitments(days)` — обіцянки, після яких
-  тема більше не спливала; `list_stale_topics(days)` — напрями, що зникли з розмов.
-  Задачі віддають і сиру фразу терміну (`due_raw`), і обчислену дату (`due_date` +
-  `due_precision`) — див. `app/services/commitments.py`.
-- **AI на вимогу (proxy, 4):** `ask_archive` (RAG-відповідь з цитатами),
-  `suggest_category` (k-NN підказка), `research_preview`, `research_summary`.
-- **Багатші читання, як в UI (proxy, 7):** `search_archive` (гібрид e5+FTS5),
+- **Commitments (direct-DB, 4 — Track 1):** `weekly_digest(owner)` — the Monday digest
+  in one call; `list_action_items(window=this_week|next_week|overdue|soon|no_date|all,
+  owner, category_id, status)`; `list_dropped_commitments(days)` — promises after which the
+  topic never came up again; `list_stale_topics(days)` — directions that vanished from conversations.
+  Tasks return both the raw deadline phrase (`due_raw`) and the computed date (`due_date` +
+  `due_precision`) — see `app/services/commitments.py`.
+- **On-demand AI (proxy, 4):** `ask_archive` (RAG answer with citations),
+  `suggest_category` (k-NN hint), `research_preview`, `research_summary`.
+- **Richer reads, as in the UI (proxy, 7):** `search_archive` (hybrid e5+FTS5),
   `search_history`, `get_archive_stats`, `list_speakers`, `get_speaker_stats`,
   `get_speaker_timeline`, `list_bookmarks`, `list_saved_searches`.
-- **Live / фонові статуси (proxy, 4):** `get_job_status`, `get_active_recording`,
+- **Live / background statuses (proxy, 4):** `get_job_status`, `get_active_recording`,
   `copilot_availability`, `telegram_status`.
 
-**Resources:** `recall://about` (огляд + жива статистика + карта тулзів +
-список автономні/proxy), `recall://transcript/{id}`, `recall://entity/{id}`.
+**Resources:** `recall://about` (overview + live statistics + tool map +
+autonomous/proxy list), `recall://transcript/{id}`, `recall://entity/{id}`.
 
-**Довгі операції:** MCP — запит/відповідь без стріму. Опитуй стан фонової задачі
-через `get_job_status(job_id)` (job_id видає UI Recall — стартового тула немає в
-MCP). SSE-звіти (`research_summary`) дочитуються на боці проксі й вертаються
-готовими.
+**Long operations:** MCP is request/response without streaming. Poll the state of a background task
+via `get_job_status(job_id)` (the job_id is issued by the Recall UI — there is no start tool in
+MCP). SSE reports (`research_summary`) are read to the end on the proxy side and returned
+complete.
 
-## Транспорти й авторизація
+## Transports and authorization
 
-| Режим | Команда | Авторизація | Кому |
+| Mode | Command | Authorization | For whom |
 |-------|---------|-------------|------|
-| **stdio** (default) | `mcp_server.py` | не треба (клієнт сам спавнить процес) | Claude Code, Claude Desktop |
-| **http** | `mcp_server.py --transport http` (:5060) | `Authorization: Bearer <RECALL_MCP_KEY>` | персистентний сервер; майбутній web |
+| **stdio** (default) | `mcp_server.py` | not needed (the client spawns the process itself) | Claude Code, Claude Desktop |
+| **http** | `mcp_server.py --transport http` (:5060) | `Authorization: Bearer <RECALL_MCP_KEY>` | persistent server; future web |
 
-У http-режимі без `RECALL_MCP_KEY` сервер **не стартує** (захист від випадкової
-публічності). Слухає лише `127.0.0.1`.
+In http mode without `RECALL_MCP_KEY` the server **does not start** (protection against accidental
+exposure). It listens on `127.0.0.1` only.
 
-## Підключення
+## Connecting
 
-### Claude Code — stdio, глобально на всі проєкти (рекомендовано)
+### Claude Code — stdio, globally for all projects (recommended)
 ```bash
 claude mcp add recall -s user -- "E:\Projects\Recall\.venv\Scripts\python.exe" "E:\Projects\Recall\mcp_server.py"
 ```
-`-s user` → доступно у Claude Code з будь-якого проєкту на цьому ПК (конфіг у
-`C:\Users\<you>\.claude.json`). Транспорт за замовчуванням stdio — `--transport`
-**не передавай** (трейлінг-аргументи після `--` Claude CLI відкидає; саме тому stdio
-зроблено дефолтним у самому сервері). Після `add` **перезапусти Claude Code**, щоб
-зʼявилась група `recall`. Перевірка: `claude mcp list` → `recall … ✔ Connected`.
+`-s user` → available in Claude Code from any project on this PC (config in
+`C:\Users\<you>\.claude.json`). The default transport is stdio — **do not pass**
+`--transport` (the Claude CLI drops trailing arguments after `--`; that is exactly why stdio
+is the default in the server itself). After `add`, **restart Claude Code** so that the
+`recall` group appears. Check: `claude mcp list` → `recall … ✔ Connected`.
 
 ### Claude Desktop — stdio
-У `claude_desktop_config.json` (Settings → Developer → Edit Config):
+In `claude_desktop_config.json` (Settings → Developer → Edit Config):
 ```json
 {
   "mcpServers": {
@@ -97,49 +97,49 @@ claude mcp add recall -s user -- "E:\Projects\Recall\.venv\Scripts\python.exe" "
   }
 }
 ```
-Перезапустити Desktop.
+Restart Desktop.
 
-### http (опційно, персистентний сервер)
+### http (optional, persistent server)
 ```bash
 # .env: RECALL_MCP_KEY=<secrets.token_urlsafe(32)>
 .venv\Scripts\python.exe mcp_server.py --transport http
 claude mcp add --transport http recall http://127.0.0.1:5060/mcp --header "Authorization: Bearer <RECALL_MCP_KEY>"
 ```
 
-## Змінні середовища
+## Environment variables
 
-| Env | Default | Призначення |
+| Env | Default | Purpose |
 |-----|---------|-------------|
-| `RECALL_API_URL` | `http://127.0.0.1:5050` | адреса запущеного `app.py` для проксі-тулзів |
-| `RECALL_MCP_READONLY` | (вимк.) | захист-про-запас: усі write-тулзи вже фізично видалені з коду, тож зараз цей флаг ні на що не впливає — можна лишити для майбутнього |
-| `RECALL_MCP_KEY` | — | Bearer-ключ, **лише** для http-режиму |
-| `RECALL_MCP_DEBUG_LOG` | `1` (увімкнено з 24.07.2026) | лог кожного виклику тулзи у `logs/mcp_calls.log`: імʼя, аргументи, мс, ok/exc. До Треку 1 був вимкнений — 488 викликів пішли в нікуди, і будь-який тюнінг видачі був наосліп |
+| `RECALL_API_URL` | `http://127.0.0.1:5050` | address of the running `app.py` for the proxy tools |
+| `RECALL_MCP_READONLY` | (off) | belt-and-braces: all write tools are already physically removed from the code, so this flag currently has no effect — it can be left for the future |
+| `RECALL_MCP_KEY` | — | Bearer key, **only** for http mode |
+| `RECALL_MCP_DEBUG_LOG` | `1` (on since 24.07.2026) | log of every tool call to `logs/mcp_calls.log`: name, arguments, ms, ok/exc. Before Track 1 it was off — 488 calls went nowhere, and any tuning of the results was blind |
 
-`.env` вантажиться з каталогу самого скрипта (а не cwd) — тому user-scope конектор
-коректно працює при запуску з будь-якого проєкту.
+`.env` is loaded from the script's own directory (not the cwd) — so the user-scope connector
+works correctly when launched from any project.
 
-## Безпека
-- Слухає лише localhost; http без валідного `Bearer` → 401.
-- Читання БД через `get_db_connection` (WAL, паралельно з Flask).
-- Читання оригіналів файлів (`get_original_file`) обмежено білим списком папок
+## Security
+- Listens on localhost only; http without a valid `Bearer` → 401.
+- DB reads go through `get_db_connection` (WAL, in parallel with Flask).
+- Reading original files (`get_original_file`) is restricted to a whitelist of folders
   (`documents/`, `uploads/`, `youtube_downloads/`, `telegram_media/`) — anti-traversal.
-- Жодних записів через MCP немає — весь інструментарій read-only.
-- НЕ комітити `.env` з ключем (він у `.gitignore`).
+- There are no writes through MCP — the whole toolset is read-only.
+- Do NOT commit `.env` with the key (it is in `.gitignore`).
 
-## Чому НЕ автозапуск з app.py
-Stdio-сервер спавнить **сам клієнт** (Claude Code/Desktop) на вимогу і вбиває по
-завершенні — тримати окремий процес із `app.py` не треба (і це створило б другий зайвий
-сервер). Автозапуск доречний лише для http-режиму (майбутній web-доступ через
-тунель+OAuth) — тоді за зразком `telegram_listener`.
+## Why NOT autostart from app.py
+The stdio server is spawned **by the client itself** (Claude Code/Desktop) on demand and killed on
+exit — there is no need to keep a separate process alongside `app.py` (and it would create a redundant second
+server). Autostart makes sense only for http mode (future web access via
+tunnel+OAuth) — then modeled on `telegram_listener`.
 
-## Перформанс / нюанси
-- `mcp_server.py` сам НЕ імпортує torch/e5 — важка ML-ініціалізація живе лише в
-  `app.py`; `search_archive`/`ask_archive` проксіюють запит на вже теплу модель
-  там, а не вантажать її в stdio-процес.
-- Proxy-тулзи (16 з 27, див. таблицю вище) потребують запущеного `app.py`
-  (найзручніше — іконкою **Recall** на робочому столі: термінал з логами + сервер
-  на :5050). Direct-DB тули (11) працюють і без нього.
+## Performance / caveats
+- `mcp_server.py` itself does NOT import torch/e5 — the heavy ML initialization lives only in
+  `app.py`; `search_archive`/`ask_archive` proxy the request to the already warm model
+  there instead of loading it in the stdio process.
+- Proxy tools (16 of 27, see the table above) need a running `app.py`
+  (most conveniently via the **Recall** icon on the desktop: a terminal with logs + the server
+  on :5050). Direct-DB tools (11) work without it too.
 
 ## Roadmap
-- **Web / claude.ai:** OAuth 2.1+PKCE (FastMCP `OAuthProxy`) + Cloudflare Tunnel для
-  публічного HTTPS-хоста + автозапуск http-сервера з `app.py`.
+- **Web / claude.ai:** OAuth 2.1+PKCE (FastMCP `OAuthProxy`) + Cloudflare Tunnel for a
+  public HTTPS host + autostart of the http server from `app.py`.

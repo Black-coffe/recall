@@ -1,6 +1,6 @@
 # ADR-028: With hotwords, the sequential path passes `condition_on_previous_text=False` to stay within 448 prompt tokens
 
-- Status: accepted (2026-10-08, власник: «ВСЕ принял все даю тебе» — прийнято разом із трьома місцями поза дельтами плану; shipped in 4.8.0 at ccd3de6)
+- Status: accepted (2026-10-08, owner: "I accept everything, I give it all to you" — accepted together with the three places outside the plan deltas; shipped in 4.8.0 at ccd3de6)
 - Date: 2026-10-08
 - Spec: docs/specs/k1-name-vocabulary
 
@@ -9,21 +9,21 @@
 In faster-whisper 1.2.1, `hotwords` is added to every window's prompt *next to* the previous
 context, not in place of it. The plan's Goal (verbatim):
 
-> **`hotwords`** добавляется в промпт **каждого** окна (`get_prompt`, :1542) РЯДОМ с предыдущим
-> контекстом `previous_tokens[-223:]`, а не вместо него. Предел самих hotwords —
-> `max_length // 2 - 1` = 223 токена, хвост отрезается. При заданном `prefix` hotwords не действуют.
-> Вместе с контекстом промпт может превысить 448 токенов: 1 + 222 + 223 + 3 = 449. Поэтому в
-> последовательном режиме с hotwords контекст не передаётся, как и в batched (поправка ревью
-> раунда 1).
+> **`hotwords`** is added to the prompt of **every** window (`get_prompt`, :1542) NEXT TO the previous
+> context `previous_tokens[-223:]`, not instead of it. The limit of the hotwords themselves is
+> `max_length // 2 - 1` = 223 tokens, the tail is cut off. When `prefix` is set, hotwords have no effect.
+> Together with the context the prompt can exceed 448 tokens: 1 + 222 + 223 + 3 = 449. Therefore in
+> sequential mode with hotwords the context is not passed, as in batched (a round 1 review
+> correction).
 
-Source delta (plan.md `## Plan deltas`, "ремонт раунда 1", verbatim):
+Source delta (plan.md `## Plan deltas`, "round 1 repair", verbatim):
 
-> 2026-10-08, ремонт раунда 1. В последовательном режиме при hotwords передаётся
-> `condition_on_previous_text=False`, иначе промпт переполнял 448 токенов и транскрипция падала.
-> Известная цена: сегменты крупнее, на клипе 240 с их 22 вместо 80, текст полный. Затрагивает файлы и
-> записи до 10 минут и голосовые TG. Точность имён и разметка спикеров в этой конфигурации не мерились.
-> Если на коротких записях пострадают спикеры, следующий шаг — меньший бюджет словаря для
-> последовательного пути.
+> 2026-10-08, round 1 repair. In sequential mode with hotwords `condition_on_previous_text=False` is
+> passed, otherwise the prompt overflowed 448 tokens and transcription crashed.
+> Known cost: segments are larger, on a 240 s clip there are 22 of them instead of 80, the text is complete. Affects files and
+> recordings up to 10 minutes and TG voice messages. Name accuracy and speaker labelling in this configuration were not measured.
+> If speakers suffer on short recordings, the next step is a smaller vocabulary budget for the
+> sequential path.
 
 `RECALL_VOCAB_MODE=hotwords` is now the default, so any change to the vocabulary budget, the decode
 options or the sequential/batched split meets this limit again.

@@ -3,14 +3,15 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
 
     const TYPES = [
-        { k: '', label: 'Усі' },
-        { k: 'person', label: 'Люди' },
-        { k: 'project', label: 'Проєкти' },
-        { k: 'org', label: 'Організації' },
+        { k: '', label: T('knowledge.ent.type.all') },
+        { k: 'person', label: T('knowledge.ent.type.people') },
+        { k: 'project', label: T('knowledge.ent.type.projects') },
+        { k: 'org', label: T('knowledge.ent.type.orgs') },
     ];
-    const TYPE_LABEL = { person: 'людина', project: 'проєкт', org: 'організація', other: 'інше' };
+    const TYPE_LABEL = { person: T('knowledge.ent.kind.person'), project: T('knowledge.ent.kind.project'), org: T('knowledge.ent.kind.org'), other: T('knowledge.ent.kind.other') };
 
     // ---------- LIST ----------
     let listEl = null, lstate = null, cats = null;
@@ -20,16 +21,15 @@
     const ENT_PAGE = 200;
     let entRows = [], entTotal = 0;
 
-    const FILTER_HINT = 'Напрямок включає всі свої проєкти; проєкт — лише себе. ' +
-        'Тег ріже впоперек напрямків і проєктів. Разом (напрямок або проєкт + тег) — перетин: лишається те, що підходить під усі обрані фільтри.';
+    const FILTER_HINT = T('knowledge.ent.filterHint');
     function filterExplain(st) {
         if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
         const bits = [];
-        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push('у «' + p + '»'); }
-        if (st.tags.length) bits.push('з тегами «' + st.tags.join(', ') + '»');
-        if (st.since || st.until) bits.push('за період ' + (st.since || '…') + ' – ' + (st.until || '…'));
+        if (st.category_id && UI.catPath) { const p = UI.catPath(Number(st.category_id)); if (p) bits.push(T('knowledge.filter.inCat', { path: p })); }
+        if (st.tags.length) bits.push(T('knowledge.filter.withTags', { tags: st.tags.join(', ') }));
+        if (st.since || st.until) bits.push(T('knowledge.filter.period', { from: st.since || '…', to: st.until || '…' }));
         if (!bits.length) return null;
-        return 'Сутностей не знайдено ' + bits.join(' ') + '. Зніміть напрямок/проєкт, тег або період.';
+        return T('knowledge.ent.explain', { bits: bits.join(' ') });
     }
 
     async function renderList(ctx) {
@@ -46,22 +46,22 @@
 
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow">Граф архіву</div>
-                <h1 class="rc-pagehead__title">Сутності</h1>
-                <p class="rc-pagehead__lede">Люди, проєкти й організації, що зустрічаються в архіві. Показані значущі (згадані у ≥2 записах); пошук розкриває й рідкісні.</p>
+                <div class="rc-eyebrow">${T('knowledge.ent.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${T('knowledge.ent.title')}</h1>
+                <p class="rc-pagehead__lede">${T('knowledge.ent.lede')}</p>
             </div>
             <div class="rc-toolbar">
                 <div class="rc-search rc-toolbar__grow">
                     <i class="rc-ico fa-solid fa-magnifying-glass"></i>
-                    <input id="rcEntSearch" type="search" placeholder="Пошук сутності за іменем…" value="${U.esc(lstate.q)}">
+                    <input id="rcEntSearch" type="search" placeholder="${U.esc(T('knowledge.ent.searchPh'))}" value="${U.esc(lstate.q)}">
                 </div>
                 <select class="rc-select rc-catsel" id="rcEntCat" data-cat-first="all">${catOpts}</select>
             </div>
             <div class="rc-filterbar" id="rcEntTypes"></div>
             <div class="rc-toolbar" id="rcEntTagPeriod">
                 <div id="rcEntTagsWrap">${tagSel}</div>
-                <input type="date" class="rc-input rc-select--sm" id="rcEntSince" value="${U.esc(lstate.since)}" title="Записи з дати">
-                <input type="date" class="rc-input rc-select--sm" id="rcEntUntil" value="${U.esc(lstate.until)}" title="Записи по дату">
+                <input type="date" class="rc-input rc-select--sm" id="rcEntSince" value="${U.esc(lstate.since)}" title="${T('knowledge.filter.sinceTitle')}">
+                <input type="date" class="rc-input rc-select--sm" id="rcEntUntil" value="${U.esc(lstate.until)}" title="${T('knowledge.filter.untilTitle')}">
             </div>
             <div id="rcEntHint"></div>
             <div class="rc-list" id="rcEntList"></div>`;
@@ -79,7 +79,7 @@
         catSel.value = lstate.category_id;
         catSel.addEventListener('change', () => { lstate.category_id = catSel.value; syncList(); loadList(ctx); });
         const tagSelEl = ctx.mount.querySelector('#rcEntTagsWrap select');
-        if (tagSelEl) { tagSelEl.setAttribute('aria-label', 'Фільтр за тегами'); tagSelEl.title = 'Теги — оберіть один або кілька (Ctrl+клік)'; }
+        if (tagSelEl) { tagSelEl.setAttribute('aria-label', T('core.ui.tags.filterAria')); tagSelEl.title = T('knowledge.filter.tagsTitle'); }
         if (tagSelEl) tagSelEl.addEventListener('change', () => {
             lstate.tags = Array.from(tagSelEl.selectedOptions).map(o => o.value).filter(Boolean);
             syncList(); loadList(ctx);
@@ -139,12 +139,12 @@
             // filter/search gets the neutral "widen your filter" message.
             const filtered = !!(lstate.category_id || lstate.tags.length || lstate.since || lstate.until || lstate.q || lstate.type);
             if (filtered) {
-                listEl.innerHTML = UI.empty('Сутностей не знайдено',
-                    filterExplain(lstate) || 'У цьому напрямку/фільтрі немає сутностей — спробуйте розширити пошук.', 'fa-diagram-project');
+                listEl.innerHTML = UI.empty(T('knowledge.ent.none'),
+                    filterExplain(lstate) || T('knowledge.ent.noneFiltered'), 'fa-diagram-project');
             } else {
-                const actions = [{ label: 'Запустити збагачення', icon: 'fa-wand-magic-sparkles', primary: true, onClick: () => runEnrichment(ctx) }];
-                listEl.innerHTML = UI.empty('Сутностей не знайдено',
-                    'Збагачення (enrichment) ще не виконано — Claude ще не витягнув людей, проєкти й організації з записів.',
+                const actions = [{ label: T('knowledge.ent.runEnrich'), icon: 'fa-wand-magic-sparkles', primary: true, onClick: () => runEnrichment(ctx) }];
+                listEl.innerHTML = UI.empty(T('knowledge.ent.none'),
+                    T('knowledge.ent.noEnrich'),
                     'fa-diagram-project', actions);
                 UI.wireEmptyActions(listEl, actions);
             }
@@ -158,22 +158,22 @@
                         <div class="rc-rec__meta">
                             <span class="rc-mono">${U.esc(TYPE_LABEL[e.type] || e.type)}</span>
                             ${e.role ? `<span class="sep">·</span><span>${U.esc(e.role)}</span>` : ''}
-                            <span class="sep">·</span><span>${e.mention_count || 0} згадок</span>
-                            <span class="sep">·</span><span>${e.meeting_count || 0} записів</span>
+                            <span class="sep">·</span><span>${T('knowledge.ent.mentionsN', { count: e.mention_count || 0 })}</span>
+                            <span class="sep">·</span><span>${T('knowledge.ent.recordsN', { count: e.meeting_count || 0 })}</span>
                         </div>
                     </div>
                 </div>`).join('');
         // T4.7: honestly show truncation (same pattern as research.js's `truncated`)
         // instead of silently capping the list at ENT_PAGE rows.
         const more = entTotal > entRows.length
-            ? `<div class="rc-note"><p>Показано ${entRows.length} з ${entTotal} сутностей.</p>
-                <div class="rc-note__actions"><button class="rc-btn rc-btn--sm" id="rcEntMore">Завантажити ще</button></div></div>`
+            ? `<div class="rc-note"><p>${T('knowledge.ent.shown', { shown: entRows.length, total: entTotal })}</p>
+                <div class="rc-note__actions"><button class="rc-btn rc-btn--sm" id="rcEntMore">${T('knowledge.ent.loadMore')}</button></div></div>`
             : '';
         listEl.innerHTML = rowsHTML + more;
         listEl.querySelectorAll('.rc-rec').forEach(el => el.addEventListener('click', () => R.router.navigate(el.dataset.href)));
         const moreBtn = listEl.querySelector('#rcEntMore');
         if (moreBtn) moreBtn.addEventListener('click', () => {
-            moreBtn.disabled = true; moreBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Завантаження…';
+            moreBtn.disabled = true; moreBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ' + T('knowledge.ent.loading');
             fetchEntities(ctx, false);
         });
     }
@@ -181,68 +181,70 @@
     async function runEnrichment(ctx) {
         try {
             await R.api.post('/api/memory/backfill', {});
-            UI.toast('Збагачення запущено у фоні — сутності зʼявляться протягом кількох хвилин. Оновіть сторінку пізніше.', 'success');
+            UI.toast(T('knowledge.ent.enrichStarted'), 'success');
         } catch (err) {
-            UI.toast((err && err.message) || 'Не вдалося запустити збагачення', 'error');
+            UI.toast((err && err.message) || T('knowledge.ent.enrichFail'), 'error');
         }
     }
 
     // ---------- DETAIL ----------
     async function renderDetail(ctx) {
         const id = U.parseId(ctx.params.id);
-        if (!Number.isInteger(id)) { ctx.mount.innerHTML = UI.error('Некоректне посилання.'); return; }
+        if (!Number.isInteger(id)) { ctx.mount.innerHTML = UI.error(T('knowledge.ent.badLink')); return; }
         ctx.mount.innerHTML = `<div class="rc-skel" style="height:120px"></div>`;
         let d;
         try { d = await R.api.entity(id); }
-        catch (err) { if (ctx.isCurrent()) ctx.mount.innerHTML = UI.error(err.status === 404 ? 'Сутність не знайдено.' : err.message); return; }
+        catch (err) { if (ctx.isCurrent()) ctx.mount.innerHTML = UI.error(err.status === 404 ? T('knowledge.ent.notFound') : err.message); return; }
         if (!ctx.isCurrent()) return;
         const e = d.entity;
         const meetings = d.meetings || [], actions = d.action_items || [], aliases = d.aliases || [];
 
         ctx.mount.innerHTML = `
-            <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/entities" style="margin-bottom:16px"><i class="fa-solid fa-arrow-left"></i> Сутності</a>
+            <a class="rc-btn rc-btn--ghost rc-btn--sm" href="/entities" style="margin-bottom:16px"><i class="fa-solid fa-arrow-left"></i> ${T('knowledge.ent.title')}</a>
             <div class="rc-record">
                 <div class="rc-record__head">
-                    <div class="rc-record__accession"><span>RECALL · СУТНІСТЬ <span class="rc-id">#${e.id}</span></span><span>·</span><span class="rc-mono">${U.esc(TYPE_LABEL[e.type] || e.type)}</span></div>
+                    <div class="rc-record__accession"><span>${T('knowledge.ent.accession')} <span class="rc-id">#${e.id}</span></span><span>·</span><span class="rc-mono">${U.esc(TYPE_LABEL[e.type] || e.type)}</span></div>
                     <h1 class="rc-record__title">${U.esc(e.canonical_name)}</h1>
                     <div class="rc-prov">
-                        ${e.role ? `<div class="rc-prov__cell"><div class="rc-prov__k">Роль</div><div class="rc-prov__v">${U.esc(e.role)}</div></div>` : ''}
-                        <div class="rc-prov__cell"><div class="rc-prov__k">Згадок</div><div class="rc-prov__v">${e.mention_count || 0}</div></div>
-                        <div class="rc-prov__cell"><div class="rc-prov__k">Записів</div><div class="rc-prov__v">${e.meeting_count || 0}</div></div>
-                        ${aliases.length ? `<div class="rc-prov__cell"><div class="rc-prov__k">Псевдоніми</div><div class="rc-prov__v">${aliases.map(a => U.esc(a)).join(', ')}</div></div>` : ''}
+                        ${e.role ? `<div class="rc-prov__cell"><div class="rc-prov__k">${T('knowledge.ent.role')}</div><div class="rc-prov__v">${U.esc(e.role)}</div></div>` : ''}
+                        <div class="rc-prov__cell"><div class="rc-prov__k">${T('knowledge.ent.mentions')}</div><div class="rc-prov__v">${e.mention_count || 0}</div></div>
+                        <div class="rc-prov__cell"><div class="rc-prov__k">${T('knowledge.ent.records')}</div><div class="rc-prov__v">${e.meeting_count || 0}</div></div>
+                        ${aliases.length ? `<div class="rc-prov__cell"><div class="rc-prov__k">${T('knowledge.ent.aliases')}</div><div class="rc-prov__v">${aliases.map(a => U.esc(a)).join(', ')}</div></div>` : ''}
                     </div>
                     ${e.description ? `<p style="margin-top:16px;color:var(--rc-ink-2)">${U.esc(e.description)}</p>` : ''}
                 </div>
                 <div class="rc-record__body">
                     <div class="rc-rel">
-                        ${actions.length ? `<div class="rc-rel__block"><div class="rc-rel__h">Задачі <span class="rc-mono">${actions.length}</span></div>
+                        ${actions.length ? `<div class="rc-rel__block"><div class="rc-rel__h">${T('knowledge.ent.tasks')} <span class="rc-mono">${actions.length}</span></div>
                             <div>${actions.map(a => `<div class="rc-task"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(U.taskStatus(a.status))}</span>
                                 <div class="rc-task__body"><a href="/transcript/${U.slug(a.transcription_id, a.source_name)}" style="color:inherit">${U.esc(a.task)}</a></div></div>`).join('')}</div></div>` : ''}
-                        <div class="rc-rel__block"><div class="rc-rel__h">Зʼявляється у записах <span class="rc-mono">${meetings.length}</span></div>
+                        <div class="rc-rel__block"><div class="rc-rel__h">${T('knowledge.ent.appearsIn')} <span class="rc-mono">${meetings.length}</span></div>
                             <div class="rc-tags">${meetings.map(m => `<a class="rc-entity" href="/transcript/${U.slug(m.id, m.source_name)}">
                                 ${UI.srcBadge(m.source_type)} ${U.esc(m.source_name || ('#' + m.id))}
                                 <span class="rc-entity__type">${U.esc(m.meeting_date || '')}</span></a>`).join('')}</div></div>
 
                         <div class="rc-rel__block rc-entexp">
-                            <div class="rc-rel__h">Експорт за весь час <span class="rc-mono">${e.mention_count || 0} згадок</span></div>
-                            <p class="rc-entexp__lede">Зібрати кожну згадку «${U.esc(e.canonical_name)}»${aliases.length ? ` (та псевдоніми: ${aliases.map(a => U.esc(a)).join(', ')})` : ''} з УСІХ джерел у великий <b>.md</b>.</p>
+                            <div class="rc-rel__h">${T('knowledge.ent.exportAll')} <span class="rc-mono">${T('knowledge.ent.mentionsN', { count: e.mention_count || 0 })}</span></div>
+                            <p class="rc-entexp__lede">${aliases.length
+                                ? T('knowledge.ent.exportLedeAliases', { name: U.esc(e.canonical_name), aliases: aliases.map(a => U.esc(a)).join(', ') })
+                                : T('knowledge.ent.exportLede', { name: U.esc(e.canonical_name) })}</p>
                             <div class="rc-research__actions">
                                 <button class="rc-research__exp" data-eexp="originals">
                                     <div class="rc-research__exp-ic"><i class="fa-solid fa-file-arrow-down"></i></div>
-                                    <div><div class="rc-research__exp-t">Повний експорт (оригінали)</div>
-                                        <div class="rc-research__exp-s">Усі дослівні фрагменти за датою (свіже згори) + посилання на оригінали. <b>0 токенів, без AI.</b></div></div>
+                                    <div><div class="rc-research__exp-t">${T('knowledge.ent.expOrig.t')}</div>
+                                        <div class="rc-research__exp-s">${T('knowledge.ent.expOrig.s')}</div></div>
                                 </button>
                                 <button class="rc-research__exp" data-eexp="summary">
                                     <div class="rc-research__exp-ic"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
-                                    <div><div class="rc-research__exp-t">AI-саммарі за весь час</div>
-                                        <div class="rc-research__exp-s">Стислий хронологічний звіт по всіх згадках. Дешева модель, тільки по фрагментах.</div></div>
+                                    <div><div class="rc-research__exp-t">${T('knowledge.ent.expSum.t')}</div>
+                                        <div class="rc-research__exp-s">${T('knowledge.ent.expSum.s')}</div></div>
                                 </button>
                             </div>
                             <div class="rc-entexp__opts">
-                                <label class="rc-mono">Модель саммарі</label>
+                                <label class="rc-mono">${T('knowledge.ent.model')}</label>
                                 <select class="rc-select rc-select--sm" id="rcEntExpModel">
-                                    <option value="haiku">Haiku 4.5 — дешева (рекомендовано)</option>
-                                    <option value="sonnet">Sonnet 4.6 — якісніша</option>
+                                    <option value="haiku">${T('knowledge.ent.model.haiku')}</option>
+                                    <option value="sonnet">${T('knowledge.ent.model.sonnet')}</option>
                                 </select>
                             </div>
                             <div id="rcEntExpOut"></div>

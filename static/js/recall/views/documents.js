@@ -10,6 +10,7 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
+    const T = (k, v) => R.t(k, v);
 
     const EXT = ['pdf', 'docx', 'pptx', 'xlsx', 'csv', 'md', 'markdown', 'txt',
                  'png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'webp'];
@@ -33,10 +34,10 @@
 
     function bgNoticeHTML(label) {
         return `<div class="rc-note">
-            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> Додаю «${U.esc(label)}» у фоні</div>
-            <p>Можна закрити цю вкладку або перейти в інший розділ — запис з'явиться в Історії, коли обробка завершиться.</p>
+            <div class="rc-note__title"><i class="fa-solid fa-cloud-arrow-up"></i> ${T('library.docs.bg.title', { label: U.esc(label) })}</div>
+            <p>${T('library.docs.bg.body')}</p>
             <div class="rc-note__actions">
-                <button class="rc-btn rc-btn--primary" id="rcDocGoHistory">Перейти в Історію</button>
+                <button class="rc-btn rc-btn--primary" id="rcDocGoHistory">${T('library.docs.bg.go')}</button>
             </div>
         </div>`;
     }
@@ -50,14 +51,14 @@
         st = { file: null, category_id: '', busy: false };
         ctx.mount.innerHTML = `
             <div class="rc-pagehead">
-                <div class="rc-eyebrow"><i class="fa-solid fa-file-lines"></i> Додати у архів · Документ</div>
-                <h1 class="rc-pagehead__title">Завантажити документ</h1>
-                <p class="rc-pagehead__lede">PDF, Word, PowerPoint, Excel, CSV, Markdown, текст або зображення — Recall розбере текст (з OCR для сканів) і додасть у семантичний пошук. Готовий запис відкриється як сторінка в Історії.</p>
+                <div class="rc-eyebrow"><i class="fa-solid fa-file-lines"></i> ${T('library.docs.eyebrow')}</div>
+                <h1 class="rc-pagehead__title">${T('library.docs.title')}</h1>
+                <p class="rc-pagehead__lede">${T('library.docs.lede')}</p>
             </div>
-            <div class="rc-drop" id="rcDrop" tabindex="0" role="button" aria-label="Обрати документ або перетягнути сюди">
+            <div class="rc-drop" id="rcDrop" tabindex="0" role="button" aria-label="${U.esc(T('library.docs.dropAria'))}">
                 <input type="file" id="rcDocFile" accept="${EXT.map(e => '.' + e).join(',')}" hidden>
                 <div class="rc-drop__ico"><i class="fa-solid fa-cloud-arrow-up"></i></div>
-                <div class="rc-drop__title">Перетягніть документ сюди або натисніть, щоб обрати</div>
+                <div class="rc-drop__title">${T('library.docs.dropTitle')}</div>
                 <div class="rc-drop__hint rc-mono">${EXT.join(' · ')}</div>
             </div>
             <div id="rcDocBody"></div>`;
@@ -88,7 +89,7 @@
     }
 
     async function onFile(ctx, file) {
-        if (!extOk(file.name)) { UI.toast('Непідтримуваний формат документа', 'error'); return; }
+        if (!extOk(file.name)) { UI.toast(T('library.docs.badFormat'), 'error'); return; }
         st.file = file; st.busy = false;
         await renderForm(ctx);
     }
@@ -110,26 +111,26 @@
                         <div class="rc-up__fname">${U.esc(st.file.name)}</div>
                         <div class="rc-up__fsub rc-mono">${U.fmtBytes(st.file.size)} · ${U.esc(extOf(st.file.name).toUpperCase())}</div>
                     </div>
-                    <button class="rc-iconbtn" id="rcDocClear" title="Прибрати"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="rc-iconbtn" id="rcDocClear" title="${U.esc(T('library.docs.clear'))}"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="rc-yt__settings">
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcDocTitle">Назва (необовʼязково)</label>
+                        <label class="rc-field__label" for="rcDocTitle">${T('library.docs.nameLbl')}</label>
                         <input class="rc-input" id="rcDocTitle" autocomplete="off" maxlength="200" placeholder="${U.esc(st.file.name)}">
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcDocDesc">Опис (необовʼязково)</label>
-                        <textarea class="rc-textarea" id="rcDocDesc" maxlength="4000" placeholder="Короткий опис документа…"></textarea>
+                        <label class="rc-field__label" for="rcDocDesc">${T('library.docs.descLbl')}</label>
+                        <textarea class="rc-textarea" id="rcDocDesc" maxlength="4000" placeholder="${U.esc(T('library.docs.descPh'))}"></textarea>
                     </div>
                     <div class="rc-field">
-                        <label class="rc-field__label" for="rcDocCat">Напрямок</label>
+                        <label class="rc-field__label" for="rcDocCat">${T('library.docs.catLbl')}</label>
                         <select class="rc-select rc-catsel" id="rcDocCat" data-cat-first="none">${catOpts}</select>
                     </div>
                 </div>
                 <div class="rc-yt__actions">
-                    <button class="rc-btn" id="rcDocBack"><i class="fa-solid fa-arrow-left"></i> Інший документ</button>
+                    <button class="rc-btn" id="rcDocBack"><i class="fa-solid fa-arrow-left"></i> ${T('library.docs.another')}</button>
                     <div class="rc-yt__spacer"></div>
-                    <button class="rc-btn rc-btn--primary" id="rcDocStart"><i class="fa-solid fa-file-import"></i> Додати в архів</button>
+                    <button class="rc-btn rc-btn--primary" id="rcDocStart"><i class="fa-solid fa-file-import"></i> ${T('library.docs.add')}</button>
                 </div>
             </div>
             <div id="rcDocRun"></div>`;
@@ -164,7 +165,7 @@
         const label = st.file.name;
         const run = ctx.mount.querySelector('#rcDocRun');
         if (run) run.innerHTML = `<div class="rc-run">
-            <div class="rc-run__head"><span class="rc-run__stage" id="rcDocStage">Завантаження…</span><span class="rc-run__pct rc-mono" id="rcDocPct">0%</span></div>
+            <div class="rc-run__head"><span class="rc-run__stage" id="rcDocStage">${T('library.docs.uploading')}</span><span class="rc-run__pct rc-mono" id="rcDocPct">0%</span></div>
             <div class="rc-progress"><div class="rc-progress__fill" id="rcDocFill"></div></div>
             <div class="rc-run__hint rc-mono" id="rcDocHint">${U.esc(st.file.name)} · ${U.fmtBytes(st.file.size)}</div>
         </div>`;
@@ -183,24 +184,24 @@
             () => {
                 const run2 = ctx.mount.querySelector('#rcDocRun');
                 if (run2) { run2.innerHTML = bgNoticeHTML(label); wireBgNotice(run2); }
-                UI.toast('Файл завантажено — розбираю «' + label + '» у фоні. Можна закрити вкладку.', 'info');
+                UI.toast(T('library.docs.uploaded', { label: label }), 'info');
             }
         ).then((result) => {
             bgJob = null;
             if (!ctx.isCurrent()) {
-                UI.toast('«' + label + '» додано в архів', 'success');
+                UI.toast(T('library.docs.addedBg', { label: label }), 'success');
                 return;
             }
             st.busy = false;
             const tid = result && result.transcription_id;
             const name = (result && result.source_name) || label;
             if (result && result.duplicate) { showDuplicate(ctx, tid, name); return; }
-            UI.toast('Документ додано в архів', 'success');
+            UI.toast(T('library.docs.added'), 'success');
             if (tid) R.router.navigate('/transcript/' + U.slug(tid, name));
             else R.router.navigate('/library');
         }).catch((err) => {
             bgJob = null;
-            UI.toast('Не вдалось додати «' + label + '»: ' + ((err && err.message) || 'помилка'), 'error');
+            UI.toast(T('library.docs.addFail', { label: label, msg: (err && err.message) || T('library.docs.errorWord') }), 'error');
             if (!ctx.isCurrent()) return;
             fail(ctx, err && err.message);
         });
@@ -211,11 +212,11 @@
         const run = ctx.mount.querySelector('#rcDocRun');
         if (!run) return;
         run.innerHTML = `<div class="rc-note">
-            <div class="rc-note__title"><i class="fa-solid fa-circle-info"></i> Такий документ уже є в архіві</div>
-            <p>Контент збігається з наявним записом. Можна відкрити його або додати копію примусово.</p>
+            <div class="rc-note__title"><i class="fa-solid fa-circle-info"></i> ${T('library.docs.dup.title')}</div>
+            <p>${T('library.docs.dup.body')}</p>
             <div class="rc-note__actions">
-                <button class="rc-btn rc-btn--primary" id="rcDocOpen">Відкрити наявний</button>
-                <button class="rc-btn" id="rcDocForce">Додати все одно</button>
+                <button class="rc-btn rc-btn--primary" id="rcDocOpen">${T('library.docs.dup.open')}</button>
+                <button class="rc-btn" id="rcDocForce">${T('library.docs.dup.force')}</button>
             </div></div>`;
         const open = run.querySelector('#rcDocOpen');
         if (open) open.addEventListener('click', () => { if (tid) R.router.navigate('/transcript/' + U.slug(tid, name)); });
@@ -240,8 +241,8 @@
         setFormDisabled(ctx, false);
         const run = ctx.mount.querySelector('#rcDocRun');
         if (run) {
-            run.innerHTML = UI.error(msg || 'Помилка')
-                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcDocRetry"><i class="fa-solid fa-rotate-right"></i> Спробувати ще раз</button></div>`;
+            run.innerHTML = UI.error(msg || T('library.docs.error'))
+                + `<div class="rc-yt__retry"><button class="rc-btn" id="rcDocRetry"><i class="fa-solid fa-rotate-right"></i> ${T('library.docs.retry')}</button></div>`;
             const retry = run.querySelector('#rcDocRetry');
             if (retry) retry.addEventListener('click', () => start(ctx, false));
         }

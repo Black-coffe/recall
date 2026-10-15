@@ -9,7 +9,7 @@ The stop-word filter (ADR-033) checks the text of what leaves. For an arbitrary 
 only had the OCR of the segment's representative frame, not of the frame actually shown. Plan
 delta, verbatim:
 
-> 2026-10-14, історія 01 під час побудови: `get_frame` для довільного `t` віддає OCR представника відрізка, а не того кадру, що на картинці, — стоп-слово на самому кадрі не перевірити. Рішення: `video_timeline.render_frame` повертає `frame_text` (живий OCR цього кадру, секрети замасковані), MCP перевіряє його і не пропускає назовні; +`app/services/video_timeline.py` і `tests/test_video_timeline.py` (старий тест бив по живій БД) у `## Files` історії 01. Відкинуто: вірити тексту представника (не fail closed) і відмовляти в `get_frame` для будь-якого не-представника (ламає «покажи кадр на 12:34»).
+> 2026-10-14, story 01 during the build: `get_frame` for an arbitrary `t` returns the OCR of the segment's representative, not of the frame that is in the picture — a stop-word on the frame itself cannot be checked. Decision: `video_timeline.render_frame` returns `frame_text` (the live OCR of this frame, secrets masked), MCP checks it and does not let it out; +`app/services/video_timeline.py` and `tests/test_video_timeline.py` (the old test hit the live DB) in `## Files` of story 01. Rejected: trusting the representative's text (not fail closed) and refusing `get_frame` for any non-representative (breaks "show the frame at 12:34").
 
 ## Options
 1. Trust the representative's text. Rejected because it does not fail closed.

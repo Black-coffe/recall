@@ -12,6 +12,7 @@ import logging
 import re
 
 from flask import Blueprint, Response, current_app, jsonify, request
+from app.core.i18n import localize_sse, request_lang, tr
 
 from app.services import research
 from app.services.categories import parse_date, parse_filter, parse_tags
@@ -66,7 +67,7 @@ def preview():
     Приймає q АБО entity_id (тоді шукає по імені+псевдонімах сутності)."""
     q, display = _resolve_query(request.args)
     if not q:
-        return jsonify({"success": False, "error": "Порожній запит"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.research.err.query_empty')}), 400
     try:
         category_id, tags, since, until = _parse_axes(request.args)
     except ValueError as e:
@@ -90,7 +91,7 @@ def originals():
     data = request.get_json(silent=True) or {}
     q, display = _resolve_query(data)
     if not q:
-        return jsonify({"success": False, "error": "Порожній запит"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.research.err.query_empty')}), 400
     try:
         category_id, tags, since, until = _parse_axes(data)
     except ValueError as e:
@@ -107,13 +108,25 @@ def originals():
     })
 
 
+# Тексти статусів/помилок, які `summarize_stream` стрімить українською.
+_SUMMARY_SSE_KEYS = (
+    'knowledge.research.err.query_empty',
+    'knowledge.research.err.no_api_key',
+    'knowledge.research.err.no_fragments',
+    'knowledge.research.err.generate_failed',
+    'knowledge.research.progress.analyzing',
+    'knowledge.research.progress.analyzing_part',
+    'knowledge.research.progress.reducing',
+)
+
+
 @research_bp.route('/api/research/summary', methods=['POST'])
 def summary():
     """SSE: структурований звіт по бренду (map-reduce, дешева модель)."""
     data = request.get_json(silent=True) or {}
     q, display = _resolve_query(data)
     if not q:
-        return jsonify({"success": False, "error": "Порожній запит"}), 400
+        return jsonify({"success": False, "error": tr('knowledge.research.err.query_empty')}), 400
     try:
         category_id, tags, since, until = _parse_axes(data)
     except ValueError as e:
@@ -121,14 +134,16 @@ def summary():
     model = data.get('model')
     db_path = _db()
 
+    lang = request_lang()
+
     def generate():
         try:
-            yield from research.summarize_stream(
+            yield from localize_sse(research.summarize_stream(
                 db_path, q, category_id, model, display=display,
-                tags=tags, since=since, until=until)
+                tags=tags, since=since, until=until), lang, _SUMMARY_SSE_KEYS)
         except Exception as e:
             logger.error("[research] summary generator failed: %s", e, exc_info=True)
-            yield research._sse("error", {"error": "Помилка саммарі."})
+            yield research._sse("error", {"error": tr('knowledge.research.err.summary_failed', lang=lang)})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

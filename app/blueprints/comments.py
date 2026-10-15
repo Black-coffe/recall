@@ -22,6 +22,7 @@ import logging
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core.i18n import request_lang, tr
 from app.db.connection import get_db_connection
 from app.services import comments as svc
 
@@ -101,10 +102,10 @@ def list_comments():
     target_id = request.args.get('target_id')
     if not target_type or not target_id:
         return jsonify({'success': False,
-                        'error': 'потрібні target_type і target_id'}), 400
+                        'error': tr('knowledge.comments.err.target_required')}), 400
     if target_type not in svc.TARGETS:
         return jsonify({'success': False,
-                        'error': f'невідомий тип цілі: {target_type}'}), 400
+                        'error': tr('knowledge.comments.err.unknown_target', target_type=target_type)}), 400
     try:
         return jsonify({'comments': svc.list_for(_db(), target_type, target_id)})
     except svc.CommentError as e:
@@ -134,9 +135,9 @@ def counts():
     ids = data.get('ids') or []
     if target_type not in svc.TARGETS:
         return jsonify({'success': False,
-                        'error': f'невідомий тип цілі: {target_type}'}), 400
+                        'error': tr('knowledge.comments.err.unknown_target', target_type=target_type)}), 400
     if not isinstance(ids, list):
-        return jsonify({'success': False, 'error': 'ids мусить бути масивом'}), 400
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.ids_array')}), 400
     try:
         return jsonify({'counts': svc.counts_for(_db(), target_type, ids[:5000])})
     except svc.CommentError as e:
@@ -166,7 +167,7 @@ def create():
     except svc.CommentError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'некоректний target_id'}), 400
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.target_id_bad')}), 400
     c['index_status'] = _schedule_index(c['id'], _db())
     return jsonify({'success': True, 'comment': c}), 201
 
@@ -186,7 +187,7 @@ def update(comment_id):
     except svc.CommentError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     if not c:
-        return jsonify({'success': False, 'error': 'Коментар не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
     if not c['indexed']:
         c['index_status'] = _schedule_index(comment_id, _db())
     return jsonify({'success': True, 'comment': c})
@@ -195,7 +196,7 @@ def update(comment_id):
 @comments_bp.route('/api/comments/<int:comment_id>', methods=['DELETE'])
 def delete(comment_id):
     if not svc.delete(_db(), comment_id):
-        return jsonify({'success': False, 'error': 'Коментар не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
     return jsonify({'success': True, 'id': comment_id})
 
 
@@ -215,18 +216,18 @@ def analyze(comment_id):
                       force=bool(data.get('force')))
     status = res.get('status')
     if status == 'not_found':
-        return jsonify({'success': False, 'error': 'Коментар не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
     if status == 'unavailable':
         return jsonify({'success': False, 'result': res,
-                        'error': 'Немає ANTHROPIC_API_KEY — розбір недоступний'}), 503
+                        'error': tr('knowledge.comments.err.no_api_key')}), 503
     if status == 'no_anchor':
         # 409, а не 400: запит коректний, просто цій картці нема куди покласти
         # задачу (файл без транскрипта, сутність, напрямок).
         return jsonify({'success': False, 'result': res,
-                        'error': 'Немає транскрипта, до якого прикріпити задачі'}), 409
+                        'error': tr('knowledge.comments.err.no_transcript')}), 409
     if status == 'retry_needed':
         return jsonify({'success': False, 'result': res,
-                        'error': 'Claude не відповів — спробуйте ще раз'}), 502
+                        'error': tr('knowledge.comments.err.claude_silent')}), 502
     return jsonify({'success': True, 'result': res,
                     'comment': svc.get(_db(), comment_id)})
 
@@ -241,7 +242,7 @@ def derived(comment_id):
     """
     c = svc.get(_db(), comment_id)
     if not c:
-        return jsonify({'success': False, 'error': 'Коментар не знайдено'}), 404
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
     with get_db_connection(_db()) as conn:
         tasks = [dict(r) for r in conn.execute(
             "SELECT id, task, owner_name, due, due_date, status "
@@ -253,7 +254,7 @@ def derived(comment_id):
 @comments_bp.route('/api/comments/<int:comment_id>/restore', methods=['POST'])
 def restore(comment_id):
     if not svc.restore(_db(), comment_id):
-        return jsonify({'success': False, 'error': 'Немає що відновлювати'}), 404
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.nothing_to_restore')}), 404
     # Відновлений коментар має повернутись і в пошук, а не лише на картку.
     return jsonify({'success': True, 'id': comment_id,
                     'index_status': _schedule_index(comment_id, _db())})
