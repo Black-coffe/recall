@@ -1,6 +1,6 @@
 # services — `app/services/*` (core)
 
-last-verified: 2026-10-14 (privacy.py, video_timeline.py, rag.py MCP-фільтр); 2026-10-13 (video_*.py, screen_secrets.py); решта 2026-10-09
+last-verified: 2026-10-15 (pipes*.py, tg_bot.py); 2026-10-14 (privacy.py, video_timeline.py, rag.py MCP-фільтр); 2026-10-13 (video_*.py, screen_secrets.py); решта 2026-10-09
 (файл >80 рядків — давній борг, розбити на модулі при нагоді)
 
 Бізнес-логіка поза HTTP. Copilot та recording — окремі файли карти
@@ -62,7 +62,28 @@ Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`; замір і межі �
   без морфології), `screen_chunk_allowed(chunk, private, words, mode)` (лише `speaker='екран'`; `off`/приватний/стоп-слово → ні),
   `filter_screen_chunks(db, chunks)` → `(kept, hidden)`; `PrivacyError` → усі екранні чанки прибрано (fail closed).
   Споживачі: `rag._mcp_screen_filter` (лише `channel='mcp'`, у `answer_question[_stream]` до Claude, `rag.py:320,368,526`),
-  `mcp_server.py` (див. root.md). UI Recall фільтр не зачіпає.
+  `mcp_server.py` (див. root.md), `pipes_privacy.py` (K4). UI Recall фільтр не зачіпає.
+
+## Труби за розкладом → Telegram-бот (K4 `k4-scheduled-pipes`, 4.13.0, 15.10.2026)
+Файли труб — `pipes/*.md` (`weekly-digest` пн 9:00, `dropped-commitments` пн 9:00, `open-questions` пн-пт 9:00): frontmatter
+`schedule|tools|channel|budget_usd|skip_if_empty|max_tokens` + тіло-промпт. Історія — таблиця `pipe_runs` (v50, `migrations.py:2085`).
+- **pipes.py** — `Cron.parse` (власний 5-польовий, без croniter; `prev/next`, локальний час; dom+dow обидва обмежені → OR),
+  `TOOLS` — ЗАКРИТИЙ реєстр read-функцій (`weekly_digest|dropped_commitments|open_questions`; ключ поза ним → `PipeError`, труба не
+  вантажиться), `parse_pipe`/`load_pipes` (невалідна — пропуск + warning), `run_pipe(pipe, db_path, deliver, …)` ніколи не кидає:
+  дані → `pipes_privacy.filter_data` → `render_claude` (оцінка вартості ДО виклику > `budget_usd`, нема `ANTHROPIC_API_KEY` чи збій
+  → `render_plain` з позначкою `PLAIN_MARK`) → `scrub_text` → `deliver`. Статуси `ok|skipped|blocked|error|running`. `not_collected`:
+  функція з `reason` (напр. `open_questions` без власника) — явний «не зібрано», не тиша; `skip_if_empty` не спрацьовує, якщо щось
+  приховано чи не зібрано. Збій ДО доставки → коротке повідомлення в бот (на 1-й і останній спробі); `blocked` → повідомлення без даних.
+  `PipeScheduler(tick=30)`: перший прохід `catchup` (один запуск за останній момент ≤ зараз), далі `schedule`; `_next_attempt` —
+  `error`/завислий `running` (>30 хв) моменту НЕ закривають, повтор через `PIPES_RETRY_MINUTES` до `PIPES_RETRY_MAX`; `manual`-запуск
+  не закриває момент. CLI `python -m app.services.pipes list|run <name>` (run → stdout, `trigger='manual'`). `list_runs` читає MCP.
+- **pipes_privacy.py** — шар над `privacy.py` (спільний стоп-лист з MCP). `filter_data` ДО рендеру: пункт зі стоп-словом, з приватного
+  напрямку або з джерелом, яке не визначилось → викинуто (fail closed: збій БД → усі пункти з джерелом приховано; нечитабельний
+  `private.txt` → `PrivacyError` назовні → `blocked`). `scrub_text` ПІСЛЯ: маски `•••` (IBAN, email, картки, телефони, суми з валютою),
+  стоп-слово, що пережило рендер → `blocked` (слово не пишеться навіть в історію). `hidden_line(n)` — «🔒 N пунктів приховано».
+- **tg_bot.py** — Bot API (окремий бот, НЕ MTProto-слухач `telegram_listener.py`) на `urllib`. `send(text)` шле ЛИШЕ в
+  `TELEGRAM_BOT_CHAT_ID` (адресат не параметр), ріже по 4096 по рядках; `BotError` без токена/URL; `is_configured()`;
+  CLI `python -m app.services.tg_bot whoami` (chat id після /start). `transport=` підміняється в тестах.
 
 ## Дедуп аудіо/YouTube/записів (Хвиля A production-RAG, 16.09.2026)
 - **dedup_audio.py** — `hash_for(source_type, text)` (sha256 нормалізованого тексту, лише

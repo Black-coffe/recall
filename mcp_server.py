@@ -1150,6 +1150,24 @@ def list_open_questions(days: int = 90, limit: int = 20, window_h: float = 24.0,
 
 
 @mcp.tool
+def list_pipe_runs(pipe: Optional[str] = None, limit: int = 20) -> dict:
+    """Історія труб за розкладом (K4): брифінги, які Recall сам шле в Telegram-бот.
+
+    Труби: `weekly-digest` (звід, пн 9:00), `dropped-commitments` (забуті обіцянки,
+    пн 9:00), `open-questions` (питання без відповіді, будні 9:00). Кожен рядок —
+    один запуск: `trigger` (schedule | catchup — догін пропущеного при старті |
+    manual), `status` (ok | skipped — порожньо | blocked — фільтр приватного
+    зупинив | error | running), `rendered_by` (claude | plain — простий список,
+    причина в `error`), `cost_usd`, `chars`. Відповідає на «чи прийшов звід» і
+    «чому бот мовчить». Текстів брифінгів історія не зберігає."""
+    from app.services import pipes
+    limit = max(1, min(int(limit), 200))
+    try:
+        return {"runs": pipes.list_runs(DB_PATH, pipe=pipe, limit=limit)}
+    except sqlite3.OperationalError:
+        return {"runs": [], "reason": "таблиці pipe_runs ще нема — Recall не запускався з K4"}
+
+@mcp.tool
 def research_export(terms: str, category_id: Optional[int] = None,
                     tags: Optional[str] = None, since: Optional[str] = None,
                     until: Optional[str] = None) -> str:
@@ -2194,6 +2212,7 @@ _ABOUT_DIRECT_DB = (
     "list_entities", "get_entity", "list_action_items", "list_dropped_commitments",
     "list_stale_topics", "weekly_digest", "list_open_questions", "research_export",
     "get_chat_context", "list_comments", "grep_archive", "get_live_copilot",
+    "list_pipe_runs",
 )
 _ABOUT_PROXY = (
     "search_archive", "ask_archive", "suggest_category", "research_preview",
@@ -2244,7 +2263,7 @@ def about() -> str:
         "5. `list_categories`/`list_speakers`/`list_bookmarks`/`list_saved_searches`/`get_archive_stats`;\n"
         "6. `ask_archive(question)` — RAG-відповідь з цитатами; `suggest_category` — k-NN підказка (без застосування);\n"
         "7. **Live/фонові статуси:** `get_job_status`, `get_active_recording`, `copilot_availability`, "
-        "`telegram_status`; `list_comments` — власні уточнення й виправлення поверх записів;\n"
+        "`telegram_status`; `list_pipe_runs` — чи прийшли брифінги труб у бот; `list_comments` — власні уточнення й виправлення поверх записів;\n"
         "8. **Живий дзвінок:** `get_live_transcript`/`ask_live` — прев'ю транскрипту й питання до нього, "
         "поки дзвінок триває; `get_live_copilot` — повний потік подій ко-пілота (включно з притишеними "
         "бюджетом і неверифікованими), фільтрація — на боці агента;\n"

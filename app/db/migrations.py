@@ -2082,5 +2082,26 @@ def init_database(db_path: str):
                   "(49, 'screen_secrets: сирі секрети з кадрів, лише для локального reveal')")
         logger.info("Міграція v49: screen_secrets")
 
+    # === v50: pipe_runs — історія труб за розкладом (K4) =======================
+    # Кожен запуск труби (`app/services/pipes.py`) — рядок: розклад/догін/ручний,
+    # чим відрендерено (claude|plain), вартість, помилка. Аддитивно.
+    if current_version < 50:
+        c.execute('''CREATE TABLE IF NOT EXISTS pipe_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pipe TEXT NOT NULL,
+                        trigger TEXT NOT NULL,
+                        scheduled_for TEXT,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        rendered_by TEXT,
+                        cost_usd REAL DEFAULT 0,
+                        error TEXT,
+                        chars INTEGER DEFAULT 0)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_pipe_runs_pipe ON pipe_runs(pipe, started_at)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(50, 'pipe_runs: історія труб за розкладом (K4)')")
+        logger.info("Міграція v50: pipe_runs")
+
     conn.commit()
     conn.close()

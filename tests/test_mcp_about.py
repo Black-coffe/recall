@@ -101,3 +101,9 @@ def test_about_adding_a_tool_changes_the_reported_count(db, monkeypatch):
         m.mcp.remove_tool("_temp_probe_tool")
 
     assert f"{before + 1} тулзів" in after_text
+
+
+def test_list_pipe_runs_is_direct_db():
+    import mcp_server as m
+    assert "list_pipe_runs" in m._ABOUT_DIRECT_DB
+    assert "list_pipe_runs" in m._registered_tool_names()

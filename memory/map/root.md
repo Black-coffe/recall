@@ -1,6 +1,7 @@
 # root — кореневі entry points
 
-last-verified: 2026-10-14 (mcp_server.py фільтр приватного, реєстр 155); 2026-10-13 (config.py); решта розділів — раніше
+last-verified: 2026-10-15 (app.py труби, mcp_server.py list_pipe_runs, реєстр 165); 2026-10-13 (config.py); решта розділів — раніше
+(файл >80 рядків — давній борг)
 
 ## app.py (1288)
 **Призначення:** головний Flask-сервер. Boot, реєстрація blueprints, фонові сервіси,
@@ -39,6 +40,12 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `GET /api/ready` (blueprint `system`, див. `memory/map/blueprints.md`) — 200 коли
 `database=='ok' ∧ job_queue.bound ∧ whisper.preload in ('ready','disabled') ∧ boot_finished`, інакше 503.
 
+**Труби (K4, 4.13.0):** `_maybe_start_pipes()` (app.py:1250) — під `__main__` разом із `_maybe_start_call_watcher()`
+(app.py:1309-1311, лише в процесі, що обслуговує запити; під pytest не стартує). `PIPES_ENABLED=0` → рядок у лозі й вихід.
+Збирає `PipeScheduler(load_pipes(), db_path=app.config['DATABASE'], deliver=tg_bot.send)` → `app.extensions['pipe_scheduler']`,
+`.start()`. Бот не налаштований → лише warning, планувальник усе одно йде (запуски пишуться в історію як помилка). Виняток
+при збірці → warning і return. Логіка — `services.md` → pipes.py.
+
 ## config.py (537)
 **Призначення:** ієрархія конфігів Development/Production/Testing; `.env`-побічні ефекти
 виконуються ліниво при першому `get_config()` (деталі — Gotchas нижче, вже НЕ на етапі
@@ -50,7 +57,7 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
 `RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
 **Реєстр (`app/core/settings.py`, спек `config-registry-profiles` S1):** єдине джерело істини для
-155 env-флагів (4.11.0: +`RECALL_MCP_VISUAL`/`RECALL_PRIVATE_CATEGORIES`/`RECALL_PRIVATE_WORDS_FILE`, група «MCP-сервер»; 4.10.0: +`OCR_TESSERACT_CMD`/`OCR_TESSDATA_DIR`/`OCR_TESSDATA_FAST_DIR`, `RECORDING_VIDEO_SCENE_THRESHOLD` прибрано, `RECORDING_VIDEO_ANALYSIS_MAX_FRAMES` дефолт 1500; K1 додав `RECALL_VOCAB_MODE`, `WHISPER_MULTILINGUAL` у групу «Транскрипція») (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
+165 env-флагів (рахунок `^    Setting(` у `settings.py`; 4.13.0 K4: група «Труби» — `PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`=15, `PIPES_RETRY_MAX`=6, `PIPES_MODEL`=claude-sonnet-5, `TELEGRAM_BOT_TOKEN` (secret), `TELEGRAM_BOT_CHAT_ID`, `settings.py:657-680`) (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI
 `python -m app.core.settings env-example` генерує `.env.example`). Модуль без важких залежностей
 (не імпортує `app.*`/`flask`/`torch`/`config` — памʼятка `mcp-stdio-no-heavy-models`); `config.py`
@@ -102,11 +109,11 @@ Telethon-сесію не відкрити двома клієнтами — Flas
 
 ## mcp_server.py (785)
 **Призначення:** окремий MCP-сервер — **read-first** міст до Recall для Claude Code/Desktop.
-**40 read-only тулзів** (4.10.0: +5 відео-проксі, див. нижче), жодного create/update/delete (стратегічне рішення власника 02.07.2026;
+**41 read-only тулз** (4.13.0: +`list_pipe_runs`, mcp_server.py:1153; 4.10.0: +5 відео-проксі), жодного create/update/delete (стратегічне рішення власника 02.07.2026;
 38 write-тулзів фізично видалено у Волні 1 — карта до цього стверджувала «~80 tools, CRUD-міст»).
 Число тулзів у `about()` рахується з реєстру FastMCP (`_registered_tool_names()`), а не хардкодиться.
-**Гібрид:** 16 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, працюють БЕЗ запущеного app.py,
-серед них `grep_archive`), 24 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
+**Гібрид:** 17 тулзів читають SQLite напряму (`_ABOUT_DIRECT_DB`, mcp_server.py:2210, працюють БЕЗ запущеного app.py,
+серед них `grep_archive`, `list_pipe_runs`), 24 — httpx-проксі на `app.py` (`_ABOUT_PROXY`, `RECALL_API_URL`,
 default `http://127.0.0.1:5050`) через `_api()`, щоб не тягнути torch/e5 у stdio-процес.
 `editable-title-description`-04 (4.5.0): `list_recent`/`get_transcript`/`search_archive`/
 `ask_archive` (sources), ресурс `recall://transcript/{id}` і експорт-заголовок несуть
@@ -131,6 +138,8 @@ images=)` → `error_code` `MCP_VISUAL_OFF|MCP_VISUAL_TEXT_ONLY|PRIVACY_CHECK_FA
 (`private_hidden`), `search_visual` перевіряє ПОВНИЙ OCR/опис з БД, не уривок. `search_archive` (`:577`) і `grep_archive`
 (`_grep_hide_screen`, `:816`) прибирають чанки `speaker='екран'`; `ask_archive` — через `rag` канал `mcp`. Env: `RECALL_MCP_VISUAL`
 (дефолт `images`), `RECALL_PRIVATE_CATEGORIES`, `RECALL_PRIVATE_WORDS_FILE`. Логіка — `services.md` → privacy.py.
+**Труби (K4):** `list_pipe_runs(pipe=None, limit=20)` (limit клемпиться 1..200) → `{"runs": pipes.list_runs(DB_PATH,…)}`;
+таблиці `pipe_runs` нема (`sqlite3.OperationalError`) → `{"runs": [], "reason": …}`. Тексти брифінгів історія не зберігає.
 **Зобовʼязання (Трек 1):** `weekly_digest`, `list_action_items(window/owner/category/status)`,
 `list_dropped_commitments`, `list_stale_topics` — поверх `app.services.commitments`.
 **Зріз (Трек 2):** `ask_archive(project=…)` звужує до проєкту/людини. `ask_archive` шле

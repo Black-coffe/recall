@@ -1166,3 +1166,18 @@ def test_v48_video_timeline_columns_are_additive_and_idempotent(tmp_path: Path):
         assert _schema_version(conn) >= 48
     finally:
         conn.close()
+
+
+def test_v50_pipe_runs_is_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # повторний прогін — без помилок
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'pipe_runs')
+        for col in ('pipe', 'trigger', 'scheduled_for', 'started_at', 'finished_at',
+                    'status', 'rendered_by', 'cost_usd', 'error', 'chars'):
+            assert col in cols, col
+        assert _schema_version(conn) >= 50
+    finally:
+        conn.close()

@@ -1246,6 +1246,30 @@ def _maybe_start_call_watcher():
     watcher.start()
 
 
+
+def _maybe_start_pipes():
+    """K4: труби за розкладом (app/services/pipes.py).
+
+    Лише під ``__main__`` — під pytest (імпорт app.py) потік не стартує.
+    ``PIPES_ENABLED=0`` → один рядок у лозі й нічого більше."""
+    if not _settings.env_bool('PIPES_ENABLED'):
+        logger.info("Труби: вимкнено (PIPES_ENABLED=0)")
+        return
+    try:
+        from app.services import tg_bot
+        from app.services.pipes import PipeScheduler, load_pipes
+
+        if not tg_bot.is_configured():
+            logger.warning("Труби: бот не налаштований (TELEGRAM_BOT_TOKEN/TELEGRAM_BOT_CHAT_ID) — "
+                           "запуски писатимуться в історію з помилкою")
+        scheduler = PipeScheduler(load_pipes(), db_path=app.config['DATABASE'],
+                                   deliver=tg_bot.send)
+    except Exception as e:
+        logger.warning("Труби не запустились: %s", e, exc_info=True)
+        return
+    app.extensions['pipe_scheduler'] = scheduler
+    scheduler.start()
+
 # config-registry-profiles S2: boot-послідовність модульного рівня завершена
 # (БД/міграції/JobQueue/recorder-гейт/лічильники/blueprints/auth/error-handler
 # усі вище). Telegram-слухач запускається нижче лише під `__main__` (reloader-
@@ -1284,5 +1308,6 @@ if __name__ == '__main__':
     # це дочірній із WERKZEUG_RUN_MAIN='true', без reloader'а — цей самий).
     if not debug_mode or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         _maybe_start_call_watcher()
+        _maybe_start_pipes()
     # threaded=True для SSE: каждое соединение в своём потоке, не блокирует другие.
     app.run(debug=debug_mode, host=host, port=cfg.PORT, threaded=True)
