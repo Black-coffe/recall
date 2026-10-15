@@ -36,7 +36,15 @@
     // Called once from shell.init() on every page load. No-op if the user
     // already finished or skipped (localStorage), or if an overlay is
     // somehow already open (defensive — shouldn't happen this early).
-    onb.maybeShowFirstRun = function () {
+    // Перший запуск — це перший запуск АРХІВУ, а не адреси: прапорець живе в
+    // localStorage, а він у кожного origin свій. Відкриття через новий адрес
+    // (tailscale serve, K5) показувало чек-лист поверх запису з посилання брифінгу.
+    // Тому: за посиланням на конкретну сторінку — не показуємо; архів уже
+    // налаштований (модель завантажена) — мовчки ставимо прапорець.
+    onb.maybeShowFirstRun = async function () {
+        if (isDone() || overlayEl) return;
+        if (location.pathname !== '/') return;
+        if (await checkModelDownloaded()) { markDone(); return; }
         if (isDone() || overlayEl) return;
         onb.open();
     };

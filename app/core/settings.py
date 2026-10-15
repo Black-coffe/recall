@@ -621,6 +621,11 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("RECALL_API_KEY", "", "secret", "Auth / доступ",
             "Ключ доступу для запитів НЕ з localhost (або RECALL_LOCAL_TRUSTED=0).",
             "Заголовок X-Recall-Api-Key або Authorization: Bearer. Не задано → fail-closed для не-localhost."),
+    Setting("RECALL_PROXY_ALLOWED_IPS", "", "str", "Auth / доступ",
+            "Tailnet-IP пристроїв, яким можна в Recall через tailscale serve (через кому). У пристрою ДВІ адреси — "
+            "100.x і fd7a:… (IPv6): вписуй обидві, serve передає ту, якою прийшов клієнт.",
+            "Запит із localhost з X-Forwarded-For/Tailscale-User-Login — проксійований: без IP тут або ключа → 401. "
+            "Порожньо → через проксі нікого (сервер vps-prod у тому ж tailnet теж)."),
 
     # --- MCP-сервер ---
     Setting("RECALL_API_URL", "http://127.0.0.1:5050", "str", "MCP-сервер",
@@ -675,9 +680,12 @@ REGISTRY: tuple[Setting, ...] = (
             "Чат власника, куди бот шле брифінги: `python -m app.services.tg_bot whoami` після /start боту.",
             "Бот шле ЛИШЕ сюди; інших адресатів код не приймає."),
     Setting("PIPES_MODEL", "claude-sonnet-5", "str", "Труби",
-            "Модель Claude, що переказує дані труби за її промптом.",
+            "Модель Claude, що пише 1–2 рядки «головне» над карткою брифінгу.",
             "Оцінка вартості ДО виклику більша за budget_usd труби, нема ключа або помилка → "
-            "замість переказу простий список із позначкою."),
+            "те саме повідомлення без рядка «головне»."),
+    Setting("RECALL_PUBLIC_URL", "", "str", "Труби",
+            "Адреса Recall, яку видно з телефона (напр. https://home-pc.<tailnet>.ts.net через tailscale serve).",
+            "База посилань у картках брифінгу в Telegram. Порожньо → RECALL_API_URL (відкриваються лише на цьому ПК)."),
 
     # --- Логування ---
     Setting("RECALL_LOG_TO_FILE", "0", "bool", "Логування",

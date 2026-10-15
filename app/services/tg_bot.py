@@ -4,8 +4,9 @@
 (Telethon), цей — Bot API з токеном від @BotFather. Бот шле ЛИШЕ в
 ``TELEGRAM_BOT_CHAT_ID``; адресата викликач не передає взагалі.
 
-HTTP — стандартний ``urllib``, без нової бібліотеки. Повідомлення довше
-4096 символів ріжеться по рядках. Токен — частина URL Bot API, тому жодна
+HTTP — стандартний ``urllib``, без нової бібліотеки. Текст іде з
+``parse_mode=HTML`` (картки K5). Повідомлення довше 4096 символів ріжеться по
+порожніх рядках — межах блоків, — тож жодна частина не рве тег. Токен — частина URL Bot API, тому жодна
 помилка звідси не несе ні URL, ні токена (``BotError`` уже очищений).
 
 CLI:
@@ -76,7 +77,7 @@ def _call(method: str, params: Optional[dict] = None, *,
     return out
 
 
-def split_text(text: str, limit: int = MAX_LEN) -> list[str]:
+def _split_lines(text: str, limit: int) -> list[str]:
     """Ріже по рядках; рядок довший за ліміт — по символах."""
     parts: list[str] = []
     cur = ""
@@ -98,21 +99,56 @@ def split_text(text: str, limit: int = MAX_LEN) -> list[str]:
     return parts
 
 
-def send(text: str, *, transport: Optional[Transport] = None) -> int:
-    """Надіслати текст у чат власника. → кількість повідомлень. Збій → BotError."""
+def split_text(text: str, limit: int = MAX_LEN) -> list[str]:
+    """Ріже по абзацах (порожній рядок — межа блоку); абзац довший за ліміт — по рядках."""
+    parts: list[str] = []
+    cur = ""
+    for para in text.split("\n\n"):
+        if len(para) > limit:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.extend(_split_lines(para, limit))
+            continue
+        cand = f"{cur}\n\n{para}" if cur else para
+        if len(cand) > limit:
+            parts.append(cur)
+            cur = para
+        else:
+            cur = cand
+    if cur or not parts:
+        parts.append(cur)
+    return parts
+
+
+def send(text: str, *, parse_mode: Optional[str] = "HTML",
+         reply_markup: Optional[dict] = None,
+         transport: Optional[Transport] = None) -> int:
+    """Надіслати текст у чат власника. → кількість повідомлень. Збій → BotError.
+
+    ``parse_mode`` за замовчуванням HTML: усе, що шлють труби, уже екрановане
+    (``pipes_cards``, сповіщення про збій). ``None`` — простий текст.
+    ``reply_markup`` (кнопки брифінгу K5) чіпляється до ОСТАННЬОЇ частини."""
     chat = _chat_id()
     if not chat or not _token():
         raise BotError("бот не налаштований: потрібні TELEGRAM_BOT_TOKEN і TELEGRAM_BOT_CHAT_ID")
     parts = split_text(text)
-    for part in parts:
-        _call("sendMessage", {"chat_id": chat, "text": part,
-                              "disable_web_page_preview": "true"}, transport=transport)
+    for i, part in enumerate(parts):
+        params = {"chat_id": chat, "text": part, "disable_web_page_preview": "true"}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        if reply_markup and i == len(parts) - 1:
+            params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+        _call("sendMessage", params, transport=transport)
     return len(parts)
 
 
 def whoami(*, transport: Optional[Transport] = None) -> list[dict]:
     """Чати, що писали боту (з getUpdates): звідси береться TELEGRAM_BOT_CHAT_ID."""
-    out = _call("getUpdates", transport=transport)
+    # Слухач кнопок (brief_actions) просить лише callback_query, а Telegram запамʼятовує
+    # цей фільтр — тож тут явно повертаємо повідомлення, інакше /start не видно.
+    out = _call("getUpdates", {"allowed_updates": json.dumps(
+        ["message", "my_chat_member", "callback_query"])}, transport=transport)
     seen: dict = {}
     for upd in out.get("result", []):
         msg = upd.get("message") or upd.get("my_chat_member") or {}

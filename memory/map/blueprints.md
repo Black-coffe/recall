@@ -4,14 +4,14 @@
 маршруті. Усі читають singleton-и через `from app import state as _state`. Помилки —
 JSON `{success,error}` + HTTP-код (400/401/403/404/409/500/503).
 
-last-verified: 2026-10-13 (transcription.py відео-ендпоінти, APP_VERSION); решта розділів — раніше
+last-verified: 2026-10-15 (system.py APP_VERSION 4.15.0, memory.py PATCH action-items); 2026-10-13 (transcription.py відео-ендпоінти); решта розділів — раніше
 
 ## system.py (~390) — `/`, `/api/health`, `/api/ready`, `/api/models/*`, `/api/system_*`, `/api/polish/*`, `/api/metrics`
 Health/робота, каталог/завантаження Whisper-моделей, системні метрики, shell-роутинг.
 `GET /` — SPA-shell (catch-all, після /api/*). `GET /sw.js` (no-cache). `GET /api/health`,
 `/api/models`, `POST /api/download_model`, `/api/models/{update-status,check-updates}`,
 `/api/system_info`, `/api/system_stats`, `/api/polish/availability` (тіри Claude), `/api/metrics` (Prometheus).
-`APP_VERSION = "4.10.0"` (system.py:37) — джерело для `version` у health/ready/system_info.
+`APP_VERSION = "4.15.0"` (system.py:37; дзеркало — `app/__init__.py:6` `__version__`) — джерело для `version` у health/ready/system_info.
 `GET /api/ready` (system.py:138-177, config-registry-profiles T03) — читає `app.state.робота`
 (див. `memory/map/root.md`) + живий `_check_database_ready()` (106-136): відкриває ІСНУЮЧИЙ файл
 БД (`mode=rw`, не автостворює) і вимагає таблицю `schema_versions` з `MAX(version) >= 1`.
@@ -84,6 +84,9 @@ migration v45) + теги — `app/services/categories.py` (`memory/map/services
 (`{"accept":[names],"dismiss":[names]}` — лише зі `suggested_tags_json`, інакше 400). Зміна
 `name` тега/категорії або `parent_id` → `reembed:{mode,count,stale}` у відповіді
 (`categories.schedule_records_reembed`, `memory/map/services.md`).
+`PATCH /api/memory/action-items/<int:aid>` (memory.py:1220, K5 4.15.0) `{"status": open|done|cancelled}` → інше 400 «Невірний статус»,
+нема задачі 404 (`LookupError`), інакше `{success:true}`; пише через `commitments.apply_action(..., source='web', actor='web')` —
+той самий шлях, що кнопки брифінгу, з рядком у `action_item_events` (прямого `UPDATE` більше нема). Перенос терміну з веба не експонується.
 **Gotchas:** entity `min_meetings=2` (шумофільтр) якщо нема `q`; category-назва унікальна casefold
 СЕРЕД БРАТІВ (v47, не по всій таблиці — застаріла з 4.6.0); action-items period по meeting_date.
 Фільтр `owner` — ТОЧНИЙ збіг (значення приходить із чипа фасета) по канонічному імені АБО по аліасах графа; сире

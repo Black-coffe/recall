@@ -134,15 +134,25 @@ def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
     return out, hidden
 
 
+def mask(text: str) -> str:
+    """IBAN, картки, телефони, email і суми з валютою → ``•••``."""
+    for rx in _MASKS:
+        text = rx.sub(MASK, text)
+    return text
+
+
+def leaked_words(text: str, words: Optional[list[str]] = None) -> list[str]:
+    """Стоп-слова, що є в тексті. ``words`` не передано → ``private.txt`` (``PrivacyError`` назовні)."""
+    low = text.casefold()
+    return [w for w in (privacy.stop_words() if words is None else words) if w in low]
+
+
 def scrub_text(text: str) -> tuple[str, list[str]]:
     """→ (текст із масками, стоп-слова, що пережили рендер).
 
     Непорожній список = відправку скасувати. ``PrivacyError`` летить назовні."""
-    for rx in _MASKS:
-        text = rx.sub(MASK, text)
-    low = text.casefold()
-    leaked = [w for w in privacy.stop_words() if w in low]
-    return text, leaked
+    text = mask(text)
+    return text, leaked_words(text)
 
 
 def hidden_line(n: int) -> str:

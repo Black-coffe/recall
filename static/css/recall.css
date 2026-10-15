@@ -803,6 +803,9 @@ html, body { margin: 0; padding: 0; }
     border-bottom: 1px solid var(--rc-hairline);
 }
 .rc-task:hover { background: var(--rc-surface); }
+/* ?task=<id> з брифінгу: задача підсвічена кілька секунд і згасає */
+.rc-task.is-target { animation: rc-task-target 4s var(--rc-ease); }
+@keyframes rc-task-target { 0%,60% { background: var(--rc-accent-tint); } 100% { background: transparent; } }
 /* Статус-пілюля лишається для /entities та /transcript, де задача показана
    поодинці й статус справді інформативний. На дашборді /tasks її замінили
    прапорці-винятки (.rc-task__flag) — «open» на 1500 рядках був чистим шумом. */
@@ -1528,7 +1531,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 
 /* загальна модалка (створення напрямку, перенесення) */
 .rc-modal-ov { position: fixed; inset: 0; z-index: 1000; background: rgba(20, 22, 28, .42); display: flex; align-items: center; justify-content: center; padding: var(--rc-4); }
-.rc-modal { background: var(--rc-surface); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); box-shadow: 0 18px 50px rgba(20, 22, 28, .28); width: 100%; max-width: 420px; padding: var(--rc-5, 20px); }
+.rc-modal { background: var(--rc-surface); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); box-shadow: 0 18px 50px rgba(20, 22, 28, .28); width: 100%; max-width: 420px; padding: var(--rc-5, 20px); max-height: 100%; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; }
 .rc-modal__h { font-weight: 700; font-size: var(--rc-t-md, 1.05rem); margin-bottom: var(--rc-4); display: flex; align-items: center; gap: var(--rc-2); }
 .rc-modal .rc-input, .rc-modal .rc-select, .rc-modal .rc-textarea { width: 100%; margin-top: var(--rc-1); }
 .rc-modal__row { display: flex; align-items: center; gap: var(--rc-3); margin-top: var(--rc-3); }
@@ -1559,6 +1562,8 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-onb__status[data-s="done"] { color: var(--rc-ok); }
 .rc-onb__actions { flex: none; padding-top: 2px; }
 .rc-onb__x { margin-left: auto; width: 30px; height: 30px; }
+/* окно вище за екран (телефон): заголовок із × лишається видимим під час прокрутки */
+.rc-onb .rc-modal__h { position: sticky; top: calc(-1 * var(--rc-5, 20px)); background: var(--rc-surface); padding: var(--rc-5, 20px) 0 var(--rc-2); margin-top: calc(-1 * var(--rc-5, 20px)); z-index: 1; }
 @keyframes rc-onb-flash { 0%, 100% { background: transparent; } 25% { background: var(--rc-accent-tint); } }
 .rc-onb-flash { animation: rc-onb-flash 1.6s ease; border-radius: var(--rc-r-2); }
 

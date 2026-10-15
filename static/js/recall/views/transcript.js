@@ -1012,11 +1012,12 @@
             blocks.push(`<div class="rc-rel__block">
                 <div class="rc-rel__h">Задачі <span class="rc-mono">${tasks.length}</span></div>
                 <div>${tasks.map(a =>
-                    `<div class="rc-task"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(U.taskStatus(a.status))}</span>
+                    `<div class="rc-task" data-id="${U.esc(a.id)}"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(U.taskStatus(a.status))}</span>
                     <div class="rc-task__body">${U.esc(a.task)}${a.owner_name ? ` <span class="rc-task__owner">· ${U.esc(a.owner_name)}</span>` : ''}</div></div>`
                 ).join('')}</div></div>`);
         }
         rel.innerHTML = blocks.join('');
+        focusTask(rel, ctx.query.task);
 
         // same-category (separate fetch, appended)
         if (t.category_id) {
@@ -1035,6 +1036,22 @@
                 }
             } catch (_) {}
         }
+    }
+
+    // Посилання з брифінгу в Telegram: ?task=<id> — прокрутити до задачі й підсвітити.
+    // Чужий чи відсутній id — нічого не робимо.
+    function focusTask(rel, taskId) {
+        if (!taskId) return;
+        const row = rel.querySelector(`.rc-task[data-id="${CSS.escape(String(taskId))}"]`);
+        if (!row) return;
+        // 'instant' явно: .rc-content має scroll-behavior: smooth, і плавна прокрутка
+        // зіштовхувалась зі скиданням scrollTop у роутері. Двічі: вище ще дорисовуються
+        // резюме й ліниві панелі (копілот, відео) і зсувають рядок.
+        const go = () => { if (row.isConnected) row.scrollIntoView({ block: 'center', behavior: 'instant' }); };
+        requestAnimationFrame(go);
+        setTimeout(go, 800);
+        row.classList.add('is-target');
+        row.addEventListener('animationend', () => row.classList.remove('is-target'), { once: true });
     }
 
     // ---- Claude actions (existing endpoints) ----

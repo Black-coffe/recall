@@ -202,3 +202,56 @@ class TestAuthGateProfileDefaults:
             environ_overrides={"REMOTE_ADDR": _NON_LOCAL_ADDR},
         )
         assert r.status_code == 200
+
+
+# ------------- проксійований доступ (K5-04, власник 15.10.2026)
+
+_VPS = "100.64.0.9"      # сервер vps-prod у tailnet власника
+_PHONE = "100.64.0.7"
+
+
+class TestProxiedAccess:
+    """«После включения Tailscale-доступа сервер vps-prod сможет открыть весь Recall без пароля,
+    пока вы сами не закроете ему доступ.» — tailscale serve приходить як 127.0.0.1."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
+        monkeypatch.delenv("RECALL_API_KEY", raising=False)
+        monkeypatch.delenv("RECALL_PROXY_ALLOWED_IPS", raising=False)
+
+    def _get(self, client, path="/api/history", **headers):
+        return client.get(path, headers=headers, environ_overrides={"REMOTE_ADDR": "127.0.0.1"})
+
+    def test_vps_prod_through_serve_is_401_by_default(self, client):
+        r = self._get(client, **{"X-Forwarded-For": _VPS,
+                                 "Tailscale-User-Login": "owner@example.com"})
+        assert r.status_code == 401
+
+    def test_vps_prod_401_when_only_phone_allowed(self, client, monkeypatch):
+        monkeypatch.setenv("RECALL_PROXY_ALLOWED_IPS", _PHONE)
+        assert self._get(client, **{"X-Forwarded-For": _VPS}).status_code == 401
+
+    def test_allowed_ip_passes(self, client, monkeypatch):
+        monkeypatch.setenv("RECALL_PROXY_ALLOWED_IPS", f"{_VPS.replace('54', '1')}, {_PHONE}")
+        assert self._get(client, **{"X-Forwarded-For": _PHONE}).status_code == 200
+
+    def test_valid_key_passes_through_proxy(self, client, monkeypatch):
+        monkeypatch.setenv("RECALL_API_KEY", "k")
+        r = self._get(client, **{"X-Forwarded-For": _VPS, "X-Recall-Api-Key": "k"})
+        assert r.status_code == 200
+
+    def test_identity_header_alone_counts_as_proxied(self, client, monkeypatch):
+        monkeypatch.setenv("RECALL_PROXY_ALLOWED_IPS", _PHONE)
+        r = self._get(client, **{"Tailscale-User-Login": "owner@example.com"})
+        assert r.status_code == 401
+
+    def test_direct_local_unchanged_and_health_shell_open(self, client):
+        assert self._get(client).status_code == 200
+        assert self._get(client, "/api/health", **{"X-Forwarded-For": _VPS}).status_code == 200
+        assert self._get(client, "/", **{"X-Forwarded-For": _VPS}).status_code == 200
+
+    def test_xff_chain_is_not_trusted(self, client, monkeypatch):
+        monkeypatch.setenv("RECALL_PROXY_ALLOWED_IPS", _PHONE)
+        assert self._get(client, **{"X-Forwarded-For": f"{_PHONE}, {_VPS}"}).status_code == 401
+        assert self._get(client, **{"X-Forwarded-For": f"{_VPS}, {_PHONE}"}).status_code == 401

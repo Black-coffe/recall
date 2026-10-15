@@ -32,6 +32,14 @@ Allowlist (без auth, гейт узагалі не застосовуєтьс�
   - /api/health (health-check лишається відкритим для моніторингу)
   - OPTIONS-запити (CORS preflight, інакше ламаємо CORS з app.py ~231)
 
+Проксійований доступ (K5-04, власник 15.10.2026: «После включения Tailscale-доступа сервер
+vps-prod сможет открыть весь Recall без пароля, пока вы сами не закроете ему доступ.»):
+`tailscale serve` приводить запит з tailnet як 127.0.0.1, тож local-trusted пускав би ВЕСЬ
+tailnet. Запит із localhost, що несе X-Forwarded-For або Tailscale-User-Login, — проксійований:
+local-trusted на нього не діє, пускаємо лише IP з RECALL_PROXY_ALLOWED_IPS (перша адреса
+X-Forwarded-For; serve її перезаписує, клієнт не підробить) або валідний ключ. Пристрої
+розрізняємо за IP, не за Tailscale-User-Login: він однаковий для всіх нетегованих вузлів власника.
+
 НЕ гейтиться тут: /api/telegram/ingest має ВЛАСНИЙ shared-secret механізм
 (X-Telegram-Token, telegram_common.control_token) — цей гейт додається
 ПОВЕРХ нього, а не замінює. У дефолтному режимі (RECALL_LOCAL_TRUSTED=1)
@@ -86,6 +94,24 @@ def _is_localhost(remote_addr: str | None) -> bool:
     return (remote_addr or "") in _LOCALHOST_ADDRS
 
 
+_PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-User-Login")
+
+
+def _proxied_client() -> str | None:
+    """None — запит прямий; інакше IP клієнта за проксі ("" — проксі IP не назвав)."""
+    if not any(request.headers.get(h) for h in _PROXY_HEADERS):
+        return None
+    xff = (request.headers.get("X-Forwarded-For") or "").strip()
+    # serve робить Header.Set — рівно одна адреса. Ланцюжок означає інший проксі або
+    # підставлене значення: IP невідомий, далі лише ключ.
+    return "" if "," in xff else xff
+
+
+def _proxy_allowed_ips() -> set[str]:
+    raw = settings.env("RECALL_PROXY_ALLOWED_IPS") or ""
+    return {ip.strip() for ip in raw.replace(";", ",").split(",") if ip.strip()}
+
+
 def _extract_presented_key() -> str | None:
     """X-Recall-Api-Key має пріоритет; Authorization: Bearer <key> — зручний фолбек
     (напр. для клієнтів, що вже мають стандартну Bearer-обв'язку)."""
@@ -112,7 +138,12 @@ def _is_exempt(path: str, method: str) -> bool:
 
 def _is_authorized() -> bool:
     if _local_trusted_enabled() and _is_localhost(request.remote_addr):
-        return True
+        client = _proxied_client()
+        if client is None:
+            return True
+        if client and client in _proxy_allowed_ips():
+            return True
+        # Проксійований і не в списку — далі лише з ключем.
 
     configured = _configured_api_key()
     if not configured:

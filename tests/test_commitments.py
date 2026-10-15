@@ -953,3 +953,106 @@ def test_rare_terms_are_reproducible(db: str):
     with get_db_connection(db) as conn:
         runs = {tuple(cm._rare_terms(conn, task, before="2026-05-14")) for _ in range(5)}
     assert len(runs) == 1
+
+
+# --- K5 k5-task-buttons: зміна статусу з журналом і скасуванням -------------------
+
+def _item(db: str, task: str = "Надіслати Андрієві договір", **kw) -> int:
+    _seed(db, [{"task": task, **kw}])
+    with get_db_connection(db) as conn:
+        return conn.execute("SELECT id FROM action_items WHERE task = ?", (task,)).fetchone()["id"]
+
+
+def _state(db: str, aid: int):
+    with get_db_connection(db) as conn:
+        return conn.execute("SELECT status, due, due_date, due_precision FROM action_items "
+                            "WHERE id = ?", (aid,)).fetchone()
+
+
+def _events(db: str) -> list:
+    with get_db_connection(db) as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM action_item_events ORDER BY id")]
+
+
+@pytest.mark.parametrize("action", ["done", "cancelled", "open"])
+def test_apply_action_changes_status_and_logs_event(db: str, action: str):
+    aid = _item(db, status="stale" if action == "open" else "open")
+    res = cm.apply_action(db, aid, action, source="bot", actor="tg:42 @андрій")
+    assert res["status"] == action and _state(db, aid)["status"] == action
+    [ev] = _events(db)
+    assert ev["id"] == res["event_id"] and ev["item_id"] == aid
+    assert ev["source"] == "bot" and ev["actor"] == "tg:42 @андрій" and ev["at"]
+    assert ev["new_status"] == action and ev["old_status"] in ("open", "stale")
+
+
+def test_postpone_sets_due_date_keeps_raw_phrase_and_reopens_stale(db: str):
+    aid = _item(db, due="колись потім", status="stale")
+    res = cm.apply_action(db, aid, "postpone:7", source="bot", today=date(2026, 10, 15))
+    st = _state(db, aid)
+    assert res["due_date"] == "2026-10-22" == st["due_date"]
+    assert st["status"] == "open" and st["due_precision"] == cm.P_DAY
+    assert st["due"] == "колись потім"
+
+
+def test_undo_restores_status_and_due_and_is_logged(db: str):
+    aid = _item(db, due="завтра")
+    with get_db_connection(db) as conn:
+        conn.execute("UPDATE action_items SET due_date='2026-05-15', due_precision='day' "
+                     "WHERE id=?", (aid,))
+        conn.commit()
+    ev = cm.apply_action(db, aid, "postpone:30", source="bot", today=date(2026, 10, 15))
+    res = cm.undo_action(db, ev["event_id"], source="bot", actor="tg:42")
+    st = _state(db, aid)
+    assert (st["status"], st["due_date"], st["due_precision"]) == ("open", "2026-05-15", "day")
+    assert res["status"] == "open" and _events(db)[-1]["undo_of"] == ev["event_id"]
+
+
+def test_undo_only_the_last_action(db: str):
+    aid = _item(db)
+    first = cm.apply_action(db, aid, "done", source="bot")
+    cm.apply_action(db, aid, "open", source="web")
+    with pytest.raises(ValueError):
+        cm.undo_action(db, first["event_id"], source="bot")
+    assert _state(db, aid)["status"] == "open"
+
+
+def test_undo_of_an_undo_is_refused(db: str):
+    aid = _item(db)
+    ev = cm.apply_action(db, aid, "done", source="bot")
+    undo = cm.undo_action(db, ev["event_id"], source="bot")
+    with pytest.raises(ValueError):
+        cm.undo_action(db, undo["event_id"], source="bot")
+
+
+def test_unknown_item_or_action_changes_nothing(db: str):
+    aid = _item(db)
+    with pytest.raises(LookupError):
+        cm.apply_action(db, aid + 999, "done", source="bot")
+    with pytest.raises(ValueError):
+        cm.apply_action(db, aid, "видалити", source="bot")
+    with pytest.raises(LookupError):
+        cm.undo_action(db, 12345, source="bot")
+    assert _state(db, aid)["status"] == "open" and _events(db) == []
+
+
+def test_web_patch_goes_through_the_journal(db: str):
+    from flask import Flask
+    from app.blueprints.memory import memory_bp
+    app = Flask(__name__)
+    app.register_blueprint(memory_bp)
+    app.config.update(TESTING=True, DATABASE=db)
+    client = app.test_client()
+    aid = _item(db)
+    assert client.patch(f"/api/memory/action-items/{aid}", json={"status": "done"}).status_code == 200
+    assert client.patch(f"/api/memory/action-items/{aid}", json={"status": "зроблено"}).status_code == 400
+    assert client.patch("/api/memory/action-items/99999", json={"status": "done"}).status_code == 404
+    [ev] = _events(db)
+    assert ev["source"] == "web" and ev["new_status"] == "done"
+    assert _state(db, aid)["status"] == "done"
+
+
+def test_migration_v51_is_idempotent(db: str):
+    init_database(db)
+    with get_db_connection(db) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(action_item_events)")}
+    assert {"item_id", "at", "source", "actor", "old_status", "new_status", "undo_of"} <= cols

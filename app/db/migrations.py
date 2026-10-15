@@ -2103,5 +2103,29 @@ def init_database(db_path: str):
                   "(50, 'pipe_runs: історія труб за розкладом (K4)')")
         logger.info("Міграція v50: pipe_runs")
 
+    # === v51: журнал змін статусу/терміну задач (K5 k5-task-buttons) ==========
+    # Хто і коли закрив / переніс задачу — з кнопок брифінгу (bot) і з /tasks (web).
+    # `undo_of` — подія-скасування посилається на скасовану.
+    if current_version < 51:
+        c.execute('''CREATE TABLE IF NOT EXISTS action_item_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        item_id INTEGER NOT NULL,
+                        at TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        actor TEXT,
+                        action TEXT NOT NULL,
+                        old_status TEXT,
+                        new_status TEXT,
+                        old_due_date TEXT,
+                        new_due_date TEXT,
+                        old_due_precision TEXT,
+                        new_due_precision TEXT,
+                        undo_of INTEGER)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_action_item_events_item '
+                  'ON action_item_events(item_id, id)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(51, 'action_item_events: журнал змін статусу задач (K5)')")
+        logger.info("Міграція v51: action_item_events")
+
     conn.commit()
     conn.close()

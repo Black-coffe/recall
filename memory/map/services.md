@@ -1,6 +1,6 @@
 # services — `app/services/*` (core)
 
-last-verified: 2026-10-15 (pipes*.py, tg_bot.py); 2026-10-14 (privacy.py, video_timeline.py, rag.py MCP-фільтр); 2026-10-13 (video_*.py, screen_secrets.py); решта 2026-10-09
+last-verified: 2026-10-15 (pipes*.py, pipes_cards.py, tg_bot.py, brief_actions.py, commitments.apply_action — K5 4.15.0); 2026-10-14 (privacy.py, video_timeline.py, rag.py MCP-фільтр); 2026-10-13 (video_*.py, screen_secrets.py); решта 2026-10-09
 (файл >80 рядків — давній борг, розбити на модулі при нагоді)
 
 Бізнес-логіка поза HTTP. Copilot та recording — окремі файли карти
@@ -64,25 +64,54 @@ Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`; замір і межі �
   Споживачі: `rag._mcp_screen_filter` (лише `channel='mcp'`, у `answer_question[_stream]` до Claude, `rag.py:320,368,526`),
   `mcp_server.py` (див. root.md), `pipes_privacy.py` (K4). UI Recall фільтр не зачіпає.
 
-## Труби за розкладом → Telegram-бот (K4 `k4-scheduled-pipes`, 4.13.0, 15.10.2026)
+## Труби за розкладом → Telegram-бот (K4 4.13.0; K5 `k5-brief-cards` 4.14.0; `k5-task-buttons` 4.15.0, 15.10.2026)
 Файли труб — `pipes/*.md` (`weekly-digest` пн 9:00, `dropped-commitments` пн 9:00, `open-questions` пн-пт 9:00): frontmatter
-`schedule|tools|channel|budget_usd|skip_if_empty|max_tokens` + тіло-промпт. Історія — таблиця `pipe_runs` (v50, `migrations.py:2085`).
+`schedule|tools|channel|budget_usd|skip_if_empty|max_tokens` + тіло-промпт. З K5 промпт просить лише 1–2 рядки «головне»
+простим текстом (список/групи/посилання складає код). Історія — таблиця `pipe_runs` (v50, `migrations.py:2085`).
+- **pipes_cards.py** (K5, нове) — повідомлення складає КОД, не модель; HTML (`parse_mode=HTML`) лише `b|i|a`. `render(title, data, *,
+  db_path, today, base_url, headline, missing, hidden, words)` → `(html, leaked_words)`; непорожній `leaked` = не слати. Задачі
+  групуються блоками за КОРЕНЕВИМ напрямком (`_Dirs.root` по `categories.parent_id`, без напрямку → «Без напрямку»), ≤`MAX_CARDS`=5
+  у блоці, решта → `ще N →` на `{base}/tasks?category_id=` (питання — «…ще N у Recall»). Картка: що · хто · до коли · звідки;
+  задача лінкується на `/transcript/<tid>?task=<id>`. Секції: 📌 задачі (`overdue|this_week|no_date`), 🕳 упущено, ❓ питання,
+  💤 теми, ✏️ виправлення, покриття. `_Guard` на КОЖНЕ поле: маска (`pipes_privacy.mask`) → стоп-слова → обрізка → `html.escape`.
+  `clean_headline` прибирає markdown моделі, ≤2 рядки. `link_base()` = `RECALL_PUBLIC_URL` → `RECALL_API_URL` → `127.0.0.1:5050`.
+  Перевірка: `scripts/check_brief_links.py` (див. scripts.md). 4.15.0: `render(..., buttons: list|None)` — задачі звіту й «упущено»
+  нумеруються `<b>N.</b>` замість «•» (`_numbered`, ≤`brief_actions.MAX_ITEMS`=33), їхні `item_id` (`_Card.item_id`) дописуються
+  в `buttons` у порядку номерів; непорожній `buttons` → внизу курсивом `brief_actions.FOOTER`.
+- **brief_actions.py** (K5 `k5-task-buttons`, 4.15.0, нове) — кнопки «зроблено / неактуально / перенести» під брифінгом. `keyboard(item_ids)`
+  → `{inline_keyboard}` (ряд на задачу, `task_row`/`postpone_row`/`done_row`; `None` якщо порожньо). `callback_data` (≤64 Б, без стану):
+  `a:<n>:<id>:<done|cancelled|postpone:1|7|30>`, `p|b:<n>:<id>` (вибір терміну/назад), `u:<n>:<event>` (скасувати), `x` (підпис).
+  `handle(cq, *, db_path, transport)`: чат ≠ `tg_bot._chat_id()` → «Немає доступу» (лише власник); зміна ТІЛЬКИ через
+  `commitments.apply_action/undo_action(source='bot', actor='tg:<id> @user')`; `LookupError|ValueError` → текст у `answerCallbackQuery`.
+  Ряд шукається за НОМЕРОМ (`_row_number`), основа — наша остання клавіатура в `_KEYBOARDS` (LRU 200; натиски після сну ПК
+  приходять пачкою з початковою клавіатурою), інакше з `msg.reply_markup`. `ButtonPoller(db_path, transport, backoff=10)` — daemon-потік
+  `brief-buttons`: `getUpdates` long-poll (`POLL_TIMEOUT`=15 < `tg_bot.TIMEOUT`), `allowed_updates=["callback_query"]`, `offset` у памʼяті;
+  збій → пауза `backoff`. Без webhook (нема публічної адреси): натиск, зроблений поки ПК спав, чекає в Telegram ≤24 год. Запуск — `app.py`.
 - **pipes.py** — `Cron.parse` (власний 5-польовий, без croniter; `prev/next`, локальний час; dom+dow обидва обмежені → OR),
   `TOOLS` — ЗАКРИТИЙ реєстр read-функцій (`weekly_digest|dropped_commitments|open_questions`; ключ поза ним → `PipeError`, труба не
   вантажиться), `parse_pipe`/`load_pipes` (невалідна — пропуск + warning), `run_pipe(pipe, db_path, deliver, …)` ніколи не кидає:
-  дані → `pipes_privacy.filter_data` → `render_claude` (оцінка вартості ДО виклику > `budget_usd`, нема `ANTHROPIC_API_KEY` чи збій
-  → `render_plain` з позначкою `PLAIN_MARK`) → `scrub_text` → `deliver`. Статуси `ok|skipped|blocked|error|running`. `not_collected`:
+  дані → `pipes_privacy.filter_data` → `render_claude` (лише «головне», ≤`HEADLINE_MAX_TOKENS`=300; оцінка вартості ДО виклику >
+  `budget_usd`, нема `ANTHROPIC_API_KEY` чи збій → `_PlainFallback`, картки йдуть БЕЗ «головного», `rendered_by='plain'`) →
+  `pipes_cards.render` (маски/стоп-слова по полях) → друга перевірка `leaked_words(html.unescape(text))` → `deliver`.
+  `render_plain`/`PLAIN_MARK`/виклик `scrub_text` з `run_pipe` прибрані. Статуси `ok|skipped|blocked|error|running`. `not_collected`:
   функція з `reason` (напр. `open_questions` без власника) — явний «не зібрано», не тиша; `skip_if_empty` не спрацьовує, якщо щось
-  приховано чи не зібрано. Збій ДО доставки → коротке повідомлення в бот (на 1-й і останній спробі); `blocked` → повідомлення без даних.
+  приховано чи не зібрано. 4.15.0: `run_pipe(..., buttons=False)` і `PipeScheduler(..., buttons=False)` — при `buttons` збирається
+  `item_ids`, `deliver(text, reply_markup=brief_actions.keyboard(ids))` (нема кнопок → `deliver(text)`); `deliver` мусить приймати
+  `reply_markup` (`tg_bot.send`). Збій ДО доставки → коротке повідомлення в бот (на 1-й і останній спробі); `blocked` → повідомлення без даних.
   `PipeScheduler(tick=30)`: перший прохід `catchup` (один запуск за останній момент ≤ зараз), далі `schedule`; `_next_attempt` —
   `error`/завислий `running` (>30 хв) моменту НЕ закривають, повтор через `PIPES_RETRY_MINUTES` до `PIPES_RETRY_MAX`; `manual`-запуск
   не закриває момент. CLI `python -m app.services.pipes list|run <name>` (run → stdout, `trigger='manual'`). `list_runs` читає MCP.
 - **pipes_privacy.py** — шар над `privacy.py` (спільний стоп-лист з MCP). `filter_data` ДО рендеру: пункт зі стоп-словом, з приватного
   напрямку або з джерелом, яке не визначилось → викинуто (fail closed: збій БД → усі пункти з джерелом приховано; нечитабельний
-  `private.txt` → `PrivacyError` назовні → `blocked`). `scrub_text` ПІСЛЯ: маски `•••` (IBAN, email, картки, телефони, суми з валютою),
-  стоп-слово, що пережило рендер → `blocked` (слово не пишеться навіть в історію). `hidden_line(n)` — «🔒 N пунктів приховано».
+  `private.txt` → `PrivacyError` назовні → `blocked`). K5: публічні `mask(text)` (IBAN, email, картки, телефони, суми з валютою → `•••`) і
+  `leaked_words(text, words=None)` кличе `pipes_cards._Guard` на кожне поле ДО обрізки й екранування; стоп-слово, що
+  пережило складання → `blocked` (слово не пишеться навіть в історію). `scrub_text` лишився визначеним, але `run_pipe` його
+  не кличе. `hidden_line(n)` — «🔒 N пунктів приховано, дивись у Recall».
 - **tg_bot.py** — Bot API (окремий бот, НЕ MTProto-слухач `telegram_listener.py`) на `urllib`. `send(text)` шле ЛИШЕ в
-  `TELEGRAM_BOT_CHAT_ID` (адресат не параметр), ріже по 4096 по рядках; `BotError` без токена/URL; `is_configured()`;
+  `TELEGRAM_BOT_CHAT_ID` (адресат не параметр), `send(text, *, parse_mode="HTML", reply_markup=None)` (`None` — простий текст; сповіщення про збій
+  труб екрануються `html.escape`; `reply_markup` → JSON лише на ОСТАННЮ частину), `_call(method, params, transport=)` бере
+  і `brief_actions`; `whoami()` явно ставить `allowed_updates=[message,my_chat_member,callback_query]` — Telegram памʼятає фільтр
+  слухача кнопок (`callback_query`), без цього `/start` не видно. `split_text` ріже по 4096 по ПОРОЖНІХ рядках (межі блоків — тег не рветься); `BotError` без токена/URL; `is_configured()`;
   CLI `python -m app.services.tg_bot whoami` (chat id після /start). `transport=` підміняється в тестах.
 
 ## Дедуп аудіо/YouTube/записів (Хвиля A production-RAG, 16.09.2026)
@@ -345,6 +374,11 @@ Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`; замір і межі �
   Read-функції (`list_commitments`, `dropped_commitments`, `stale_topics`, `weekly_digest`) —
   спільне ядро для MCP і UI. *Лише stdlib + app.db.connection: імпортується зі stdio-MCP,
   тож без embeddings/torch. Сира фраза в `due` НЕ переписується — у видачі обидві.*
+  *K5 4.15.0 (`commitments.py:1395-1463`): єдиний ПИСЬМОВИЙ шлях статусу задачі — `apply_action(db_path, item_id, action, *, source,
+  actor, today)` (`done|cancelled|open|postpone:1|7|30`; перенос → `due_date`=сьогодні+N, `due_precision='day'`, статус `open`, також зі
+  `stale`) і `undo_action(db_path, event_id, *, source, actor)` (лише ОСТАННЯ подія задачі, не `undo`, інакше `ValueError`; скасування
+  — теж подія `action='undo'`, `undo_of`). Зміна + рядок `action_item_events` (v51) — одна транзакція. Невідома задача/подія →
+  `LookupError`. Викликачі: `brief_actions` (`source='bot'`), `PATCH /api/memory/action-items/<id>` (`source='web'`). MCP лишається read-only.*
   *Волна 5.2: задача з переписки несе адресу — `chat`/`said_by` + пара `chat_id`/`msg_id`.
   Пара, а не лише `link`: у legacy-групах (chat_id без `-100`) посилання на повідомлення
   фізично не існує — 1453 записи з 3959, тож на самому `link` третина архіву лишилась би без

@@ -1263,12 +1263,22 @@ def _maybe_start_pipes():
             logger.warning("Труби: бот не налаштований (TELEGRAM_BOT_TOKEN/TELEGRAM_BOT_CHAT_ID) — "
                            "запуски писатимуться в історію з помилкою")
         scheduler = PipeScheduler(load_pipes(), db_path=app.config['DATABASE'],
-                                   deliver=tg_bot.send)
+                                   deliver=tg_bot.send, buttons=True)
     except Exception as e:
         logger.warning("Труби не запустились: %s", e, exc_info=True)
         return
     app.extensions['pipe_scheduler'] = scheduler
     scheduler.start()
+    # K5: кнопки «зроблено / неактуально / перенести» під брифінгами — натиски
+    # приходять long-polling-ом у цей процес (webhook без публічної адреси неможливий).
+    if tg_bot.is_configured():
+        try:
+            from app.services.brief_actions import ButtonPoller
+            poller = ButtonPoller(db_path=app.config['DATABASE'])
+            app.extensions['brief_buttons'] = poller
+            poller.start()
+        except Exception as e:
+            logger.warning("Кнопки брифінгу не запустились: %s", e, exc_info=True)
 
 # config-registry-profiles S2: boot-послідовність модульного рівня завершена
 # (БД/міграції/JobQueue/recorder-гейт/лічильники/blueprints/auth/error-handler

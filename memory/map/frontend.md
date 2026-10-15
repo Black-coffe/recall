@@ -1,6 +1,7 @@
 # frontend — SPA (`static/js/recall/`)
 
 Клієнтський роутер + shell, vanilla JS (без фреймворку), глобальний `window.Recall`.
+last-verified: 2026-10-15 (transcript.js `?task=`, sw.js v77); решта розділів — раніше
 **Дизайн:** editorial-каталог, тепле паперове полотно, тільки світла тема; класи з префіксом `rc-*`.
 
 ## Архітектура
@@ -45,7 +46,7 @@
 | `/` | home | Дашборд: плитки stats, ask-box, останні записи |
 | `/library` | library | Історія: пошук + фасети (джерело/категорія/період), пагінація, bulk-категорія/видалення. **Рядок рендериться ПО ТИПУ джерела** (`rowParts()`): TG — чат+відправник у підписі й повідомлення в тілі; дзвінок — тривалість/спікери/задачі; документ — файл/сторінки. Дубль (Хвиля A) несе бейдж «дубль #N» (`t.duplicate_of`) |
 | `/audio` | audio | Аудіотека (YouTube+записи): play/explore/transcribe/delete, бейдж активної транскрипції, фільтр **«Без транскрипта»** (`?transcribed=0`) |
-| `/transcript/:slug` | transcript | Запис: 3 view (plain/segments/polished), плеєр+seek по сегменту, закладки, категорія, **таймлайн ко-пілота**, word cloud, олівець біля заголовка → `UI.editMetaModal` (перейменування пере-слагує URL, `editable-title-description`-05) |
+| `/transcript/:slug` | transcript | Запис: 3 view (plain/segments/polished), плеєр+seek по сегменту, закладки, категорія, **таймлайн ко-пілота**, word cloud, олівець біля заголовка → `UI.editMetaModal` (перейменування пере-слагує URL, `editable-title-description`-05). K5: `?task=<id>` (посилання з брифінгу Telegram) → `focusTask(rel, id)` (transcript.js:1043) прокручує до `.rc-task[data-id]` двічі (rAF + 800 мс, `behavior:'instant'`) і вішає `.is-target` (анімація `rc-task-target` 4 с, recall.css:807); чужий id — нічого |
 | `/ask` | ask | RAG-чат: `api.askStream()` (fetch+SSE), цитати-посилання, 👍/👎+замітка під відповіддю (`R.api.rateAsk(askId, rating, note)` → `POST /api/memory/ask/<id>/rate`, Хвиля A 16.09.2026 — розмітка golden-set, не «лайк») |
 | `/research` | research | Дослідження бренду: preview → originals(.md) / AI-summary |
 | `/entities`, `/entities/:id` | entities | Граф: значущі сутності (≥2 згадки) + картка (co-mentions, timeline, export) |
@@ -59,7 +60,7 @@
 | `/record` | record | Рекордер: таби паралельних сесій (reattach до всіх з `/api/recordings/active`, SSE на кожну), setup→active→stop-name→transcribe, вибір системного звуку увесь/include/exclude з `/api/recording/apps`, retarget наживо (`/system-source`, подія `source_changed`), 409 `SESSION_LIMIT` ховає «+ Новий запис», перенос ко-пілота між табами; після стопу сусідам зі звуженим звуком пропонує повернути `all` (`auto_restore`, без відповіді = «так»); `?app=<exe>&mic=<назва>` (з «Інші джерела» K2) → `presetFrom(q)` лише передвибирає форму, невалідне ігнорується |
 
 ## Service worker — `static/sw.js` (202)
-**Поточна версія кешу: `recall-v72`** (sw.js:118; K2, 4.9.0). Стратегії: shell precache; `/static/` stale-while-revalidate;
+**Поточна версія кешу: `recall-v77`** (sw.js:118; K5, 4.14.0). Стратегії: shell precache; `/static/` stale-while-revalidate;
 CDN cache-first; API-GET network-first+fallback; SSE/POST не кешуються. На `activate` старі `recall-vN` чистяться.
 
 ## Gotchas

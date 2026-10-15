@@ -84,3 +84,23 @@ def test_whoami_cli_without_token(monkeypatch, capsys):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     assert tg_bot._cli(["whoami"]) == 1
     assert "@BotFather" in capsys.readouterr().out
+
+
+def test_reply_markup_goes_only_on_last_part(configured):
+    """K5: кнопки брифінгу — під останньою частиною, щоб нумерація читалась над ними."""
+    f = Fake()
+    kb = {"inline_keyboard": [[{"text": "1 ✅", "callback_data": "a:1:5:done"}]]}
+    text = "\n\n".join(f"🏷 <b>Блок {i}</b>\n" + "задача Олени " * 60 for i in range(12))
+    n = tg_bot.send(text, reply_markup=kb, transport=f)
+    assert n > 1
+    marks = [p.get("reply_markup") for _, p in f.calls]
+    assert marks[:-1] == [None] * (n - 1)
+    assert json.loads(marks[-1][0]) == kb
+
+
+def test_whoami_asks_for_messages_despite_button_filter(configured):
+    """Слухач кнопок просить лише callback_query, Telegram це запамʼятовує — whoami скидає фільтр."""
+    f = Fake(reply={"ok": True, "result": []})
+    tg_bot.whoami(transport=f)
+    _, params = f.calls[0]
+    assert "message" in json.loads(params["allowed_updates"][0])

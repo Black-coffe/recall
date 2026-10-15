@@ -9,7 +9,7 @@
 - [overview](map/overview.md) — вся система з висоти: потоки даних, процеси, точки входу
 - [root](map/root.md) — кореневі модулі: app.py boot (+ планувальник труб K4), whisper_manager_new, config, mcp_server, telegram_listener
 - [blueprints](map/blueprints.md) — 14 Flask blueprints: маршрути API за доменами
-- [services](map/services.md) — app/services/*: database, transcription, RAG, commitments, scope, taxonomy (categories.py — dir→project tree + tags), pipes (K4 — брифінги за розкладом: pipes.py/pipes_privacy.py/tg_bot.py)
+- [services](map/services.md) — app/services/*: database, transcription, RAG, commitments, scope, taxonomy (categories.py — dir→project tree + tags), pipes (K4 — брифінги за розкладом: pipes.py/pipes_privacy.py/tg_bot.py; K5 — brief_actions.py кнопки задач, commitments.apply_action)
 - [copilot](map/copilot.md) — живий ко-пілот дзвінка: топік-машина, диспетчер, каскад local→Claude
 - [recording](map/recording.md) — серверний recorder: до N паралельних сесій, mic+loopback, ізоляція звуку по застосунку (process loopback), SSE, підказки «Записати?»/«Зупинити?» за дзвінком (call_watch + toast, K2)
 - [frontend](map/frontend.md) — SPA: router/views/cmdk, recall.css, service worker
@@ -26,7 +26,7 @@
 - [taxonomy-tree-and-tags](../docs/wiki/taxonomy-tree-and-tags.md) — canonical node identity is its full path (siblings-only name uniqueness, v47), a bare ambiguous name never resolves silently (CategoryError('ambiguous') propagates, never swallowed into empty), --dry-run on a write pass is the same code with commit=False + rollback, rename/reparent invalidates the whole subtree's embedded prefix
 - [recording-sources-and-sessions](../docs/wiki/recording-sources-and-sessions.md) — parallel sessions (registry, per-session lock, SESSION_LIMIT), AudioSource boundary, `all` byte-identical, fixed .pcm format (EXCLUDE-own-PID), silence padding + source_events, session-PID tree-root targeting, one copilot per process, AMBIGUOUS_SESSION never guesses, call autoprompt only asks (click-token starts, autostop only after «Зупинити?»)
 - [video-timeline-and-screen-secrets](../docs/wiki/video-timeline-and-screen-secrets.md) — frames never stored (cut on the fly), secrets masked before any write/describe and redacted in every outgoing image, raw values only in screen_secrets via TTY `reveal`, cache key = video_analysis_params
-- [scheduled-pipes-delivery](../docs/wiki/scheduled-pipes-delivery.md) — closed read-only TOOLS registry, filter before render + scrub after, fail closed, bot only to owner chat, failed run never closes a schedule moment
+- [scheduled-pipes-delivery](../docs/wiki/scheduled-pipes-delivery.md) — closed read-only TOOLS registry, code-built HTML brief cards (K5), per-field mask+stop-word check, filter before render, fail closed, proxied (tailscale) requests not local-trusted, bot only to owner chat, failed run never closes a schedule moment
 
 ## Verification
 - build: none — інтерпретований Python + vanilla JS

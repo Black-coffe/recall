@@ -9,8 +9,9 @@
   MCP-тулзів труба не кличе: ключ поза реєстром → труба не вантажиться.
 - Cron — власний 5-польовий парсер (``*``, числа, списки, діапазони, крок),
   без croniter/apscheduler. Час — локальний час машини.
-- Переказ робить Claude у межах ``budget_usd`` (оцінка ДО виклику). Нема
-  ключа, бюджет або помилка → простий список із позначкою причини.
+- Повідомлення складає код (``pipes_cards``: HTML-картки за напрямками). Claude
+  у межах ``budget_usd`` (оцінка ДО виклику) пише лише 1–2 рядки «головне»; нема
+  ключа, бюджет або помилка → те саме повідомлення без цих рядків.
 - Кожен запуск — рядок у ``pipe_runs`` (міграція v50); збій не вбиває потік.
 
 CLI:
@@ -19,6 +20,7 @@ CLI:
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -30,13 +32,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from app.services import pipes_privacy
+from app.services import brief_actions, pipes_cards, pipes_privacy
 
 logger = logging.getLogger(__name__)
 
 PIPES_DIR = Path(__file__).resolve().parents[2] / "pipes"
-PLAIN_MARK = "⚠️ Простий список"
 DEFAULT_MAX_TOKENS = 1500
+#: «Головне» — 1–2 рядки; більше токенів моделі не треба.
+HEADLINE_MAX_TOKENS = 300
 
 
 class PipeError(ValueError):
@@ -342,34 +345,6 @@ def not_collected(data: dict) -> list[str]:
     return out
 
 
-def _item_line(item: Any) -> str:
-    if not isinstance(item, dict):
-        return str(item)
-    text = (item.get("task") or item.get("question") or item.get("topic")
-            or item.get("name") or item.get("title") or "")
-    if not text:
-        return json.dumps(item, ensure_ascii=False, default=str)[:200]
-    tail = [str(x) for x in (item.get("owner"), item.get("due_date") or item.get("due_raw"),
-                             item.get("chat") or item.get("meeting")) if x]
-    return f"{text}" + (f" ({'; '.join(tail)})" if tail else "")
-
-
-def render_plain(pipe: Pipe, data: dict, reason: str) -> str:
-    lines = [f"{PLAIN_MARK} ({reason}) · {pipe.name}"]
-    for tool, result in data.items():
-        if not isinstance(result, dict):
-            continue
-        for key, v in result.items():
-            if not isinstance(v, list) or not v:
-                continue
-            lines.append("")
-            lines.append(f"{tool} · {key} ({len(v)}):")
-            lines.extend(f"• {_item_line(it)}" for it in v)
-    if len(lines) == 1:
-        lines.append("Даних нема.")
-    return "\n".join(lines)
-
-
 _client = None
 _client_lock = threading.Lock()
 
@@ -384,9 +359,11 @@ def _get_client():
 
 
 _SYSTEM = (
-    "Ти переказуєш дані з особистого архіву дзвінків і чатів власнику у Telegram. "
-    "Пиши українською, коротко, без вступів. Використовуй ЛИШЕ факти з JSON-даних: "
-    "не додавай висновків, оцінок і подій, яких там нема. Імена, дати й назви — дослівно."
+    "Ти пишеш 1–2 короткі рядки «головне» над брифінгом з особистого архіву дзвінків і "
+    "чатів власника. Сам список задач уже складено кодом — не перелічуй його. Пиши "
+    "українською, простим текстом: без Markdown, без зірочок, заголовків і списків. "
+    "Використовуй ЛИШЕ факти з JSON-даних: не додавай висновків, оцінок і подій, яких "
+    "там нема. Імена, дати й назви — дослівно."
 )
 
 
@@ -396,7 +373,9 @@ def _model() -> str:
 
 
 def render_claude(pipe: Pipe, data: dict) -> tuple[str, float]:
-    """Переказ Claude. Повертає (текст, вартість $). Кидає _PlainFallback з причиною."""
+    """«Головне» від Claude (1–2 рядки простим текстом). → (рядки, вартість $).
+
+    Кидає _PlainFallback з причиною — тоді повідомлення йде без «головного»."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise _PlainFallback("нема ANTHROPIC_API_KEY")
     from app.services.pricing import estimate_cost
@@ -404,18 +383,19 @@ def render_claude(pipe: Pipe, data: dict) -> tuple[str, float]:
     payload = json.dumps(data, ensure_ascii=False, default=str)
     user = f"{pipe.prompt}\n\nДані (JSON):\n{payload}"
     # Груба оцінка вхідних токенів із запасом: кирилиця ~2 символи на токен.
-    est = estimate_cost(model, (len(user) + len(_SYSTEM)) // 2, pipe.max_tokens)
+    max_tokens = min(pipe.max_tokens, HEADLINE_MAX_TOKENS)
+    est = estimate_cost(model, (len(user) + len(_SYSTEM)) // 2, max_tokens)
     if est > pipe.budget_usd:
         raise _PlainFallback(f"бюджет: оцінка ${est:.4f} > ${pipe.budget_usd:.4f}")
     try:
         msg = _get_client().messages.create(
-            model=model, max_tokens=pipe.max_tokens, system=_SYSTEM,
+            model=model, max_tokens=max_tokens, system=_SYSTEM,
             messages=[{"role": "user", "content": user}])
     except Exception as e:
         logger.warning("Труба %s: Claude не відповів (%s)", pipe.name, type(e).__name__,
                        exc_info=True)
         raise _PlainFallback(f"помилка Claude: {type(e).__name__}") from e
-    text = "".join(getattr(b, "text", "") for b in msg.content).strip()
+    text = pipes_cards.clean_headline("".join(getattr(b, "text", "") for b in msg.content))
     if not text:
         raise _PlainFallback("Claude повернув порожню відповідь")
     usage = getattr(msg, "usage", None)
@@ -426,7 +406,7 @@ def render_claude(pipe: Pipe, data: dict) -> tuple[str, float]:
 
 
 class _PlainFallback(Exception):
-    """Переказ неможливий — іде простий список; аргумент — причина для людини."""
+    """«Головного» не буде — картки йдуть без нього; аргумент — причина для людини."""
 
 
 # ---------------------------------------------------------------- запуск
@@ -434,7 +414,8 @@ class _PlainFallback(Exception):
 def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
              now: Optional[datetime] = None, trigger: str = "manual",
              scheduled_for: Optional[datetime] = None,
-             attempt: int = 1, max_attempts: int = 1, retry_minutes: int = 0) -> dict:
+             attempt: int = 1, max_attempts: int = 1, retry_minutes: int = 0,
+             buttons: bool = False) -> dict:
     """Один запуск труби: дані → рендер → deliver → рядок у pipe_runs.
 
     Ніколи не кидає: збій функції даних чи доставки пишеться як status='error'.
@@ -445,6 +426,8 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
     без даних і без самого стоп-слова (тиша читалась би як «брифінгу не буде взагалі»).
     З повторами (``max_attempts`` > 1) повідомлення йде на першій помилці і на
     останній спробі, між ними — тиша.
+    ``buttons`` (K5): задачі нумеруються, а ``deliver`` отримує ще й ``reply_markup``
+    з кнопками — тому лише для доставки, яка його приймає (``tg_bot.send``).
     """
     now = now or datetime.now()
     t0 = datetime.now()                   # тривалість — по справжньому годиннику
@@ -459,35 +442,44 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
     delivering = False
     try:
         raw = {t: TOOLS[t](db_path, now) for t in pipe.tools}
-        # Приватне викидається ДО рендеру: ні Claude, ні простий список його не бачать.
+        # Приватне викидається ДО рендеру: ні Claude, ні картки його не бачать.
         data, hidden = pipes_privacy.filter_data(raw, db_path=db_path)
         missing = not_collected(data)
         if pipe.skip_if_empty and is_empty(data) and not hidden and not missing:
             res["status"] = "skipped"
             res["error"] = "порожні дані (skip_if_empty)"
         else:
+            headline = None
             try:
-                text, cost = render_claude(pipe, data)
+                headline, cost = render_claude(pipe, data)
                 res.update(rendered_by="claude", cost_usd=cost)
             except _PlainFallback as fb:
-                text = render_plain(pipe, data, str(fb))
                 res.update(rendered_by="plain", error=str(fb))
-            if hidden:
-                text = f"{text}\n\n{pipes_privacy.hidden_line(hidden)}"
+            # Маски й стоп-слова — на кожне поле ДО екранування (усередині render);
+            # база посилань — pipes_cards.link_base() (RECALL_PUBLIC_URL → RECALL_API_URL).
+            item_ids: Optional[list[int]] = [] if buttons else None
+            text, leaked = pipes_cards.render(
+                pipes_cards.title_for(pipe.tools), data, db_path=db_path,
+                today=now.date(), headline=headline, missing=missing, hidden=hidden,
+                buttons=item_ids)
+            # Друга лінія: стоп-слово не має пережити й складання повідомлення.
+            leaked = leaked or pipes_privacy.leaked_words(html.unescape(text))
             if missing:
-                text = "\n".join(missing) + f"\n\n{text}"
                 note = "не зібрано: " + ", ".join(t for t in pipe.tools
                                                   if isinstance(data.get(t), dict)
                                                   and data[t].get("reason"))
                 res["error"] = f"{res['error']}; {note}" if res["error"] else note
-            text, leaked = pipes_privacy.scrub_text(text)
             if leaked:
                 # Слова не називаємо навіть в історії — вона читається через MCP.
                 res.update(status="blocked",
                            error=f"стоп-слово в готовому тексті ({len(leaked)}) — не надіслано")
             else:
                 delivering = True
-                deliver(text)
+                kb = brief_actions.keyboard(item_ids) if item_ids else None
+                if kb:
+                    deliver(text, reply_markup=kb)
+                else:
+                    deliver(text)
                 res.update(status="ok", chars=len(text))
     except pipes_privacy.PrivacyError as e:
         logger.warning("Труба %s: приватність не перевірено (%s) — не надсилаю", pipe.name, e)
@@ -525,8 +517,9 @@ def _notify_blocked(pipe: Pipe, res: dict, deliver: Callable[[str], None]) -> No
     err = res["error"] or ""
     reason = next((v for k, v in _BLOCKED_REASONS.items() if err.startswith(k)), "фільтр приватного")
     try:
-        deliver(f"🔒 Брифінг «{pipe.name}» не надіслано: його зупинив фільтр приватного — {reason}. "
-                f"Подивись у Recall; деталі — у list_pipe_runs.")
+        deliver(html.escape(f"🔒 Брифінг «{pipe.name}» не надіслано: його зупинив фільтр "
+                            f"приватного — {reason}. Подивись у Recall; деталі — у list_pipe_runs.",
+                            quote=False))
     except Exception as e:  # noqa: BLE001 — історія вже має blocked
         logger.warning("Труба %s: повідомлення про блокування не надіслано (%s)",
                        pipe.name, type(e).__name__)
@@ -542,7 +535,8 @@ def _notify_failure(pipe: Pipe, res: dict, deliver: Callable[[str], None], *,
     else:
         tail = f" Спроби вичерпано ({max_attempts}), до наступного розкладу не пробую."
     try:
-        deliver(f"⚠️ Труба «{pipe.name}» впала: {reason}.{tail} Деталі — у list_pipe_runs.")
+        deliver(html.escape(f"⚠️ Труба «{pipe.name}» впала: {reason}.{tail} "
+                            f"Деталі — у list_pipe_runs.", quote=False))
     except Exception as e:  # noqa: BLE001 — канал теж лежить; історія вже має збій
         logger.warning("Труба %s: повідомлення про збій не надіслано (%s)",
                        pipe.name, type(e).__name__)
@@ -562,10 +556,12 @@ class PipeScheduler:
     def __init__(self, pipes: list[Pipe], *, db_path: str,
                  deliver: Callable[[str], None], tick: float = 30.0,
                  clock: Callable[[], datetime] = datetime.now,
-                 retry_minutes: Optional[int] = None, retry_max: Optional[int] = None):
+                 retry_minutes: Optional[int] = None, retry_max: Optional[int] = None,
+                 buttons: bool = False):
         self.pipes = pipes
         self.db_path = db_path
         self.deliver = deliver
+        self.buttons = buttons
         self.tick = tick
         self.clock = clock
         from app.core import settings as _settings
@@ -593,7 +589,8 @@ class PipeScheduler:
                                     now=now, trigger="retry" if attempt > 1 else trigger,
                                     scheduled_for=due, attempt=attempt,
                                     max_attempts=self.retry_max,
-                                    retry_minutes=self.retry_minutes))
+                                    retry_minutes=self.retry_minutes,
+                                    buttons=self.buttons))
             except Exception as e:
                 logger.warning("Планувальник труб: %s — %s", pipe.name, e, exc_info=True)
         return out

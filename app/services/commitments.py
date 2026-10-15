@@ -1386,6 +1386,84 @@ def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int =
 
 
 # ============================================================
+# Зміна статусу задачі з журналом (K5 k5-task-buttons)
+# ============================================================
+# Єдиний писальний шлях для кнопок брифінгу (source='bot') і /tasks (source='web'):
+# зміна і подія в `action_item_events` — в одній транзакції, тож журнал не може
+# розійтись зі станом. MCP сюди не ходить (read-only, `mcp-read-first-strategy`).
+
+STATUS_ACTIONS = ("done", "cancelled", "open")
+POSTPONE_DAYS = {"postpone:1": 1, "postpone:7": 7, "postpone:30": 30}
+
+
+def _item_state(conn, item_id: int):
+    row = conn.execute("SELECT id, status, due_date, due_precision FROM action_items "
+                       "WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"задачу {item_id} не знайдено")
+    return row
+
+
+def _write_event(conn, row, *, source: str, actor: Optional[str], action: str,
+                 status: str, due_date: Optional[str], due_precision: Optional[str],
+                 undo_of: Optional[int] = None) -> dict:
+    conn.execute("UPDATE action_items SET status = ?, due_date = ?, due_precision = ? "
+                 "WHERE id = ?", (status, due_date, due_precision, row["id"]))
+    cur = conn.execute(
+        "INSERT INTO action_item_events (item_id, at, source, actor, action, old_status, "
+        "new_status, old_due_date, new_due_date, old_due_precision, new_due_precision, undo_of) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (row["id"], datetime.now().isoformat(timespec="seconds"), source, actor, action,
+         row["status"], status, row["due_date"], due_date, row["due_precision"],
+         due_precision, undo_of))
+    conn.commit()
+    return {"event_id": cur.lastrowid, "item_id": row["id"], "status": status,
+            "due_date": due_date}
+
+
+def apply_action(db_path: str, item_id: int, action: str, *, source: str,
+                 actor: Optional[str] = None, today: Optional[date] = None) -> dict:
+    """Змінити статус (`done|cancelled|open`) або перенести термін (`postpone:1|7|30`).
+
+    Перенос: `due_date` = сьогодні + N днів, `due_precision='day'`, статус → `open`
+    (і зі `stale` теж — власник щойно підтвердив, що задача жива). Сира фраза `due`
+    не переписується. → `{event_id, item_id, status, due_date}`.
+    Невідома задача → `LookupError`, невідома дія → `ValueError`; БД без змін."""
+    if action not in STATUS_ACTIONS and action not in POSTPONE_DAYS:
+        raise ValueError(f"невідома дія: {action}")
+    with get_db_connection(db_path) as conn:
+        row = _item_state(conn, item_id)
+        if action in POSTPONE_DAYS:
+            new_due = ((today or date.today()) + timedelta(days=POSTPONE_DAYS[action])).isoformat()
+            return _write_event(conn, row, source=source, actor=actor, action=action,
+                                status="open", due_date=new_due, due_precision=P_DAY)
+        return _write_event(conn, row, source=source, actor=actor, action=action,
+                            status=action, due_date=row["due_date"],
+                            due_precision=row["due_precision"])
+
+
+def undo_action(db_path: str, event_id: int, *, source: str,
+                actor: Optional[str] = None) -> dict:
+    """Скасувати подію: повернути статус і термін задачі, які були до неї.
+
+    Лише ОСТАННЯ подія задачі (інакше відкат затер би пізнішу зміну) → інакше `ValueError`.
+    Скасування — теж подія (`action='undo'`, `undo_of`), тож журнал лишається повним."""
+    with get_db_connection(db_path) as conn:
+        ev = conn.execute("SELECT * FROM action_item_events WHERE id = ?",
+                          (event_id,)).fetchone()
+        if ev is None:
+            raise LookupError(f"подію {event_id} не знайдено")
+        last = conn.execute("SELECT MAX(id) AS m FROM action_item_events WHERE item_id = ?",
+                            (ev["item_id"],)).fetchone()["m"]
+        if last != event_id or ev["action"] == "undo":
+            raise ValueError("скасувати можна лише останню дію над задачею")
+        row = _item_state(conn, ev["item_id"])
+        return _write_event(conn, row, source=source, actor=actor, action="undo",
+                            status=ev["old_status"], due_date=ev["old_due_date"],
+                            due_precision=ev["old_due_precision"], undo_of=event_id)
+
+
+# ============================================================
 # CLI
 # ============================================================
 

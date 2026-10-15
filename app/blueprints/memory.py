@@ -1224,12 +1224,12 @@ def update_action_item(aid: int):
     status = data.get('status')
     if status not in ('open', 'done', 'cancelled'):
         return jsonify({"success": False, "error": "Невірний статус"}), 400
-    with _get_db() as conn:
-        cur = conn.execute(
-            "UPDATE action_items SET status = ? WHERE id = ?", (status, aid),
-        )
-        conn.commit()
-    if cur.rowcount == 0:
+    # K5: той самий писальний шлях, що й кнопки брифінгу — з подією в журналі.
+    from app.services import commitments
+    try:
+        commitments.apply_action(current_app.config['DATABASE'], aid, status,
+                                 source='web', actor='web')
+    except LookupError:
         return jsonify({"success": False, "error": "Задачу не знайдено"}), 404
     return jsonify({"success": True})
 

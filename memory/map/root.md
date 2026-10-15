@@ -1,6 +1,6 @@
 # root — кореневі entry points
 
-last-verified: 2026-10-15 (app.py труби, mcp_server.py list_pipe_runs, реєстр 165); 2026-10-13 (config.py); решта розділів — раніше
+last-verified: 2026-10-15 (app.py труби + ButtonPoller 4.15.0 `:1250-1281`, mcp_server.py list_pipe_runs, реєстр 167, auth.py проксі); 2026-10-13 (config.py); решта розділів — раніше
 (файл >80 рядків — давній борг)
 
 ## app.py (1288)
@@ -41,10 +41,12 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `database=='ok' ∧ job_queue.bound ∧ whisper.preload in ('ready','disabled') ∧ boot_finished`, інакше 503.
 
 **Труби (K4, 4.13.0):** `_maybe_start_pipes()` (app.py:1250) — під `__main__` разом із `_maybe_start_call_watcher()`
-(app.py:1309-1311, лише в процесі, що обслуговує запити; під pytest не стартує). `PIPES_ENABLED=0` → рядок у лозі й вихід.
-Збирає `PipeScheduler(load_pipes(), db_path=app.config['DATABASE'], deliver=tg_bot.send)` → `app.extensions['pipe_scheduler']`,
+(app.py:1320-1321, лише в процесі, що обслуговує запити; під pytest не стартує). `PIPES_ENABLED=0` → рядок у лозі й вихід.
+Збирає `PipeScheduler(load_pipes(), db_path=app.config['DATABASE'], deliver=tg_bot.send, buttons=True)` → `app.extensions['pipe_scheduler']`,
 `.start()`. Бот не налаштований → лише warning, планувальник усе одно йде (запуски пишуться в історію як помилка). Виняток
-при збірці → warning і return. Логіка — `services.md` → pipes.py.
+при збірці → warning і return. 4.15.0 (K5 кнопки): далі, лише коли `tg_bot.is_configured()`, `ButtonPoller(db_path=…)` →
+`app.extensions['brief_buttons']`, `.start()` (daemon-потік long-poll `getUpdates`; збій старту → warning, планувальник живий).
+Окремого прапора нема — той самий `PIPES_ENABLED`. Логіка — `services.md` → pipes.py, brief_actions.py.
 
 ## config.py (537)
 **Призначення:** ієрархія конфігів Development/Production/Testing; `.env`-побічні ефекти
@@ -57,13 +59,18 @@ headless-інжест, не вимикається), `boot_finished=True` в с�
 `cfg.PROFILE` (`'desktop'|'headless'`, з `RECALL_PROFILE`) і `cfg.HEADLESS: bool` — у headless
 `RECORDING_ENABLED`/`RECORDING_VIDEO_ENABLED` завжди `False`.
 **Реєстр (`app/core/settings.py`, спек `config-registry-profiles` S1):** єдине джерело істини для
-165 env-флагів (рахунок `^    Setting(` у `settings.py`; 4.13.0 K4: група «Труби» — `PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`=15, `PIPES_RETRY_MAX`=6, `PIPES_MODEL`=claude-sonnet-5, `TELEGRAM_BOT_TOKEN` (secret), `TELEGRAM_BOT_CHAT_ID`, `settings.py:657-680`) (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
+167 env-флагів (рахунок `^    Setting(` у `settings.py`; 4.13.0 K4: група «Труби» — `PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`=15, `PIPES_RETRY_MAX`=6, `PIPES_MODEL`=claude-sonnet-5 (з K5 пише лише «головне»), `TELEGRAM_BOT_TOKEN` (secret), `TELEGRAM_BOT_CHAT_ID`; 4.14.0 K5: `RECALL_PUBLIC_URL` (база посилань у картках, порожньо → `RECALL_API_URL`), група «Auth / доступ» + `RECALL_PROXY_ALLOWED_IPS`; `settings.py:624,661-687`) (назва/дефолт/тип/група/`gates`/профіль) — `REGISTRY`, `by_name()`, типізовані
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI
 `python -m app.core.settings env-example` генерує `.env.example`). Модуль без важких залежностей
 (не імпортує `app.*`/`flask`/`torch`/`config` — памʼятка `mcp-stdio-no-heavy-models`); `config.py`
 бере скалярні дефолти звідти замість дубльованих літералів (три свідомі винятки на прямому
 `os.environ.get`: `TELEGRAM_SESSION`, `TELEGRAM_API_ID`, `_detect_telegram_enabled` — див.
 `## Implementation notes` story 01).
+**Auth-гейт (`app/core/auth.py`, K5-04, 4.14.0):** один `before_request` на `/api/*` (exempt: OPTIONS, не-`/api/`, `/api/health`, `/api/ready`).
+`RECALL_LOCAL_TRUSTED` + localhost пускає без ключа ЛИШЕ прямий запит. Запит із localhost з `X-Forwarded-For` або
+`Tailscale-User-Login` (так `tailscale serve` приводить tailnet) — проксійований (`_proxied_client`, `auth.py:100`): пускається, лише
+якщо єдина адреса XFF ∈ `RECALL_PROXY_ALLOWED_IPS` (ланцюжок через кому → IP невідомий), інакше потрібен `RECALL_API_KEY` (без нього 401).
+Різняться за IP, не за `Tailscale-User-Login` (однаковий для всіх вузлів власника). Перевірка: `scripts/check_proxy_trust.py`.
 **Gotchas:** `_detect_recording_enabled()`/`_detect_telegram_enabled()` і перевірка `SECRET_KEY`
 (hard-fail/автоген/запис у `.env`) **більше не на імпорті** — перенесені у `_initialize_dynamic_config()`,
 що виконується лінивo один раз при **першому** `get_config()` (прапорець `_config_initialized`).

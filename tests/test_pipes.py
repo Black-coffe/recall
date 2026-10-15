@@ -146,12 +146,12 @@ class _FakeClient:
 
 
 class TestRunPipe:
-    def test_no_key_goes_plain_with_mark(self, db, fake_tools, no_key):
+    def test_no_key_sends_cards_without_headline(self, db, fake_tools, no_key):
         fake_tools("weekly_digest", DATA_FULL)
         sent = []
         res = run_pipe(_pipe(), db_path=db, deliver=sent.append)
         assert res["status"] == "ok" and res["rendered_by"] == "plain"
-        assert sent[0].startswith(pipes.PLAIN_MARK)
+        assert "💡" not in sent[0]
         assert "Надіслати Олені договір" in sent[0]
         row = pipes.list_runs(db)[0]
         assert row["rendered_by"] == "plain" and "ANTHROPIC_API_KEY" in row["error"]
@@ -165,7 +165,7 @@ class TestRunPipe:
         res = run_pipe(_pipe(budget_usd="0.0001"), db_path=db, deliver=sent.append)
         assert client.calls == []
         assert res["rendered_by"] == "plain" and "бюджет" in res["error"]
-        assert sent[0].startswith(pipes.PLAIN_MARK)
+        assert "💡" not in sent[0] and "Надіслати Олені договір" in sent[0]
 
     def test_claude_exception_goes_plain(self, db, fake_tools, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -183,7 +183,7 @@ class TestRunPipe:
         fake_tools("weekly_digest", DATA_FULL)
         sent = []
         res = run_pipe(_pipe(), db_path=db, deliver=sent.append)
-        assert sent == ["Звід: надіслати Олені договір."]
+        assert len(sent) == 1 and "💡 Звід: надіслати Олені договір." in sent[0]
         assert res["rendered_by"] == "claude"
         from app.services.pricing import estimate_cost
         expected = estimate_cost(pipes._model(), 1000, 200)
@@ -292,7 +292,8 @@ def _app_py():
 
 
 def test_app_import_does_not_start_scheduler():
-    assert "pipe_scheduler" not in _app_py().app.extensions
+    extensions = _app_py().app.extensions
+    assert "pipe_scheduler" not in extensions and "brief_buttons" not in extensions
 
 
 def test_disabled_flag_logs_one_line(monkeypatch, caplog):
@@ -452,7 +453,7 @@ class TestNotCollected:
         sent = []
         res = run_pipe(self._q(), db_path=db, deliver=sent.append)
         assert res["status"] == "ok" and len(sent) == 1
-        assert sent[0].startswith("⚠️ Питання з Telegram не зібрано: невідомо, хто власник")
+        assert "⚠️ Питання з Telegram не зібрано: невідомо, хто власник" in sent[0]
         assert "не зібрано: open_questions" in pipes.list_runs(db)[0]["error"]
 
     def test_real_empty_still_silent(self, db, fake_tools, no_key):
@@ -467,5 +468,5 @@ class TestNotCollected:
         fake_tools("open_questions", NO_OWNER)
         sent = []
         run_pipe(self._q(), db_path=db, deliver=sent.append)
-        assert sent[0].startswith("⚠️ Питання з Telegram не зібрано")
-        assert sent[0].endswith("Питань нема.")
+        assert "⚠️ Питання з Telegram не зібрано" in sent[0]
+        assert "💡 Питань нема." in sent[0]
