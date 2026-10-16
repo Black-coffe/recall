@@ -5,6 +5,41 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- VULYK tooling (`/vulyk-evolve` 2026-10-16): `scripts/scope-check.sh` no longer counts its own `memory/stats/scope.jsonl` as a story's out-of-scope edit (false `scope_breach` on every rerun in the same tree); registered as override 2 in `scripts/recall-vulyk-overrides.sh`.
+
+## [4.18.1] — 2026-10-16
+
+### Fixed
+- The mail poller writes a start line (`Mail poller started (every N min)`) to `whisper_ui.log`, so a release can prove
+  the background service runs from the log, not only from `/api/mail/status` (`docs/defects/shipped-but-not-restarted.md`).
+
+## [4.18.0] — 2026-10-16
+
+### Added
+- **Gmail ingestion** (spec `gmail-ingest`, council GREEN in round 6). Connect one or more Gmail mailboxes with an
+  address + Google app password (IMAP over SSL, read-only in code: EXAMINE/BODY.PEEK, no write or SMTP commands, a test
+  proves it). The password lives only in the OS credential store via `keyring` (Windows Credential Manager) — never in
+  the DB, `.env`, logs, API/MCP responses or backups. Only labels enabled on the new **Mail** screen (`/mail`) are
+  ingested; a label maps to a direction and has a per-label Claude card toggle (off by default). First sync of a label
+  loads the last 12 months (`MAIL_BACKFILL_MONTHS`), then a background poller (`MAIL_POLL_MINUTES`, default 5) picks up
+  new mail; "load deeper" fills older months. One record per email (`source_type='email'`, dated by the Date header),
+  quoted replies stripped (Gmail/Apple/Outlook, uk/ru/en attributions), forwarded content kept, emails chained by
+  thread; passwords, tokens and one-time codes masked in subject, body and text attachments before anything is stored.
+  Attachments go through the document pipeline as linked document records (`mail_attachments`, 25 MB cap,
+  `MAIL_ATTACH_MAX_MB`). A message that fails to store is retried on the next poll.
+- Migration v52 (mail accounts, labels, attachment links, email columns on `transcriptions`) — additive.
+- MCP: `email_status` (accounts and per-label sync state, no secrets); `get_transcript`/`list_recent` show email
+  fields and the thread's messages. 42 read-only tools.
+
+### Changed
+- Document persistence moved from `app/blueprints/documents.py` into `app/services/document_ingest.py` (one path for
+  uploads, folder import and mail attachments).
+- `keyring>=25.7` added to `requirements.txt`.
+
+### Known gaps
+- Turning the Claude card on for a label later does not enrich that label's emails already in the archive.
+
 ## [4.17.0] — 2026-10-16
 
 ### Changed

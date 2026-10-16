@@ -2127,5 +2127,55 @@ def init_database(db_path: str):
                   "(51, 'action_item_events: журнал змін статусу задач (K5)')")
         logger.info("Migration v51: action_item_events")
 
+    # === v52: Gmail ingest (gmail-ingest-01) =====================================
+    # Accounts hold only the address: the app password lives in the OS keyring.
+    if current_version < 52:
+        c.execute('''CREATE TABLE IF NOT EXISTS mail_accounts (
+                        id INTEGER PRIMARY KEY,
+                        address TEXT NOT NULL UNIQUE,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        last_poll_at TEXT,
+                        last_error_code TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS mail_labels (
+                        id INTEGER PRIMARY KEY,
+                        account_id INTEGER NOT NULL,
+                        folder TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        category_id INTEGER,
+                        enrich INTEGER NOT NULL DEFAULT 0,
+                        system INTEGER NOT NULL DEFAULT 0,
+                        uidvalidity INTEGER,
+                        last_uid INTEGER,
+                        synced_since TEXT,
+                        last_sync_at TEXT,
+                        last_error_code TEXT,
+                        UNIQUE(account_id, folder))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS mail_attachments (
+                        email_tid INTEGER NOT NULL,
+                        document_tid INTEGER NOT NULL,
+                        filename TEXT,
+                        content_type TEXT,
+                        size_bytes INTEGER,
+                        PRIMARY KEY(email_tid, document_tid))''')
+        c.execute("PRAGMA table_info(transcriptions)")
+        tx_cols = {r[1] for r in c.fetchall()}
+        if tx_cols:
+            for col, decl in (('mail_account_id', 'INTEGER'), ('mail_message_id', 'TEXT'),
+                              ('mail_thread_key', 'TEXT'), ('mail_in_reply_to', 'TEXT'),
+                              ('mail_from', 'TEXT'), ('mail_to', 'TEXT'),
+                              ('mail_subject', 'TEXT'), ('mail_folder', 'TEXT'),
+                              ('mail_enrich', 'INTEGER')):
+                if col not in tx_cols:
+                    c.execute(f'ALTER TABLE transcriptions ADD COLUMN {col} {decl}')
+            c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_mail_msg '
+                      'ON transcriptions(mail_account_id, mail_message_id) '
+                      'WHERE mail_message_id IS NOT NULL')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_tx_mail_thread '
+                      'ON transcriptions(mail_thread_key)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(52, 'Gmail ingest: mail_accounts, mail_labels, mail_attachments, transcriptions.mail_*')")
+        logger.info("Migration v52: gmail ingest")
+
     conn.commit()
     conn.close()

@@ -601,6 +601,77 @@ def search_archive(query: str, top_k: int = 8,
     return out
 
 
+def _email_blocks(conn, ids: list) -> dict:
+    """`email` blocks for the given transcription ids (email rows only). Direct-DB read; an
+    un-migrated database without the mail tables/columns yields {} instead of an error."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.mail_from, t.mail_to, t.mail_subject, t.mail_thread_key, "
+            "t.mail_message_id, t.mail_folder, a.address AS account, l.display_name AS folder_name "
+            "FROM transcriptions t "
+            "LEFT JOIN mail_accounts a ON a.id = t.mail_account_id "
+            "LEFT JOIN mail_labels l ON l.account_id = t.mail_account_id AND l.folder = t.mail_folder "
+            f"WHERE t.source_type = 'email' AND t.id IN ({marks})", ids).fetchall()
+        if not rows:
+            return {}
+        eids = [r["id"] for r in rows]
+        att: dict = {}
+        for r in conn.execute(
+                "SELECT email_tid, document_tid, filename FROM mail_attachments "
+                f"WHERE email_tid IN ({','.join('?' * len(eids))}) ORDER BY document_tid", eids):
+            att.setdefault(r["email_tid"], []).append(
+                {"document_id": r["document_tid"], "filename": r["filename"]})
+    except sqlite3.Error as e:
+        logger.debug("email block unavailable (mail tables missing?): %s", e)
+        return {}
+    return {r["id"]: {
+        "from": r["mail_from"], "to": r["mail_to"], "subject": r["mail_subject"],
+        "account": r["account"], "folder": r["folder_name"] or r["mail_folder"],
+        "thread_key": r["mail_thread_key"], "message_id": r["mail_message_id"],
+        "attachments": att.get(r["id"], []),
+    } for r in rows}
+
+
+def _email_thread(conn, transcription_id: int) -> Optional[dict]:
+    """The whole email chain this email belongs to (same account + thread key), oldest
+    first, as Telegram's `thread`. None for a lone email or without the mail columns."""
+    try:
+        row = conn.execute(
+            "SELECT mail_account_id, mail_thread_key FROM transcriptions "
+            "WHERE id = ? AND source_type = 'email'", (int(transcription_id),)).fetchone()
+        if not row or not row["mail_thread_key"]:
+            return None
+        msgs = conn.execute(
+            "SELECT id, meeting_date, mail_from, mail_to, mail_subject, mail_message_id, "
+            "mail_in_reply_to, transcript_text FROM transcriptions "
+            "WHERE source_type = 'email' AND mail_account_id IS ? AND mail_thread_key = ? "
+            "AND deleted_at IS NULL ORDER BY meeting_date, id LIMIT 60",
+            (row["mail_account_id"], row["mail_thread_key"])).fetchall()
+    except sqlite3.Error as e:
+        logger.debug("email thread unavailable (mail columns missing?): %s", e)
+        return None
+    if len(msgs) < 2:
+        return None
+    return {"thread_key": row["mail_thread_key"], "msg_count": len(msgs),
+            "first_date": msgs[0]["meeting_date"], "last_date": msgs[-1]["meeting_date"],
+            "messages": [_row(m) for m in msgs]}
+
+
+def _attached_to(conn, document_id: int) -> list:
+    """Ids of the emails a document is an attachment of ([] when none or no mail tables)."""
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT email_tid FROM mail_attachments WHERE document_tid = ? ORDER BY email_tid",
+            (int(document_id),))]
+    except sqlite3.Error as e:
+        logger.debug("attached_to unavailable (mail tables missing?): %s", e)
+        return []
+
+
 @mcp.tool
 def get_transcript(transcription_id: int, include_segments: bool = False) -> dict:
     """Full transcript/text of a recording or document + metadata (source, language, date,
@@ -613,6 +684,8 @@ def get_transcript(transcription_id: int, include_segments: bool = False) -> dic
     For Telegram `thread` is added — the whole conversation thread this message
     belongs to (Wave 4.5). A single line in a chat is often unreadable
     («Ок», «а скільки там?»), so without the thread the answer would have to be guessed.
+    For an email `thread` is the whole email chain (same thread key), oldest first; each
+    message's text has its quotes cut, so the chain is read message by message.
 
     `comments` — the owner's comments on this record, if any. These are NOT lines
     from the conversation but sentences written about it afterwards: clarifications, corrections,
@@ -646,8 +719,16 @@ def get_transcript(transcription_id: int, include_segments: bool = False) -> dic
             if th and len(msgs) > 1:
                 thread = {**_row(th), "messages": [_row(m) for m in msgs]}
         comments = _comments_for(conn, "transcription", int(transcription_id))
+        email_block = _email_blocks(conn, [r["id"]]).get(r["id"])
+        if email_block and thread is None:
+            thread = _email_thread(conn, r["id"])
+        attached_to = _attached_to(conn, r["id"]) if r["source_type"] != "email" else []
     d = _row(r)
     d["display_name"] = record_meta.display_name(d)
+    if email_block:
+        d["email"] = email_block
+    if attached_to:
+        d["attached_to"] = attached_to
     if thread:
         d["thread"] = thread
     if comments:
@@ -697,7 +778,7 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
                 category_id: Optional[int] = None, tags: Optional[str] = None,
                 since: Optional[str] = None, until: Optional[str] = None):
     """Latest archive records (id, date, source type, name, language, direction, text
-    size). source_type: recording|youtube|document|telegram|file. For an overview of
+    size). source_type: recording|youtube|document|telegram|email|file. For an overview of
     "what is fresh" before a targeted search.
 
     `display_name` — how to call the record to a person (`title` if the owner set it,
@@ -756,6 +837,10 @@ def list_recent(limit: int = 20, source_type: Optional[str] = None,
             d = _row(r)
             d["display_name"] = record_meta.display_name(d)
             rows.append(d)
+        emails = _email_blocks(conn, [d["id"] for d in rows if d.get("source_type") == "email"])
+        for d in rows:
+            if d["id"] in emails:
+                d["email"] = emails[d["id"]]
         note = _tags_note(conn, tag_list)
     return {"items": rows, "note": note}
 
@@ -1439,7 +1524,16 @@ def search_history(search: Optional[str] = None, source_type: Optional[str] = No
                      ("since", since), ("until", until)):
         if val is not None:
             params[key] = val
-    return _api("GET", "/api/history", params=params)
+    res = _api("GET", "/api/history", params=params)
+    items = res.get("transcriptions") if isinstance(res, dict) else None
+    mail_ids = [i["id"] for i in items or [] if i.get("source_type") == "email"]
+    if mail_ids:
+        with get_db_connection(DB_PATH) as conn:
+            emails = _email_blocks(conn, mail_ids)
+        for i in items:
+            if i.get("id") in emails:
+                i["email"] = emails[i["id"]]
+    return res
 
 
 @mcp.tool
@@ -2157,6 +2251,39 @@ def telegram_status() -> dict:
     return _api("GET", "/api/telegram/status")
 
 
+_MAIL_ACCOUNT_KEYS = ("id", "address", "configured", "last_poll_at", "last_error_code")
+_MAIL_LABEL_KEYS = ("id", "folder", "display_name", "enabled", "system", "category_id", "enrich",
+                    "last_sync_at", "synced_since", "last_uid", "last_error_code", "records")
+_MAIL_POLLER_KEYS = ("running", "interval_min")
+
+
+def _pick(src, keys) -> dict:
+    src = src if isinstance(src, dict) else {}
+    return {k: src[k] for k in keys if k in src}
+
+
+@mcp.tool
+def email_status() -> dict:
+    """Mail ingest state: connected mailboxes (address, whether a credential is stored, last poll,
+    last error code) and, per folder/label, whether it is enabled, how far it is synced
+    (synced_since, last_sync_at), its error code and how many records it holds; plus whether the
+    background poller runs. Take this FIRST when a search found no recent email: the folder may be
+    disabled or the sync may have failed. Read-only; passwords are never part of the answer."""
+    res = _api("GET", "/api/mail/status")
+    if not isinstance(res, dict) or "error" in res:
+        return res if isinstance(res, dict) else {"error": "unexpected response from /api/mail/status"}
+    accounts = res.get("accounts")
+    if isinstance(accounts, dict):  # the C2 status() envelope nested under the key
+        accounts = accounts.get("accounts")
+    out = []
+    for a in accounts if isinstance(accounts, list) else []:
+        item = _pick(a, _MAIL_ACCOUNT_KEYS)
+        item["labels"] = [_pick(lb, _MAIL_LABEL_KEYS) for lb in (a.get("labels") or [])
+                          if isinstance(lb, dict)] if isinstance(a, dict) else []
+        out.append(item)
+    return {"accounts": out, "poller": _pick(res.get("poller"), _MAIL_POLLER_KEYS)}
+
+
 @mcp.tool
 def telegram_coverage() -> dict:
     """How far the archive lags behind live Telegram — per monitored chat.
@@ -2233,7 +2360,7 @@ _ABOUT_PROXY = (
     "research_summary", "search_history", "get_archive_stats", "list_speakers",
     "get_speaker_stats", "get_speaker_timeline", "list_bookmarks", "list_saved_searches",
     "get_job_status", "get_active_recording", "copilot_availability", "telegram_status",
-    "telegram_coverage", "get_live_transcript", "ask_live",
+    "email_status", "telegram_coverage", "get_live_transcript", "ask_live",
     "video_analyze", "get_visual_timeline", "get_frame", "get_frames_for_text",
     "search_visual",
 )
@@ -2259,7 +2386,7 @@ def about() -> str:
     return (
         f"# Recall — a local RAG archive of calls (MCP: read-first core, {n_tools} tools)\n\n"
         "A Flask app, data is local. Sources: call recordings (diarization), YouTube, "
-        "documents (PDF/DOCX/…), Telegram. Search: e5 embeddings (1024-dim) + FTS5, "
+        "documents (PDF/DOCX/…), Telegram, email. Search: e5 embeddings (1024-dim) + FTS5, "
         "RRF hybrid with recency/diversity.\n\n"
         f"## Statistics\n- transcripts: {n_tx}\n- chunks (vectorized): {n_ch}\n"
         f"- by source: {json.dumps(by_src, ensure_ascii=False)}\n"
@@ -2277,7 +2404,7 @@ def about() -> str:
         "5. `list_categories`/`list_speakers`/`list_bookmarks`/`list_saved_searches`/`get_archive_stats`;\n"
         "6. `ask_archive(question)` — a RAG answer with citations; `suggest_category` — a k-NN hint (not applied);\n"
         "7. **Live/background statuses:** `get_job_status`, `get_active_recording`, `copilot_availability`, "
-        "`telegram_status`; `list_pipe_runs` — whether pipe briefs reached the bot; `list_comments` — the owner's own clarifications and corrections over the records;\n"
+        "`telegram_status`, `email_status` (mailboxes and per-folder sync state); `list_pipe_runs` — whether pipe briefs reached the bot; `list_comments` — the owner's own clarifications and corrections over the records;\n"
         "8. **Live call:** `get_live_transcript`/`ask_live` — a transcript preview and questions to it "
         "while the call goes on; `get_live_copilot` — the full stream of copilot events (including those muted by "
         "the budget and unverified), filtering is on the agent's side;\n"

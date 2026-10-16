@@ -8,8 +8,8 @@
 - [index](map/index.md) — map navigation: which file covers what (migrated from docs/map 21.08.2026)
 - [overview](map/overview.md) — the whole system from above: data flows, processes, entry points
 - [root](map/root.md) — app.py boot (+ K4 pipes/K5 buttons), config, state, whisper_manager_new; processes — [root-processes](map/root-processes.md) (telegram_listener, mcp_server)
-- [blueprints](map/blueprints.md) — 15 Flask blueprints (overview) + [media](map/blueprints-media.md) + [memory](map/blueprints-memory.md)
-- [services](map/services.md) — hub for app/services/* → slices services-*.md (pipes-bot: K4/K5 pipes and buttons; enrichment: commitments/scope; retrieval: RAG; taxonomy; telegram; entities; video-privacy; media; embeddings; infra)
+- [blueprints](map/blueprints.md) — 16 Flask blueprints (overview, incl. mail) + [media](map/blueprints-media.md) + [memory](map/blueprints-memory.md)
+- [services](map/services.md) — hub for app/services/* → slices services-*.md (pipes-bot: K4/K5 pipes and buttons; enrichment: commitments/scope; retrieval: RAG; taxonomy; telegram; mail: Gmail ingest + document_ingest; entities; video-privacy; media; embeddings; infra)
 - [copilot](map/copilot.md) — live call copilot: topic machine, dispatcher, local→Claude cascade
 - [recording](map/recording.md) — server-side recorder: up to N parallel sessions, mic+loopback, per-application audio isolation (process loopback), SSE, call-driven «Record it?»/«Stop recording?» prompts (call_watch + toast, K2)
 - [frontend](map/frontend.md) — SPA: router/views/cmdk, i18n.js + dictionaries, recall.css, service worker
@@ -28,6 +28,7 @@
 - [video-timeline-and-screen-secrets](../docs/wiki/video-timeline-and-screen-secrets.md) — frames never stored (cut on the fly), secrets masked before any write/describe and redacted in every outgoing image, raw values only in screen_secrets via TTY `reveal`, cache key = video_analysis_params
 - [scheduled-pipes-delivery](../docs/wiki/scheduled-pipes-delivery.md) — closed read-only TOOLS registry, code-built HTML brief cards (K5), per-field mask+stop-word check, filter before render, fail closed, proxied (tailscale) requests not local-trusted, bot only to owner chat, failed run never closes a schedule moment
 - [ui-language](../docs/wiki/ui-language.md) — `RECALL_UI_LANG` auto|uk|en; browser sends `X-Recall-Lang`, server falls back to setting then uk; Telegram uses `server_lang()` at render/press time; archive content stays in its source language, code/logs are English (guard `tests/test_code_english.py`), service texts live in `svc_*` catalogs, MCP runs `en`; every UI string is a dictionary key (coverage guard)
+- [gmail-ingest-privacy](../docs/wiki/gmail-ingest-privacy.md) — mail channel is read-only (EXAMINE + BODY.PEEK, no passthrough), app password only in the OS keyring (never DB/.env/logs/backups), body/subject/attachment text masked before any write, Claude off unless the label's `enrich` is on (`mail_enrich`), failed message never advances the watermark
 
 ## Verification
 - build: none — interpreted Python + vanilla JS

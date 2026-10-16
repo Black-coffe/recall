@@ -30,7 +30,7 @@ from werkzeug.utils import secure_filename
 from app import state
 from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
-from app.services import document_parser, record_meta, text_polishing
+from app.services import document_ingest, document_parser, record_meta
 from app.utils.files import allowed_document_file
 from app.utils.paths import safe_path_within, safe_path_within_any
 
@@ -48,137 +48,13 @@ def _conn(db_path: str):
     return get_db_connection(db_path)
 
 
-# ============================================================
-# Table description (Phase 16C)
-# ============================================================
-
-def _table_preview(md: str, max_lines: int = 30) -> str:
-    """A markdown table sample (header + first rows) for a Claude description."""
-    lines = (md or "").splitlines()
-    out = "\n".join(lines[:max_lines])
-    if len(lines) > max_lines:
-        out += f"\n… (ще {len(lines) - max_lines} рядків)"
-    return out
-
-
-def _describe_tabular(parsed: dict) -> int:
-    """Phase 16C: for xlsx/csv mix an NL description of each sheet (Claude) into the text
-    of the block - so the table becomes semantically findable. Mutates parsed (blocks + text).
-    Optional: without ANTHROPIC_API_KEY or on error - only the tables remain.
-    Returns the number of sheets for which a description was generated."""
-    blocks = parsed.get("blocks")
-    if not blocks or parsed.get("doc_type") not in ("xlsx", "csv"):
-        return 0
-    if not text_polishing.is_available():
-        return 0
-    try:
-        sheets = [{
-            "name": b.get("section") or f"Аркуш {b.get('page')}",
-            "rows": b.get("rows"), "cols": b.get("cols"),
-            "preview": _table_preview(b.get("text", "")),
-        } for b in blocks]
-        descs = text_polishing.describe_sheets(sheets).get("descriptions") or []
-    except Exception as e:
-        logger.warning("describe_sheets failed (continuing with the tables): %s", e)
-        return 0
-
-    described = 0
-    for b, d in zip(blocks, descs):
-        d = (d or "").strip()
-        if not d:
-            continue
-        name = b.get("section")
-        head = f"[Опис таблиці «{name}»]" if name else "[Опис таблиці]"
-        b["description"] = d
-        b["text"] = f"{head}\n{d}\n\n{b['text']}"
-        described += 1
-    if described:
-        parsed["text"] = "\n\n".join(b["text"] for b in blocks)
-    return described
-
-
-# ============================================================
-# Shared helpers (upload / reparse / import)
-# ============================================================
-
-def _structure_json(parsed: dict):
-    blocks = parsed.get("blocks")
-    return json.dumps(blocks, ensure_ascii=False) if blocks else None
-
-
-def _find_duplicate(db_path: str, content_hash: str):
-    """An existing document with the same content_hash (dedup, 16E). None if there is none."""
-    if not content_hash:
-        return None
-    with _conn(db_path) as conn:
-        # T4.6: a soft-deleted one does not count as a duplicate - otherwise re-uploading
-        # the same file after delete would be "blocked" forever by a duplicate
-        # the user cannot see at all (the undo window has not expired yet).
-        row = conn.execute(
-            "SELECT id, source_name FROM transcriptions "
-            "WHERE content_hash = ? AND source_type = 'document' AND deleted_at IS NULL "
-            "ORDER BY id LIMIT 1",
-            (content_hash,),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def _persist_document(db_path: str, *, source_name: str, filepath: str, parsed: dict,
-                      category_id, parse_time: float,
-                      title: str | None = None, description: str | None = None) -> int:
-    """INSERT a document into transcriptions. Returns transcription_id.
-    Shared by upload and folder-import (does not depend on the request context).
-    `title`/`description` are already normalized by the caller (editable-title-description-02)."""
-    parsed_at = datetime.now().isoformat(timespec='seconds')
-    with _conn(db_path) as conn:
-        c = conn.cursor()
-        c.execute(
-            '''INSERT INTO transcriptions
-               (source_type, source_name, file_path, transcript_text, language,
-                model_used, processing_time, segments, category_id,
-                doc_type, original_filename, page_count, byte_size, content_hash,
-                parsed_at, parser_version, structure_json, title, description)
-               VALUES ('document', ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (
-                source_name, filepath, parsed["text"], parse_time, category_id,
-                parsed["doc_type"], source_name, parsed.get("page_count"),
-                parsed.get("byte_size"), parsed.get("content_hash"),
-                parsed_at, parsed.get("parser_version"), _structure_json(parsed),
-                title, description,
-            ),
-        )
-        tid = c.lastrowid
-        conn.commit()
-    return tid
-
-
-def _submit_enrichment(transcription_id: int, db_path: str, force: bool = False) -> str:
-    """Queue the SAME background enrichment job as for audio (chunk+embed +
-    Claude card). db_path is passed explicitly - so it works outside the request context
-    too (the folder-import worker). force=True - for reparse (the text changed → re-embed)."""
-    try:
-        from app.services import enrichment
-        if not (enrichment.any_available() and state.job_queue is not None):
-            return "unavailable"
-        ch = f"enrich_{transcription_id}"
-
-        def _job(job, _tid=transcription_id, _db=db_path, _c=ch, _force=force):
-            try:
-                state.sse_broker.publish(_c, "enrich", {"status": "running", "transcription_id": _tid})
-            except Exception:
-                pass
-            res = enrichment.enrich_transcription(_db, _tid, force=_force)
-            try:
-                state.sse_broker.publish(_c, "complete", {"status": "completed", **res})
-            except Exception:
-                pass
-            return res
-
-        state.job_queue.submit("enrichment", _job, meta={"transcription_id": transcription_id})
-        return "queued"
-    except Exception as e:
-        logger.warning("Enrichment job not queued (continuing): %s", e)
-        return "error"
+from app.services.document_ingest import (  # noqa: E402  (shared chain; names kept for callers)
+    describe_tabular as _describe_tabular,
+    find_duplicate as _find_duplicate,
+    persist_document as _persist_document,
+    structure_json as _structure_json,
+    submit_enrichment as _submit_enrichment,
+)
 
 
 def _save_original(file, original_name: str) -> str:
@@ -390,25 +266,16 @@ def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_i
     for i, src in enumerate(files):
         fname = os.path.basename(src)
         try:
-            parsed = document_parser.parse_document(src, filename=fname)
-            if _find_duplicate(db_path, parsed.get("content_hash")):
+            res = document_ingest.ingest_file(
+                db_path, src, original_name=fname, category_id=category_id,
+                store=lambda p: _copy_into_docs(p, docs_dir),
+            )
+            if res["status"] == "created":
+                imported += 1
+            elif res["status"] == "duplicate":
                 skipped += 1
             else:
-                dest = _copy_into_docs(src, docs_dir)
-                _describe_tabular(parsed)
-                tid = _persist_document(
-                    db_path, source_name=fname, filepath=dest, parsed=parsed,
-                    category_id=category_id, parse_time=0.0,
-                )
-                try:
-                    state.metrics.inc("whisper_documents_total", doc_type=parsed["doc_type"])
-                except Exception:
-                    pass
-                _submit_enrichment(tid, db_path)
-                imported += 1
-        except document_parser.DocumentParseError as e:
-            logger.info("[import] skipped '%s': %s", src, e)
-            failed += 1
+                failed += 1
         except Exception as e:
             logger.error("[import] error '%s': %s", src, e)
             failed += 1

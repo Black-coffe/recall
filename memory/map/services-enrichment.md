@@ -1,6 +1,6 @@
 # services — enrichment, documents, commitments, scope
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
@@ -12,6 +12,11 @@ Part of `app/services/*`; hub — [services.md](services.md).
   `optimize_chunk_index()` (`:657`). CLI `python -m app.services.enrichment backfill-cards --dry-run [--model M] [--limit N]
   [--kind calls|docs|all]` — card phase only; selection `summary_json IS NULL AND source_type != 'telegram' AND deleted_at IS
   NULL AND duplicate_of IS NULL`; dry-run counts characters/tokens(≈4)/cost (`pricing.estimate_cost`), top-10 longest.
+  Gmail guard (4.18.0): `enrich_transcription` returns `skipped`/`reason=mail_enrich_off` when `transcriptions.mail_enrich == 0` and
+  not `force` (`:498`); `backfill-cards` and the unenriched-id list add `mail_enrich IS NOT 0` (`:594`, `:708`). NULL = not mail.
+- **document_ingest.py** (4.18.0, moved out of `blueprints/documents.py`) — the document persistence chain: `find_duplicate`,
+  `persist_document`, `submit_enrichment`, `describe_tabular`, `structure_json`, and `ingest_file(...)` shared by folder import and
+  mail (details — [services-mail.md](services-mail.md)).
 - **document_parser.py** — `parse_document()` → (text, blocks); parsers by extension (lazy): md/txt/docx/pdf/pptx/xlsx/csv/
   images. OCR Tesseract (≤50 pages), tables→markdown(+NL description by Claude). PyMuPDF/python-pptx/openpyxl are optional
   (`ParserUnavailable`); `PARSER_VERSION` → re-parse. `_configure_tesseract()`: binary `OCR_TESSERACT_CMD` or

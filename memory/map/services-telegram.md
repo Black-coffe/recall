@@ -3,7 +3,8 @@
 last-verified: 2026-10-15
 
 Part of `app/services/*`; hub — [services.md](services.md). Waves 4.5–5.3. Bot/pipes — [services-pipes-bot.md](services-pipes-bot.md);
-entity graph from TG — [services-entities.md](services-entities.md).
+entity graph from TG — [services-entities.md](services-entities.md). Sibling channel Gmail (in-process poller, not a child process) —
+[services-mail.md](services-mail.md).
 
 - **tg_threads.py** — the unit of meaning = **a thread inside a chat**. `segment_bursts()` (`:160`; pause `TG_THREAD_BURST_GAP_MIN`=180
   min), `split_batch()` (the local model splits a burst into topics, may continue an open thread; batch

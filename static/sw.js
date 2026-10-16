@@ -104,6 +104,7 @@
 //       name (Cyrillic/Latin), @nick and phone.
 // v71 — made-up examples in hints, onboarding and settings («Агенція» →
 //       «Маяк», «Орбіта», Polaris, Олена) instead of real categories, projects and people.
+// v81 — /mail: Gmail ingest screen (views/mail.js, i18n/mail.js, .rc-mail* styles).
 //
 // CHECKLIST for a version bump (minimum manual work, no build step):
 //   1. An edit in JS/CSS under /static/ → just increase VERSION below + add a
@@ -115,7 +116,7 @@
 //   3. A new asset with NO tag in shell.html (an icon from
 //      manifest.webmanifest, another file that only JS references
 //      by a string) → add it by hand to FALLBACK_SHELL below.
-const VERSION = 'recall-v80';
+const VERSION = 'recall-v81';
 const STATIC_CACHE = `recall-static-${VERSION}`;
 const RUNTIME_CACHE = `recall-runtime-${VERSION}`;
 

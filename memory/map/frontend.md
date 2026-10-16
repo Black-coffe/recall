@@ -1,7 +1,7 @@
 # frontend — SPA (`static/js/recall/`)
 
 Client-side router + shell, vanilla JS (no framework), global `window.Recall`.
-last-verified: 2026-10-16 (english-i18n 4.16.0, english-code 4.17.0, sw.js v80)
+last-verified: 2026-10-16 (english-i18n 4.16.0, english-code 4.17.0, gmail-ingest 4.18.0, sw.js v81)
 **Design:** editorial catalog, a warm paper canvas, light theme only; classes with the `rc-*` prefix.
 
 ## Architecture
@@ -11,7 +11,7 @@ last-verified: 2026-10-16 (english-i18n 4.16.0, english-code 4.17.0, sw.js v80)
   sets `<html lang>`. `t`: the language key → en fallback → the key itself + `console.warn` (:53-62). Plural — a value object,
   the form by `Intl.PluralRules` from `vars.count`. `apply(root)` (:80) translates `data-i18n`/`-title`/`-placeholder`/`-aria-label`
   (called from `shell.js:18`). Dictionaries — `i18n/<area>.js` (core, capture, transcript, settings, library, knowledge,
-  telegram), each a single `R.i18n.add('<area>', {uk, en})`; keys carry the area prefix.
+  telegram, mail), each a single `R.i18n.add('<area>', {uk, en})`; keys carry the area prefix.
 - **router.js** — a History API router, `/transcript/:slug` → regex; delegated interception of `<a href="/...">`;
   `_seq` against out-of-order (`ctx.isCurrent()`).
 - **shell.js** — navigation, burger, ⌘K, model banner, live counters (`R.i18n.num`). K2 `startCallPrompts()` polls
@@ -45,11 +45,12 @@ last-verified: 2026-10-16 (english-i18n 4.16.0, english-code 4.17.0, sw.js v80)
 | `/speakers` | speakers | Speakers: stats, rename/delete, bulk-merge, timeline |
 | `/youtube`, `/upload`, `/documents` | youtube, upload, documents | URL/file → progress → /transcript (documents: dedup by hash) |
 | `/telegram` | telegram | Listener panel: dialogs, monitoring, category, backfill; row `.rc-tgrow*`, search `#rcTgSearch` (`searchIndex`, `phoneHit`) |
+| `/mail` | mail | Gmail ingest (4.18.0, `views/mail.js`, nav `data-route="mail"` in `shell.html:73`): add-account form (address + app password field, never prefilled/stored), create/revoke/safety hints, per-account label list (enable, root direction, Claude toggle, system folders collapsed), refresh labels, delete, "load deeper" (`POST /api/mail/sync {months}`). Reads `GET /api/mail/status`; error codes map to `mail.err.*` via a literal `ERR_KEYS`; styles `.rc-mail*` (16 rules in `recall.css`). Emails in the Library/transcript use the generic row (title = subject) |
 | `/settings` | settings | System info, models, copilot, categories, speakers, **language selector** (`GET/POST /api/settings/ui-lang` → reload, :96-121) |
 | `/record` | record | Recorder: tabs of parallel sessions (`/api/recordings/active`, SSE for each), system audio choice, retarget `/system-source`, 409 `SESSION_LIMIT`, copilot move; `?app=&mic=` → `presetFrom(q)` |
 
 ## Service worker — `static/sw.js`
-**Cache version: `recall-v80`** (sw.js:118). shell precache; `/static/` stale-while-revalidate; CDN cache-first;
+**Cache version: `recall-v81`** (sw.js:119; v81 = /mail screen). The precache list is derived from the `<script>/<link>` tags of `shell.html` — a new view only needs its tag. shell precache; `/static/` stale-while-revalidate; CDN cache-first;
 API-GET network-first; SSE/POST are not cached. On `activate` old `recall-vN` are cleaned up.
 
 ## Gotchas
@@ -74,5 +75,5 @@ API-GET network-first; SSE/POST are not cached. On `activate` old `recall-vN` ar
     (:82-87) — the static uk text stays.
 
 **CSS:** `static/css/recall.css` — tokens (`--rc-canvas/ink/accent/src-*`), Fraunces/Inter/IBM Plex Mono, scope `.rc-app`.
-**Load order (`shell.html:117-150`):** namespace → i18n → i18n/{core,capture,transcript,settings,library,knowledge,telegram}
+**Load order (`shell.html:119-153`):** namespace → i18n → i18n/{core,capture,transcript,settings,library,knowledge,telegram,mail}
 → util → api → ui → research_export → comments → views → shell → onboarding → cmdk → router.

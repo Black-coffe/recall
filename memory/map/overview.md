@@ -1,5 +1,7 @@
 # overview — architecture and processes
 
+last-verified: 2026-10-16 (4.18.0, schema v52)
+
 ## Three processes
 
 Recall is a **monolithic Flask server** + **2 separate child processes**:
@@ -10,9 +12,12 @@ Recall is a **monolithic Flask server** + **2 separate child processes**:
    `app.py` via `subprocess.Popen` (if `TELEGRAM_ENABLED` + a `telegram.session` exists).
    Control API on localhost:5051; posts messages back to Flask `/api/telegram/ingest`.
 3. **`mcp_server.py`** — a separate MCP server: a **read-first** bridge to Recall for
-   Claude Code/Desktop (41 read-only tools; the write surface was removed in Wave 1). The stdio connector (**default**) is spawned by the client itself
+   Claude Code/Desktop (42 read-only tools; the write surface was removed in Wave 1). The stdio connector (**default**) is spawned by the client itself
    (`claude mcp add`, user-scope) — no need to start it separately; http+key is optional.
    Hybrid: reads SQLite directly, while writes/live/AI actions are proxied to the running `app.py`.
+
+Gmail ingest (4.18.0) is NOT a fourth process: `MailPoller` is a daemon thread inside `app.py` (`_maybe_start_mail`, IMAP read-only,
+password in the OS keyring) — see `services-mail.md`.
 
 All three read one SQLite DB (`whisper_history.db`) and the shared `app/services/*`
 modules directly. MCP reads the DB without Flask, but for writes/live/AI actions
@@ -30,9 +35,10 @@ proxies HTTP to the running `app.py` (hybrid).
 7. `live_transcribe_worker` (model='small', interval 8s) — if there is a recording_service.
 8. `copilot_service` + `copilot_worker` — if `COPILOT_ENABLED` + an LLM is available.
 9. `app.state.init(**singletons)` — injection of all singletons.
-10. Registration of 14 blueprints (WITHOUT url_prefix — full paths in the routes).
+10. Registration of 16 blueprints (WITHOUT url_prefix — full paths in the routes).
 11. Attaching rate limiters to specific view functions.
-12. Spawn of telegram_listener (gated by `WERKZEUG_RUN_MAIN` so the reloader does not duplicate it).
+12. Spawn of telegram_listener (gated by `WERKZEUG_RUN_MAIN` so the reloader does not duplicate it); call watcher, pipes and
+    mail poller start only under `__main__` (reloader child).
 13. `app.run(threaded=True)` — each SSE connection in its own thread.
 
 **Shutdown** (atexit): stop system_monitor → stop file_cleanup →
@@ -58,7 +64,8 @@ proxies HTTP to the running `app.py` (hybrid).
 ## DB (SQLite, `whisper_history.db`)
 
 Key tables: `transcriptions` (central — all sources: file/youtube/recording/
-document/telegram/copilot/meeting_archive), `audio_downloads` (Audio library), `segments`/
+document/telegram/email/copilot/meeting_archive; v52 adds `mail_*` columns, `source_type='email'`), `mail_accounts`/`mail_labels`/
+`mail_attachments` (v52, no secret column), `audio_downloads` (Audio library), `segments`/
 speaker-map, `chunks`+embeddings (RAG), `categories` (direction→project tree, `parent_id`,
 v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (memory graph),
 `tags`/`record_tags`/`tg_chat_tags` (v45), `embedding_epochs` (v46 — prefix format of each
@@ -67,7 +74,9 @@ v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (memory graph
 (v42 — provenance of the thread digest), `chunks.context_prefix` (v43), `transcriptions.title`/
 `.description` (v44).
 Access — the `get_db_connection()` context manager. Migrations — `app/db/migrations.py`
-(current **v47**: v40 `transcriptions.duplicate_of` — audio/YouTube duplicates; v41 `ask_log` —
+(current **v52**: v48-v51 — see `migrations.py` (v50 `pipe_runs`, v51 `action_item_events`); v52 (`:2130`) Gmail ingest — additive:
+`mail_accounts`, `mail_labels`, `mail_attachments`, `transcriptions.mail_*` + unique partial index `idx_tx_mail_msg` (gmail-ingest, 4.18.0,
+16.10.2026); v40 `transcriptions.duplicate_of` — audio/YouTube duplicates; v41 `ask_log` —
 question/channel/scope/sources/tokens/cost/owner's rating (production-RAG Wave A,
 16.09.2026); v42 `tg_threads.summary_source_ids_json`/`summary_at`/`summary_model`/
 `summary_msgs` — provenance of the thread digest; v43 `chunks.context_prefix` + rebuild of

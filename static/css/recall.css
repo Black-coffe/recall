@@ -2285,3 +2285,21 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-meta__variant:hover { border-color: var(--rc-accent-deep); }
 .rc-meta__variant.is-picked { border-color: var(--rc-accent-deep); background: var(--rc-accent-tint); }
 .rc-rec__name { white-space: nowrap; }
+
+/* ---- /mail (Gmail ingest) ---- */
+.rc-mailform { border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-2); padding: var(--rc-3) var(--rc-4); margin-bottom: var(--rc-3); background: var(--rc-surface-2); }
+.rc-mailform__title { font-size: var(--rc-t-sm); margin: 0 0 var(--rc-2); }
+.rc-mailform__row { display: flex; flex-wrap: wrap; gap: var(--rc-2); }
+.rc-mailform__row .rc-input { flex: 1 1 220px; min-width: 0; }
+.rc-mailacc { border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-2); padding: var(--rc-3) var(--rc-4); margin: var(--rc-4) 0; }
+.rc-mailacc__head { display: flex; flex-wrap: wrap; gap: var(--rc-3); align-items: center; justify-content: space-between; }
+.rc-mailacc__who { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rc-mailacc__ctrl { display: flex; gap: var(--rc-2); flex-wrap: wrap; }
+.rc-mailacc__state { font-size: var(--rc-t-xs); color: var(--rc-ok); }
+.rc-mailacc__state.is-bad { color: var(--rc-warn); }
+.rc-mailacc__meta { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-mailacc__err { font-size: var(--rc-t-xs); color: var(--rc-warn); }
+.rc-mailacc__deeper { display: flex; flex-wrap: wrap; align-items: center; gap: var(--rc-2); margin: var(--rc-3) 0; font-size: var(--rc-t-xs); color: var(--rc-ink-2); }
+.rc-mailacc__deeper .rc-input { width: 80px; }
+.rc-mailacc__sub { font-size: var(--rc-t-sm); margin: var(--rc-2) 0; }
+.rc-maillabel__claude { display: flex; align-items: center; gap: 4px; font-size: var(--rc-t-xs); color: var(--rc-ink-2); cursor: pointer; }

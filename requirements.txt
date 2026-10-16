@@ -151,3 +151,6 @@ transformers>=4.41,<5
 
 # MCP server (Phase 20) — local access of Claude to the RAG archive
 fastmcp>=3.3,<4
+
+# Gmail ingest: app passwords live in the OS credential store, never in the DB or .env
+keyring>=25.7

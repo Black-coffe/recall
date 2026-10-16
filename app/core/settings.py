@@ -325,6 +325,20 @@ REGISTRY: tuple[Setting, ...] = (
             "tg-media-policy-02: owner decision — ONLY originals heavier than the threshold are deleted, "
             "small ones stay on disk; applies only if text extraction succeeded."),
 
+    # --- Mail (Gmail ingest) ---
+    Setting("MAIL_POLL_ENABLED", "1", "bool", "Mail",
+            "Poll the connected Gmail accounts in the background.",
+            "Off stops the periodic sync of the enabled labels; accounts and archived mail stay."),
+    Setting("MAIL_POLL_MINUTES", "5", "int", "Mail",
+            "Interval (minutes) between mail polls.",
+            "How often the poller checks the enabled labels for new messages."),
+    Setting("MAIL_BACKFILL_MONTHS", "12", "int", "Mail",
+            "How many months of history a newly enabled label loads.",
+            "Limits the first sync of a label; deeper history is loaded on request."),
+    Setting("MAIL_ATTACH_MAX_MB", "25", "int", "Mail",
+            "Largest attachment (MB) that is ingested as a document.",
+            "Heavier attachments are skipped."),
+
     # --- Telegram chat threads ---
     Setting("TG_THREAD_BURST_GAP_MIN", "180", "int", "Telegram threads",
             "Pause (min) after which a conversation counts as a new burst.",

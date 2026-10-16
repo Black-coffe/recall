@@ -28,10 +28,10 @@ Flask goes through HTTP only.
 ## mcp_server.py
 **Purpose:** a separate MCP server, a read-first bridge to Recall for Claude Code/Desktop. No create/update/delete
 (owner's decision 02.07.2026; write tools removed).
-**41 read-only tools** (17 direct-DB + 24 proxy; checked against the tuples). The number in `about()` comes from the FastMCP registry
-(`_registered_tool_names()` :2228).
-**Hybrid:** 17 tools read SQLite directly without app.py (`_ABOUT_DIRECT_DB` :2210; among them `grep_archive`, `list_pipe_runs`);
-24 are httpx proxies to app.py (`_ABOUT_PROXY` :2217) via `_api()` :155, `RECALL_API_URL` (default `http://127.0.0.1:5050`).
+**42 read-only tools** (17 direct-DB + 25 proxy; checked against the tuples). The number in `about()` comes from the FastMCP registry
+(`_registered_tool_names()` :2370).
+**Hybrid:** 17 tools read SQLite directly without app.py (`_ABOUT_DIRECT_DB` :2352; among them `grep_archive`, `list_pipe_runs`);
+25 are httpx proxies to app.py (`_ABOUT_PROXY` :2359) via `_api()` :155, `RECALL_API_URL` (default `http://127.0.0.1:5050`).
 **Transports:** stdio (default :2308; `claude mcp add ... -- ... --transport stdio` drops trailing arguments, hence the default) or
 `--transport http` (127.0.0.1:5060, Bearer `RECALL_MCP_KEY`; without a key — startup refused :2313).
 **Resources:** `recall://about`, `recall://transcript/{id}`, `recall://entity/{id}`.
@@ -48,6 +48,11 @@ sets `RECALL_UI_LANG=en` at import (skipped under pytest, :109), so `tr()` serve
 - Taxonomy: `list_categories` = the `categories.list_tree` tree (a node has `path`). `tags`/`since`/`until` in
   search/list_recent/list_action_items/ask/research_*/search_history; direct-DB SQL only via
   `app.services.categories.filter_sql/tags_sql/date_sql`.
+- Email (4.18.0): `email_status` :2267 proxies `GET /api/mail/status`, keeps only whitelisted keys (`_MAIL_ACCOUNT_KEYS`,
+  `_MAIL_LABEL_KEYS`, `_MAIL_POLLER_KEYS`; never a password). For `source_type='email'` `get_transcript`/`list_recent`/`search_history`
+  add `email{from,to,subject,account,folder,thread_key,message_id,attachments[]}` (`_email_blocks` :604; direct DB, un-migrated DB ->
+  `{}`); `get_transcript` carries `thread` = the whole email chain (`_email_thread` :639) and, for an attachment document,
+  `attached_to` = email ids (`_attached_to` :664). Logic — `services-mail.md`.
 - Commitments: `weekly_digest`, `list_action_items`, `list_dropped_commitments`, `list_stale_topics` (`app.services.commitments`).
 - `display_name` next to `source_name` in `list_recent`/`get_transcript`/`search_archive`/`ask_archive`/the transcript resource;
   `get_transcript`/`list_recent` add `title`/`description`.

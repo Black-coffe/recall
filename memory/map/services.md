@@ -23,6 +23,8 @@ Separate map files: [copilot.md](copilot.md), [recording.md](recording.md).
 - [services-enrichment.md](services-enrichment.md) — `enrichment`, `document_parser`, `text_polishing`, `research`,
   `commitments` (deadlines, digests, `apply_action`), `scope`.
 - [services-telegram.md](services-telegram.md) — `tg_threads`, `tg_chat_context`, `tg_tasks`, `tg_questions`.
+- [services-mail.md](services-mail.md) — Gmail ingest (4.18.0): `mail_accounts` (keyring), `mail_imap` (read-only), `mail_parse`,
+  `mail_sync` (+`MailPoller`), `document_ingest` (shared `ingest_file`).
 - [services-entities.md](services-entities.md) — `entity_dedup`, `tg_entities` (+morphology), `comments.link_entities`,
   `evals/graph_links`.
 - [services-infra.md](services-infra.md) — `job_queue`, `sse_broker`, monitoring, `local_llm`, `models`, `pricing`.

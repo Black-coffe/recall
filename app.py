@@ -76,6 +76,7 @@ from app.blueprints.research import research_bp as _research_bp
 from app.blueprints.copilot import copilot_bp as _copilot_bp
 from app.blueprints.settings_api import settings_bp as _settings_bp
 from app.blueprints.comments import comments_bp as _comments_bp
+from app.blueprints.mail import mail_bp as _mail_bp
 
 
 def get_db_connection():
@@ -1075,6 +1076,7 @@ app.register_blueprint(_research_bp)
 app.register_blueprint(_copilot_bp)
 app.register_blueprint(_settings_bp)
 app.register_blueprint(_comments_bp)
+app.register_blueprint(_mail_bp)
 
 # T1.2 (Wave 1): a single before_request authentication gate for all /api/*
 # (except /api/health). A centralized point instead of a decorator on each of
@@ -1281,6 +1283,25 @@ def _maybe_start_pipes():
         except Exception as e:
             logger.warning("Brief buttons failed to start: %s", e, exc_info=True)
 
+def _maybe_start_mail():
+    """Gmail ingest poller (app/services/mail_sync.py).
+
+    Only under ``__main__``, never under pytest. ``MAIL_POLL_ENABLED=0`` -> one log
+    line and no thread. A start failure is a warning; the app still boots."""
+    if not _settings.env_bool('MAIL_POLL_ENABLED'):
+        logger.info("Mail: polling disabled (MAIL_POLL_ENABLED=0)")
+        return
+    try:
+        from app.services.mail_sync import MailPoller
+
+        poller = MailPoller(app.config['DATABASE'])
+        app.extensions['mail_poller'] = poller
+        poller.start()
+    except Exception as e:
+        app.extensions.pop('mail_poller', None)
+        logger.warning("Mail poller failed to start: %s", e, exc_info=True)
+
+
 # config-registry-profiles S2: the module-level boot sequence is complete
 # (DB/migrations/JobQueue/recorder gate/counters/blueprints/auth/error handler
 # all above). The Telegram listener is launched below only under `__main__` (reloader
@@ -1320,5 +1341,6 @@ if __name__ == '__main__':
     if not debug_mode or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         _maybe_start_call_watcher()
         _maybe_start_pipes()
+        _maybe_start_mail()
     # threaded=True for SSE: each connection in its own thread, does not block the others.
     app.run(debug=debug_mode, host=host, port=cfg.PORT, threaded=True)

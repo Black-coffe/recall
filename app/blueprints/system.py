@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 system_bp = Blueprint('system', __name__)
 
 # Shared with /api/health — one version for the whole blueprint (T8.1).
-APP_VERSION = "4.17.0"
+APP_VERSION = "4.18.1"
 
 
 @system_bp.route('/', defaults={'_path': ''}, methods=['GET'])

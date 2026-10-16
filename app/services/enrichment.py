@@ -487,10 +487,17 @@ def _enrich_card(
         row = tx_repo.get_by_id(
             conn, transcription_id,
             columns=("id", "transcript_text", "polished_text", "segments", "enriched_at",
-                     "enrichment_version", "created_at", "meeting_date", "source_type"),
+                     "enrichment_version", "created_at", "meeting_date", "source_type",
+                     "mail_enrich"),
         )
         if not row:
             return {"status": "not_found", "transcription_id": transcription_id}
+
+        # Gmail ingest: a mail record (or its attachment) whose label has the Claude
+        # toggle off must never be enriched by a later backfill. NULL = not mail.
+        if row["mail_enrich"] == 0 and not force:
+            return {"status": "skipped", "transcription_id": transcription_id,
+                    "reason": "mail_enrich_off"}
 
         # Phase 17: Telegram goes embed-only — a Claude card on a one-line chat
         # message («Ок», «Дякую») is useless, and over records it is also paid.
@@ -584,7 +591,7 @@ def list_unenriched_ids(db_path: str, limit: Optional[int] = None) -> list[int]:
         sql = (
             "SELECT id FROM transcriptions WHERE deleted_at IS NULL "
             "AND duplicate_of IS NULL AND ("
-            "(source_type IS NOT 'telegram' AND (enriched_at IS NULL OR "
+            "(source_type IS NOT 'telegram' AND mail_enrich IS NOT 0 AND (enriched_at IS NULL OR "
             " enrichment_version IS NULL OR enrichment_version < ?)) "
             "OR embedded_at IS NULL OR embedding_model IS NULL OR embedding_model != ? "
             "OR embedding_version IS NULL OR embedding_version != ?) "
@@ -698,8 +705,8 @@ def _select_backfill_card_rows(db_path: str, kind: str = "all",
     not duplicates (dedup_audio). `kind` narrows to a source_type."""
     sql = ("SELECT id, source_type, source_name, transcript_text, polished_text "
            "FROM transcriptions WHERE summary_json IS NULL "
-           "AND source_type IS NOT 'telegram' AND deleted_at IS NULL "
-           "AND duplicate_of IS NULL")
+           "AND source_type IS NOT 'telegram' AND mail_enrich IS NOT 0 "
+           "AND deleted_at IS NULL AND duplicate_of IS NULL")
     params: list = []
     if kind != "all":
         types = _KIND_SOURCE_TYPES.get(kind)

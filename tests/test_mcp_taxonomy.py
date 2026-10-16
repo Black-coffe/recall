@@ -305,11 +305,11 @@ def test_about_draws_the_tree(archive):
     assert "Особисте (1)" in text
 
 
-def test_about_still_reports_41_tools(archive):
+def test_about_still_reports_42_tools(archive):
     """Taxonomy neither adds nor removes tools (C6); 35 → 40 — the video visual timeline (4.10.0),
-    40 → 41 — the pipe history `list_pipe_runs` (K4)."""
-    assert len(m._registered_tool_names()) == 41
-    assert "41 tools" in m.about()
+    40 → 41 — the pipe history `list_pipe_runs` (K4), 41 → 42 — the mail tool (gmail-ingest)."""
+    assert len(m._registered_tool_names()) == 42
+    assert "42 tools" in m.about()
 
 
 # ============================================================

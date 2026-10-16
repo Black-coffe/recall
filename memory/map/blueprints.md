@@ -1,13 +1,13 @@
 # blueprints — HTTP layer (`app/blueprints/`), overview + system/events/settings/comments/documents/copilot/speakers/bookmarks
 
-15 blueprints, ~180 route decorators, registered at `app.py:1062-1076` (imports :63-77) WITHOUT `url_prefix` — the full
+16 blueprints (+`mail`, 4.18.0), ~187 route decorators, registered at `app.py:1064-1079` (imports :64-79) WITHOUT `url_prefix` — the full
 path in every route. Singletons — `from app import state`. Errors — JSON `{success,error}` + 400/401/403/404/409/500/503.
 Other slices: `blueprints-media.md` (transcription, audio_library, youtube, recording), `blueprints-memory.md` (memory, research, telegram).
 
 last-verified: 2026-10-16
 
 ## system.py (~400) — `/`, `/api/health|ready|models*|system_*|polish/*|metrics`
-- `APP_VERSION = "4.16.0"` (system.py:38; mirror `app/__init__.py:6`) — `version` in health/ready/system_info.
+- `APP_VERSION = "4.18.0"` (system.py:38; mirror `app/__init__.py:6`) — `version` in health/ready/system_info.
 - `GET /<path>` SPA shell (:41-43; `api/…` → 404 JSON, `HEADLESS` → 404 `headless`; renders `shell.html` with
   `ui_lang=ui_lang_setting()` :56), `/favicon.ico` (:59), `/sw.js` (:70, no-cache + `Service-Worker-Allowed`), `/api/models`
   (:187), `POST /download_model` (:193), `/models/update-status` (:205), `POST /models/check-updates` (:215), `/system_info`
@@ -33,7 +33,7 @@ last-verified: 2026-10-16
 ## i18n in the HTTP layer (english-i18n, 4.16.0)
 All error/status texts in `jsonify` — `tr('<area>.<key>', **vars)` / `tr_n` from `app/core/i18n.py`
 (language = `request_lang()`: the `X-Recall-Lang` header → explicit `RECALL_UI_LANG` → uk). Catalog — `app/core/i18n_catalog/<area>.py`
-(`MESSAGES`, `core|capture|transcript|settings|library|knowledge|telegram` + service modules `svc_boot|embed|llm|media|pipes|recording|retrieval|tasks|taxonomy|telegram`, 4.17.0; a duplicate key → `ValueError` at import,
+(`MESSAGES`, `core|capture|transcript|settings|library|knowledge|telegram|mail` + service modules `svc_boot|embed|llm|media|pipes|recording|retrieval|tasks|taxonomy|telegram`, 4.17.0; a duplicate key → `ValueError` at import,
 `i18n_catalog/__init__.py:25-36`). The catch-all 500 (`error_handlers.py:64`) — `tr("core.error.internal")`;
 `GENERIC_MESSAGE` stays a uk constant. The services' SSE (research/rag stream uk strings outside the request context)
 is filtered by `localize_sse(frames, lang, keys)` (`research.py:141`, `memory.py:858`). Since 4.17.0 internal exception texts, logs and the process journal are English; user-facing
@@ -47,8 +47,19 @@ service texts go through `svc_*` keys and follow the request language. Guard: `t
 without a queue — synchronous. `target_id` may be a string (a recording session) — coerced in the service according to `TARGETS`.
 
 ## documents.py (~460) — `/api/documents/*`
-`POST /upload` (:206, sync-parse; multipart accepts `title`/`description`, validation BEFORE parsing), `POST /<tid>/reparse`
-(:297), `POST /import-folder` (:449, background+SSE). Dedup by content_hash; OCR opt.; table description by Claude. Depends on: document_parser, text_polishing.
+`POST /upload` (:83, sync-parse; multipart accepts `title`/`description`, validation BEFORE parsing), `POST /<tid>/reparse`
+(:174), `POST /import-folder` (:316, background+SSE; `_run_folder_import` :261 calls `document_ingest.ingest_file(..., store=_copy_into_docs)`).
+Dedup by content_hash; OCR opt.; table description by Claude. The persistence chain lives in `services/document_ingest.py` (4.18.0; names
+re-imported at the top of the file). Depends on: document_parser, document_ingest, text_polishing.
+
+## mail.py (~190) — `/api/mail/*` (blueprint `mail_bp`, 4.18.0; JSON `{success,...}`, errors `tr('mail.err.*')` + `error_code`)
+`GET /accounts`, `POST /accounts {address, app_password}` (validates address -> test login + LIST via `mail_imap.connect`, only then
+`add_account` + `upsert_folders` -> 201 `{account, labels}`; `INVALID_ADDRESS`/`EMPTY_PASSWORD` 400, `AUTH_FAILED` 400, `CONNECT_FAILED`/
+`FOLDER_MISSING`/`PROTOCOL` 502; spaces in the password are removed; the body is never logged), `DELETE /accounts/<id>` (404),
+`GET /accounts/<id>/labels[?refresh=1]` (refresh without keyring entry -> 409 `NO_PASSWORD`), `PATCH /labels/<id> {enabled?, enrich?
+(bool only), category_id? (null or a ROOT direction, `parent_id IS NULL`)}` -> enabling triggers a sync of that account,
+`POST /sync {account_id?, months? 1..120}` -> 202 `{queued}` (no poller -> 503 `MAIL_POLLER_OFF`), `GET /status` -> `{accounts, poller:
+{running, interval_min}}`. The poller is reached only through `current_app.extensions['mail_poller']`. Logic — `services-mail.md`.
 
 ## copilot.py (~550) — `/api/copilot/*`
 `GET /availability` (:84), `POST /live-ask` (:176), `POST /start` (:232), `POST /move` (:255), `GET /sessions` (:307),

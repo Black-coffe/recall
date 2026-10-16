@@ -26,6 +26,7 @@
         { id: 'upload',     pattern: '/upload',           view: 'upload' },
         { id: 'documents',  pattern: '/documents',        view: 'documents' },
         { id: 'telegram',   pattern: '/telegram',         view: 'telegram' },
+        { id: 'mail',       pattern: '/mail',             view: 'mail' },
         { id: 'settings',   pattern: '/settings',         view: 'settings' },
         { id: 'record',     pattern: '/record',           view: 'record' },
     ];
