@@ -1,8 +1,8 @@
-"""Тести буквального/regex-пошуку по чанках (grep-explainability, історія 01).
+"""Tests for literal/regex search over chunks (grep-explainability, story 01).
 
-БД — власна тимчасова SQLite, побудована через `init_database()` (та сама
-схема `chunks`/`chunks_fts`/`transcriptions`, що й у бойовому архіві), НІКОЛИ
-не `whisper_history.db`.
+The DB is a dedicated temporary SQLite built via `init_database()` (the same
+`chunks`/`chunks_fts`/`transcriptions` schema as the live archive), NEVER
+`whisper_history.db`.
 """
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ def test_literal_finds_what_fts5_cannot(db_path):
     assert result["matches"][0]["chunk_index"] == 0
     assert "ID-4471" in result["matches"][0]["excerpt"]
 
-    # `-` у нетокенізованому запиті FTS5 парситься як NOT-оператор колонки —
-    # рівно те розсипання, про яке каже контракт: наївний MATCH ламається,
-    # там де grep() коректно знаходить підрядок.
+    # `-` in an untokenized FTS5 query is parsed as a column NOT operator --
+    # exactly the breakage the contract talks about: a naive MATCH breaks
+    # where grep() correctly finds the substring.
     import sqlite3 as _sqlite3
     with get_db_connection(db_path) as conn:
         with pytest.raises(_sqlite3.OperationalError):
@@ -86,7 +86,7 @@ def test_context_clamped_at_transcription_boundaries(db_path):
     result = archive_grep.grep(db_path, "TARGET", context=2)
     match = result["matches"][0]
     assert match["chunk_index"] == 1
-    # ліворуч є лише чанк 0 (межа транскрипції) — не 2, хоч context=2
+    # on the left there is only chunk 0 (transcript boundary) -- not 2, though context=2
     assert [c["chunk_index"] for c in match["context_before"]] == [0]
     assert [c["chunk_index"] for c in match["context_after"]] == [2, 3]
 
@@ -157,8 +157,8 @@ def test_empty_result_is_not_an_exception(db_path):
 
 
 def test_cyrillic_case_insensitive_literal_search(db_path):
-    # знахідка 1 (критична): SQLite lower() згортає лише ASCII — цей тест
-    # ловить саме те, чого не було в оригінальних ASCII-тестах.
+    # finding 1 (critical): SQLite lower() folds only ASCII -- this test
+    # catches exactly what the original ASCII tests lacked.
     with get_db_connection(db_path) as conn:
         tid = _add_transcription(conn, meeting_date="2026-08-01")
         _add_chunk(conn, tid, 0, "Вчора дзвонив Андрій щодо оплати.")
@@ -174,7 +174,7 @@ def test_cyrillic_case_insensitive_literal_search(db_path):
 
     for needle in ("ї", "є", "і"):
         result = archive_grep.grep(db_path, needle)
-        assert result["count"] >= 1, f"needle {needle!r} має знайти чанк 1"
+        assert result["count"] >= 1, f"needle {needle!r} must find chunk 1"
 
 
 def test_literal_and_regex_agree_under_ignore_case(db_path):
@@ -205,8 +205,8 @@ def test_empty_or_blank_pattern_raises(db_path):
 
 
 def test_excerpt_window_uses_actual_match_not_pattern_length(db_path):
-    # знахідка 6: вікно уривка мало рахуватись по len(pattern) (сирому, до
-    # casefold), а не по фактичному збігу — тест ловить розбіжність довжини.
+    # finding 6: the excerpt window used to be computed from len(pattern) (raw, before
+    # casefold), not from the actual match -- the test catches the length mismatch.
     with get_db_connection(db_path) as conn:
         tid = _add_transcription(conn, meeting_date="2026-08-01")
         text = "х" * 90 + "Андрій" + "y" * 90
@@ -216,16 +216,16 @@ def test_excerpt_window_uses_actual_match_not_pattern_length(db_path):
     result = archive_grep.grep(db_path, "андрій")
     excerpt = result["matches"][0]["excerpt"]
     assert "Андрій" in excerpt
-    # уривок обрізаний навколо фактичного 6-символьного збігу з обох боків
+    # the excerpt is cut around the actual 6-character match on both sides
     assert excerpt.startswith("…")
     assert excerpt.endswith("…")
 
 
 def test_null_meeting_date_sorts_last_without_crashing(db_path):
-    # знахідка 1 (Plan deltas D2): C1 оголошує meeting_date: str | None, Python
-    # не порівнює None зі str — рядок без дати (і без meeting_date, і без
-    # created_at, що теоретично неможливо, але COALESCE тут не рятує) не
-    # повинен ронять сортування, а має йти останнім.
+    # finding 1 (Plan deltas D2): C1 declares meeting_date: str | None, Python
+    # does not compare None with str -- a row without a date (neither meeting_date nor
+    # created_at, which is theoretically impossible, but COALESCE does not save it here)
+    # must not crash the sorting, but must go last.
     with get_db_connection(db_path) as conn:
         tid_null = _add_transcription(conn, meeting_date=None)
         conn.execute("UPDATE transcriptions SET created_at = NULL WHERE id = ?", (tid_null,))
@@ -252,12 +252,12 @@ def test_arbitrary_scan_caveat_present_only_on_early_stop(db_path):
             _add_chunk(conn, tid, i, f"чанк {i} з MARKER")
         conn.commit()
 
-    # зупинка лише на `limit` (весь скан завершено) — довільності немає.
+    # a stop on `limit` only (the whole scan finished) -- no arbitrariness.
     limited = archive_grep.grep(db_path, "MARKER", limit=2)
     assert limited["truncated_reason"] == "limit"
     assert limited["arbitrary_scan_caveat"] is None
 
-    # зупинка на max_scan — скан достроковий, підмножина довільна щодо дати.
+    # a stop on max_scan -- the scan is early, the subset is arbitrary with respect to date.
     scan_capped = archive_grep.grep(db_path, "MARKER", max_scan=2, limit=20)
     assert scan_capped["truncated_reason"] == "max_scan"
     assert scan_capped["arbitrary_scan_caveat"]
@@ -287,37 +287,37 @@ def test_max_scan_bounds_match_function_calls(db_path, monkeypatch):
 
 
 def test_catastrophic_regex_stops_at_deadline_not_hang(db_path, monkeypatch):
-    # знахідка 3: patern з катастрофічним бектрекінгом не має права повісити
-    # виклик — дедлайн перевіряється між рядками. Дуже маленький дедлайн +
-    # кілька рядків, кожен з яких окремо помітно повільний (але не
-    # нескінченний), доводять, що скан зупиняється достроково.
+    # finding 3: a pattern with catastrophic backtracking must not be able to hang
+    # the call -- the deadline is checked between rows. A very small deadline +
+    # several rows, each of which is noticeably slow on its own (but not
+    # infinite), prove that the scan stops early.
     monkeypatch.setattr(archive_grep, "_DEFAULT_DEADLINE_SECONDS", 0.3)
 
     with get_db_connection(db_path) as conn:
         tid = _add_transcription(conn, meeting_date="2026-08-01")
-        slow_text = "a" * 22 + "X"  # (a+)+$ на цьому рядку помітно повільний
+        slow_text = "a" * 22 + "X"  # (a+)+$ is noticeably slow on this string
         for i in range(30):
             _add_chunk(conn, tid, i, slow_text)
         conn.commit()
 
     import concurrent.futures
 
-    # НЕ `with ThreadPoolExecutor(...) as pool:` — його __exit__ кличе
-    # shutdown(wait=True) і чекає на потік, що застряг у бектрекінгу, тобто
-    # регресія все одно зависає, лише за TimeoutError замість __exit__.
-    # shutdown(wait=False) не блокує тест, навіть якщо regex-потік ще живий.
+    # NOT `with ThreadPoolExecutor(...) as pool:` -- its __exit__ calls
+    # shutdown(wait=True) and waits for the thread stuck in backtracking, i.e. the
+    # regression would still hang, only on TimeoutError instead of __exit__.
+    # shutdown(wait=False) does not block the test even if the regex thread is still alive.
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(archive_grep.grep, db_path, r"(a+)+$", regex=True, max_scan=1000)
-        # якщо дедлайн-перевірка між рядками регресує, це впаде по таймауту
-        # замість того, щоб зависнути назавжди.
+        # if the deadline check between rows regresses, this will fail on the timeout
+        # instead of hanging forever.
         result = future.result(timeout=15)
     finally:
         pool.shutdown(wait=False)
 
     assert result["truncated"] is True
     assert result["truncated_reason"] == "deadline"
-    # зупинились задовго до того, як переглянули всі 30 рядків
+    # stopped long before all 30 rows were looked at
     assert result["scanned"] < 30
 
 

@@ -1,10 +1,10 @@
-"""Тести ниток розмови в Telegram-чатах (Волна 4.5).
+"""Tests for conversation threads in Telegram chats (Wave 4.5).
 
-Локальна модель мокається — тести офлайн, без Ollama і без GPU. Те, що тут
-перевіряється, — саме логіка каскаду і його поведінка при відмовах, бо
-розділяльної здатності у косинуса на цих даних немає (заміряно: reply-пари
-0.828 проти випадкових 0.827), і вся правильність тримається на тому, як ми
-поводимось із відповіддю моделі та без неї.
+The local model is mocked — the tests are offline, without Ollama and without a GPU. What is
+checked here is the logic of the cascade and its behaviour on failures, because
+the cosine has no separating power on this data (measured: reply pairs
+0.828 against random 0.827), and all correctness rests on how we
+treat the model's answer and its absence.
 """
 import sqlite3
 from datetime import datetime, timedelta
@@ -25,7 +25,7 @@ def db(tmp_path):
 
 def _msg(path, *, chat_id=-100, chat_title="Робочий чат", msg_id=1, date=None,
          sender="Автор", text="повідомлення", reply_to=None, vec=None):
-    """TG-повідомлення + (опційно) чанк з вектором, як після ембедингу."""
+    """A TG message + (optionally) a chunk with a vector, as after embedding."""
     conn = sqlite3.connect(path)
     cur = conn.execute(
         "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
@@ -52,7 +52,7 @@ def _rows(path, sql, params=()):
 
 
 # ============================================================
-# Сплески
+# Bursts
 # ============================================================
 
 def _at(minutes):
@@ -72,7 +72,7 @@ def test_bursts_keep_dense_conversation_together():
 
 
 def test_bursts_survive_broken_dates():
-    """Дата, яку не розібрати, не має рвати сплеск на друзки."""
+    """A date that cannot be parsed must not tear a burst to pieces."""
     msgs = [{"tg_date": _at(0)}, {"tg_date": "не дата"}, {"tg_date": _at(5)}]
     assert len(tg_threads.segment_bursts(msgs)) == 1
 
@@ -90,12 +90,12 @@ def test_batches_respect_char_cap(monkeypatch):
 
 
 # ============================================================
-# Розбір відповіді моделі
+# Parsing the model's answer
 # ============================================================
 
 def _fake_llm(monkeypatch, payload):
-    """Підмінити локальну модель. Патчимо сам модуль local_llm, бо split_batch
-    імпортує його всередині функції."""
+    """Replace the local model. We patch the local_llm module itself, because split_batch
+    imports it inside the function."""
     from app.services import local_llm
     monkeypatch.setattr(local_llm, "generate_json",
                         lambda *a, **k: {"data": payload})
@@ -115,8 +115,8 @@ def test_split_groups_messages(monkeypatch):
 
 
 def test_split_returns_none_when_model_down(monkeypatch):
-    """Модель недоступна → None, щоб викликач чесно позначив деградацію,
-    а не вигадав нитку."""
+    """Model unavailable → None, so that the caller honestly marks the degradation
+    and does not invent a thread."""
     from app.services import local_llm
 
     def _boom(*a, **k):
@@ -127,7 +127,7 @@ def test_split_returns_none_when_model_down(monkeypatch):
 
 
 def test_split_ignores_invented_thread_ids(monkeypatch):
-    """Модель охоче вигадує id ниток; беремо лише ті, що самі показали."""
+    """The model readily invents thread ids; we take only those we showed ourselves."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "x", "continues": 999}]})
     got = tg_threads.split_batch("чат", _batch(1), [{"id": 7, "label": "справжня"}])
     assert got[0]["continues"] is None
@@ -140,16 +140,16 @@ def test_split_accepts_known_thread_id(monkeypatch):
 
 
 def test_split_recovers_messages_model_forgot(monkeypatch):
-    """Повідомлення, яке модель не згадала, не має зникнути з архіву.
+    """A message the model did not mention must not vanish from the archive.
 
-    Куди саме воно потрапляє — див. test_forgotten_message_joins_nearest_group;
-    тут перевіряється лише те, що жодне не загублено."""
+    Where exactly it goes — see test_forgotten_message_joins_nearest_group;
+    here we check only that none is lost."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "тема"}]})
     got = tg_threads.split_batch("чат", _batch(3), [])
     covered = sorted(i for g in got for i in g["msgs"])
     assert covered == [1, 2, 3]
     assert any(g.get("orphan") or g.get("orphan_msgs") for g in got), \
-        "відновлення має бути позначене як здогадка"
+        "the recovery must be marked as a guess"
 
 
 def test_split_drops_out_of_range_indexes(monkeypatch):
@@ -168,7 +168,7 @@ def test_split_never_assigns_message_twice(monkeypatch):
 
 
 # ============================================================
-# Каскад
+# Cascade
 # ============================================================
 
 def test_backfill_dry_run_writes_nothing(db, monkeypatch):
@@ -192,13 +192,13 @@ def test_backfill_groups_burst_by_model(db, monkeypatch):
 
 
 def test_reply_to_overrides_model(db, monkeypatch):
-    """tg_reply_to — знання самого Telegram, воно сильніше за здогадку моделі."""
+    """tg_reply_to is Telegram's own knowledge, it is stronger than the model's guess."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "Перша"}]})
     _msg(db, msg_id=1, date=_at(0), text="питання")
     tg_threads.backfill(db, dry_run=False)
     first = _rows(db, "SELECT id FROM tg_threads")[0]["id"]
 
-    # Друге повідомлення — відповідь на перше, але модель кладе його в нову тему.
+    # The second message is a reply to the first, but the model puts it in a new topic.
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "Зовсім інша"}]})
     _msg(db, msg_id=2, date=_at(5), text="відповідь", reply_to=1)
     _msg(db, msg_id=3, date=_at(6), text="ще")
@@ -211,8 +211,8 @@ def test_reply_to_overrides_model(db, monkeypatch):
 
 
 def test_degradation_marks_source_not_silently(db, monkeypatch):
-    """Без моделі сплеск лишається однією ниткою, але це ВИДНО в даних —
-    інакше деградацію не відрізнити від рішення і не перерахувати потім."""
+    """Without the model a burst stays one thread, but this is VISIBLE in the data —
+    otherwise degradation cannot be told from a decision and recomputed later."""
     from app.services import local_llm
     monkeypatch.setattr(local_llm, "generate_json",
                         lambda *a, **k: (_ for _ in ()).throw(local_llm.LocalLLMError("нема")))
@@ -224,8 +224,8 @@ def test_degradation_marks_source_not_silently(db, monkeypatch):
 
 
 def test_lonely_message_is_single_not_degradation(db):
-    """Повідомлення, єдине у своєму сплеску, моделі не потребує — і не має
-    виглядати як збій моделі."""
+    """A message that is alone in its burst does not need the model — and must not
+    look like a model failure."""
     _msg(db, msg_id=1, date=_at(0))
     tg_threads.backfill(db, dry_run=False, use_llm=False)
     assert _rows(db, "SELECT tg_thread_src FROM transcriptions")[0]["tg_thread_src"] == "single"
@@ -252,8 +252,8 @@ def test_centroid_built_from_message_vectors(db, monkeypatch):
 
 
 def test_candidates_ranked_by_similarity_without_threshold(db, monkeypatch):
-    """Косинус тут лише впорядковує кандидатів. Жодного абсолютного порога —
-    на живих даних він необґрунтований (розділення +0.02σ)."""
+    """The cosine here only orders candidates. No absolute threshold —
+    on live data it is unjustified (separation +0.02 sigma)."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "Далека"}]})
     _msg(db, msg_id=1, date=_at(0), vec=[0.0, 1.0])
     tg_threads.backfill(db, dry_run=False)
@@ -268,13 +268,13 @@ def test_candidates_ranked_by_similarity_without_threshold(db, monkeypatch):
         conn, -100, _at(30), np.array([1.0, 0.0]))
     conn.close()
     near = [r["id"] for r in _rows(db, "SELECT id FROM tg_threads ORDER BY id")][-1]
-    assert cands[0]["id"] == near, "найсхожіша нитка має бути першою"
-    assert len(cands) == 2, "низька схожість не має ВІДКИДАТИ кандидата"
+    assert cands[0]["id"] == near, "the most similar thread must be first"
+    assert len(cands) == 2, "low similarity must not DISCARD a candidate"
 
 
 def test_lonely_thread_gets_label_without_model(db):
-    """Сплеск з одного повідомлення моделі не показують — але нитка без назви
-    марна як кандидат на продовження, тож назва береться з тексту."""
+    """A one-message burst is not shown to the model — but a thread without a name is
+    useless as a continuation candidate, so the name is taken from the text."""
     _msg(db, msg_id=1, date=_at(0), text="Треба узгодити бюджет на вересень")
     tg_threads.backfill(db, dry_run=False, use_llm=False)
     label = _rows(db, "SELECT label FROM tg_threads")[0]["label"]
@@ -282,18 +282,18 @@ def test_lonely_thread_gets_label_without_model(db):
 
 
 def test_fallback_label_skips_media_placeholders():
-    """«[фото без тексту]» — службова позначка, а не назва теми."""
+    """«[фото без тексту]» is a service mark, not a topic name."""
     msgs = [{"transcript_text": "[фото без тексту]"},
             {"transcript_text": "Ось рахунок на оплату"}]
     assert tg_threads._fallback_label(msgs) == "Ось рахунок на оплату"
 
 
 # ============================================================
-# Живий інжест
+# Live ingest
 # ============================================================
 
 def test_incoming_is_provisional(db):
-    """На інжесті рішення попереднє: модель ще не питали."""
+    """At ingest the decision is provisional: the model has not been asked yet."""
     tid = _msg(db, msg_id=1, date=_at(0))
     tg_threads.assign_incoming(db, tid)
     row = _rows(db, "SELECT tg_thread_id, tg_thread_src FROM transcriptions")[0]
@@ -320,7 +320,7 @@ def test_incoming_starts_new_thread_after_silence(db):
 
 
 def test_incoming_follows_reply_across_silence(db):
-    """Відповідь через добу все одно належить своїй нитці — це знає Telegram."""
+    """A reply a day later still belongs to its thread — Telegram knows that."""
     t1 = _msg(db, msg_id=1, date=_at(0))
     tg_threads.assign_incoming(db, t1)
     first = _rows(db, "SELECT tg_thread_id FROM transcriptions WHERE id = ?", (t1,))[0]
@@ -347,7 +347,7 @@ def test_resettle_replaces_provisional_with_model_split(db, monkeypatch):
 
 
 def test_resettle_leaves_fresh_burst_alone(db, monkeypatch):
-    """Сплеск, який ще триває, чіпати не можна — розмова не договорила."""
+    """A burst that is still going must not be touched — the conversation has not finished."""
     tid = _msg(db, msg_id=1, date=datetime.now().isoformat())
     tg_threads.assign_incoming(db, tid)
     res = tg_threads.resettle_pending(db)
@@ -366,7 +366,7 @@ def test_resettle_does_not_touch_model_decisions(db, monkeypatch):
 
 
 # ============================================================
-# Закриття і зведення
+# Closing and summaries
 # ============================================================
 
 def test_close_idle_threads(db, monkeypatch):
@@ -403,13 +403,13 @@ def test_stats_report_degradations(db, monkeypatch):
 
 
 # ============================================================
-# Закриття за обсягом (дефект першого проходу)
+# Closing by volume (a defect of the first pass)
 # ============================================================
 
 def test_thread_closes_at_volume_cap(db, monkeypatch):
-    """Без стелі нитка росте, доки в чат пишуть частіше за THREAD_IDLE_DAYS:
-    на першому проході ниток зібрали значна частина архіву, найбільша — повідомлень
-    за два місяці, і всередині неї чотири різні теми. Це чат усередині чату."""
+    """Without a ceiling a thread grows as long as the chat is written to more often than THREAD_IDLE_DAYS:
+    on the first pass a few threads collected a large share of the archive, the largest messages
+    over two months, and inside it four different topics. That is a chat inside a chat."""
     monkeypatch.setattr(tg_threads, "THREAD_MAX_MSGS", 3)
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1, 2, 3], "label": "Тема"}]})
     for i in (1, 2, 3):
@@ -433,7 +433,7 @@ def test_full_thread_is_not_offered_for_continuation(db, monkeypatch):
 
 
 def test_new_conversation_starts_fresh_thread_after_cap(db, monkeypatch):
-    """Наступна розмова йде окремою ниткою, а не доліплюється до переповненої."""
+    """The next conversation goes into a separate thread and is not glued onto an overfull one."""
     monkeypatch.setattr(tg_threads, "THREAD_MAX_MSGS", 2)
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1, 2], "label": "Перша"}]})
     _msg(db, msg_id=1, date=_at(0))
@@ -456,19 +456,19 @@ def test_incoming_does_not_extend_full_thread(db, monkeypatch):
 
 
 # ============================================================
-# Промахи моделі кладемо до сусідів, а не в самотні нитки
+# Model misses go to neighbours, not into lonely threads
 # ============================================================
 
 def test_forgotten_message_joins_nearest_group(monkeypatch):
-    """Окрема нитка на кожен промах — це гарантовано нитка без контексту
-    (повідомлень, 10.дрібна частка архіву, на першому проході)."""
+    """A separate thread per miss is guaranteed to be a thread without context
+    (messages, 10.a small share of the archive, on the first pass)."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1, 2], "label": "Перша"},
                                         {"msgs": [4], "label": "Друга"}]})
     got = tg_threads.split_batch("чат", _batch(4), [])
     covered = sorted(i for g in got for i in g["msgs"])
     assert covered == [1, 2, 3, 4]
     host = [g for g in got if 3 in g["msgs"]][0]
-    assert host["label"] == "Перша", "3 ближче до групи [1,2], ніж до [4]"
+    assert host["label"] == "Перша", "3 is closer to the group [1,2] than to [4]"
 
 
 def test_forgotten_message_is_marked_as_guess(monkeypatch):
@@ -478,7 +478,7 @@ def test_forgotten_message_is_marked_as_guess(monkeypatch):
 
 
 def test_guess_and_decision_get_different_provenance(db, monkeypatch):
-    """Один src на всю групу зробив би здогадку невідрізненною від рішення."""
+    """One src for the whole group would make a guess indistinguishable from a decision."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1, 2], "label": "Тема"}]})
     for i in (1, 2, 3):
         _msg(db, msg_id=i, date=_at(i))
@@ -488,11 +488,11 @@ def test_guess_and_decision_get_different_provenance(db, monkeypatch):
     assert got[1] == got[2] == "llm"
     assert got[3] == "orphan"
     ids = {r["tg_thread_id"] for r in _rows(db, "SELECT tg_thread_id FROM transcriptions")}
-    assert len(ids) == 1, "промах приєднався до сусідів, а не завів свою нитку"
+    assert len(ids) == 1, "the miss joined the neighbours and did not start its own thread"
 
 
 def test_orphan_alone_in_batch_still_gets_thread(monkeypatch):
-    """Модель не повернула жодної групи — приєднуватись нема до чого."""
+    """The model returned no group — there is nothing to join."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [], "label": "порожня"}]})
     got = tg_threads.split_batch("чат", _batch(2), [])
     assert got is not None
@@ -500,9 +500,9 @@ def test_orphan_alone_in_batch_still_gets_thread(monkeypatch):
 
 
 def test_volume_cap_never_splits_one_conversation(db, monkeypatch):
-    """Стеля мʼяка навмисно: група, яку модель визнала однією темою, заходить
-    цілком. Розірвати звʼязну розмову заради круглого числа гірше за
-    накопичення — сенс нитки в тому, що вона ціла."""
+    """The ceiling is soft on purpose: a group the model judged to be one topic enters
+    whole. Tearing a coherent conversation for a round number is worse than
+    accumulation — the point of a thread is that it is whole."""
     monkeypatch.setattr(tg_threads, "THREAD_MAX_MSGS", 2)
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1, 2, 3, 4], "label": "Одна розмова"}]})
     for i in range(1, 5):
@@ -510,14 +510,14 @@ def test_volume_cap_never_splits_one_conversation(db, monkeypatch):
     tg_threads.backfill(db, dry_run=False)
     threads = _rows(db, "SELECT msg_count, status FROM tg_threads")
     assert len(threads) == 1
-    assert threads[0]["msg_count"] == 4, "розмова не розрізана"
-    assert threads[0]["status"] == "closed", "але нитка закрита — далі не росте"
+    assert threads[0]["msg_count"] == 4, "the conversation is not cut"
+    assert threads[0]["status"] == "closed", "but the thread is closed — it does not grow further"
 
 
 def test_stale_thread_is_not_offered_even_if_open(db, monkeypatch):
-    """Вікно кандидатів — головний регулятор злипання, а не судження моделі:
-    на прогоні з вікном 21 день максимальний розрив усередині нитки упирався
-    рівно в 21 при медіані 2.8. Модель бере зі списку те, що їй показали."""
+    """The candidate window is the main regulator of gluing, not the model's judgement:
+    in a run with a 21-day window the maximum gap inside a thread hit
+    exactly 21 at a median of 2.8. The model takes from the list what it was shown."""
     _fake_llm(monkeypatch, {"threads": [{"msgs": [1], "label": "Давня"}]})
     _msg(db, msg_id=1, date=_at(0))
     tg_threads.backfill(db, dry_run=False)

@@ -1,22 +1,22 @@
-"""T1.2 (REMEDIATION_PLAN Волна 1): тести на auth-гейт app/core/auth.py.
+"""T1.2 (REMEDIATION_PLAN Wave 1): tests for the auth gate app/core/auth.py.
 
-Перевіряє критерії приймання T1.2:
-  (a) RECALL_LOCAL_TRUSTED=0 + без ключа + не-localhost → 401 на /api/*.
-  (b) RECALL_LOCAL_TRUSTED=0 + правильний X-Recall-Api-Key → НЕ 401.
-  (c) дефолт local-trusted (RECALL_LOCAL_TRUSTED не задано) + localhost
-      (звичайний test_client, remote_addr=127.0.0.1) → працює без ключа.
-  (d) /api/health відкритий без ключа навіть при LOCAL_TRUSTED=0 + не-localhost.
+Checks the T1.2 acceptance criteria:
+  (a) RECALL_LOCAL_TRUSTED=0 + no key + non-localhost → 401 on /api/*.
+  (b) RECALL_LOCAL_TRUSTED=0 + the correct X-Recall-Api-Key → NOT 401.
+  (c) default local-trusted (RECALL_LOCAL_TRUSTED not set) + localhost
+      (a plain test_client, remote_addr=127.0.0.1) → works without a key.
+  (d) /api/health is open without a key even with LOCAL_TRUSTED=0 + non-localhost.
 
-Навмисно НЕ імпортує весь app.py (як tests/test_endpoints_smoke.py) —
-app.py на імпорт кличе load_dotenv(), що назавжди дописує реальні секрети
-з .env (напр. HF_TOKEN) у os.environ на решту pytest-сесії й ламає
-тести з іншого модуля, що залежать від "порожнього" env (спостережено на
+Deliberately does NOT import the whole app.py (like tests/test_endpoints_smoke.py) —
+app.py calls load_dotenv() on import, which permanently appends real secrets
+from .env (e.g. HF_TOKEN) to os.environ for the rest of the pytest session and breaks
+tests from another module that depend on an "empty" env (observed on
 tests/test_diarization_orchestrator.py::test_unavailable_service_raises —
-почав падати, коли цей файл через алфавітний порядок виконувався ДО нього).
-app/core/auth.py самодостатній (Flask + os.environ, без залежностей на
-решту app.py), тож для юніт-тесту гейта досить мінімального Flask-застосунку.
+started failing when this file ran BEFORE it because of alphabetical order).
+app/core/auth.py is self-contained (Flask + os.environ, no dependencies on
+the rest of app.py), so a minimal Flask application is enough to unit-test the gate.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_auth_gate.py -v
 """
 import pytest
@@ -25,12 +25,12 @@ from flask import Flask, jsonify
 from app.core import auth as auth_module
 
 
-_NON_LOCAL_ADDR = "203.0.113.5"  # TEST-NET-3 (RFC 5737) — гарантовано не localhost
+_NON_LOCAL_ADDR = "203.0.113.5"  # TEST-NET-3 (RFC 5737) — guaranteed not localhost
 
 
 @pytest.fixture()
 def app_module():
-    """Мінімальний Flask-застосунок з парою /api/*-роутів + гейтом."""
+    """Minimal Flask application with a couple of /api/* routes + the gate."""
     app = Flask(__name__)
 
     @app.route("/api/health")
@@ -64,7 +64,7 @@ def client(app_module):
 
 class TestAuthGate:
     def test_non_localhost_without_key_is_401(self, client, monkeypatch):
-        """(a) RECALL_LOCAL_TRUSTED=0, немає ключа, запит не з localhost → 401."""
+        """(a) RECALL_LOCAL_TRUSTED=0, no key, request not from localhost → 401."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
         r = client.get(
@@ -76,7 +76,7 @@ class TestAuthGate:
         assert data["success"] is False
 
     def test_non_localhost_with_correct_key_passes(self, client, monkeypatch):
-        """(b) RECALL_LOCAL_TRUSTED=0 + правильний X-Recall-Api-Key → не 401."""
+        """(b) RECALL_LOCAL_TRUSTED=0 + the correct X-Recall-Api-Key → not 401."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.setenv("RECALL_API_KEY", "s3cr3t-test-key")
         r = client.get(
@@ -87,7 +87,7 @@ class TestAuthGate:
         assert r.status_code != 401
 
     def test_non_localhost_with_wrong_key_is_401(self, client, monkeypatch):
-        """Неправильний ключ так само блокується."""
+        """A wrong key is blocked all the same."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.setenv("RECALL_API_KEY", "s3cr3t-test-key")
         r = client.get(
@@ -98,7 +98,7 @@ class TestAuthGate:
         assert r.status_code == 401
 
     def test_non_localhost_with_bearer_auth_header_passes(self, client, monkeypatch):
-        """Authorization: Bearer <key> приймається як альтернатива заголовку."""
+        """Authorization: Bearer <key> is accepted as an alternative to the header."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.setenv("RECALL_API_KEY", "s3cr3t-test-key")
         r = client.get(
@@ -109,16 +109,16 @@ class TestAuthGate:
         assert r.status_code != 401
 
     def test_default_local_trusted_localhost_works_without_key(self, client, monkeypatch):
-        """(c) Дефолтний режим (RECALL_LOCAL_TRUSTED не задано) + localhost
-        (test_client, remote_addr=127.0.0.1 за замовчуванням) → без ключа."""
+        """(c) Default mode (RECALL_LOCAL_TRUSTED not set) + localhost
+        (test_client, remote_addr=127.0.0.1 by default) → without a key."""
         monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
         r = client.get("/api/models")
         assert r.status_code != 401
 
     def test_health_open_even_with_local_trusted_disabled(self, client, monkeypatch):
-        """(d) /api/health відкритий без ключа навіть при LOCAL_TRUSTED=0
-        і запиті не з localhost — health-check лишається для моніторингу."""
+        """(d) /api/health is open without a key even with LOCAL_TRUSTED=0
+        and requests not from localhost — the health check stays available for monitoring."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
         r = client.get(
@@ -128,8 +128,8 @@ class TestAuthGate:
         assert r.status_code == 200
 
     def test_options_preflight_not_blocked(self, client, monkeypatch):
-        """OPTIONS (CORS preflight) не повинен впиратись у auth-гейт навіть
-        коли LOCAL_TRUSTED=0 і запит не з localhost."""
+        """OPTIONS (CORS preflight) must not run into the auth gate even
+        when LOCAL_TRUSTED=0 and the request is not from localhost."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
         r = client.options(
@@ -139,8 +139,8 @@ class TestAuthGate:
         assert r.status_code != 401
 
     def test_spa_shell_not_gated(self, client, monkeypatch):
-        """Не-/api/* шляхи (SPA-шелл) лишаються доступними навіть при
-        LOCAL_TRUSTED=0 і запиті не з localhost."""
+        """Non-/api/* paths (the SPA shell) stay accessible even with
+        LOCAL_TRUSTED=0 and requests not from localhost."""
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
         r = client.get(
@@ -151,21 +151,21 @@ class TestAuthGate:
 
 
 class TestAuthGateProfileDefaults:
-    """config-registry-profiles S2: дефолт RECALL_LOCAL_TRUSTED залежить від
-    RECALL_PROFILE, доки оператор не задав RECALL_LOCAL_TRUSTED явно."""
+    """config-registry-profiles S2: the default of RECALL_LOCAL_TRUSTED depends on
+    RECALL_PROFILE, until the operator sets RECALL_LOCAL_TRUSTED explicitly."""
 
     def test_headless_without_key_is_401_even_from_localhost(self, client, monkeypatch):
-        """headless без RECALL_API_KEY і без явного RECALL_LOCAL_TRUSTED → дефолт
-        local-trusted "0" (fail-closed), тож навіть localhost отримує 401."""
+        """headless without RECALL_API_KEY and without an explicit RECALL_LOCAL_TRUSTED → default
+        local-trusted "0" (fail-closed), so even localhost gets 401."""
         monkeypatch.setenv("RECALL_PROFILE", "headless")
         monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
-        r = client.get("/api/history")  # test_client за замовчуванням шле з 127.0.0.1
+        r = client.get("/api/history")  # test_client sends from 127.0.0.1 by default
         assert r.status_code == 401
 
     def test_headless_with_explicit_local_trusted_passes(self, client, monkeypatch):
-        """Явний RECALL_LOCAL_TRUSTED=1 у headless — свідомий override, поважається
-        (Assumption 1 плану) — localhost знову працює без ключа."""
+        """An explicit RECALL_LOCAL_TRUSTED=1 in headless is a conscious override, respected
+        (Assumption 1 of the plan) — localhost works without a key again."""
         monkeypatch.setenv("RECALL_PROFILE", "headless")
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "1")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
@@ -173,8 +173,8 @@ class TestAuthGateProfileDefaults:
         assert r.status_code == 200
 
     def test_desktop_default_still_local_trusted(self, client, monkeypatch):
-        """desktop (профіль не задано або 'desktop') зберігає попередній UX —
-        дефолт local-trusted лишається "1"."""
+        """desktop (profile not set or 'desktop') keeps the previous UX —
+        the local-trusted default stays "1"."""
         monkeypatch.delenv("RECALL_PROFILE", raising=False)
         monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
@@ -182,7 +182,7 @@ class TestAuthGateProfileDefaults:
         assert r.status_code == 200
 
     def test_ready_open_in_headless_without_key(self, client, monkeypatch):
-        """/api/ready лишається без auth у headless (той самий клас, що /api/health)."""
+        """/api/ready stays without auth in headless (the same class as /api/health)."""
         monkeypatch.setenv("RECALL_PROFILE", "headless")
         monkeypatch.delenv("RECALL_LOCAL_TRUSTED", raising=False)
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
@@ -193,7 +193,7 @@ class TestAuthGateProfileDefaults:
         assert r.status_code == 200
 
     def test_ready_open_in_desktop_without_key(self, client, monkeypatch):
-        """/api/ready лишається без auth і у desktop-профілі при LOCAL_TRUSTED=0."""
+        """/api/ready stays without auth in the desktop profile too with LOCAL_TRUSTED=0."""
         monkeypatch.delenv("RECALL_PROFILE", raising=False)
         monkeypatch.setenv("RECALL_LOCAL_TRUSTED", "0")
         monkeypatch.delenv("RECALL_API_KEY", raising=False)
@@ -204,15 +204,15 @@ class TestAuthGateProfileDefaults:
         assert r.status_code == 200
 
 
-# ------------- проксійований доступ (K5-04, власник 15.10.2026)
+# ------------- proxied access (K5-04, owner 15.10.2026)
 
-_VPS = "100.64.0.9"      # сервер vps-prod у tailnet власника
+_VPS = "100.64.0.9"      # the vps-prod server in the owner's tailnet
 _PHONE = "100.64.0.7"
 
 
 class TestProxiedAccess:
-    """«После включения Tailscale-доступа сервер vps-prod сможет открыть весь Recall без пароля,
-    пока вы сами не закроете ему доступ.» — tailscale serve приходить як 127.0.0.1."""
+    """Owner: "After Tailscale access is turned on, the vps-prod server will be able to open all of Recall
+    without a password until you yourself close its access." — tailscale serve arrives as 127.0.0.1."""
 
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch):

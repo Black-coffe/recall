@@ -1,21 +1,21 @@
 #!/usr/bin/env python
-"""Детермінований eval для дедлайнів/власників задач (eval-gate, C7/A3/C3).
+"""Deterministic eval for task deadlines/owners (eval-gate, C7/A3/C3).
 
-Не викликає Claude і не запускає `enrich_transcription`/`tg_tasks` — рахує
-лише те, що детерміноване офлайн: `commitments.parse_due(due_raw, meeting_date)`
-проти `truth.due_date` і поточний `action_items.owner_entity_id` зі знімка
-(→ канонічне імʼя/аліас) проти `truth.owner`. Точність самого витягу Claude —
-поза межами цього eval (A3).
+Does not call Claude and does not run `enrich_transcription`/`tg_tasks`; it computes
+only what is deterministic offline: `commitments.parse_due(due_raw, meeting_date)`
+against `truth.due_date` and the current `action_items.owner_entity_id` from the snapshot
+(-> canonical name/alias) against `truth.owner`. The accuracy of Claude's own extraction is
+outside this eval (A3).
 
-Метрики рахуються лише по `status="labeled"` пунктах golden-набору
-(`evals/build_tasks_golden.py`), чия `truth` СТВЕРДЖЕНА — відрізняється від
-дефолтного порожнього блоку, яким будівник відмічає щойно вибраний, ще не
-розмічений рядок (D7/знахідка 9 review-round-1.md). Файл, якому лише
-перемкнули `status` на `labeled`, нічого не стверджує — рахуватись не буде.
-Пункт, чий `action_item_id` більше не називає той самий рядок (реінджест
-перестворює `action_items` — знахідка 11), чи чий знімок-провенанс не
-збігається з поточним `--db` (D7), виключається з рахунку як "стейл", а не
-тихо змірюється проти чужих даних.
+Metrics are computed only over `status="labeled"` items of the golden set
+(`evals/build_tasks_golden.py`) whose `truth` is ASSERTED, i.e. differs from
+the default empty block with which the builder marks a just-picked, not yet
+labeled row (D7/finding 9 of review-round-1.md). A file where only
+`status` was switched to `labeled` asserts nothing and will not be counted.
+An item whose `action_item_id` no longer names the same row (re-ingest
+recreates `action_items`, finding 11), or whose snapshot provenance does not
+match the current `--db` (D7), is excluded from the count as "stale" rather than
+being silently measured against someone else's data.
 
 CLI:
     python -m evals.tasks_eval --golden evals/tasks_golden.local.jsonl --db evals/snapshots/x.db
@@ -36,14 +36,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from evals.graph_links import is_live_db, open_readonly  # noqa: E402
-from evals.golden_io import read_jsonl  # noqa: E402 — спільний читач (D13), пишеться історією 05
-from app.services import commitments  # noqa: E402 — лише stdlib + app.db.connection, без torch/e5
+from evals.golden_io import read_jsonl  # noqa: E402 - shared reader (D13), written by story 05
+from app.services import commitments  # noqa: E402 - stdlib + app.db.connection only, no torch/e5
 
 
 def _normalize_owner_name(name: str) -> str:
-    """Той самий ключ, що `commitments._normalize_name`/`link_owners` (свідома
-    копія 6 рядків — не тягнемо приватне імʼя сусіднього модуля через межу
-    файлів; регістр рахуємо в Python, бо SQLite `LOWER` не згортає кирилицю)."""
+    """The same key as `commitments._normalize_name`/`link_owners` (a deliberate
+    6-line copy: we do not pull a neighbouring module's private name across the
+    file boundary; case is computed in Python because SQLite `LOWER` does not fold Cyrillic)."""
     if not name:
         return ""
     s = name.strip().lower()
@@ -52,21 +52,21 @@ def _normalize_owner_name(name: str) -> str:
 
 
 def _snapshot_identity(db_path: str) -> dict:
-    """Груба ознака ідентичності знімка (D7): базове імʼя файлу + розмір.
-    Не хеш (315 МБ на кожен прогін — задорого) — ловить головну загрозу
-    (реінджест переписав дані знімка НА МІСЦІ), не переносить файл під іншим
-    імʼям без причини бити тривогу."""
+    """Rough snapshot identity marker (D7): file base name + size.
+    Not a hash (315 MB on every run is too expensive); it catches the main threat
+    (a re-ingest rewrote the snapshot data IN PLACE) and does not raise an alarm
+    for a file moved under another name for no reason."""
     st = os.stat(db_path)
     return {"path": os.path.basename(db_path), "size": st.st_size}
 
 
 # ============================================================
-# Правда: пункт зараховується лише якщо СТВЕРДЖЕНА (D7, знахідка 9)
+# Truth: an item counts only if ASSERTED (D7, finding 9)
 # ============================================================
 
-#: Той самий дефолтний блок, яким `build_tasks_golden._make_item` відмічає
-#: щойно вибраний, ще НЕ розмічений рядок. `truth == _DEFAULT_TRUTH` після
-#: `status="labeled"` означає, що поле лише перемкнули, нічого не заповнивши.
+#: The same default block with which `build_tasks_golden._make_item` marks
+#: a just-picked, NOT yet labeled row. `truth == _DEFAULT_TRUTH` after
+#: `status="labeled"` means the field was merely switched without filling anything in.
 _DEFAULT_TRUTH = {"owner": None, "due_date": None, "due_precision": None}
 
 
@@ -81,8 +81,8 @@ def _truth_asserted(it: dict) -> bool:
 
 
 # ============================================================
-# Провенанс рядка: чи ще називає `action_item_id` той самий пункт
-# (знахідка 11 — реінджест перестворює action_items)
+# Row provenance: whether `action_item_id` still names the same item
+# (finding 11: re-ingest recreates action_items)
 # ============================================================
 
 def _row_status(conn, action_item_id: int, expected_task) -> tuple[str, Optional[dict]]:
@@ -99,14 +99,14 @@ def _row_status(conn, action_item_id: int, expected_task) -> tuple[str, Optional
 
 
 # ============================================================
-# Власник: owner_entity_id зі знімка → канонічне імʼя/аліас проти truth.owner
+# Owner: owner_entity_id from the snapshot -> canonical name/alias against truth.owner
 # ============================================================
 
 def _entity_canonical_and_names(conn, entity_id: Optional[int]) -> tuple[Optional[str], set[str]]:
-    """Нормалізоване канонічне імʼя окремо (для first-name fallback нижче) +
-    канонічне імʼя разом з усіма аліасами (`commitments._normalize_name`,
-    той самий ключ, що й `link_owners`). Порожні, якщо `entity_id` не задано
-    або сутність зникла зі знімка (видалення/merge)."""
+    """The normalized canonical name separately (for the first-name fallback below) +
+    the canonical name together with all aliases (`commitments._normalize_name`,
+    the same key as `link_owners`). Empty if `entity_id` is not set
+    or the entity disappeared from the snapshot (deletion/merge)."""
     if entity_id is None:
         return None, set()
     names: set[str] = set()
@@ -128,9 +128,9 @@ def _owner_match(conn, entity_id: Optional[int], truth_owner: Optional[str]) -> 
         return not names
     if want in names:
         return True
-    # First-name fallback лінкера (commitments.link_owners: «Юля Гончар» → «юля»)
-    # — багатослівне truth.owner проти однослівного КАНОНІЧНОГО імені (не
-    # аліасів — фолбек продакшена теж дивиться лише на канонічне; знахідка 25).
+    # First-name fallback of the linker (commitments.link_owners: «Юля Гончар» -> «юля»)
+    # - a multi-word truth.owner against a single-word CANONICAL name (not
+    # aliases: the production fallback also looks only at the canonical one; finding 25).
     if " " in want and canonical_norm and " " not in canonical_norm:
         if want.split(" ", 1)[0] == canonical_norm:
             return True
@@ -138,7 +138,7 @@ def _owner_match(conn, entity_id: Optional[int], truth_owner: Optional[str]) -> 
 
 
 # ============================================================
-# Оцінка
+# Scoring
 # ============================================================
 
 def evaluate(golden_items: list[dict], conn, *, db_path: Optional[str] = None) -> dict:
@@ -182,9 +182,9 @@ def evaluate(golden_items: list[dict], conn, *, db_path: Optional[str] = None) -
         meeting_date = it.get("meeting_date")
         due_ok: Optional[bool] = None
         if due_raw and meeting_date is None:
-            # commitments.parse_due(raw, anchor=None) мовчки підставляє
-            # date.today() для відносних фраз (знахідка 17) — не кличемо,
-            # пункт не зараховується в due_accuracy.
+            # commitments.parse_due(raw, anchor=None) silently substitutes
+            # date.today() for relative phrases (finding 17); we do not call it,
+            # the item does not count toward due_accuracy.
             n_due_no_anchor += 1
         else:
             got_due, _prec = commitments.parse_due(due_raw, meeting_date)
@@ -223,10 +223,10 @@ def evaluate(golden_items: list[dict], conn, *, db_path: Optional[str] = None) -
 
 def _print_report(result: dict) -> None:
     print()
-    print(f"[tasks_eval] golden: {result['n_total']} записів, labeled={result['n_labeled']}, "
-          f"ствердж.={result['n_scored']} "
-          f"(без-правди={result['n_unasserted']}, стейл={result['n_stale']}, "
-          f"без-якоря-дедлайну={result['n_due_no_anchor']})")
+    print(f"[tasks_eval] golden: {result['n_total']} records, labeled={result['n_labeled']}, "
+          f"asserted={result['n_scored']} "
+          f"(unasserted={result['n_unasserted']}, stale={result['n_stale']}, "
+          f"no-due-anchor={result['n_due_no_anchor']})")
     due_acc = result["due_accuracy"]
     owner_acc = result["owner_accuracy"]
     print(f"  due_accuracy:   {due_acc * 100:.1f}% (n={result['n_due_scored']})"
@@ -234,11 +234,11 @@ def _print_report(result: dict) -> None:
     print(f"  owner_accuracy: {owner_acc * 100:.1f}% (n={result['n_owner_scored']})"
           if owner_acc is not None else "  owner_accuracy: — (n=0)")
     if result["stale"]:
-        print(f"\nСтейл-пункти ({len(result['stale'])}), виключені з рахунку:")
+        print(f"\nStale items ({len(result['stale'])}), excluded from the count:")
         for s in result["stale"]:
             print(f"  {s['id']} (#{s['action_item_id']}): {s['reason']}")
     if result["misses"]:
-        print(f"\nПромахи ({len(result['misses'])}):")
+        print(f"\nMisses ({len(result['misses'])}):")
         for m in result["misses"]:
             parts = [f"  {m['id']} (#{m['action_item_id']}):"]
             if m["due_ok"] is False:
@@ -250,33 +250,33 @@ def _print_report(result: dict) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--golden", required=True, help="Шлях до JSONL evals/build_tasks_golden.py")
-    parser.add_argument("--db", default="whisper_history.db", help="Шлях до ЗНІМКА БД (owner_entity_id/entities)")
-    parser.add_argument("--gate", action="store_true", help="Повернути 0/1 за порогами замість завжди 0")
-    parser.add_argument("--min-due-acc", type=float, default=0.90, help="Поріг due_accuracy для --gate (default: 0.90)")
-    parser.add_argument("--min-owner-acc", type=float, default=0.80, help="Поріг owner_accuracy для --gate (default: 0.80)")
+    parser.add_argument("--golden", required=True, help="Path to the evals/build_tasks_golden.py JSONL")
+    parser.add_argument("--db", default="whisper_history.db", help="Path to the DB SNAPSHOT (owner_entity_id/entities)")
+    parser.add_argument("--gate", action="store_true", help="Return 0/1 by thresholds instead of always 0")
+    parser.add_argument("--min-due-acc", type=float, default=0.90, help="due_accuracy threshold for --gate (default: 0.90)")
+    parser.add_argument("--min-owner-acc", type=float, default=0.80, help="owner_accuracy threshold for --gate (default: 0.80)")
     parser.add_argument("--yes-live", action="store_true",
-                         help="Дозволити відкрити файл, що збігається з Config.DATABASE")
+                         help="Allow opening the file that matches Config.DATABASE")
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.db):
-        print(f"[tasks_eval] БД не знайдено: {args.db}", file=sys.stderr)
+        print(f"[tasks_eval] DB not found: {args.db}", file=sys.stderr)
         return 2
     if is_live_db(args.db) and not args.yes_live:
-        print(f"[tasks_eval] Відмова: {args.db!r} — це бойова БД (Config.DATABASE). "
-              "Ця оснастка працює на ЗНІМКУ. Якщо це свідомий вибір — додайте --yes-live.",
+        print(f"[tasks_eval] Refused: {args.db!r} is the live DB (Config.DATABASE). "
+              "This tooling works on a SNAPSHOT. If this is a deliberate choice, add --yes-live.",
               file=sys.stderr)
         return 2
 
     try:
         golden_items = read_jsonl(args.golden)
     except (OSError, ValueError) as exc:
-        print(f"[tasks_eval] Golden-набір нечитний: {exc}", file=sys.stderr)
+        print(f"[tasks_eval] Golden set unreadable: {exc}", file=sys.stderr)
         return 2
 
     dupes = sorted({i for i, n in Counter(it.get("id") for it in golden_items).items() if n > 1})
     if dupes:
-        print(f"[tasks_eval] Дублі id у golden-наборі (не згортаються мовчки): {dupes}", file=sys.stderr)
+        print(f"[tasks_eval] Duplicate ids in the golden set (not silently collapsed): {dupes}", file=sys.stderr)
         return 2
 
     conn = open_readonly(args.db)
@@ -288,7 +288,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     _print_report(result)
 
     if result["n_scored"] == 0:
-        print("\n[tasks_eval] Нема пунктів зі ствердженою правдою на цьому знімку — нема на чому рахувати.",
+        print("\n[tasks_eval] No items with asserted truth on this snapshot - nothing to count.",
               file=sys.stderr)
         return 2
 

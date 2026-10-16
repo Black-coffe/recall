@@ -1,8 +1,8 @@
-"""Шар коментарів, Волна 3: звʼязки з графом і розбір через Claude.
+"""Comments layer, Wave 3: graph links and analysis via Claude.
 
-Два шари перевіряються окремо, бо мають різну ціну і різні гарантії:
-  А — локальне звірення назв, безкоштовне, працює саме на інжесті;
-  Б — Claude на вимогу, платний, ніколи не автоматичний.
+The two layers are checked separately because they have different costs and different guarantees:
+  A — local name matching, free, works right on ingest;
+  B — Claude on demand, paid, never automatic.
 """
 import sqlite3
 
@@ -61,7 +61,7 @@ def _add_entity(path, etype, name):
     return eid
 
 
-_ANY = object()   # сентинел: None — це справжній фільтр «source IS NULL»
+_ANY = object()   # sentinel: None is a real filter "source IS NULL"
 
 
 def _links(path, tid, source=_ANY):
@@ -76,7 +76,7 @@ def _links(path, tid, source=_ANY):
     return rows
 
 
-# ------------------------------------------------- v38: провенанс похідних
+# ------------------------------------------------- v38: provenance of derivatives
 
 def test_v38_adds_provenance_columns(db):
     conn = sqlite3.connect(db)
@@ -97,7 +97,7 @@ def test_v38_idempotent(db):
     assert n == 1
 
 
-# ------------------------------------------------------ шар А: локальний граф
+# ------------------------------------------------------ layer A: local graph
 
 def test_mention_in_comment_links_entity(db):
     tid = _add_tx(db)
@@ -109,18 +109,18 @@ def test_mention_in_comment_links_entity(db):
 
 
 def test_link_marks_provenance_not_plain(db):
-    """Згадка в коментарі — це «названо в репліці ПРО зустріч», а не «названо
-    НА зустрічі». Без мітки зріз за людиною змішав би два різні твердження."""
+    """A mention in a comment is "named in a remark ABOUT the meeting", not "named
+    AT the meeting". Without the mark, a slice by person would mix two different claims."""
     tid = _add_tx(db)
     _add_entity(db, "project", "Acmecorp")
     comments.create(db, "transcription", tid, "по Acmecorp рішення скасовано")
     comments.link_entities(db, tid)
-    assert _links(db, tid, None) == set()                       # source IS NULL — порожньо
+    assert _links(db, tid, None) == set()                       # source IS NULL — empty
     assert len(_links(db, tid, comments.ENTITY_SOURCE)) == 1
 
 
 def test_link_does_not_touch_foreign_links(db):
-    """Звʼязки Claude-картки (source NULL) і TG (thread_match) — чужі."""
+    """Links of a Claude card (source NULL) and of TG (thread_match) are foreign."""
     tid = _add_tx(db)
     other = _add_entity(db, "person", "Хтось Інший")
     conn = sqlite3.connect(db)
@@ -134,8 +134,8 @@ def test_link_does_not_touch_foreign_links(db):
 
 
 def test_link_never_overwrites_stronger_claim(db):
-    """Якщо сутність уже привʼязана карткою («звучало на зустрічі»), коментар
-    не має перетирати цей провенанс своїм, слабшим."""
+    """If the entity is already attached by a card ("it was said at the meeting"), the comment
+    must not overwrite that provenance with its own, weaker one."""
     tid = _add_tx(db)
     eid = _add_entity(db, "person", "Мельник")
     conn = sqlite3.connect(db)
@@ -153,9 +153,9 @@ def test_link_never_overwrites_stronger_claim(db):
 
 
 def test_link_is_recomputed_from_all_live_comments(db):
-    """Перерахунок іде по ЗАПИСУ, а не по одному коментарю: у meeting_entities
-    немає поля під коментар, тож «зняти звʼязки цього коментаря» неможливо,
-    не зачепивши сусідні."""
+    """The recompute goes by RECORDING, not by a single comment: meeting_entities
+    has no field for a comment, so "removing this comment's links" is impossible
+    without touching the neighbours."""
     tid = _add_tx(db)
     e1 = _add_entity(db, "person", "Мельник")
     e2 = _add_entity(db, "project", "Acmecorp")
@@ -163,7 +163,7 @@ def test_link_is_recomputed_from_all_live_comments(db):
     c2 = comments.create(db, "transcription", tid, "а по Acmecorp тиша")
     comments.link_entities(db, tid)
     assert _links(db, tid, comments.ENTITY_SOURCE) == {e1, e2}
-    # Видалення другого коментаря має зняти ЙОГО звʼязок і лишити перший.
+    # Deleting the second comment must remove ITS link and leave the first.
     comments.delete(db, c2["id"])
     assert _links(db, tid, comments.ENTITY_SOURCE) == {e1}
 
@@ -188,8 +188,8 @@ def test_restore_brings_mention_back(db):
 
 
 def test_lowercase_mention_is_not_a_link(db):
-    """Спільне з інжестом правило: власна назва пізнається великою літерою не
-    на початку речення. Інакше «том» і «адам» засмічують граф."""
+    """A rule shared with ingest: a proper name is recognized by a capital letter not
+    at the start of a sentence. Otherwise «том» and «адам» would clutter the graph."""
     tid = _add_tx(db)
     _add_entity(db, "project", "Барselona")
     comments.create(db, "transcription", tid, "тут йшлося про барselona загалом")
@@ -206,12 +206,12 @@ def test_link_is_idempotent(db):
     assert first == second == 1
 
 
-# ---------------------------------------------------------- якір (resolve)
+# ---------------------------------------------------------- anchor (resolve)
 
 def test_resolve_transcription_by_target(db):
     tid = _add_tx(db)
     assert comments.resolve_transcription(db, "transcription", tid) == tid
-    # Сутність/напрямок якоря не мають — це нормальний стан, не помилка.
+    # An entity/direction has no anchor — a normal state, not an error.
     assert comments.resolve_transcription(db, "entity", 1) is None
     assert comments.resolve_transcription(db, "recording_session", 7) is None
 
@@ -250,10 +250,10 @@ def test_relink_all_converges(db):
     comments.create(db, "transcription", t2, "знову Acmecorp")
     assert comments.relink_all(db, dry_run=True)["transcriptions"] == 2
     assert comments.relink_all(db)["written"] == 2
-    assert comments.relink_all(db)["written"] == 2     # ідемпотентно
+    assert comments.relink_all(db)["written"] == 2     # idempotent
 
 
-# -------------------------------------------------- шар Б: розбір (Claude)
+# -------------------------------------------------- layer B: analysis (Claude)
 
 _PARSED = {
     "action_items": [
@@ -270,7 +270,7 @@ _PARSED = {
 
 @pytest.fixture
 def mock_claude(monkeypatch):
-    """Claude мокається цілком: тест перевіряє ЗАПИС результату, а не модель."""
+    """Claude is mocked entirely: the test checks the WRITING of the result, not the model."""
     from app.services import enrichment, text_polishing
     calls = []
     monkeypatch.setattr(enrichment, "is_available", lambda: True)
@@ -305,8 +305,8 @@ def test_analyze_links_found_entities_to_graph(db, mock_claude):
 
 
 def test_analyze_is_idempotent_and_rewrites_only_own_tasks(db, mock_claude):
-    """Ось заради чого у v38 зʼявився comment_id: повторний розбір не має ні
-    плодити дублі, ні стирати задачі СУСІДНЬОГО коментаря того ж запису."""
+    """This is why comment_id appeared in v38: a repeated analysis must neither
+    breed duplicates nor erase tasks of a NEIGHBOURING comment of the same recording."""
     tid = _add_tx(db)
     c1 = comments.create(db, "transcription", tid, "перший")
     c2 = comments.create(db, "transcription", tid, "другий")
@@ -334,10 +334,10 @@ def test_analyze_marks_comment_and_exposes_flag(db, mock_claude):
 
 
 def test_analyze_skips_without_anchor_before_paying(db, mock_claude):
-    """Без транскрипта задачу нема куди покласти — модель не викликаємо взагалі."""
+    """Without a transcript there is nowhere to put the task — we do not call the model at all."""
     c = comments.create(db, "recording_session", 9, "текст", source="live")
     assert comments.analyze(db, c["id"])["status"] == "no_anchor"
-    assert mock_claude == []            # жодного виклику Claude
+    assert mock_claude == []            # no Claude call at all
 
 
 def test_analyze_degrades_without_api_key(db, monkeypatch):
@@ -353,13 +353,13 @@ def test_analyze_survives_claude_failure(db, monkeypatch):
     monkeypatch.setattr(enrichment, "is_available", lambda: True)
 
     def _boom(*a, **kw):
-        raise RuntimeError("Claude повернув некоректний JSON")
+        raise RuntimeError("Claude returned invalid JSON")
     monkeypatch.setattr(text_polishing, "extract_comment_items", _boom)
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "текст")
     res = comments.analyze(db, c["id"])
     assert res["status"] == "retry_needed"
-    # Коментар лишається цілим і непозначеним — розбір можна повторити.
+    # The comment stays whole and unmarked — the analysis can be repeated.
     assert comments.get(db, c["id"])["analyzed"] is False
 
 
@@ -372,7 +372,7 @@ def test_analyze_passes_comment_date_for_relative_deadlines(db, mock_claude):
 
 
 def test_analyze_never_runs_on_create(db, mock_claude, mock_embeddings):
-    """Розбір платний — він НЕ має запускатись сам при створенні коментаря."""
+    """The analysis is paid — it must NOT start by itself when a comment is created."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "треба переписати договір")
     comments.index_comment(db, c["id"])
@@ -381,12 +381,12 @@ def test_analyze_never_runs_on_create(db, mock_claude, mock_embeddings):
     assert comments.get(db, c["id"])["analyzed"] is False
 
 
-# ------------------------------------------ регресії за код-рев'ю (merge)
+# ------------------------------------------ regressions from the code review (merge)
 
 def test_deleting_a_comment_takes_its_tasks_with_it(db, mock_claude):
-    """Знайдено рев'ю: задачі, витягнуті Claude з коментаря, лишались «open» у
-    дашборді й у зводі назавжди, а джерело ставало невидимим — власник
-    видалив коментар як помилковий, а три задачі з нього далі вимагають уваги."""
+    """Found by the review: tasks extracted by Claude from a comment stayed "open" in
+    the dashboard and in the digest forever, and the source became invisible — the owner
+    deleted the comment as erroneous, and three tasks from it keep demanding attention."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "треба переписати договір")
     comments.analyze(db, c["id"])
@@ -415,8 +415,8 @@ def test_delete_does_not_touch_other_comments_tasks(db, mock_claude):
 
 
 def test_restored_comment_can_be_analyzed_again(db, mock_claude):
-    """Видалення знімає analyzed_at, тож після відновлення розбір можливий —
-    інакше коментар лишався б «розібраним» без жодної задачі."""
+    """Deleting clears analyzed_at, so after restore the analysis is possible —
+    otherwise the comment would stay "analyzed" without a single task."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "треба переписати договір")
     comments.analyze(db, c["id"])

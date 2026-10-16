@@ -8,7 +8,7 @@
     let cats = null, data = null, mode = 'text', audioReq = null, ppOpen = null, speakersOpen = false;
     let bookmarks = {}, bookmarksOpen = false;   // {segment_index: {id, note}}
     let _onTime = null;   // audio timeupdate handler (segment ↔ playback sync)
-    let copilotTL = null, copilotOpen = false, cpFilter = 'all';   // co-pilot timeline (Phase 19, Крок 7)
+    let copilotTL = null, copilotOpen = false, cpFilter = 'all';   // co-pilot timeline (Phase 19, Step 7)
     let videoInfo = null, videoPolling = null;   // screen-video panel (Phase 23, Story B-C)
 
     // word-cloud stopwords (UA + RU + EN) — client-side, no endpoint
@@ -176,15 +176,15 @@
         const spkBtn = ctx.mount.querySelector('#rcSpeakersBtn');
         if (spkBtn) spkBtn.addEventListener('click', () => openSpeakers(ctx, id, t));
 
-        // bookmarks (segmented records) + editable напрямок (✨ suggest)
+        // bookmarks (segmented records) + editable category (✨ suggest)
         const bmBtn = ctx.mount.querySelector('#rcBookmarksBtn');
         if (bmBtn) bmBtn.addEventListener('click', () => openBookmarks(ctx, t));
         updateBmCount(ctx);
 
-        // Коментарі власника. Якір за таймкодом береться з позиції плеєра: якщо
-        // аудіо грає, коментар прикріплюється до моменту, який слухали, — це
-        // єдиний спосіб сказати «ось ТУТ насправді було інакше», не рахуючи
-        // хвилини руками.
+        // Owner comments. The timecode anchor is taken from the player position: if
+        // audio is playing, the comment is attached to the moment that was listened to — this is the
+        // only way to say "right HERE it was actually different" without counting
+        // minutes by hand.
         const cmBtn = ctx.mount.querySelector('#rcCommentsBtn');
         if (cmBtn) cmBtn.addEventListener('click', () => toggleComments(ctx, id));
         updateCmCount(ctx, id);
@@ -213,13 +213,13 @@
         loadCopilotTab(ctx, id);
         // screen-video panel — lazy, best-effort (Phase 23, Story B-C)
         loadVideoPanel(ctx, id);
-        // T5.1: постійний статус-чип «ключ налаштований/ні» поруч із Claude-
-        // фічами (Покращити/Резюме/Переклад/...) — щоб polish/enrich не падали
-        // тихо в незрозумілу помилку, коли ключ ще не заданий у Settings.
+        // T5.1: a permanent status chip "key configured/not" next to the Claude
+        // features (Improve/Summary/Translate/...) — so that polish/enrich do not fail
+        // silently with an unclear error when the key is not yet set in Settings.
         loadAiKeyChip(ctx);
     }
 
-    // ---- Claude API-ключ: статус-чип (T5.1) --------------------------------
+    // ---- Claude API key: status chip (T5.1) --------------------------------
     async function loadAiKeyChip(ctx) {
         const chip = ctx.mount.querySelector('#rcAiKeyChip');
         if (!chip) return;
@@ -231,12 +231,12 @@
             } else {
                 chip.innerHTML = `<a href="/settings" style="color:var(--rc-warn,#b07a16)"><i class="fa-solid fa-triangle-exclamation"></i> ${T('transcript.keyMissing')}</a>`;
             }
-        } catch (_) { chip.innerHTML = ''; }   // best-effort — не критично для перегляду транскрипту
+        } catch (_) { chip.innerHTML = ''; }   // best-effort — not critical for viewing the transcript
     }
 
-    // ---- Co-pilot timeline (Phase 19, Крок 7) ----
-    // Паралельна доріжка під діалогом: усе, що ко-пілот робив у кожен момент;
-    // клік по події → seek аудіо на той таймкод (механіка з Phase 18).
+    // ---- Co-pilot timeline (Phase 19, Step 7) ----
+    // A parallel track under the dialogue: everything the co-pilot did at each moment;
+    // a click on an event → seek the audio to that timecode (mechanics from Phase 18).
     const CP_EVENT = {
         topic_shift:      { icon: 'fa-diagram-project', cls: 'is-topic', lbl: T('transcript.cp.ev.topicShift') },
         topic_return:     { icon: 'fa-rotate-left',     cls: 'is-topic', lbl: T('transcript.cp.ev.topicReturn') },
@@ -316,7 +316,7 @@
 
     function eventMatchesFilter(e) {
         if (cpFilter === 'all') return true;
-        // показуємо лише інсайти вибраного типу (теми/пошук/дії ховаються у фільтрі)
+        // show only insights of the chosen type (topics/search/actions hide in the filter)
         if (e.kind !== 'insight_local' && e.kind !== 'insight_verified') return false;
         return (e.payload && e.payload.kind) === cpFilter;
     }
@@ -407,7 +407,7 @@
         const lbl = ctx.mount.querySelector('#rcVideoBtnLbl');
         if (btn) btn.style.display = '';   // reveal button
         const claudeWrap = ctx.mount.querySelector('#rcVisionClaudeWrap');
-        if (claudeWrap) claudeWrap.style.display = 'inline-flex';   // reveal Claude-опис toggle
+        if (claudeWrap) claudeWrap.style.display = 'inline-flex';   // reveal Claude description toggle
         updateVideoBtnLabel(ctx);
 
         // If already analysed, render full panel immediately
@@ -605,7 +605,7 @@
         c.push(cell(T('transcript.prov.language'), U.langLabel(t.language)));
         if (t.model_used) c.push(cell(T('transcript.prov.model'), `<span class="rc-mono">${U.esc((t.model_used||'').toUpperCase())}</span>`));
         if (t.processing_time) c.push(cell(T('transcript.prov.processing'), T('transcript.prov.seconds', { n: R.i18n.num(Number(t.processing_time), { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })));
-        // Напрямок — editable (select + ✨ k-NN suggest); filled by bindCategoryEditor.
+        // Category — editable (select + ✨ k-NN suggest); filled by bindCategoryEditor.
         c.push(`<div class="rc-prov__cell"><div class="rc-prov__k">${T('transcript.prov.category')}</div><div class="rc-prov__v" id="rcCatEdit"></div></div>`);
 
         // per-source provenance
@@ -788,9 +788,9 @@
         const n = Object.keys(bookmarks).length;
         if (el) el.textContent = n ? ' ' + n : '';
     }
-    // ---- коментарі власника ------------------------------------------------
-    // Панель постійна (не розгортається під рядком, як у списках): на сторінці
-    // запису коментар — повноцінна частина документа, а не приписка збоку.
+    // ---- owner comments ------------------------------------------------
+    // The panel is permanent (does not expand under a row, as in lists): on the record
+    // page a comment is a full part of the document, not a side note.
     async function updateCmCount(ctx, id) {
         const el = ctx.mount.querySelector('#rcCmCount');
         if (!el || !R.comments) return;
@@ -798,7 +798,7 @@
             const d = await R.api.commentCounts('transcription', [id]);
             const c = (d.counts || {})[id] || (d.counts || {})[String(id)] || {};
             el.textContent = c.n ? ' ' + c.n : '';
-        } catch (_) { /* лічильник — прикраса; сторінка працює без нього */ }
+        } catch (_) { /* the counter is decoration; the page works without it */ }
     }
 
     async function toggleComments(ctx, id) {
@@ -809,8 +809,8 @@
         panel.className = 'rc-cmpanel';
         panel.innerHTML = '<div class="rc-cmpanel__loading rc-mono">' + T('transcript.loading') + '</div>';
         const audio = ctx.mount.querySelector('#rcAudio');
-        // Якір ставимо лише коли плеєр реально зрушив з нуля: інакше кожен
-        // коментар отримав би фальшивий «~00:00», що гірше за жоден якір.
+        // We set the anchor only when the player has really moved from zero: otherwise every
+        // comment would get a fake «~00:00», which is worse than no anchor.
         const at = audio && audio.currentTime > 0.5 ? Math.floor(audio.currentTime) : null;
         await R.comments.mount(panel, 'transcription', id, {
             anchorTime: at,
@@ -883,13 +883,13 @@
     async function editBookmarkNote(ctx, t, idx) {
         const bm = bookmarks[idx]; if (!bm) return;
         const raw = await UI.promptModal({ title: T('transcript.bm.editTitle'), label: T('transcript.bm.note'), defaultValue: bm.note || '', maxlength: 300 });
-        if (raw == null) return;   // скасовано (Escape/backdrop/×) — на відміну від window.prompt, тепер розрізняємо це від "зберегти порожньою"
+        if (raw == null) return;   // cancelled (Escape/backdrop/×) — unlike window.prompt, we now distinguish this from "save empty"
         const note = raw.trim();
         if (note === (bm.note || '')) return;
         R.api.bookmarkUpdate(bm.id, note).then(() => { bm.note = note; afterBookmarkChange(ctx, t); UI.toast(T('transcript.bm.noteSaved'), 'success'); }).catch(e => UI.toast(e.message, 'error'));
     }
 
-    // ---- editable напрямок + ✨ k-NN suggest ----
+    // ---- editable category + ✨ k-NN suggest ----
     function bindCategoryEditor(ctx, id, t) {
         const box = ctx.mount.querySelector('#rcCatEdit');
         if (!box) return;
@@ -902,7 +902,7 @@
     async function applyCategory(ctx, id, t, cid) {
         try {
             await R.api.setCategory(id, cid); t.category_id = cid; data.category_id = cid;
-            renderTaxonomy(ctx, id, t);   // шлях під заголовком іде за напрямком
+            renderTaxonomy(ctx, id, t);   // the path under the title follows the category
             UI.toast(cid ? T('transcript.cat.changed') : T('transcript.cat.cleared'), 'success');
         }
         catch (e) { UI.toast(e.message || T('transcript.failed'), 'error'); }
@@ -928,10 +928,10 @@
         finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i>'; } }
     }
 
-    // ---- шлях «Напрямок → Проєкт» + теги запису + підказки Claude ----
-    // Теги редагуються тут і ніде більше (у списках вони читальні): відповідь
-    // PUT /tags і POST /tags/suggestions несе свіжі `tags`/`suggested_tags`,
-    // тож перемальовуємо з неї, без перезавантаження сторінки.
+    // ---- path «Напрямок → Проєкт» + record tags + Claude hints ----
+    // Tags are edited here and nowhere else (they are read-only in lists): the response of
+    // PUT /tags and POST /tags/suggestions carries fresh `tags`/`suggested_tags`,
+    // so we redraw from it, without reloading the page.
     function renderTaxonomy(ctx, id, t) {
         const box = ctx.mount.querySelector('#rcRecTax');
         if (!box) return;
@@ -983,7 +983,7 @@
         t.tags = r.tags || [];
         t.suggested_tags = r.suggested_tags || [];
         if (data && data.id === t.id) { data.tags = t.tags; data.suggested_tags = t.suggested_tags; }
-        if (UI.bustTags) UI.bustTags();   // словник міг поповнитись новим тегом
+        if (UI.bustTags) UI.bustTags();   // the dictionary could have grown with a new tag
         renderTaxonomy(ctx, id, t);
     }
     async function changeTags(ctx, id, t, body) {
@@ -1039,15 +1039,15 @@
         }
     }
 
-    // Посилання з брифінгу в Telegram: ?task=<id> — прокрутити до задачі й підсвітити.
-    // Чужий чи відсутній id — нічого не робимо.
+    // Link from the briefing in Telegram: ?task=<id> — scroll to the task and highlight it.
+    // A foreign or missing id — we do nothing.
     function focusTask(rel, taskId) {
         if (!taskId) return;
         const row = rel.querySelector(`.rc-task[data-id="${CSS.escape(String(taskId))}"]`);
         if (!row) return;
-        // 'instant' явно: .rc-content має scroll-behavior: smooth, і плавна прокрутка
-        // зіштовхувалась зі скиданням scrollTop у роутері. Двічі: вище ще дорисовуються
-        // резюме й ліниві панелі (копілот, відео) і зсувають рядок.
+        // 'instant' explicitly: .rc-content has scroll-behavior: smooth, and smooth scrolling
+        // collided with the scrollTop reset in the router. Twice: above, the summary
+        // and lazy panels (copilot, video) are still being drawn and shift the row.
         const go = () => { if (row.isConnected) row.scrollIntoView({ block: 'center', behavior: 'instant' }); };
         requestAnimationFrame(go);
         setTimeout(go, 800);

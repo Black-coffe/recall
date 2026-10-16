@@ -1,4 +1,4 @@
-"""K4 story 02: фільтр приватного перед ботом труб."""
+"""K4 story 02: the private-data filter before the pipes bot."""
 from __future__ import annotations
 
 import logging
@@ -18,7 +18,7 @@ def db(tmp_path, monkeypatch):
     path = str(tmp_path / "r.db")
     init_database(path)
     conn = sqlite3.connect(path)
-    # «Юридичне» → підпроєкт «Суди»; 2 — «Особисте» з міграцій.
+    # «Юридичне» → subcategory «Суди»; 2 is «Особисте» from the migrations.
     conn.execute("INSERT INTO categories (id, name, name_norm, parent_id) VALUES "
                  "(15, 'Юридичне', 'юридичне', 5)")
     conn.execute("INSERT INTO categories (id, name, name_norm, parent_id) VALUES "
@@ -61,7 +61,7 @@ class TestFilterData:
         out, hidden = filter_data(_digest(), db_path=db)
         tasks = [i["task"] for i in out["weekly_digest"]["this_week"]]
         assert tasks == ["Надіслати звіт"]
-        # Забута обіцянка без transcription_id — напрямок через action_items.
+        # A forgotten promise without transcription_id — the direction via action_items.
         assert [i["task"] for i in out["weekly_digest"]["dropped"]] == ["Оновити кошторис"]
         assert hidden == 3
         assert out["weekly_digest"]["coverage"] == {"total": 5}
@@ -77,9 +77,9 @@ class TestFilterData:
             out, hidden = filter_data(_digest(), db_path=str(tmp_path / "нема" / "r.db"))
         wd = out["weekly_digest"]
         assert wd["this_week"] == [] and wd["dropped"] == []
-        # Теми без джерела перевіряються лише стоп-словами — лишаються.
+        # Topics without a source are checked against stop words only — they stay.
         assert len(wd["stale_topics"]) == 2 and hidden == 5
-        assert "приховано" in caplog.text
+        assert "hidden" in caplog.text
 
     def test_ambiguous_namesake_hidden(self, db):
         conn = sqlite3.connect(db)
@@ -113,7 +113,7 @@ class TestScrub:
         ("інвестиція $5k на старт", "5k"),
         ("аванс €300 до пʼятниці", "300"),
         ("бюджет 5к USD на місяць", "5к"),
-        # Ревʼю раунду 1: тисячі словом і російські валюти.
+        # Review round 1: thousands as a word and Russian currencies.
         ("позика 12 тисяч доларів до весни", "12"),
         ("взяли 13 тысяч гривен наличными", "13"),
         ("счёт 5000 долларов за сервер", "5000"),
@@ -134,7 +134,7 @@ class TestScrub:
 
     def test_leaked_stop_word_reported(self, db, tmp_path):
         _words(tmp_path, "петренко")
-        assert scrub_text("Зателефонувати Петренку")[1] == []      # морфології нема
+        assert scrub_text("Зателефонувати Петренку")[1] == []      # no morphology
         assert scrub_text("Зателефонувати ПЕТРЕНКО")[1] == ["петренко"]
 
 
@@ -144,7 +144,7 @@ def test_hidden_line_plural():
     assert "11 пунктів" in pipes_privacy.hidden_line(11)
 
 
-# ------------------------------------------------------- у run_pipe
+# ------------------------------------------------------- in run_pipe
 
 def _pipe():
     return parse_pipe("---\nschedule: 0 9 * * 1\ntools: weekly_digest\nchannel: telegram\n"
@@ -204,11 +204,11 @@ def test_masks_applied_to_delivered_text(db, claude, monkeypatch):
 
 
 def test_stop_word_surviving_render_blocks_and_tells_owner(db, claude, monkeypatch, tmp_path):
-    """Власник 15.10.2026: «Если фильтр приватного остановит брифинг, бот просто промолчит:
-    не будет ни свода, ни сообщения об ошибке.» — брифінгу нема, повідомлення є."""
+    """Owner 15.10.2026: «If the private filter stops the brief, the bot will just stay silent:
+    there will be neither the digest nor an error message.» — there is no brief, there is a message."""
     _words(tmp_path, "Петренко")
     monkeypatch.setitem(pipes.TOOLS, "weekly_digest", lambda d, n: {"this_week": []})
-    claude("Нагадати ПЕТРЕНКО про зустріч")          # модель дописала від себе
+    claude("Нагадати ПЕТРЕНКО про зустріч")          # the model added this on its own
     sent = []
     res = run_pipe(_pipe(), db_path=db, deliver=sent.append)
     assert res["status"] == "blocked" and len(sent) == 1

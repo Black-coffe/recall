@@ -1,9 +1,9 @@
 """Finalize pipeline (Phase 9.4): PCM → WAV → mix → MP3.
 
-Останній етап recording-сесії: перетворення raw PCM-стрімів у єдиний
-аудіо-файл, готовий до транскрипції та зберігання в Audio Library.
+The last stage of a recording session: turns the raw PCM streams into a single
+audio file ready for transcription and storage in the Audio Library.
 
-Pipeline (для двопотокової сесії):
+Pipeline (for a two-stream session):
 
 .. code-block:: text
 
@@ -11,24 +11,24 @@ Pipeline (для двопотокової сесії):
                                               ├──pydub overlay──→ final.mp3
     system.pcm ──pcm_to_wav──→ system.wav ──┘
 
-Для однопотокового запису (тільки mic або тільки system) — pipeline
-коротший, без overlay, просто WAV → MP3.
+For a single-stream recording (mic only or system only) the pipeline
+is shorter, without overlay, just WAV → MP3.
 
-Pause/resume: при pause writer flush+close, при resume — новий segment
-з offset = total_bytes. У файл нічого не пишеться під час паузи, тому
-PCM на диску не містить тишини. Cut'ити segments не треба — байти
-вже без розривів.
+Pause/resume: on pause the writer flushes+closes, on resume a new segment
+with offset = total_bytes. Nothing is written to the file during a pause, so
+the PCM on disk contains no silence. There is no need to cut segments — the bytes
+are already gapless.
 
-Чому stdlib ``wave`` для PCM→WAV:
-- Не потребує pydub/ffmpeg для базового перетворення.
-- Швидкий: просто додає 44-байтовий RIFF-хедер до існуючих PCM-байт.
-- Streaming-friendly: ``writeframes`` пише chunk'ами, не вантажить
-  усе в RAM.
+Why the stdlib ``wave`` for PCM→WAV:
+- It needs neither pydub nor ffmpeg for the basic conversion.
+- Fast: it just adds a 44-byte RIFF header to the existing PCM bytes.
+- Streaming-friendly: ``writeframes`` writes in chunks, does not load
+  everything into RAM.
 
-Чому pydub для mix→MP3:
-- Native overlay підтримує гучності, fade'и (на майбутнє).
-- MP3 export через ffmpeg (вже є в проєкті).
-- Звичайний interface: ``AudioSegment.overlay()``.
+Why pydub for mix→MP3:
+- Native overlay supports volumes and fades (for the future).
+- MP3 export through ffmpeg (already in the project).
+- A familiar interface: ``AudioSegment.overlay()``.
 """
 from __future__ import annotations
 
@@ -53,13 +53,13 @@ from app.services.recording.session_store import (
 logger = logging.getLogger(__name__)
 
 
-# Поріг, з якого mix іде через ffmpeg (константна пам'ять) замість pydub
-# (тримає весь декодований WAV у RAM). 400 МБ ≈ 40 хв стерео 48кГц — усе, що
-# коротше, pydub переживає спокійно; усе, що довше, б'є по пам'яті процесу.
+# The threshold above which the mix goes through ffmpeg (constant memory) instead of pydub
+# (which holds the whole decoded WAV in RAM). 400 MB ≈ 40 min of stereo 48kHz — anything
+# shorter pydub handles calmly; anything longer hits the process memory.
 FFMPEG_MIX_THRESHOLD_BYTES = 400 * 1024 * 1024
 
-# Стеля на один ffmpeg-mix. Реально 70-хв запис зводиться за ~27с, але
-# багатогодинна сесія на холодному диску може тягнутись — беремо із запасом.
+# Ceiling for one ffmpeg mix. A 70-min recording is really mixed in ~27s, but
+# a multi-hour session on a cold disk may drag on — we take a margin.
 _FFMPEG_MIX_TIMEOUT_SEC = 3600
 
 
@@ -73,19 +73,19 @@ def pcm_to_wav(
     sample_width_bytes: int = 2,
     chunk_size: int = 1024 * 1024,
 ) -> int:
-    """Конвертує raw PCM у WAV з RIFF-хедером.
+    """Converts raw PCM to WAV with a RIFF header.
 
-    Робить streaming-write: читає по ``chunk_size`` байт і пише через
-    ``wave.writeframes``. Не вантажить увесь файл у RAM, тому годиться
-    для багатогодинних записів.
+    Does a streaming write: reads ``chunk_size`` bytes at a time and writes through
+    ``wave.writeframes``. Does not load the whole file into RAM, so it is suitable
+    for multi-hour recordings.
 
-    Повертає кількість записаних audio frames.
+    Returns the number of audio frames written.
 
-    Особливості:
-    - Якщо PCM-файл порожній або відсутній — створює пустий WAV (0 frames)
-      і повертає 0. Це валідний WAV, можна відкрити.
-    - Якщо розмір PCM не кратний (channels * sample_width_bytes) —
-      хвостові байти ігноруються (округлення до повного семплу).
+    Details:
+    - If the PCM file is empty or missing — creates an empty WAV (0 frames)
+      and returns 0. This is a valid WAV, it can be opened.
+    - If the PCM size is not a multiple of (channels * sample_width_bytes) —
+      the trailing bytes are ignored (rounded down to a whole sample).
     """
     pcm_path = Path(pcm_path)
     wav_path = Path(wav_path)
@@ -100,7 +100,7 @@ def pcm_to_wav(
         wf.setframerate(sample_rate)
 
         if not pcm_path.is_file():
-            logger.warning("PCM не знайдено: %s — створено пустий WAV", pcm_path)
+            logger.warning("PCM not found: %s — created an empty WAV", pcm_path)
             return 0
 
         with open(pcm_path, 'rb') as pf:
@@ -108,11 +108,11 @@ def pcm_to_wav(
                 chunk = pf.read(chunk_size)
                 if not chunk:
                     break
-                # Округлюємо chunk вниз до повного семплу
+                # Round the chunk down to a whole sample
                 usable = (len(chunk) // frame_size) * frame_size
                 if usable < len(chunk):
                     logger.debug(
-                        "Хвіст %d байт у %s округлено вниз до %d",
+                        "Tail of %d bytes in %s rounded down to %d",
                         len(chunk) - usable, pcm_path, usable,
                     )
                 if usable > 0:
@@ -132,36 +132,36 @@ def mix_streams(
     mic_gain_db: float = 0.0,
     system_gain_db: float = 0.0,
 ) -> Path:
-    """Зводить mic + system у MP3.
+    """Mixes mic + system into an MP3.
 
-    Логіка:
-    - Великі доріжки (сумарно > ``FFMPEG_MIX_THRESHOLD_BYTES``) → стрімовий
-      mix через ffmpeg, БЕЗ завантаження в RAM (див. :func:`_mix_via_ffmpeg`)
-    - Інакше обидва WAV → overlay через pydub → MP3
-    - Тільки mic або тільки system (інший = None або пустий) → одразу
-      WAV → MP3 без overlay'у
-    - Обидва відсутні → :class:`FileNotFoundError`
+    Logic:
+    - Large tracks (together > ``FFMPEG_MIX_THRESHOLD_BYTES``) → a streaming
+      mix through ffmpeg, WITHOUT loading into RAM (see :func:`_mix_via_ffmpeg`)
+    - Otherwise both WAVs → overlay through pydub → MP3
+    - Only mic or only system (the other = None or empty) → straight
+      WAV → MP3 without overlay
+    - Both missing → :class:`FileNotFoundError`
 
-    Gain в дБ: 0 = native, +6 ≈ x2 amplitude, -6 ≈ /2.
+    Gain in dB: 0 = native, +6 ≈ x2 amplitude, -6 ≈ /2.
 
-    Повертає шлях до згенерованого MP3.
+    Returns the path to the generated MP3.
     """
-    from pydub import AudioSegment  # lazy import — pydub тягне ffmpeg при імпорті
+    from pydub import AudioSegment  # lazy import — pydub pulls in ffmpeg on import
 
     output_mp3 = Path(output_mp3)
     output_mp3.parent.mkdir(parents=True, exist_ok=True)
 
-    # pydub тримає ВЕСЬ декодований WAV у пам'яті (і ще раз стільки ж на час
-    # overlay'у). Для багатогодинної сесії це гігабайти: 10-годинний запис =
-    # 3.3 ГБ mic + 0.9 ГБ system. Це не теорія — саме такий запис ліг у
-    # crashed 21.07.2026, а boot-recovery тепер намагається дофіналізувати
-    # такі сесії автоматично, тобто ризик OOM переїхав би на СТАРТ застосунку.
-    # ffmpeg робить те саме стрімом, з константною пам'яттю.
+    # pydub holds the WHOLE decoded WAV in memory (and the same amount again during
+    # the overlay). For a multi-hour session that is gigabytes: a 10-hour recording =
+    # 3.3 GB mic + 0.9 GB system. This is not theory — exactly such a recording went
+    # crashed on 21.07.2026, and boot recovery now tries to finalize
+    # such sessions automatically, so the OOM risk would move to APPLICATION START.
+    # ffmpeg does the same as a stream, with constant memory.
     _inputs = [p for p in (mic_wav, system_wav) if p and Path(p).is_file()]
     _total = sum(Path(p).stat().st_size for p in _inputs)
     if _total > FFMPEG_MIX_THRESHOLD_BYTES:
         logger.info(
-            "mix_streams: %.2f ГБ вхідних даних — мікшую через ffmpeg (не pydub)",
+            "mix_streams: %.2f GB of input data — mixing through ffmpeg (not pydub)",
             _total / 1e9,
         )
         try:
@@ -174,11 +174,11 @@ def mix_streams(
                 system_gain_db=system_gain_db,
             )
         except Exception as e:
-            # Не фатально: падаємо назад у pydub. Гірше по пам'яті, але це
-            # рівно та поведінка, що була до цієї оптимізації.
+            # Not fatal: fall back to pydub. Worse for memory, but this is
+            # exactly the behaviour that existed before this optimization.
             logger.warning(
-                "ffmpeg-mix не вдався (%s) — відкочуюсь на pydub, "
-                "можливий великий сплеск пам'яті", e,
+                "ffmpeg mix failed (%s) — falling back to pydub, "
+                "a large memory spike is possible", e,
             )
 
     mic_seg = _maybe_load_wav(mic_wav, mic_gain_db)
@@ -186,12 +186,12 @@ def mix_streams(
 
     if mic_seg is None and sys_seg is None:
         raise FileNotFoundError(
-            f"Жодного валідного WAV для зведення (mic={mic_wav}, system={system_wav})"
+            f"No valid WAV to mix (mic={mic_wav}, system={system_wav})"
         )
 
     if mic_seg is not None and sys_seg is not None:
-        # Вирівнюємо довжину: коротший буде накладено в позицію 0,
-        # довший залишиться як є.
+        # Align the length: the shorter one is overlaid at position 0,
+        # the longer one stays as is.
         if len(mic_seg) >= len(sys_seg):
             combined = mic_seg.overlay(sys_seg)
         else:
@@ -211,25 +211,25 @@ def _mix_via_ffmpeg(
     mic_gain_db: float,
     system_gain_db: float,
 ) -> Path:
-    """Стрімовий mix через ffmpeg — константна пам'ять на будь-якій довжині.
+    """Streaming mix through ffmpeg — constant memory at any length.
 
-    Семантика 1:1 з pydub-гілкою:
-    - ``amix=normalize=0`` — проста сума семплів, як ``AudioSegment.overlay``
-      (з ``normalize=1``, дефолтом ffmpeg, кожен вхід ділився б на N → тихіше).
-    - ``duration=longest`` — коротший вхід доповнюється тишею, довший лишається
-      цілим (pydub кладе коротший у позицію 0 довшого).
-    - target rate/channels = максимум по входах — так само, як ``_sync`` у pydub.
-    - gain в дБ через ``volume``.
+    Semantics 1:1 with the pydub branch:
+    - ``amix=normalize=0`` — a plain sum of samples, like ``AudioSegment.overlay``
+      (with ``normalize=1``, the ffmpeg default, every input would be divided by N → quieter).
+    - ``duration=longest`` — the shorter input is padded with silence, the longer one stays
+      whole (pydub puts the shorter one at position 0 of the longer).
+    - target rate/channels = the maximum over the inputs — the same as ``_sync`` in pydub.
+    - gain in dB through ``volume``.
 
-    Кидає виняток при будь-якій проблемі — викликач відкочується на pydub.
+    Raises an exception on any problem — the caller falls back to pydub.
     """
     import subprocess
 
-    from pydub import AudioSegment  # той самий резолвер ffmpeg, що й у pydub
+    from pydub import AudioSegment  # the same ffmpeg resolver as in pydub
 
     ffmpeg_bin = getattr(AudioSegment, 'converter', None) or shutil.which('ffmpeg')
     if not ffmpeg_bin:
-        raise FinalizeError('ffmpeg не знайдено')
+        raise FinalizeError('ffmpeg not found')
 
     inputs: list[tuple[Path, float]] = []
     for path, gain in ((mic_wav, mic_gain_db), (system_wav, system_gain_db)):
@@ -239,9 +239,9 @@ def _mix_via_ffmpeg(
         if p.is_file() and p.stat().st_size > 0:
             inputs.append((p, gain))
     if not inputs:
-        raise FinalizeError('Немає вхідних WAV для ffmpeg-mix')
+        raise FinalizeError('No input WAVs for the ffmpeg mix')
 
-    # Читаємо параметри з RIFF-хедера (wave не вантажить аудіо-дані).
+    # Read the parameters from the RIFF header (wave does not load the audio data).
     params: list[tuple[int, int]] = []
     for p, _ in inputs:
         with wave.open(str(p), 'rb') as wf:
@@ -258,12 +258,12 @@ def _mix_via_ffmpeg(
     for idx, (_, gain) in enumerate(inputs):
         src_ch = params[idx][1]
         if src_ch == 1 and target_ch >= 2:
-            # НЕ aformat: при mono→stereo rematrix у swresample нормалізує
-            # мікс і тихішає на 3 дБ, тоді як pydub set_channels() просто
-            # дублює канал. Для нас це не косметика — mic-доріжка моно і вже
-            # найтихіша (мікрофон проти loopback'у), зайві -3 дБ б'ють саме
-            # по голосу власника і по якості його транскрипції. pan копіює
-            # канал один-в-один, як pydub.
+            # NOT aformat: on mono→stereo the rematrix in swresample normalizes
+            # the mix and it gets quieter by 3 dB, whereas pydub set_channels() simply
+            # duplicates the channel. For us this is not cosmetic — the mic track is mono and already
+            # the quietest (microphone vs loopback), the extra -3 dB hits precisely
+            # the owner's voice and the quality of its transcription. pan copies the
+            # channel one-to-one, like pydub.
             chain = f'aresample={target_rate},pan={layout}|c0=c0|c1=c0'
         else:
             chain = f'aformat=sample_rates={target_rate}:channel_layouts={layout}'
@@ -296,12 +296,12 @@ def _mix_via_ffmpeg(
             f"{result.stderr.decode('utf-8', errors='replace')[-400:]}"
         )
     if not output_mp3.is_file() or output_mp3.stat().st_size == 0:
-        raise FinalizeError('ffmpeg відпрацював, але MP3 порожній')
+        raise FinalizeError('ffmpeg finished, but the MP3 is empty')
     return output_mp3
 
 
 def _maybe_load_wav(path: Optional[Path | str], gain_db: float):
-    """Повертає AudioSegment або None якщо файл відсутній/порожній."""
+    """Returns an AudioSegment or None if the file is missing/empty."""
     if path is None:
         return None
     p = Path(path)
@@ -311,10 +311,10 @@ def _maybe_load_wav(path: Optional[Path | str], gain_db: float):
         from pydub import AudioSegment
         seg = AudioSegment.from_wav(str(p))
     except Exception as e:
-        logger.warning("Не вдалось завантажити %s: %s", p, e)
+        logger.warning("Failed to load %s: %s", p, e)
         return None
     if seg.duration_seconds < 0.05:
-        logger.debug("WAV %s занадто короткий (%.3fs) — ігноруємо",
+        logger.debug("WAV %s is too short (%.3fs) — ignoring",
                      p, seg.duration_seconds)
         return None
     if gain_db != 0.0:
@@ -325,7 +325,7 @@ def _maybe_load_wav(path: Optional[Path | str], gain_db: float):
 # ---------------------------------------------------------------- session finalize
 
 class FinalizeError(RuntimeError):
-    """Помилка фіналізації."""
+    """Finalization error."""
 
 
 def finalize_session(
@@ -337,33 +337,33 @@ def finalize_session(
     mic_gain_db: float = 0.0,
     system_gain_db: float = 0.0,
 ) -> dict:
-    """Повний pipeline для сесії: PCM → WAV → MP3 → manifest update.
+    """The full pipeline for a session: PCM → WAV → MP3 → manifest update.
 
-    Кроки:
-    1. Зчитати manifest (мусить існувати).
-    2. Для кожного активного потоку (mic/system) — pcm_to_wav.
+    Steps:
+    1. Read the manifest (it must exist).
+    2. For every active stream (mic/system) — pcm_to_wav.
     3. mix_streams → final.mp3.
-    4. Оновити manifest: status=finalized, final_mp3_path, total_duration.
-    5. Якщо keep_pcm=False — видалити .pcm файли.
-    6. Якщо keep_wav=False — видалити проміжні mic.wav/system.wav (їх нічого не
-       читає після finalize; інакше накопичуються ~1 ГБ/сесію).
+    4. Update the manifest: status=finalized, final_mp3_path, total_duration.
+    5. If keep_pcm=False — delete the .pcm files.
+    6. If keep_wav=False — delete the intermediate mic.wav/system.wav (nothing
+       reads them after finalize; otherwise ~1 GB/session accumulates).
 
-    Повертає словник із підсумком: paths, durations, status.
+    Returns a dict with the summary: paths, durations, status.
 
-    Кидає :class:`FinalizeError` при крах'у на будь-якому кроці.
-    Manifest НЕ оновлюється до finalize в такому випадку — статус
-    залишається попереднім (stopping/crashed), recovery-flow зможе
-    повторити спробу.
+    Raises :class:`FinalizeError` on a crash at any step.
+    The manifest is NOT updated before finalize in that case — the status
+    stays the previous one (stopping/crashed), the recovery flow can
+    retry.
     """
     try:
         manifest = store.read(session_id)
     except SessionStoreError as e:
-        raise FinalizeError(f"Manifest відсутній: {e}") from e
+        raise FinalizeError(f"Manifest is missing: {e}") from e
 
     session_dir = store.session_dir(session_id)
-    # Top-level залишається як target для mix (фінальний MP3),
-    # але для PCM→WAV беремо per-stream native параметри
-    # (можуть відрізнятись: моно-mic 88200/1 vs stereo loopback 48000/2).
+    # Top-level stays as the target for the mix (the final MP3),
+    # but for PCM→WAV we take per-stream native parameters
+    # (they may differ: mono mic 88200/1 vs stereo loopback 48000/2).
     target_sample_rate = int(manifest['sample_rate'])
     target_channels = int(manifest['channels'])
     bytes_per_sample = int(manifest.get('bytes_per_sample', 2))
@@ -375,8 +375,8 @@ def finalize_session(
         stream_meta = manifest['streams'][stream_name]
         if not stream_meta.get('enabled'):
             continue
-        # Per-stream native params (Phase 9.10 fix). Fallback на top-level
-        # для backward compat зі старими manifest'ами без цих полів.
+        # Per-stream native params (Phase 9.10 fix). Fallback to top-level
+        # for backward compat with old manifests without these fields.
         stream_rate = stream_meta.get('sample_rate') or target_sample_rate
         stream_channels = stream_meta.get('channels') or target_channels
         pcm_path = store.pcm_path(session_id, stream_name)
@@ -391,7 +391,7 @@ def finalize_session(
             )
         except Exception as e:
             raise FinalizeError(
-                f"pcm_to_wav для {stream_name} зламався: {e}"
+                f"pcm_to_wav for {stream_name} failed: {e}"
             ) from e
 
         duration = frames / stream_rate if stream_rate > 0 else 0.0
@@ -405,10 +405,10 @@ def finalize_session(
         if frames > 0:
             wav_paths[stream_name] = wav_path
         else:
-            logger.info("Stream %s порожній — пропускаємо у mix'і", stream_name)
+            logger.info("Stream %s is empty — skipping it in the mix", stream_name)
 
     if not wav_paths:
-        # Немає жодних даних. Manifest позначаємо finalized з пустим mp3.
+        # There is no data at all. We mark the manifest finalized with an empty mp3.
         store.modify(session_id, lambda m: m.update({
             'status': STATUS_FINALIZED,
             'final_mp3_path': None,
@@ -435,7 +435,7 @@ def finalize_session(
             system_gain_db=system_gain_db,
         )
     except Exception as e:
-        raise FinalizeError(f"mix_streams зламався: {e}") from e
+        raise FinalizeError(f"mix_streams failed: {e}") from e
 
     total_duration = max(
         (info.get('duration_sec', 0.0) for info in streams_info.values()),
@@ -450,7 +450,7 @@ def finalize_session(
         mf['streams_finalized'] = streams_info
     store.modify(session_id, _apply)
 
-    # Cleanup raw PCM (опц.)
+    # Cleanup of raw PCM (optional)
     if not keep_pcm:
         for stream_name in (STREAM_MIC, STREAM_SYSTEM):
             pcm = store.pcm_path(session_id, stream_name)
@@ -458,12 +458,12 @@ def finalize_session(
                 try:
                     pcm.unlink()
                 except OSError as e:
-                    logger.warning("Не вдалось видалити %s: %s", pcm, e)
+                    logger.warning("Failed to delete %s: %s", pcm, e)
 
-    # Cleanup проміжних WAV (опц.). final.mp3 уже створено; mic.wav/system.wav —
-    # лише крок зведення, нічого їх після finalize не читає. За замовчуванням
-    # видаляємо (інакше ~1 ГБ/сесію мертвого місця). keep_wav=True — лишити
-    # роздільні доріжки (для майбутнього реміксу/редіаризації).
+    # Cleanup of intermediate WAVs (optional). final.mp3 is already created; mic.wav/system.wav are
+    # only a mixing step, nothing reads them after finalize. By default
+    # we delete them (otherwise ~1 GB/session of dead space). keep_wav=True keeps the
+    # separate tracks (for a future remix/re-diarization).
     if not keep_wav:
         for stream_name in (STREAM_MIC, STREAM_SYSTEM):
             wav = session_dir / f'{stream_name}.wav'
@@ -471,7 +471,7 @@ def finalize_session(
                 try:
                     wav.unlink()
                 except OSError as e:
-                    logger.warning("Не вдалось видалити %s: %s", wav, e)
+                    logger.warning("Failed to delete %s: %s", wav, e)
 
     return {
         'session_id': session_id,
@@ -483,7 +483,7 @@ def finalize_session(
 
 
 def discard_session_files(session_id: str, store: SessionStore) -> None:
-    """Видалити всі файли сесії (для discard'у користувачем)."""
+    """Delete all session files (for a discard by the user)."""
     session_dir = store.session_dir(session_id)
     if session_dir.exists():
         shutil.rmtree(session_dir, ignore_errors=True)

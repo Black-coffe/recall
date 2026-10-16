@@ -1,26 +1,26 @@
-"""Integration tests для DiarizationService з РЕАЛЬНИМ pyannote.audio.
+"""Integration tests for DiarizationService with the REAL pyannote.audio.
 
-Ці тести ВАНТАЖАТЬ модель (~1.5GB при першому запуску, потім кеш)
-і запускають справжню інференцію — повільно (10-30s).
+These tests LOAD the model (~1.5GB on first run, then cached)
+and run real inference - slow (10-30s).
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_diarization_integration.py -m slow
 
-Або всі тести включно зі slow:
+Or all tests including slow:
     .venv/Scripts/python.exe -m pytest -m ""
 
 Skip-condition (auto):
-- pyannote.audio не встановлений
-- HF_TOKEN відсутній у env
-- Не прийнята ліцензія pyannote/* (буде 401 при load)
+- pyannote.audio is not installed
+- HF_TOKEN is missing from the env
+- The pyannote/* license is not accepted (a 401 on load)
 
 Strategy:
-- Synthetic audio fixture через numpy + wave (без зовнішніх залежностей).
-  Це не справжня мова — pyannote може повернути 0 сегментів — але
-  вантаження pipeline і інференція не повинні крашитись.
-- Якщо у tests/fixtures/diarization/<name>.wav лежить РЕАЛЬНЕ мовлення —
-  test_real_speech_detects_speakers (опц.) перевіряє що 1+ спікера
-  знайдено. Користувач може покласти свій файл туди для richer coverage.
+- Synthetic audio fixture via numpy + wave (no external dependencies).
+  It is not real speech - pyannote may return 0 segments - but
+  loading the pipeline and inference must not crash.
+- If tests/fixtures/diarization/<name>.wav holds REAL speech -
+  test_real_speech_detects_speakers (optional) checks that 1+ speaker is
+  found. The user can put their own file there for richer coverage.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.slow
 # ---------------------------------------------------------------- skip helpers
 
 def _skip_if_unavailable():
-    """Skip всі тести якщо pyannote / token недоступні."""
+    """Skip all tests if pyannote / the token are unavailable."""
     try:
         import pyannote.audio  # noqa: F401
     except ImportError:
@@ -53,15 +53,15 @@ def _skip_if_unavailable():
 
 @pytest.fixture(scope='module')
 def synthetic_speech_wav(tmp_path_factory):
-    """Створює короткий синтетичний WAV без додаткових залежностей.
+    """Creates a short synthetic WAV without additional dependencies.
 
-    Генерує 5s mono 16kHz signal з:
-    - Воїд-частотами (формантами) щоб виглядало мов-подібно
-    - Огинаючою на ~4Hz (rate складів)
-    - Тиша посередині (тест VAD-shift detection)
+    Generates a 5s mono 16kHz signal with:
+    - Voiced frequencies (formants) so it looks speech-like
+    - An envelope at ~4Hz (syllable rate)
+    - Silence in the middle (test of VAD-shift detection)
 
-    Не справжня мова — pyannote може повернути 0 сегментів.
-    Тест просто перевіряє що pipeline не крашиться.
+    Not real speech - pyannote may return 0 segments.
+    The test just checks that the pipeline does not crash.
     """
     import math
     import struct
@@ -73,11 +73,11 @@ def synthetic_speech_wav(tmp_path_factory):
     samples = []
     for i in range(n_samples):
         t = i / sr
-        # Тиша 2.0–3.0s
+        # Silence 2.0–3.0s
         if 2.0 <= t < 3.0:
             samples.append(0)
             continue
-        # Складова "мовно-подібна"
+        # The "speech-like" component
         envelope = (math.sin(2 * math.pi * 4 * t)) ** 2  # 4Hz syllable rate
         s = (
             math.sin(2 * math.pi * 120 * t) * 0.3 +
@@ -97,10 +97,10 @@ def synthetic_speech_wav(tmp_path_factory):
 
 @pytest.fixture
 def real_speech_wav():
-    """Опц. фікстура — реальне мовлення для richer coverage.
+    """Optional fixture - real speech for richer coverage.
 
-    Користувач може покласти WAV або MP3 у tests/fixtures/diarization/sample.wav.
-    Якщо файлу немає — тест skip'ається.
+    The user can put a WAV or MP3 at tests/fixtures/diarization/sample.wav.
+    If the file is absent - the test is skipped.
     """
     path = Path(__file__).parent / 'fixtures' / 'diarization' / 'sample.wav'
     if not path.is_file():
@@ -110,7 +110,7 @@ def real_speech_wav():
 
 @pytest.fixture
 def fresh_service():
-    """Reset singleton між тестами щоб state не текла."""
+    """Reset the singleton between tests so that state does not leak."""
     from app.services.diarization_service import DiarizationService
     DiarizationService._instance = None
     yield
@@ -120,7 +120,7 @@ def fresh_service():
 # ---------------------------------------------------------------- pipeline load
 
 def test_pipeline_loads_with_token(fresh_service):
-    """Перший виклик ensure_pipeline вантажить модель з HF cache."""
+    """The first ensure_pipeline call loads the model from the HF cache."""
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService
 
@@ -131,7 +131,7 @@ def test_pipeline_loads_with_token(fresh_service):
 
 
 def test_pipeline_singleton(fresh_service):
-    """Повторні get_instance() повертають той самий обʼєкт."""
+    """Repeated get_instance() calls return the same object."""
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService
 
@@ -143,10 +143,10 @@ def test_pipeline_singleton(fresh_service):
 # ---------------------------------------------------------------- inference
 
 def test_diarize_synthetic_doesnt_crash(synthetic_speech_wav, fresh_service):
-    """pyannote має обробити синтетичне аудіо без виключень.
+    """pyannote must process synthetic audio without exceptions.
 
-    Може повернути 0 сегментів (синтез не схожий на мову достатньо),
-    головне — не крашиться і повертає DiarizationResult.
+    It may return 0 segments (the synthetic is not speech-like enough),
+    the main thing is that it does not crash and returns a DiarizationResult.
     """
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService, DiarizationResult
@@ -156,21 +156,21 @@ def test_diarize_synthetic_doesnt_crash(synthetic_speech_wav, fresh_service):
 
     assert isinstance(result, DiarizationResult)
     assert result.processing_time_sec > 0
-    # Усі сегменти всередині duration файлу
+    # All segments are inside the file duration
     for seg in result.segments:
         assert 0 <= seg.start < seg.end <= 6.0  # 5s + slack
         assert seg.speaker.startswith('SPEAKER_')
 
 
 def test_diarize_recording_per_stream(synthetic_speech_wav, fresh_service, tmp_path):
-    """diarize_recording з mic.wav → всі лейбли self; system.wav → SPEAKER_NN."""
+    """diarize_recording with mic.wav → all labels are self; system.wav → SPEAKER_NN."""
     _skip_if_unavailable()
     from app.services.diarization_service import (
         DiarizationService,
         SELF_LABEL,
     )
 
-    # Reuse synthetic як mic + копія як system (різні шляхи, той самий контент)
+    # Reuse the synthetic as mic + a copy as system (different paths, the same content)
     mic = synthetic_speech_wav
     system = tmp_path / 'system.wav'
     system.write_bytes(mic.read_bytes())
@@ -178,8 +178,8 @@ def test_diarize_recording_per_stream(synthetic_speech_wav, fresh_service, tmp_p
     svc = DiarizationService.get_instance()
     result = svc.diarize_recording(mic_wav=mic, system_wav=system)
 
-    # Якщо synthetic generates 0 segments — тест пройде як no-op.
-    # Якщо є сегменти — мають бути або self (з mic) або SPEAKER_NN (з system).
+    # If the synthetic generates 0 segments - the test passes as a no-op.
+    # If there are segments - they must be either self (from mic) or SPEAKER_NN (from system).
     for seg in result.segments:
         if seg.speaker == SELF_LABEL:
             pass  # mic stream
@@ -188,7 +188,7 @@ def test_diarize_recording_per_stream(synthetic_speech_wav, fresh_service, tmp_p
 
 
 def test_diarize_empty_streams_returns_empty(fresh_service):
-    """mic_wav=None і system_wav=None → порожній результат, не крах."""
+    """mic_wav=None and system_wav=None → an empty result, not a crash."""
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService
 
@@ -199,7 +199,7 @@ def test_diarize_empty_streams_returns_empty(fresh_service):
 
 
 def test_diarize_missing_file_raises(fresh_service):
-    """Неіснуючий файл → FileNotFoundError."""
+    """A non-existent file → FileNotFoundError."""
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService
 
@@ -211,10 +211,10 @@ def test_diarize_missing_file_raises(fresh_service):
 # ---------------------------------------------------------------- real speech (opt)
 
 def test_real_speech_detects_speakers(real_speech_wav, fresh_service):
-    """Опц.: якщо у fixtures/diarization/sample.wav є мовлення — 1+ спікер.
+    """Optional: if fixtures/diarization/sample.wav contains speech - 1+ speaker.
 
-    Skipped якщо файлу немає. Користувач може покласти multi-speaker WAV
-    щоб перевірити що pipeline дійсно розрізняє голоси.
+    Skipped if the file is absent. The user can put a multi-speaker WAV
+    to check that the pipeline really tells voices apart.
     """
     _skip_if_unavailable()
     from app.services.diarization_service import DiarizationService
@@ -222,10 +222,10 @@ def test_real_speech_detects_speakers(real_speech_wav, fresh_service):
     svc = DiarizationService.get_instance()
     result = svc.diarize_audio(real_speech_wav)
 
-    assert len(result.segments) > 0, 'pyannote повернув 0 сегментів на real speech'
+    assert len(result.segments) > 0, 'pyannote returned 0 segments on real speech'
     speakers = {s.speaker for s in result.segments}
     assert len(speakers) >= 1
-    # Усі сегменти мають валідні часи
+    # All segments have valid times
     for seg in result.segments:
         assert seg.duration > 0
         assert seg.speaker.startswith('SPEAKER_')
@@ -234,7 +234,7 @@ def test_real_speech_detects_speakers(real_speech_wav, fresh_service):
 # ---------------------------------------------------------------- end-to-end
 
 def test_end_to_end_orchestrator_with_real_pipeline(synthetic_speech_wav, fresh_service):
-    """run_diarization_for_audio з реальним pipeline (file source)."""
+    """run_diarization_for_audio with the real pipeline (file source)."""
     _skip_if_unavailable()
     from app.services.diarization_service import run_diarization_for_audio
 
@@ -248,9 +248,9 @@ def test_end_to_end_orchestrator_with_real_pipeline(synthetic_speech_wav, fresh_
         return_embeddings=True,
     )
     assert len(enriched) == len(whisper_segs)
-    # Кожен сегмент має speaker label (може бути SPEAKER_UNKNOWN якщо diar empty)
+    # Every segment has a speaker label (may be SPEAKER_UNKNOWN if diar is empty)
     for s in enriched:
         assert 'speaker' in s
     assert ptime > 0
-    # embeddings — dict (може бути порожній якщо synthetic дав 0 segments)
+    # embeddings - a dict (may be empty if the synthetic gave 0 segments)
     assert isinstance(embeddings, dict)

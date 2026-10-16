@@ -1,15 +1,15 @@
-"""Офлайн-тест Кроку 3 ко-пілота: локальний диспетчер-LLM + інтеграція у воркер.
+"""Offline test of co-pilot Step 3: the local dispatcher LLM + integration into the worker.
 
-Без Ollama / мікрофона / БД — усі зовнішні залежності (LLM, RAG-пошук, persist-
-сервіс, live-сегменти) підставні. Перевіряє контракти Кроку 3:
-  A. Dispatcher.triage/analyze/summarize: парсинг, нормалізація, відсів галюцинацій
-     (інсайт без РЕАЛЬНОГО evidence_chunk_id відкидається).
-  B. Worker._tick → диспатч за каденсом: triage → RAG-пошук → analyze → SSE
-     copilot_insight + persist insight_local; кеш RAG теми збережено.
-  C. Повернення до теми → переюз закешованого RAG (новий пошук НЕ робиться).
-  D. Дедуп: чанк, вже показаний оператору, не шлеться в LLM повторно.
+Without Ollama / microphone / DB — all external dependencies (LLM, RAG search, persist
+service, live segments) are stubs. Checks the Step 3 contracts:
+  A. Dispatcher.triage/analyze/summarize: parsing, normalization, filtering out hallucinations
+     (an insight without a REAL evidence_chunk_id is dropped).
+  B. Worker._tick → dispatch on a cadence: triage → RAG search → analyze → SSE
+     copilot_insight + persist insight_local; the topic's RAG cache is saved.
+  C. Return to a topic → reuse of the cached RAG (no new search is made).
+  D. Dedup: a chunk already shown to the operator is not sent to the LLM again.
 
-Запуск:  .venv/Scripts/python.exe test_copilot_dispatcher.py
+Run:  .venv/Scripts/python.exe test_copilot_dispatcher.py
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def check(cond, msg):
 # --------------------------------------------------------------------- fakes
 
 class FakeLLM:
-    """Підставний local_llm: розгалужується за system-промптом."""
+    """A stub local_llm: branches on the system prompt."""
     def __init__(self):
         self.calls = []
 
@@ -62,10 +62,10 @@ class FakeLLM:
             data = {"insights": [
                 {"kind": "contradiction",
                  "text": "В архіві бюджет 40k, зараз звучить 60k",
-                 "evidence_chunk_ids": [101, 999],   # 999 — вигаданий, має відсіятись
+                 "evidence_chunk_ids": [101, 999],   # 999 — made up, must be filtered out
                  "confidence": 0.74},
                 {"kind": "fact", "text": "Без доказів", "evidence_chunk_ids": [],
-                 "confidence": 0.8},                 # порожній evidence → відкинути
+                 "confidence": 0.8},                 # empty evidence → drop
             ]}
         else:  # summary
             data = {"summary": "Обговорили бюджет проєкту X."}
@@ -75,9 +75,9 @@ class FakeLLM:
 def fake_search_factory():
     state = {"calls": 0, "queries": [], "scope_tids": []}
 
-    # Трек 2 (25.07.2026): воркер передає scope_tids (зріз за проєктом) у
-    # search_fn — сигнатура фейка мусить його приймати, інакше TypeError
-    # глотається воркером як «RAG пошук збій» і секції B/F каскадно падають.
+    # Track 2 (25.07.2026): the worker passes scope_tids (a slice by project) to
+    # search_fn — the fake's signature must accept it, otherwise a TypeError
+    # is swallowed by the worker as a "RAG search failure" and sections B/F fail in a cascade.
     def fake_search(db_path, query, top_k=8, category_id=None, scope_tids=None):
         state["calls"] += 1
         state["queries"].append(query)
@@ -104,7 +104,7 @@ class FakeService:
         self.events = []
         self.retrieval_cache = {}
         self._eid = 0
-        self.budget = budget          # None = без ліміту
+        self.budget = budget          # None = no limit
         self.cost = 0.0
         self.tokens_in = 0
         self.tokens_out = 0
@@ -137,7 +137,7 @@ class FakeService:
 
 
 class FakeLive:
-    """get_preview віддає чергу пакетів сегментів (по одному за виклик)."""
+    """get_preview returns a queue of segment batches (one per call)."""
     def __init__(self, batches):
         self._batches = list(batches)
         self._acc = []
@@ -168,7 +168,7 @@ class FakeEscalator:
                "text": "Перевірено: в архіві бюджет 40k, зараз 60k — розбіжність.",
                "model": model or "claude-sonnet-4-6", "tokens_in": 1200,
                "tokens_out": 80, "cache_read": 3000, "cost": 0.005}
-        # Симулюємо мульти-голос з пер-голосовим обліком + раннім стопом за бюджетом.
+        # We simulate a multi-vote with per-vote accounting + an early stop on the budget.
         n = 0
         for i in range(max(1, int(votes or 1))):
             if i > 0 and can_continue is not None and not can_continue():
@@ -185,7 +185,7 @@ class FakeEscalator:
 
     def sweep(self, *, window, chunks, profile="", model=None):
         self.sweep_calls += 1
-        # використовуємо ОСТАННІЙ чанк (навряд показаний інсайтом аналізу) → пройде дедуп
+        # we use the LAST chunk (hardly shown by the analysis insight) → it passes dedup
         ids = [chunks[-1]["chunk_id"]] if chunks else []
         ins = [{"kind": "fact", "text": "Sweep: важлива деталь з архіву",
                 "evidence_chunk_ids": ids, "confidence": 0.8}] if ids else []
@@ -210,7 +210,7 @@ class _Resp:
 
 
 class FakeAnthropic:
-    """Мінімальний підставний anthropic-клієнт для реального Escalator (tool-use)."""
+    """A minimal stub anthropic client for the real Escalator (tool-use)."""
     def __init__(self, verdicts):
         self._q = [{"verdict": v, "confidence": 0.8, "text": "перевірка"} for v in verdicts]
         self.calls = 0
@@ -229,7 +229,7 @@ class FakeAnthropic:
 
 
 def _embed(text):
-    # детермінований ненульовий вектор; для тесту тем достатньо стабільності
+    # a deterministic non-zero vector; stability is enough for the topic test
     h = sum(ord(c) for c in text[:50]) or 1
     rng = np.array([(h * (i + 1)) % 97 for i in range(8)], dtype=np.float32)
     return rng
@@ -249,27 +249,27 @@ def test_dispatcher():
     d = Dispatcher(db_path=":memory:", llm=llm, search_fn=search)
 
     tri = d.triage(window="...розмова про бюджет...", summary="", profile="Напрямок: Фонд")
-    check(tri is not None, "triage повернув результат")
+    check(tri is not None, "triage returned a result")
     check(tri["needs_retrieval"] is True and tri["retrieval_query"], "triage: needs_retrieval+query")
     check(len(tri["observations"]) == 1 and tri["observations"][0]["kind"] == "question",
-          "triage: відсіяно невалідний kind + порожній текст (лишився 1)")
-    check(tri["tokens_in"] == 42 and tri["tokens_out"] == 17, "triage: облік токенів")
+          "triage: invalid kind + empty text filtered out (1 left)")
+    check(tri["tokens_in"] == 42 and tri["tokens_out"] == 17, "triage: token accounting")
 
     chunks = [{"chunk_id": 101, "source_name": "Дзвінок", "meeting_date": "2026-05-12",
                "text": "бюджет 40k", "transcription_id": 5, "start_time": 30.0}]
     an = d.analyze(window="зараз 60k", chunks=chunks, profile="")
-    check(an is not None, "analyze повернув результат")
+    check(an is not None, "analyze returned a result")
     ins = an["insights"]
     check(len(ins) == 1 and ins[0]["kind"] == "contradiction",
-          "analyze: лишився 1 інсайт (без-евіденс відкинуто)")
+          "analyze: 1 insight left (the one without evidence dropped)")
     check(ins[0]["evidence_chunk_ids"] == [101],
-          "analyze: вигаданий chunk_id 999 відсіяно, лишився реальний 101")
+          "analyze: the made-up chunk_id 999 filtered out, the real 101 remained")
 
     check(d.analyze(window="x", chunks=[], profile="")["insights"] == [],
-          "analyze без чанків → порожньо, без виклику LLM")
+          "analyze without chunks → empty, without an LLM call")
 
     s = d.summarize(prev_summary="", window="репліки")
-    check(isinstance(s, str) and s, "summarize повернув текст")
+    check(isinstance(s, str) and s, "summarize returned text")
 
 
 # ------------------------------------------------------------------- B. Worker dispatch
@@ -286,39 +286,39 @@ def _make_worker(llm, search):
 
 
 def test_worker_dispatch():
-    print("\nB. Worker: _tick → диспатч (triage→RAG→analyze→SSE+persist)")
+    print("\nB. Worker: _tick → dispatch (triage→RAG→analyze→SSE+persist)")
     llm = FakeLLM()
     search, sstate = fake_search_factory()
     w, broker, svc = _make_worker(llm, search)
 
     ws = _ws({"cadence_sec": 0, "top_k": 5, "category_id": 7, "escalate_threshold": 0.65})
-    # тік 1: збирає сегмент → створює тему → диспатч
+    # tick 1: collects a segment → creates a topic → dispatch
     w._tick(ws)
 
-    check(ws.tracker.current is not None, "тему створено (топік-трекер)")
+    check(ws.tracker.current is not None, "topic created (topic tracker)")
     check(ws.tracker.topics[ws.tracker.current]["label"] == "Бюджет проєкту X",
-          "мітку теми оновлено від LLM-триажу")
-    check(sstate["calls"] == 1, "RAG-пошук викликано рівно 1×")
+          "topic label updated from the LLM triage")
+    check(sstate["calls"] == 1, "RAG search called exactly 1×")
     pub_insights = [d for (_c, ev, d) in broker.events if ev == "copilot_insight"]
-    check(len(pub_insights) == 1, "опубліковано 1 copilot_insight")
+    check(len(pub_insights) == 1, "1 copilot_insight published")
     if pub_insights:
         ins = pub_insights[0]
         check(ins["source"] == "local" and ins["kind"] == "contradiction",
-              "інсайт: source=local, kind=contradiction")
+              "insight: source=local, kind=contradiction")
         check(ins["evidence"] and ins["evidence"][0]["chunk_id"] == 101,
-              "інсайт несе реальний evidence chunk_id=101 з провенансом")
+              "the insight carries a real evidence chunk_id=101 with provenance")
     kinds = [k for (k, _kw) in svc.events]
     check("retrieval" in kinds and "insight_local" in kinds,
-          "persist: події retrieval + insight_local записані")
-    check((1, ws.tracker.current) in svc.retrieval_cache, "RAG-кеш теми збережено в сервіс")
-    check(101 in ws.shown_chunks, "показаний chunk 101 у дедуп-сеті")
+          "persist: retrieval + insight_local events recorded")
+    check((1, ws.tracker.current) in svc.retrieval_cache, "the topic's RAG cache saved into the service")
+    check(101 in ws.shown_chunks, "the shown chunk 101 is in the dedup set")
     return w, broker, svc, sstate, llm
 
 
 # ------------------------------------------------------------------- C. Topic return reuse
 
 def test_topic_return_reuse():
-    print("\nC. Повернення до теми → переюз кешу (без нового пошуку)")
+    print("\nC. Return to a topic → cache reuse (no new search)")
     llm = FakeLLM()
     search, sstate = fake_search_factory()
     disp = Dispatcher(db_path=":memory:", llm=llm, search_fn=search)
@@ -328,7 +328,7 @@ def test_topic_return_reuse():
 
     ws = _ws({"cadence_sec": 0, "top_k": 5, "category_id": None, "escalate_threshold": 0.65})
     ws.transcript = "повернулись до теми бюджету"
-    # симулюємо стан після повернення до теми 0 із закешованим RAG
+    # we simulate the state after returning to topic 0 with a cached RAG
     ws.tracker.topics = [{"index": 0, "centroid": _embed("x"), "count": 1,
                           "label": "Бюджет", "first_ts": 0, "last_ts": 0}]
     ws.tracker.current = 0
@@ -337,16 +337,16 @@ def test_topic_return_reuse():
                            "meeting_date": "2026-05-12", "start_time": 30.0, "text": "бюджет 40k"}]
 
     w._maybe_dispatch(ws)
-    check(sstate["calls"] == 0, "новий RAG-пошук НЕ робився (переюз кешу)")
+    check(sstate["calls"] == 0, "a new RAG search was NOT made (cache reused)")
     pub = [d for (_c, ev, d) in broker.events if ev == "copilot_insight"]
     check(len(pub) == 1 and pub[0]["evidence"][0]["chunk_id"] == 101,
-          "інсайт з кешованого контексту теми")
+          "an insight from the topic's cached context")
 
 
 # ------------------------------------------------------------------- D. Dedup
 
 def test_dedup():
-    print("\nD. Дедуп: вже показаний чанк не шлеться в LLM повторно")
+    print("\nD. Dedup: an already shown chunk is not sent to the LLM again")
     llm = FakeLLM()
     search, sstate = fake_search_factory()
     disp = Dispatcher(db_path=":memory:", llm=llm, search_fn=search)
@@ -358,82 +358,82 @@ def test_dedup():
     ws.tracker.topics = [{"index": 0, "centroid": _embed("x"), "count": 1,
                           "label": "Бюджет", "first_ts": 0, "last_ts": 0}]
     ws.tracker.current = 0
-    ws.shown_chunks = {101: True, 202: True}  # обидва вже показані (ordered-dict як сет)
+    ws.shown_chunks = {101: True, 202: True}  # both already shown (ordered-dict as a set)
 
     n_llm_before = len(llm.calls)
     w._maybe_dispatch(ws)
     analysis_calls = [s for s in llm.calls[n_llm_before:] if s.startswith("Ти — аналітик")]
-    check(len(analysis_calls) == 0, "analyze НЕ викликано (усі чанки вже показані)")
-    # триаж дав лише observation kind=question без пруфа → притишено як шум (filter)
+    check(len(analysis_calls) == 0, "analyze NOT called (all chunks already shown)")
+    # triage gave only an observation kind=question without proof → muted as noise (filter)
     pub = [d for (_c, ev, d) in broker.events if ev == "copilot_insight"]
     check(len(pub) == 0,
-          "fallback: question без пруфа притишено (анти-шум _filter_unanchored)")
+          "fallback: question without proof muted (anti-noise _filter_unanchored)")
 
 
 def test_topic_tracker_llm_driven():
-    print("\nC2. TopicTracker — LLM-кероване рішення (continue/shift/return)")
-    tr = TopicTracker(_embed)  # embed_fn ігнорується
+    print("\nC2. TopicTracker — LLM-driven decision (continue/shift/return)")
+    tr = TopicTracker(_embed)  # embed_fn is ignored
     e0 = tr.apply(status="continue", label="Фонд", return_to=None, ts=1)
-    check(e0["action"] == "shift" and tr.current == 0, "перша тема → shift (хай що сказала LLM)")
+    check(e0["action"] == "shift" and tr.current == 0, "first topic → shift (whatever the LLM said)")
     e1 = tr.apply(status="continue", label="Фонд (деталі)", return_to=None, ts=2)
     check(e1["action"] == "continue" and e1["relabeled"]
-          and tr.topics[0]["label"] == "Фонд (деталі)", "continue з новою міткою → relabel")
+          and tr.topics[0]["label"] == "Фонд (деталі)", "continue with a new label → relabel")
     e1b = tr.apply(status="continue", label="Фонд (деталі)", return_to=None, ts=3)
-    check(e1b["action"] == "continue" and not e1b["relabeled"], "та сама мітка → без relabel")
+    check(e1b["action"] == "continue" and not e1b["relabeled"], "the same label → no relabel")
     e2 = tr.apply(status="shift", label="AI Box", return_to=None, ts=4)
-    check(e2["action"] == "shift" and tr.current == 1 and len(tr.topics) == 2, "shift → нова тема")
+    check(e2["action"] == "shift" and tr.current == 1 and len(tr.topics) == 2, "shift → new topic")
     e3 = tr.apply(status="return", label="Фонд", return_to=0, ts=5)
     check(e3["action"] == "return" and tr.current == 0 and e3["returned_from"] == 1,
-          "return до наявного індексу → повернення")
+          "return to an existing index → return")
     e4 = tr.apply(status="return", label="x", return_to=99, ts=6)
-    check(e4["action"] == "continue" and tr.current == 0, "return на неіснуючий індекс → continue")
+    check(e4["action"] == "continue" and tr.current == 0, "return to a non-existent index → continue")
     e5 = tr.apply(status="shift", label="", return_to=None, ts=7)
-    check(e5["action"] == "continue", "shift з порожньою міткою → деградує в continue")
+    check(e5["action"] == "continue", "shift with an empty label → degrades to continue")
 
 
 def test_unanchored_filter():
-    print("\nD3. Анти-шум: _filter_unanchored гейтить інсайти без пруфів")
+    print("\nD3. Anti-noise: _filter_unanchored gates insights without proofs")
     w = CopilotWorker(broker=FakeBroker(), live_transcribe_worker=FakeLive([]),
                       recording_service=None, copilot_service=FakeService(),
                       dispatcher=None, db_path=":memory:")
     ws = _ws({"min_unanchored_conf": 0.80})
     mix = [
-        {"kind": "question", "text": "q", "confidence": 0.95},        # без пруфа → drop (вид)
-        {"kind": "clarification", "text": "c", "confidence": 0.99},   # без пруфа → drop (вид)
-        {"kind": "fact", "text": "f-low", "confidence": 0.5},         # без пруфа, low → drop
-        {"kind": "fact", "text": "f-hi", "confidence": 0.85},         # без пруфа, hi → KEEP
-        {"kind": "contradiction", "text": "ctr", "confidence": 0.80}, # без пруфа, =поріг → KEEP
+        {"kind": "question", "text": "q", "confidence": 0.95},        # no proof → drop (kind)
+        {"kind": "clarification", "text": "c", "confidence": 0.99},   # no proof → drop (kind)
+        {"kind": "fact", "text": "f-low", "confidence": 0.5},         # no proof, low → drop
+        {"kind": "fact", "text": "f-hi", "confidence": 0.85},         # no proof, hi → KEEP
+        {"kind": "contradiction", "text": "ctr", "confidence": 0.80}, # no proof, =threshold → KEEP
         {"kind": "question", "text": "q-ev", "confidence": 0.1,
-         "evidence_chunk_ids": [101]},                                # з пруфом → KEEP (як є)
+         "evidence_chunk_ids": [101]},                                # with proof → KEEP (as is)
     ]
     out = w._filter_unanchored(ws, mix)
     texts = [o["text"] for o in out]
-    check(texts == ["f-hi", "ctr", "q-ev"], f"лишились лише сигнальні: {texts}")
-    # суворіший режим (light=0.90) ріже навіть f-hi(0.85) та ctr(0.80)
+    check(texts == ["f-hi", "ctr", "q-ev"], f"only the signal ones remained: {texts}")
+    # a stricter mode (light=0.90) cuts even f-hi(0.85) and ctr(0.80)
     ws2 = _ws({"min_unanchored_conf": 0.90})
     out2 = [o["text"] for o in w._filter_unanchored(ws2, mix)]
-    check(out2 == ["q-ev"], f"суворий поріг лишає тільки анкорений: {out2}")
+    check(out2 == ["q-ev"], f"the strict threshold leaves only the anchored one: {out2}")
 
 
 # ------------------------------------------------------------------- D2. shown_chunks bounded (fix #3)
 
 def test_shown_chunks_bounded():
-    print("\nD2. shown_chunks обмежено FIFO-вікном (fix #3)")
+    print("\nD2. shown_chunks is bounded by a FIFO window (fix #3)")
     w = CopilotWorker(broker=FakeBroker(), live_transcribe_worker=FakeLive([]),
                       recording_service=None, copilot_service=FakeService(),
                       dispatcher=None, db_path=":memory:", shown_cap=5)
     ws = _ws({})
     for cid in range(20):
         w._mark_shown(ws, cid)
-    check(len(ws.shown_chunks) == 5, "розмір не перевищує cap (5)")
+    check(len(ws.shown_chunks) == 5, "size does not exceed the cap (5)")
     check(0 not in ws.shown_chunks and 19 in ws.shown_chunks,
-          "витіснено найстаріші, найновіші лишились (FIFO)")
+          "the oldest evicted, the newest remained (FIFO)")
 
 
 # ------------------------------------------------------------------- F. Escalation + safety-sweep
 
 def test_escalation_and_sweep():
-    print("\nF. Каскад: ескалація в Claude + safety-sweep (фейк-ескалатор)")
+    print("\nF. Cascade: escalation to Claude + safety-sweep (fake escalator)")
     llm = FakeLLM()
     search, sstate = fake_search_factory()
     disp = Dispatcher(db_path=":memory:", llm=llm, search_fn=search)
@@ -449,28 +449,28 @@ def test_escalation_and_sweep():
               "safety_sweep_sec": 0.0001})
     w._tick(ws)
 
-    check(esc.verify_calls == 1, "Claude verify викликано 1× (conf 0.74 ≥ поріг 0.65, є докази)")
+    check(esc.verify_calls == 1, "Claude verify called 1× (conf 0.74 ≥ threshold 0.65, evidence present)")
     upd = [d for (_c, ev, d) in broker.events if ev == "copilot_insight_update"]
     check(len(upd) == 1 and upd[0]["source"] == "api" and upd[0]["verdict"] == "real",
-          "copilot_insight_update: картка апгрейдиться до «перевірено» (real)")
-    check(esc.sweep_calls == 1, "safety-sweep викликано (Sonnet-прохід по вікну)")
+          "copilot_insight_update: the card is upgraded to 'verified' (real)")
+    check(esc.sweep_calls == 1, "safety-sweep called (a Sonnet pass over the window)")
     sweep_cards = [d for (_c, ev, d) in broker.events
                    if ev == "copilot_insight" and d.get("source") == "api"]
     check(len(sweep_cards) == 1 and sweep_cards[0]["text"].startswith("Sweep"),
-          "sweep-картка опублікована як source=api (перевірено)")
+          "the sweep card is published as source=api (verified)")
     kinds = [k for (k, _kw) in svc.events]
-    check("insight_verified" in kinds, "persist: insight_verified записано")
+    check("insight_verified" in kinds, "persist: insight_verified recorded")
     usage = [d for (_c, ev, d) in broker.events if ev == "copilot_usage"]
     check(len(usage) >= 2 and usage[-1]["state"] == "hybrid",
-          "copilot_usage опубліковано (state=hybrid, бюджет не вичерпано)")
+          "copilot_usage published (state=hybrid, budget not exhausted)")
 
 
 # ------------------------------------------------------------------- G. Budget hard-stop
 
 def test_budget_hardstop():
-    print("\nG. Бюджет-хардстоп → деградація в локальний-only")
+    print("\nG. Budget hard stop → degradation to local-only")
     esc = FakeEscalator()
-    broker, svc = FakeBroker(), FakeService(budget=0.004)  # < вартість одного verify (0.005)
+    broker, svc = FakeBroker(), FakeService(budget=0.004)  # < the cost of one verify (0.005)
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
                       copilot_service=svc, dispatcher=None, escalator=esc,
                       db_path=":memory:", default_cadence_sec=0)
@@ -481,21 +481,21 @@ def test_budget_hardstop():
                   "meeting_date": "2026-05-12", "start_time": 30.0, "text": "бюджет 40k"}}
 
     v1 = w._escalate_insight(ws, 1, ins, meta, "")
-    check(v1 is not None and esc.verify_calls == 1, "перша ескалація пройшла")
-    check(ws.budget_exhausted is True, "після перевитрати бюджет позначено вичерпаним")
+    check(v1 is not None and esc.verify_calls == 1, "the first escalation went through")
+    check(ws.budget_exhausted is True, "after the overspend the budget is marked exhausted")
     last_usage = [d for (_c, ev, d) in broker.events if ev == "copilot_usage"][-1]
     check(last_usage["state"] == "budget_exhausted", "copilot_usage: state=budget_exhausted")
 
     v2 = w._escalate_insight(ws, 2, ins, meta, "")
-    check(v2 is None and esc.verify_calls == 1, "друга ескалація НЕ пішла в API (хард-стоп)")
+    check(v2 is None and esc.verify_calls == 1, "the second escalation did NOT go to the API (hard stop)")
 
 
 # ------------------------------------------------------------------- G2. Multi-vote budget early-stop (fix #1)
 
 def test_multivote_budget_earlystop():
-    print("\nG2. Мульти-голос зупиняється за бюджетом усередині (fix #1)")
+    print("\nG2. The multi-vote stops on the budget inside (fix #1)")
     esc = FakeEscalator()
-    # бюджет на ~1 голос (0.005); жорсткий режим просить 3 — мають піти не всі
+    # budget for ~1 vote (0.005); hard mode asks for 3 — not all should go
     broker, svc = FakeBroker(), FakeService(budget=0.004)
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
                       copilot_service=svc, dispatcher=None, escalator=esc,
@@ -506,18 +506,18 @@ def test_multivote_budget_earlystop():
     meta = {101: {"chunk_id": 101, "text": "y", "source_name": "s", "transcription_id": 1}}
     v = w._escalate_insight(ws, 1, ins, meta, "")
     check(v is not None and v["votes"] == 1,
-          "виконано лише 1 голос із 3 — рання зупинка за бюджетом")
-    check(abs(svc.cost - 0.005) < 1e-9, "списано лише за 1 голос ($0.005), не за 3")
-    check(ws.budget_exhausted is True, "бюджет позначено вичерпаним")
+          "only 1 vote of 3 was performed — early stop on the budget")
+    check(abs(svc.cost - 0.005) < 1e-9, "charged for only 1 vote ($0.005), not for 3")
+    check(ws.budget_exhausted is True, "the budget is marked exhausted")
 
 
 # ------------------------------------------------------------------- G3. Escalation serialized under lock (fix #2)
 
 def test_escalation_serialized():
-    print("\nG3. Конкурентні ескалації серіалізовані локом — без подвійних витрат (fix #2)")
+    print("\nG3. Concurrent escalations are serialized by a lock — no double spending (fix #2)")
     import threading
     esc = FakeEscalator(delay=0.05)
-    broker, svc = FakeBroker(), FakeService(budget=0.004)  # бюджет на 1 виклик
+    broker, svc = FakeBroker(), FakeService(budget=0.004)  # budget for 1 call
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
                       copilot_service=svc, dispatcher=None, escalator=esc,
                       db_path=":memory:", default_cadence_sec=0)
@@ -529,20 +529,20 @@ def test_escalation_serialized():
     with w._lock:
         w._sessions["rec_g3"] = ws
 
-    # дві паралельні ручні ескалації тієї самої картки (HTTP-потоки)
+    # two parallel manual escalations of the same card (HTTP threads)
     threads = [threading.Thread(target=lambda: w.escalate_now("rec_g3", 1)) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    check(esc.verify_calls == 1, "лише 1 виклик Claude (другий побачив вичерпаний бюджет під локом)")
-    check(abs(svc.cost - 0.005) < 1e-9, "списано рівно за 1 виклик — без подвійних витрат")
+    check(esc.verify_calls == 1, "only 1 Claude call (the second saw the exhausted budget under the lock)")
+    check(abs(svc.cost - 0.005) < 1e-9, "charged for exactly 1 call — no double spending")
 
 
 # ------------------------------------------------------------------- H. API disabled
 
 def test_api_disabled():
-    print("\nH. «Лише локально» (api_enabled=False) → 0 викликів Claude")
+    print("\nH. 'Local only' (api_enabled=False) → 0 Claude calls")
     esc = FakeEscalator()
     broker, svc = FakeBroker(), FakeService()
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
@@ -552,14 +552,14 @@ def test_api_disabled():
     ins = {"kind": "contradiction", "text": "x", "evidence_chunk_ids": [101], "confidence": 0.99}
     meta = {101: {"chunk_id": 101, "text": "y"}}
     out = w._escalate_insight(ws, 1, ins, meta, "")
-    check(out is None and esc.verify_calls == 0, "ескалація заблокована, API не викликано")
-    check(w._api_active(ws) is False, "_api_active=False при api_enabled=False")
+    check(out is None and esc.verify_calls == 0, "escalation blocked, the API was not called")
+    check(w._api_active(ws) is False, "_api_active=False when api_enabled=False")
 
 
 # ------------------------------------------------------------------- K. Multi-vote verify
 
 def test_multivote_verify():
-    print("\nK. Мульти-голосова верифікація (real Escalator + фейк-клієнт)")
+    print("\nK. Multi-vote verification (real Escalator + fake client)")
     from app.services.copilot.escalate import Escalator
     client = FakeAnthropic(["real", "refuted", "real"])  # 2:1 → real
     esc = Escalator(client_factory=lambda: client)
@@ -567,20 +567,20 @@ def test_multivote_verify():
     chunks = [{"chunk_id": 101, "source_name": "Дзвінок", "meeting_date": "2026-05-12",
                "text": "бюджет 40k"}]
     v = esc.verify(insight=ins, evidence_chunks=chunks, votes=3)
-    check(client.calls == 3, "зроблено 3 незалежні голоси")
-    check(v["verdict"] == "real" and v["votes"] == 3, "мажоритарний вердикт = real (2 з 3)")
-    check(v["tokens_in"] == 300 and v["tokens_out"] == 60, "облік токенів сумується по голосах")
+    check(client.calls == 3, "3 independent votes made")
+    check(v["verdict"] == "real" and v["votes"] == 3, "majority verdict = real (2 of 3)")
+    check(v["tokens_in"] == 300 and v["tokens_out"] == 60, "token accounting is summed across votes")
 
     client2 = FakeAnthropic(["refuted", "real", "refuted"])  # 2:1 → refuted
     esc2 = Escalator(client_factory=lambda: client2)
     v2 = esc2.verify(insight=ins, evidence_chunks=chunks, votes=3)
-    check(v2["verdict"] == "refuted", "мажоритарний вердикт = refuted (2 з 3)")
+    check(v2["verdict"] == "refuted", "majority verdict = refuted (2 of 3)")
 
 
 # ------------------------------------------------------------------- L. Hard mode → 3 votes
 
 def test_hard_mode_votes():
-    print("\nL. Жорсткий режим → verify_votes=3 (мульти-лінза)")
+    print("\nL. Hard mode → verify_votes=3 (multi-lens)")
     esc = FakeEscalator()
     broker, svc = FakeBroker(), FakeService(budget=10.0)
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
@@ -591,13 +591,13 @@ def test_hard_mode_votes():
     ins = {"kind": "contradiction", "text": "x", "evidence_chunk_ids": [101], "confidence": 0.9}
     meta = {101: {"chunk_id": 101, "text": "y", "source_name": "s", "transcription_id": 1}}
     w._escalate_insight(ws, 1, ins, meta, "")
-    check(esc.votes_seen == [3], "воркер передав votes=3 у verify (з матриці режиму)")
+    check(esc.votes_seen == [3], "the worker passed votes=3 to verify (from the mode matrix)")
 
 
 # ------------------------------------------------------------------- M. Opus-on-gnarly
 
 def test_opus_on_gnarly():
-    print("\nM. «Opus на гнарлі»: uncertain від Sonnet → переарбітраж Opus")
+    print("\nM. 'Opus on gnarly': uncertain from Sonnet → Opus re-arbitration")
     esc = FakeEscalator(sonnet_verdict="uncertain")
     broker, svc = FakeBroker(), FakeService(budget=10.0)
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
@@ -609,17 +609,17 @@ def test_opus_on_gnarly():
     ins = {"kind": "contradiction", "text": "x", "evidence_chunk_ids": [101], "confidence": 0.9}
     meta = {101: {"chunk_id": 101, "text": "y", "source_name": "s", "transcription_id": 1}}
     v = w._escalate_insight(ws, 1, ins, meta, "")
-    check(esc.verify_calls == 2, "2 виклики: Sonnet (uncertain) → Opus-арбітр")
-    check(any("opus" in (m or "") for m in esc.models_seen), "арбітраж зроблено моделлю Opus")
-    check(v["verdict"] == "real", "фінальний вердикт від Opus = real")
+    check(esc.verify_calls == 2, "2 calls: Sonnet (uncertain) → Opus arbiter")
+    check(any("opus" in (m or "") for m in esc.models_seen), "arbitration done by the Opus model")
+    check(v["verdict"] == "real", "final verdict from Opus = real")
 
 
 # ------------------------------------------------------------------- N. Cost-governor warn
 
 def test_cost_governor_warn():
-    print("\nN. Cost-governor: м'який warn перед хард-стопом")
+    print("\nN. Cost-governor: soft warn before the hard stop")
     esc = FakeEscalator()
-    # бюджет $0.006: warn при ≥ $0.0048, хард-стоп при ≥ $0.006. Один verify = $0.005.
+    # budget $0.006: warn at ≥ $0.0048, hard stop at ≥ $0.006. One verify = $0.005.
     broker, svc = FakeBroker(), FakeService(budget=0.006)
     w = CopilotWorker(broker=broker, live_transcribe_worker=FakeLive([]), recording_service=None,
                       copilot_service=svc, dispatcher=None, escalator=esc,
@@ -628,19 +628,19 @@ def test_cost_governor_warn():
               "verify_votes": 1, "budget_usd": 0.006, "budget_warn_ratio": 0.8})
     ins = {"kind": "contradiction", "text": "x", "evidence_chunk_ids": [101], "confidence": 0.9}
     meta = {101: {"chunk_id": 101, "text": "y", "source_name": "s", "transcription_id": 1}}
-    w._escalate_insight(ws, 1, ins, meta, "")  # cost 0.005 → 83% бюджету, ще не вичерпано
+    w._escalate_insight(ws, 1, ins, meta, "")  # cost 0.005 → 83% of the budget, not yet exhausted
     s1 = [d for (_c, ev, d) in broker.events if ev == "copilot_usage"][-1]["state"]
-    check(s1 == "warn", "після 1 виклику ($0.005 = 83%) — м'який warn (ще не хард-стоп)")
-    check(ws.budget_exhausted is False, "warn НЕ зупиняє API (API ще активний)")
-    w._escalate_insight(ws, 2, ins, meta, "")  # cost 0.010 ≥ ліміт → вичерпано
+    check(s1 == "warn", "after 1 call ($0.005 = 83%) — a soft warn (not yet a hard stop)")
+    check(ws.budget_exhausted is False, "warn does NOT stop the API (the API is still active)")
+    w._escalate_insight(ws, 2, ins, meta, "")  # cost 0.010 ≥ limit → exhausted
     s2 = [d for (_c, ev, d) in broker.events if ev == "copilot_usage"][-1]["state"]
-    check(s2 == "budget_exhausted", "після 2-го ($0.010) — хард-стоп")
+    check(s2 == "budget_exhausted", "after the 2nd ($0.010) — hard stop")
 
 
 # ------------------------------------------------------------------- O. On-the-fly settings
 
 def test_onthefly_settings():
-    print("\nO. Зміна режиму/важливості на льоту (service + worker)")
+    print("\nO. Changing mode/importance on the fly (service + worker)")
     import os
     import tempfile
     from app.db.migrations import init_database
@@ -655,20 +655,20 @@ def test_onthefly_settings():
                         recording_session_id="rec_o")["copilot_session_id"]
         cfg0 = svc.get_state(sid)["config"]
         check(cfg0["api_enabled"] is False and cfg0["mode"] == "light",
-              "старт: light/low → API вимкнено")
+              "start: light/low → API disabled")
 
         cfg1 = svc.update_settings(sid, mode="hard")
         check(cfg1["mode"] == "hard" and cfg1["verify_votes"] == 3 and cfg1["api_enabled"] is False,
-              "зміна лише режиму: hard (votes=3), api лишився вимкненим (low)")
+              "mode change only: hard (votes=3), api stayed disabled (low)")
 
         from app.services import models as _models
         cfg2 = svc.update_settings(sid, importance="high")
         check(cfg2["api_enabled"] is True
               and cfg2["model_api_gnarly"] == _models.COPILOT_GNARLY_MODEL_DEFAULT,
-              "зміна важливості на high: API увімк., Opus-арбітр")
-        check(svc.get_state(sid)["config"]["mode"] == "hard", "persist: режим збережено в БД")
+              "importance change to high: API on, Opus arbiter")
+        check(svc.get_state(sid)["config"]["mode"] == "hard", "persist: mode saved in the DB")
 
-        # worker.update_config підміняє живий конфіг
+        # worker.update_config replaces the live config
         w = CopilotWorker(broker=FakeBroker(), live_transcribe_worker=FakeLive([]),
                           recording_service=None, copilot_service=svc, db_path=path)
         ws = _ws(cfg0)
@@ -677,7 +677,7 @@ def test_onthefly_settings():
         ws.budget_exhausted = True
         ok = w.update_config("rec_o", cfg2)
         check(ok and ws.config["importance"] == "high" and ws.budget_exhausted is False,
-              "worker.update_config: новий конфіг застосовано, прапор вичерпання скинуто")
+              "worker.update_config: the new config applied, the exhaustion flag reset")
     finally:
         try:
             os.remove(path)
@@ -688,7 +688,7 @@ def test_onthefly_settings():
 # ------------------------------------------------------------------- E. Operator actions (real DB)
 
 def test_operator_actions():
-    print("\nE. CopilotService.log_action (реальна тимчасова БД + міграції)")
+    print("\nE. CopilotService.log_action (a real temporary DB + migrations)")
     import os
     import tempfile
     from app.db.migrations import init_database
@@ -702,12 +702,12 @@ def test_operator_actions():
         res = svc.start(settings={"mode": "medium", "importance": "medium"},
                         recording_session_id="rec_e")
         sid = res["copilot_session_id"]
-        check(isinstance(sid, int), "копілот-сесію створено в реальній БД")
+        check(isinstance(sid, int), "copilot session created in a real DB")
 
         eid = svc.log_event(sid, "insight_local", source="local", confidence=0.7,
                             payload={"kind": "contradiction", "text": "x"})
         aid = svc.log_action(sid, "pin", ref_event_id=eid, ts_offset_sec=12.5)
-        check(isinstance(aid, int) and aid != eid, "log_action повернув новий event id")
+        check(isinstance(aid, int) and aid != eid, "log_action returned a new event id")
 
         import sqlite3
         conn = sqlite3.connect(path)
@@ -715,28 +715,28 @@ def test_operator_actions():
         row = conn.execute("SELECT * FROM copilot_events WHERE id = ?", (aid,)).fetchone()
         conn.close()
         check(row["kind"] == "operator_action" and row["operator_action"] == "pin",
-              "подія: kind=operator_action, operator_action=pin")
+              "event: kind=operator_action, operator_action=pin")
         check(row["source"] == "operator" and abs(row["ts_offset_sec"] - 12.5) < 1e-6,
-              "подія: source=operator, ts_offset_sec збережено")
+              "event: source=operator, ts_offset_sec saved")
         import json as _json
         payload = _json.loads(row["payload_json"])
-        check(payload.get("ref_event_id") == eid, "payload лінкує на інсайт (ref_event_id)")
+        check(payload.get("ref_event_id") == eid, "payload links to the insight (ref_event_id)")
 
-        # add_usage + cost_estimate (Крок 5)
+        # add_usage + cost_estimate (Step 5)
         from app.services.copilot.escalate import cost_estimate
         c = cost_estimate("claude-sonnet-4-6", 1000, 500, 2000)
         check(abs(c - 0.0111) < 1e-6, "cost_estimate: sonnet 1k→500 (+2k cache) = $0.0111")
-        # rec_e лишається активною в БД; без чекера сервіс консервативно вважає її
-        # живою (C6) — тут жодна з записів не йде, тож кажемо про це явно.
+        # rec_e stays active in the DB; without a checker the service conservatively considers it
+        # live (C6) — here none of the recordings is running, so we say so explicitly.
         svc2 = CopilotService(db_path=path, is_recording_active=lambda s: False)
         r2 = svc2.start(settings={"importance": "medium", "budget_usd": 0.01},
                         recording_session_id="rec_u")
         s2 = r2["copilot_session_id"]
         t1 = svc2.add_usage(s2, tokens_in=1000, tokens_out=100, cache_read=0, cost=0.006)
-        check(t1["tokens_in"] == 1000 and not t1["exhausted"], "add_usage: акумуляція, бюджет ок")
+        check(t1["tokens_in"] == 1000 and not t1["exhausted"], "add_usage: accumulation, budget ok")
         t2 = svc2.add_usage(s2, tokens_in=1000, tokens_out=100, cost=0.006)
         check(t2["exhausted"] is True and t2["tokens_in"] == 2000,
-              "add_usage: накопичено $0.012 ≥ ліміт $0.01 → exhausted")
+              "add_usage: accumulated $0.012 ≥ limit $0.01 → exhausted")
     finally:
         try:
             os.remove(path)
@@ -761,13 +761,13 @@ def test_feedback_by_confidence_bucket():
         sid = svc.start(settings={"mode": "medium", "importance": "medium"},
                         recording_session_id="rec_f")["copilot_session_id"]
 
-        # Порожня БД (без подій) — не падає, повертає нулі.
+        # An empty DB (no events) — does not fail, returns zeros.
         empty = svc.get_feedback_by_confidence_bucket()
         check(empty["buckets"] == [] and empty["unlinked"] == 0,
-              "get_feedback_by_confidence_bucket: порожня БД → buckets=[]")
+              "get_feedback_by_confidence_bucket: empty DB → buckets=[]")
 
-        # Два інсайти в різних confidence-бакетах: 0.68 (низька довіра, disliked
-        # оператором) і 0.92 (висока довіра, liked).
+        # Two insights in different confidence buckets: 0.68 (low trust, disliked
+        # by the operator) and 0.92 (high trust, liked).
         low_id = svc.log_event(sid, "insight_local", source="local", confidence=0.68,
                                payload={"kind": "contradiction", "text": "низька"})
         high_id = svc.log_event(sid, "insight_verified", source="api", confidence=0.92,
@@ -775,24 +775,24 @@ def test_feedback_by_confidence_bucket():
         svc.log_action(sid, "thumbs_down", ref_event_id=low_id)
         svc.log_action(sid, "thumbs_down", ref_event_id=low_id)
         svc.log_action(sid, "thumbs_up", ref_event_id=high_id)
-        # Дія без резолвленого ref_event_id (сирітський insight) — має піти в unlinked.
+        # An action without a resolved ref_event_id (an orphan insight) — must go to unlinked.
         svc.log_action(sid, "dismiss", ref_event_id=999999)
 
         stats = svc.get_feedback_by_confidence_bucket()
-        check(stats["unlinked"] == 1, "operator_action без валідного ref → unlinked=1")
+        check(stats["unlinked"] == 1, "operator_action without a valid ref → unlinked=1")
         by_range = {b["range"]: b for b in stats["buckets"]}
-        check("0.6-0.7" in by_range, "бакет 0.6-0.7 присутній")
+        check("0.6-0.7" in by_range, "bucket 0.6-0.7 present")
         check(by_range["0.6-0.7"]["thumbs_down"] == 2 and by_range["0.6-0.7"]["total"] == 2,
-              "бакет 0.6-0.7: 2 thumbs_down (сигнал — можливо, поріг занизький)")
+              "bucket 0.6-0.7: 2 thumbs_down (a signal — perhaps the threshold is too low)")
         check(by_range["0.6-0.7"]["thumbs_down_ratio"] == 1.0,
-              "thumbs_down_ratio=1.0 при 0 thumbs_up у бакеті")
+              "thumbs_down_ratio=1.0 with 0 thumbs_up in the bucket")
         check("0.9-1.0" in by_range and by_range["0.9-1.0"]["thumbs_up"] == 1,
-              "бакет 0.9-1.0: 1 thumbs_up")
+              "bucket 0.9-1.0: 1 thumbs_up")
 
-        # Дефолти НЕ зачеплені цим викликом (сам факт агрегації нічого не бампає).
+        # Defaults are NOT touched by this call (the mere fact of aggregation bumps nothing).
         from app.services.copilot import config as copilot_config
         check(copilot_config.MODE_PARAMS["medium"]["escalate_threshold"] == 0.65,
-              "агрегація НЕ змінює escalate_threshold дефолт")
+              "aggregation does NOT change the escalate_threshold default")
     finally:
         try:
             os.remove(path)
@@ -801,7 +801,7 @@ def test_feedback_by_confidence_bucket():
 
 
 def test_timeline():
-    print("\nP. Таймлайн сесії: persist+лінк+get_timeline+by_transcription+list (real DB)")
+    print("\nP. Session timeline: persist+link+get_timeline+by_transcription+list (real DB)")
     import os
     import tempfile
     from app.db.migrations import init_database
@@ -814,7 +814,7 @@ def test_timeline():
         svc = CopilotService(db_path=path)
         sid = svc.start(settings={"mode": "medium", "importance": "medium"},
                         recording_session_id="rec_p")["copilot_session_id"]
-        # події врозкид за таймкодами — таймлайн має відсортувати
+        # events scattered by timecodes — the timeline must sort them
         svc.log_event(sid, "insight_verified", ts_offset_sec=32, source="api", confidence=0.9,
                       payload={"kind": "contradiction", "text": "перевірено"})
         svc.log_event(sid, "topic_shift", ts_offset_sec=5, source="local",
@@ -829,24 +829,24 @@ def test_timeline():
         svc.link_transcription(sid, 99)
 
         tl = svc.get_timeline(sid)
-        check(tl is not None, "get_timeline повернув дані")
+        check(tl is not None, "get_timeline returned data")
         offs = [e["ts_offset_sec"] for e in tl["events"]]
         check(offs == sorted(offs) and offs[0] == 5,
-              "події відсортовані за таймкодом (5,28,30,31,32)")
+              "events sorted by timecode (5,28,30,31,32)")
         kinds = [e["kind"] for e in tl["events"]]
         check("insight_local" in kinds and "operator_action" in kinds,
-              "усі типи подій у доріжці (інсайт + дія оператора)")
+              "all event types in the track (insight + operator action)")
         loc = next(e for e in tl["events"] if e["kind"] == "insight_local")
-        check(loc["payload"]["evidence"][0]["chunk_id"] == 1, "payload інсайту розпарсено (evidence)")
-        check(tl["aggregates"].get("insight_verified") == 1, "агрегати рахують типи")
+        check(loc["payload"]["evidence"][0]["chunk_id"] == 1, "the insight payload parsed (evidence)")
+        check(tl["aggregates"].get("insight_verified") == 1, "aggregates count the types")
 
         bt = svc.get_by_transcription(99)
-        check(bt and bt["id"] == sid, "get_by_transcription знаходить сесію за транскриптом")
+        check(bt and bt["id"] == sid, "get_by_transcription finds the session by transcript")
 
         sessions = svc.list_sessions()
         row = next((s for s in sessions if s["id"] == sid), None)
         check(row is not None and row["insights"] == 2,
-              "list_sessions: сесія зі лічильником інсайтів (local+verified=2)")
+              "list_sessions: a session with an insight counter (local+verified=2)")
     finally:
         try:
             os.remove(path)
@@ -855,7 +855,7 @@ def test_timeline():
 
 
 def test_export():
-    print("\nQ. Експорт сесії (build_markdown/json/notes_digest + collect_notes)")
+    print("\nQ. Session export (build_markdown/json/notes_digest + collect_notes)")
     from app.services.copilot import export as ex
 
     timeline = {
@@ -882,26 +882,26 @@ def test_export():
         {"start": 29, "speaker": "other", "text": "Бюджет 60k"}]}
 
     notes = ex.collect_notes(timeline["events"])
-    check(len(notes) == 2, "collect_notes: 2 нотатки (local+verified злиті, sweep окремо)")
+    check(len(notes) == 2, "collect_notes: 2 notes (local+verified merged, sweep separately)")
     c = next(n for n in notes if n["kind"] == "contradiction")
-    check(c["source"] == "api" and c["verdict"] == "real", "інсайт злитий з верифікацією (api/real)")
-    check(c["text"] == "Підтверджено: бюджет 40k, не 60k", "текст узято з верифікованої версії")
-    check(c["evidence"][0]["chunk_id"] == 1, "евіденс перенесено з локального інсайту")
+    check(c["source"] == "api" and c["verdict"] == "real", "insight merged with verification (api/real)")
+    check(c["text"] == "Підтверджено: бюджет 40k, не 60k", "the text taken from the verified version")
+    check(c["evidence"][0]["chunk_id"] == 1, "evidence carried over from the local insight")
 
     md = ex.build_markdown(timeline, transcript)
-    check("ПРОТИРІЧЧЯ" in md and "перевірено" in md, "md: нотатка з типом+бейджем")
-    check("[0:04]" in md and "Ви:" in md, "md: діалог з таймкодами та спікером")
-    check("Дзвінок (2026-05-12)" in md, "md: посилання на джерело архіву")
-    check("## Теми" in md and "Бюджет" in md, "md: розділ тем")
+    check("ПРОТИРІЧЧЯ" in md and "перевірено" in md, "md: a note with kind+badge")
+    check("[0:04]" in md and "Ви:" in md, "md: dialogue with timecodes and speaker")
+    check("Дзвінок (2026-05-12)" in md, "md: link to the archive source")
+    check("## Теми" in md and "Бюджет" in md, "md: topics section")
 
     j = ex.build_json(timeline, transcript)
-    check(len(j["dialog"]) == 2 and len(j["notes"]) == 2, "json: діалог(2) + нотатки(2)")
-    check(j["session"]["id"] == 1 and j["transcript_name"] == "Дзвінок з клієнтом", "json: мета сесії")
+    check(len(j["dialog"]) == 2 and len(j["notes"]) == 2, "json: dialogue(2) + notes(2)")
+    check(j["session"]["id"] == 1 and j["transcript_name"] == "Дзвінок з клієнтом", "json: session meta")
 
     dig = ex.notes_digest(timeline, transcript)
-    check("Протиріччя:" in dig and "Факти:" in dig, "digest: групування за типом")
-    check("[перевірено]" in dig and "джерела: Дзвінок" in dig, "digest: позначка перевірки + джерела")
-    check(len(dig) > 20, "digest достатній для реінджесту")
+    check("Протиріччя:" in dig and "Факти:" in dig, "digest: grouping by kind")
+    check("[перевірено]" in dig and "джерела: Дзвінок" in dig, "digest: verification mark + sources")
+    check(len(dig) > 20, "digest sufficient for re-ingest")
 
 
 if __name__ == "__main__":
@@ -928,6 +928,6 @@ if __name__ == "__main__":
     test_feedback_by_confidence_bucket()
     print(f"\n{'='*50}")
     if _fail:
-        print(f"FAILED: {_fail} перевірок не пройшло")
+        print(f"FAILED: {_fail} checks failed")
         sys.exit(1)
-    print("УСІ ПЕРЕВІРКИ ПРОЙШЛИ ✓")
+    print("ALL CHECKS PASSED ✓")

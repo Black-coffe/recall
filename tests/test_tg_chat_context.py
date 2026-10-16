@@ -1,8 +1,8 @@
-"""Тести живого профілю чату (Волна 4.5.2).
+"""Tests for the live chat profile (Wave 4.5.2).
 
-Локальна модель мокається — офлайн, без Ollama. Головне, що тут перевіряється:
-тверді числа беруться з SQL і НЕ віддаються моделі на переписування, вигадані
-посилання на нитки відкидаються, а поріг оновлення справді стримує виклики.
+The local model is mocked — offline, without Ollama. The main thing checked here:
+hard numbers come from SQL and are NOT given to the model to rewrite, invented
+thread references are discarded, and the update threshold really restrains calls.
 """
 import json
 import sqlite3
@@ -22,8 +22,8 @@ def db(tmp_path):
 
 
 def _seed(path, *, chat_id=-100, title="Робочий чат", messages=None, threads=None):
-    """threads=None — створити нитку за замовчуванням; threads=[] — жодної
-    (порожній список НЕ те саме, що «не передали»)."""
+    """threads=None — create a default thread; threads=[] — none at all
+    (an empty list is NOT the same as «not passed»)."""
     if threads is None:
         threads = [(1, "Бюджет", "open")]
     conn = sqlite3.connect(path)
@@ -31,8 +31,8 @@ def _seed(path, *, chat_id=-100, title="Робочий чат", messages=None, t
         conn.execute("INSERT INTO tg_threads (id, chat_id, label, status, msg_count, "
                      "last_date) VALUES (?, ?, ?, ?, 0, '2026-06-01T10:00:00+00:00')",
                      (tid, chat_id, label, status))
-    # Продовжуємо нумерацію, а не починаємо з 1: у _seed можна дозаливати
-    # повідомлення в уже засіяний чат, а (chat_id, message_id) унікальні.
+    # We continue the numbering rather than start from 1: _seed can top up
+    # messages in an already seeded chat, and (chat_id, message_id) are unique.
     start = conn.execute("SELECT COALESCE(MAX(tg_message_id), 0) FROM transcriptions "
                          "WHERE tg_chat_id = ?", (chat_id,)).fetchone()[0] + 1
     for offset, (sender, text, thread) in enumerate(messages or []):
@@ -67,7 +67,7 @@ def _model_down(monkeypatch):
 
 
 # ============================================================
-# Тверда частина
+# Hard part
 # ============================================================
 
 def test_participants_counted_by_sql(db):
@@ -92,22 +92,22 @@ def test_closed_threads_are_not_current_topics(db):
 
 
 def test_model_cannot_rewrite_hard_numbers(db, monkeypatch):
-    """Вигадане число в профілі живої людини гірше за його відсутність."""
+    """An invented number in a living person's profile is worse than its absence."""
     _seed(db, messages=[("Адам", "перше", 1), ("Адам", "друге", 1)])
     _fake_model(monkeypatch, {"summary": "звід",
                               "roles": [{"name": "Адам", "role": "веде облік"}]})
     ctx.refresh_chat(db, -100)
     adam = ctx.get_context(db, -100)["participants"][0]
-    assert adam["messages"] == 2, "число лишається з SQL"
-    assert adam["role"] == "веде облік", "від моделі береться лише опис"
+    assert adam["messages"] == 2, "the number stays from SQL"
+    assert adam["role"] == "веде облік", "only the description comes from the model"
 
 
 # ============================================================
-# Гігієна відповіді моделі
+# Hygiene of the model's response
 # ============================================================
 
 def test_invented_thread_ids_are_dropped(db, monkeypatch):
-    """Посилання на нитку, якої не показували, веде в нікуди."""
+    """A reference to a thread that was not shown leads nowhere."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {
         "summary": "звід",
@@ -137,7 +137,7 @@ def test_empty_strings_are_dropped(db, monkeypatch):
 
 
 def test_degradation_keeps_hard_part(db, monkeypatch):
-    """Нема моделі — профіль усе одно є, але текстові поля порожні, і це видно."""
+    """No model — the profile still exists, but the text fields are empty, and that is visible."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _model_down(monkeypatch)
     res = ctx.refresh_chat(db, -100)
@@ -145,12 +145,12 @@ def test_degradation_keeps_hard_part(db, monkeypatch):
     got = ctx.get_context(db, -100)
     assert got["summary"] is None
     assert got["model"] is None
-    assert len(got["participants"]) == 1, "тверда частина лишається"
+    assert len(got["participants"]) == 1, "the hard part stays"
     assert len(got["topics"]) == 1
 
 
 # ============================================================
-# Поріг
+# Threshold
 # ============================================================
 
 def test_first_time_needs_refresh(db):
@@ -159,8 +159,8 @@ def test_first_time_needs_refresh(db):
 
 
 def test_no_refresh_right_after_update(db, monkeypatch):
-    """Профіль НЕ перебудовується на кожне повідомлення — це рівно ті виклики,
-    від яких Волна 0 поставила гард."""
+    """The profile is NOT rebuilt on every message — these are exactly the calls
+    that Wave 0 put a guard against."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {"summary": "звід"})
     ctx.refresh_chat(db, -100)
@@ -208,8 +208,8 @@ def test_get_context_missing_chat(db):
 
 
 def test_failed_refresh_does_not_erase_existing_profile(db, monkeypatch):
-    """Спіймано на живому прогоні: один таймаут 32B перетворив нормальне досьє
-    на порожнє, бо upsert писав None поверх зібраного."""
+    """Caught on a live run: one 32B timeout turned a normal dossier
+    into an empty one, because the upsert wrote None over the assembled one."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {"summary": "зібраний звід",
                               "roles": [{"name": "Адам", "role": "веде облік"}],
@@ -222,15 +222,15 @@ def test_failed_refresh_does_not_erase_existing_profile(db, monkeypatch):
     assert res["degraded"] is True
 
     got = ctx.get_context(db, -100)
-    assert got["summary"] == "зібраний звід", "звід має пережити відмову моделі"
+    assert got["summary"] == "зібраний звід", "the digest must survive a model refusal"
     assert got["participants"][0]["role"] == "веде облік"
     assert [q["question"] for q in got["open_questions"]] == ["коли?"]
     assert [d["decision"] for d in got["decisions"]] == ["беремо"]
-    assert got["model"] is not None, "текст є, просто не свіжий"
+    assert got["model"] is not None, "the text exists, just not fresh"
 
 
 def test_failed_refresh_still_updates_hard_part(db, monkeypatch):
-    """Тверда частина від моделі не залежить — її оновлюємо навіть при відмові."""
+    """The hard part does not depend on the model — we update it even on a refusal."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {"summary": "звід"})
     ctx.refresh_chat(db, -100)
@@ -243,7 +243,7 @@ def test_failed_refresh_still_updates_hard_part(db, monkeypatch):
 
 
 def test_first_refresh_failure_leaves_empty_text(db, monkeypatch):
-    """Попереднього досьє немає — нема чого зберігати, degraded чесно порожній."""
+    """There is no previous dossier — nothing to keep, degraded is honestly empty."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _model_down(monkeypatch)
     ctx.refresh_chat(db, -100)
@@ -253,8 +253,8 @@ def test_first_refresh_failure_leaves_empty_text(db, monkeypatch):
 
 
 def test_model_column_records_default_model(db, monkeypatch):
-    """NULL у model має означати рівно одне: тексту немає. Раніше він писався
-    і при успіху, якщо модель брали за замовчуванням."""
+    """NULL in model must mean exactly one thing: there is no text. Earlier it was written
+    on success too, if the model was taken by default."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {"summary": "звід"})
     ctx.refresh_chat(db, -100)
@@ -263,8 +263,8 @@ def test_model_column_records_default_model(db, monkeypatch):
 
 @pytest.mark.parametrize("junk", ["null", "None", "n/a", "—", "невідомо", "  "])
 def test_placeholder_roles_are_treated_as_empty(db, monkeypatch, junk):
-    """Спіймано на живому прогоні: 18 учасників отримали роль рядком "null" —
-    перевірки на непорожність замало, у досьє це виглядало як справжня роль."""
+    """Caught on a live run: 18 participants got the role string "null" —
+    a non-emptiness check is not enough, in the dossier it looked like a real role."""
     _seed(db, messages=[("Адам", "текст", 1)])
     _fake_model(monkeypatch, {"summary": "звід",
                               "roles": [{"name": "Адам", "role": junk}]})
@@ -281,15 +281,15 @@ def test_real_role_survives_cleaning(db, monkeypatch):
 
 
 # ============================================================
-# Свіжість досьє в MCP-тулзі (правдивість, 12.08.2026)
+# Freshness of the dossier in the MCP tool (truthfulness, 12.08.2026)
 # ============================================================
 
 def test_tool_says_how_many_messages_missed_the_profile(db, monkeypatch):
-    """«Оновлюється за порогом» — правда, з якою нічого не зробиш.
+    """«Updated by threshold» is a truth you can do nothing with.
 
-    Досьє віддавало `updated_at`, але не казало, скільки повідомлень прийшло
-    ПІСЛЯ нього: відставання на два і на двісті виглядали однаково. Тулз
-    рахує різницю числом, щоб читач бачив, наскільки картці можна вірити.
+    The dossier returned `updated_at` but did not say how many messages arrived
+    AFTER it: a lag of two and of two hundred looked the same. The tool
+    computes the difference as a number so the reader sees how far the card can be trusted.
     """
     import mcp_server as m
 
@@ -313,7 +313,7 @@ def test_tool_says_how_many_messages_missed_the_profile(db, monkeypatch):
 
 
 def test_tool_keeps_hint_when_profile_absent(db, monkeypatch):
-    """Немає досьє — помилка з підказкою, а не порожній словник із нулем."""
+    """No dossier — an error with a hint, not an empty dict with a zero."""
     import mcp_server as m
 
     monkeypatch.setattr(m, "DB_PATH", db)

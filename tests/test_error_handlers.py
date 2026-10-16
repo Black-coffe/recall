@@ -1,20 +1,20 @@
-"""T7.4 (REMEDIATION_PLAN Волна 4): тести на єдиний error-handler middleware
+"""T7.4 (REMEDIATION_PLAN Wave 4): tests for the single error-handler middleware
 (app/core/error_handlers.py).
 
-Перевіряє критерії приймання T7.4:
-  (a) необроблений виняток у view-функції → 500 з узагальненим тілом
-      (без str(exc)/internal message) + request_id.
-  (b) traceback реально йде в лог через logger.exception (перевіряємо caplog).
-  (c) HTTPException (напр. 404 на неіснуючому роуті) НЕ підмінюється на 500 —
-      error_handlers.register() пропускає їх без змін.
-  (d) конкретніший @app.errorhandler(<code>) (як 429 у app.py) лишається
-      пріоритетнішим за generic @app.errorhandler(Exception).
+Checks the T7.4 acceptance criteria:
+  (a) an unhandled exception in a view function → 500 with a generic body
+      (without str(exc)/internal message) + request_id.
+  (b) the traceback really goes to the log via logger.exception (we check caplog).
+  (c) HTTPException (e.g. 404 on a non-existent route) is NOT replaced with 500 —
+      error_handlers.register() passes them through unchanged.
+  (d) a more specific @app.errorhandler(<code>) (like 429 in app.py) stays
+      higher priority than the generic @app.errorhandler(Exception).
 
-Навмисно НЕ імпортує app.py (важкий, довгий, side-effects через load_dotenv —
-той самий підхід, що tests/test_auth_gate.py) — error_handlers.py
-самодостатній (Flask + logging), тож досить мінімального застосунку.
+Deliberately does NOT import app.py (heavy, long, side effects via load_dotenv —
+the same approach as tests/test_auth_gate.py) — error_handlers.py
+is self-contained (Flask + logging), so a minimal application is enough.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_error_handlers.py -v
 """
 import logging
@@ -27,7 +27,7 @@ from app.core import error_handlers
 
 @pytest.fixture()
 def app_module():
-    """Мінімальний Flask-застосунок: request_id hook (як app.py) + error-handler."""
+    """Minimal Flask application: request_id hook (like app.py) + error handler."""
     app = Flask(__name__)
 
     @app.before_request
@@ -87,7 +87,7 @@ class TestErrorHandlerMiddleware:
         assert r.get_json() == {"success": True}
 
     def test_http_exception_passed_through_unchanged(self, client):
-        """404 через flask.abort() лишається 404, не підміняється на 500."""
+        """404 via flask.abort() stays 404, is not replaced with 500."""
         r = client.get("/api/not-found-explicit")
         assert r.status_code == 404
 
@@ -98,9 +98,9 @@ class TestErrorHandlerMiddleware:
 
 class TestErrorHandlerPriority:
     def test_specific_code_handler_takes_priority_over_generic(self, app_module):
-        """Якщо є конкретніший @app.errorhandler(400), Flask обирає його,
-        а не generic @app.errorhandler(Exception) з error_handlers.py —
-        це те, на що покладається app.py (@app.errorhandler(429)/(413))."""
+        """If there is a more specific @app.errorhandler(400), Flask picks it,
+        not the generic @app.errorhandler(Exception) from error_handlers.py —
+        this is what app.py relies on (@app.errorhandler(429)/(413))."""
         from werkzeug.exceptions import BadRequest
 
         @app_module.route("/api/bad-request-custom")

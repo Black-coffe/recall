@@ -1,11 +1,11 @@
-"""Тести для boot-time reconcile записів у бібліотеку
+"""Tests for the boot-time reconcile of recordings into the library
 (``app.services.recording.reconcile``, 08.07.2026).
 
-Чекер запускається на кожному старті app.py і приводить Медіатеку
-(``audio_downloads``) у відповідність до диска БЕЗ транскрибації:
-реєструє сиріт, лікує мертві ``file_path`` (переїзд проєкту Whisper→Recall),
-синхронізує auto-name назви з manifest.name. Реальні назви не чіпає,
-не-фіналізовані сесії ігнорує, порожні (без mp3) пропускає.
+The checker runs on every start of app.py and brings the Media library
+(``audio_downloads``) in line with the disk WITHOUT transcription:
+it registers orphans, heals dead ``file_path`` values (the Whisper→Recall project move),
+syncs auto-name titles with manifest.name. It does not touch real names,
+ignores non-finalized sessions, skips empty ones (without an mp3).
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def _set_manifest_field(store: SessionStore, sid: str, **fields):
 def _make_finalized(store: SessionStore, sid: str, *, name=None,
                     duration: float = 60.0, create_file: bool = True,
                     final_path: str | None = None) -> str:
-    """Фіналізована сесія з реальним final.mp3 на диску. Повертає шлях до mp3."""
+    """A finalized session with a real final.mp3 on disk. Returns the path to the mp3."""
     store.create(sid, 48000, 2, mic_device_name='Mic', system_device_name='Sys')
     session_dir = store.session_dir(sid)
     real = session_dir / 'final.mp3'
@@ -112,11 +112,11 @@ def test_orphan_registered_with_manifest_name(db_path, store):
 
 
 def test_orphan_without_name_uses_auto_name_date(db_path, store):
-    """Немає власної назви → назва = auto_name (дата створення) — саме те,
-    що просив юзер: «якщо назви нема, беремо коли створено»."""
+    """No custom name → name = auto_name (the creation date) — exactly what
+    the user asked for: «if there is no name, take when it was created»."""
     _make_finalized(store, 'rec_orphan2', name=None)
     auto = store.read('rec_orphan2')['auto_name']
-    assert auto  # SessionStore генерує "Запис YYYY-MM-DD HH:MM"
+    assert auto  # SessionStore generates "Запис YYYY-MM-DD HH:MM"
 
     reconcile_recordings(db_path, store)
     row = _audio_row(db_path, 'rec_orphan2')
@@ -124,8 +124,8 @@ def test_orphan_without_name_uses_auto_name_date(db_path, store):
 
 
 def test_reconcile_never_transcribes(db_path, store):
-    """Чекер лише реєструє в audio_downloads — жодного рядка транскрипту
-    не з'являється."""
+    """The checker only registers in audio_downloads — not a single transcript
+    row appears."""
     _make_finalized(store, 'rec_notr', name='Без транскрипту')
     reconcile_recordings(db_path, store)
 
@@ -138,7 +138,7 @@ def test_reconcile_never_transcribes(db_path, store):
 
 
 def test_orphan_without_final_file_skipped(db_path, store):
-    """Фіналізована сесія, але final.mp3 нема (порожній/аборт) — не реєструємо."""
+    """A finalized session but there is no final.mp3 (empty/aborted) — we do not register."""
     _make_finalized(store, 'rec_empty', name='Порожній', create_file=False,
                     final_path=r'E:\nonexistent\final.mp3')
     stats = reconcile_recordings(db_path, store)
@@ -149,8 +149,8 @@ def test_orphan_without_final_file_skipped(db_path, store):
 
 
 def test_non_finalized_session_ignored(db_path, store):
-    """Сесія в статусі recording (ще пише) — у бібліотеку не тягнемо."""
-    store.create('rec_active', 48000, 2)  # status=recording за замовчуванням
+    """A session in the recording status (still writing) — we do not pull it into the library."""
+    store.create('rec_active', 48000, 2)  # status=recording by default
     (store.session_dir('rec_active') / 'final.mp3').write_bytes(b'x')
     stats = reconcile_recordings(db_path, store)
 
@@ -161,8 +161,8 @@ def test_non_finalized_session_ignored(db_path, store):
 # --------------------------------------------------------------- path healing
 
 def test_dead_file_path_healed_in_audio_downloads(db_path, store):
-    """Рядок у бібліотеці існує, але file_path мертвий (старий Whisper-корінь).
-    Reconcile підміняє його на живий final.mp3 з папки сесії."""
+    """A row in the library exists but file_path is dead (the old Whisper root).
+    Reconcile replaces it with the live final.mp3 from the session folder."""
     real = _make_finalized(store, 'rec_moved', name='Переїхав')
     dead = r'E:\Projects\Whisper\recordings\sessions\rec_moved\final.mp3'
     _insert_audio_download(db_path, 'rec_moved', title='Переїхав', file_path=dead)
@@ -174,11 +174,11 @@ def test_dead_file_path_healed_in_audio_downloads(db_path, store):
 
 
 def test_dead_file_path_healed_in_transcriptions(db_path, store):
-    """file_path у transcriptions цього запису теж лікується (щоб оригінал/
-    re-transcribe з Архіву не бились об мертвий шлях)."""
+    """file_path in the transcriptions of this recording is healed too (so that the original/
+    re-transcribe from the Archive do not hit a dead path)."""
     real = _make_finalized(store, 'rec_txmoved', name='Архівний')
     dead = r'E:\Projects\Whisper\recordings\sessions\rec_txmoved\final.mp3'
-    _insert_audio_download(db_path, 'rec_txmoved', file_path=real)  # audiolib вже здоровий
+    _insert_audio_download(db_path, 'rec_txmoved', file_path=real)  # audiolib is already healthy
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -201,7 +201,7 @@ def test_dead_file_path_healed_in_transcriptions(db_path, store):
 
 
 def test_healthy_path_not_touched(db_path, store):
-    """Живий file_path не чіпаємо (path_healed=0)."""
+    """A live file_path is not touched (path_healed=0)."""
     real = _make_finalized(store, 'rec_ok', name='Здоровий')
     _insert_audio_download(db_path, 'rec_ok', title='Здоровий', file_path=real)
 
@@ -213,8 +213,8 @@ def test_healthy_path_not_touched(db_path, store):
 # --------------------------------------------------------------- title sync
 
 def test_placeholder_title_synced_from_manifest(db_path, store):
-    """Auto-name плейсхолдер у бібліотеці + справжня назва в manifest →
-    підтягуємо назву."""
+    """An auto-name placeholder in the library + a real name in the manifest →
+    pull the name in."""
     real = _make_finalized(store, 'rec_rename', name='Vodafon та фонд')
     auto = store.read('rec_rename')['auto_name']  # "Запис YYYY-..."
     _insert_audio_download(db_path, 'rec_rename', title=auto, file_path=real)
@@ -225,8 +225,8 @@ def test_placeholder_title_synced_from_manifest(db_path, store):
 
 
 def test_real_title_not_overwritten(db_path, store):
-    """Не-плейсхолдерну (реальну) назву в бібліотеці НІКОЛИ не перезаписуємо,
-    навіть якщо manifest.name інший."""
+    """A non-placeholder (real) name in the library is NEVER overwritten,
+    even if manifest.name differs."""
     real = _make_finalized(store, 'rec_keep', name='Нова назва з manifest')
     _insert_audio_download(db_path, 'rec_keep', title='Моя ручна назва', file_path=real)
 
@@ -238,13 +238,13 @@ def test_real_title_not_overwritten(db_path, store):
 # --------------------------------------------------------------- idempotency
 
 def test_idempotent_second_run_no_changes(db_path, store):
-    """Другий прогін поспіль не робить жодних змін."""
+    """A second run in a row makes no changes."""
     _make_finalized(store, 'rec_idem', name='Vodafon та фонд')
     dead = r'E:\Projects\Whisper\recordings\sessions\rec_idem\final.mp3'
     _insert_audio_download(db_path, 'rec_idem', title=f'Запис {"rec_idem"[:8]}', file_path=dead)
 
     first = reconcile_recordings(db_path, store)
-    assert first['path_healed'] + first['title_synced'] >= 1  # щось зробив
+    assert first['path_healed'] + first['title_synced'] >= 1  # it did something
 
     second = reconcile_recordings(db_path, store)
     assert second['registered'] == 0
@@ -255,15 +255,15 @@ def test_idempotent_second_run_no_changes(db_path, store):
 
 
 def test_broken_session_does_not_abort_sweep(db_path, store):
-    """Одна зламана сесія (корумпований manifest) не зриває весь прохід —
-    здорова сирота поруч усе одно реєструється."""
+    """One broken session (a corrupted manifest) does not break the whole pass —
+    a healthy orphan next to it is still registered."""
     _make_finalized(store, 'rec_good', name='Здорова')
     bad_dir = store.base_dir / 'rec_bad'
     bad_dir.mkdir(parents=True)
     (bad_dir / MANIFEST_FILENAME).write_text('{broken json', encoding='utf-8')
 
     stats = reconcile_recordings(db_path, store)
-    # corrupt manifest відсіюється list_all() (не потрапляє у scanned), головне —
-    # здорова сесія зареєстрована і sweep не впав
+    # a corrupt manifest is filtered out by list_all() (does not get into scanned), the main thing —
+    # the healthy session is registered and the sweep did not fail
     assert _audio_row(db_path, 'rec_good') is not None
     assert stats['registered'] == 1

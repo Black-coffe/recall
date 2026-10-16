@@ -1,4 +1,4 @@
-"""Каталог серверних текстів: область settings (speakers.py)."""
+"""Catalog of server texts: the settings area (speakers.py)."""
 MESSAGES: dict = {
     'settings.speakers.err.name_taken': {
         "uk": 'Ім\'я "{name}" вже використовується',

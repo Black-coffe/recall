@@ -1,8 +1,8 @@
-"""Тести скоупу архіву (Трек 2, app/services/scope.py + retrieval.entity_ids).
+"""Archive scope tests (Track 2, app/services/scope.py + retrieval.entity_ids).
 
-Перевіряють два шари звуження:
-  1. напрямок за Telegram-чатом (детермінована розмітка історії + прив'язка чату);
-  2. зріз за сутністю-проєктом через meeting_entities (many-to-many).
+They verify two narrowing layers:
+  1. direction by Telegram chat (deterministic history labelling + chat binding);
+  2. slice by an entity-project through meeting_entities (many-to-many).
 """
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ def db(tmp_path: Path) -> str:
     path = str(tmp_path / "scope.db")
     init_database(path)
     with get_db_connection(path) as conn:
-        # Міграція сама сіє дефолтні напрямки — прибираємо їх, щоб тест мав
-        # рівно ту таблицю, яку описує (інакше id конфліктують).
+        # The migration itself seeds default directions - remove them so the test has
+        # exactly the table it describes (otherwise ids conflict).
         conn.execute("DELETE FROM categories")
         conn.execute("INSERT INTO categories (id, name, name_norm, sort_order) "
                      "VALUES (1, 'Фонд Робота', 'фонд робота', 1)")
         conn.execute("INSERT INTO categories (id, name, name_norm, sort_order) "
                      "VALUES (2, 'NOVA', 'nova', 2)")
-        # Чат №1 моніториться і помилково лежить у «Фонд», №2 — взагалі не в таблиці.
+        # Chat #1 is monitored and wrongly sits in «Фонд», #2 is not in the table at all.
         conn.execute("INSERT INTO tg_monitored_chats (chat_id, title, chat_type, enabled, "
                      "category_id) VALUES (-100, 'Nova Dance & Робота', 'group', 1, 1)")
         for i, (cid, chat) in enumerate([(-100, "Nova Dance & Робота"),
@@ -59,8 +59,8 @@ def test_apply_chat_categories_creates_binds_and_moves(db: str, tmp_path: Path):
 
     assert res["categories_created"] == [
         {"path": "Pegasus", "namesake": [], "note": None}]
-    assert res["chats_bound"] == 1        # -100 перевʼязаний з «Фонд» на NOVA
-    assert res["chats_inserted"] == 1     # -200 не моніторився — рядок заведено
+    assert res["chats_bound"] == 1        # -100 rebound from «Фонд» to NOVA
+    assert res["chats_inserted"] == 1     # -200 was not monitored - a row was created
     assert res["records_recategorized"] == 3
 
     with get_db_connection(db) as conn:
@@ -72,7 +72,7 @@ def test_apply_chat_categories_creates_binds_and_moves(db: str, tmp_path: Path):
         ).fetchone()
     assert rows[1] == rows[2] == cats["NOVA"]
     assert rows[3] == cats["Pegasus"]
-    # Не моніториться, але напрямок закріплено — вмикання не поверне у «без категорії».
+    # Not monitored, but the direction is pinned - enabling will not return it to "no category".
     assert chat200["enabled"] == 0 and chat200["category_id"] == cats["Pegasus"]
 
 
@@ -80,7 +80,7 @@ def test_apply_chat_categories_idempotent_and_dry_run(db: str, tmp_path: Path):
     path = _mapping(tmp_path, [{"chat_id": -100, "title": "NOVA", "category": "NOVA"}])
     preview = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
     assert preview["records_recategorized"] == 2 and preview["chats_bound"] == 1
-    with get_db_connection(db) as conn:  # dry-run нічого не пише
+    with get_db_connection(db) as conn:  # dry-run writes nothing
         assert conn.execute("SELECT category_id FROM transcriptions WHERE id = 1"
                             ).fetchone()["category_id"] == 1
 
@@ -96,14 +96,14 @@ def test_load_mapping_rejects_incomplete_rows(tmp_path: Path):
 
 
 # ============================================================
-# Контракт C7: parent + tags у карті чатів (історія 05)
+# Contract C7: parent + tags in the chat map (story 05)
 # ============================================================
 
 def test_apply_chat_categories_creates_project_under_parent_with_tags(
         db: str, tmp_path: Path, monkeypatch):
-    """`{"parent": "Фонд Робота", "tags": ["AI"]}` — проєкт створюється під
-    наявним напрямком, теги лягають з source='chat', і після реального проходу
-    змінені записи йдуть у re-embed (мок)."""
+    """`{"parent": "Фонд Робота", "tags": ["AI"]}` - the project is created under
+    the existing direction, tags lie with source='chat', and after a real pass
+    the changed records go to re-embed (mock)."""
     calls = []
     monkeypatch.setattr(
         "app.services.reembed.schedule_records_reembed",
@@ -123,17 +123,17 @@ def test_apply_chat_categories_creates_project_under_parent_with_tags(
 
     preview = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
     assert preview["records_recategorized"] >= 1
-    assert calls == [], "--dry-run не має нічого писати"
+    assert calls == [], "--dry-run must write nothing"
     with get_db_connection(db) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM categories WHERE name = 'Акмекорп'").fetchone()[0] == 0
 
     res = scope.apply_chat_categories(db, mapping_path=path)
-    # План називає ШЛЯХ, а не голу назву: «Акмекорп» і «Фонд Робота → Акмекорп» —
-    # два різні вузли, і превʼю мусить казати, який саме заведе прохід.
+    # The plan names the PATH, not the bare name: «Акмекорп» and «Фонд Робота → Акмекорп» are
+    # two different nodes, and the preview must say which one the pass will create.
     assert res["categories_created"] == [
         {"path": "Фонд Робота → Акмекорп", "namesake": [], "note": None},
-    ], "«Фонд Робота» уже існував"
+    ], "«Фонд Робота» already existed"
     assert res["tags_applied"] == 1
 
     with get_db_connection(db) as conn:
@@ -149,11 +149,11 @@ def test_apply_chat_categories_creates_project_under_parent_with_tags(
             "SELECT tg.name FROM record_tags rt JOIN tags tg ON tg.id = rt.tag_id "
             "WHERE rt.transcription_id = 10 AND rt.source = 'chat'")]
         assert tags == ["AI"]
-    assert calls, "реальний прохід мав запланувати re-embed"
+    assert calls, "the real pass must have scheduled a re-embed"
     assert 10 in calls[0][0]
     assert calls[0][1]["reason"] == "apply-chats"
 
-    # Idempotent: повторний прохід нічого не міняє і re-embed не кличе.
+    # Idempotent: a repeated pass changes nothing and does not call re-embed.
     calls.clear()
     again = scope.apply_chat_categories(db, mapping_path=path)
     assert again["records_recategorized"] == 0 and again["tags_applied"] == 0
@@ -162,8 +162,8 @@ def test_apply_chat_categories_creates_project_under_parent_with_tags(
 
 def test_apply_chat_categories_dropping_tag_keeps_manual_one(
         db: str, tmp_path: Path, monkeypatch):
-    """Зняття тега з чату в карті знімає лише `source='chat'` — ручний тег на
-    конкретному записі лишається (ADR §B, «один слот — один власник»)."""
+    """Removing a tag from a chat in the map removes only `source='chat'` - a manual tag on
+    a specific record stays (ADR §B, "one slot - one owner")."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed", lambda *a, **k: None)
     with get_db_connection(db) as conn:
         conn.execute(
@@ -180,23 +180,23 @@ def test_apply_chat_categories_dropping_tag_keeps_manual_one(
         cats.set_tags(conn, 10, add=["ручний"], source="manual")
 
     path2 = _mapping(tmp_path, [{"chat_id": -300, "title": "x", "category": "NOVA",
-                                 "tags": ["AI"]}])         # «інвестори» знято з чату
+                                 "tags": ["AI"]}])         # «інвестори» removed from the chat
     scope.apply_chat_categories(db, mapping_path=path2)
     with get_db_connection(db) as conn:
         names = {r["name"] for r in conn.execute(
             "SELECT tg.name FROM record_tags rt JOIN tags tg ON tg.id = rt.tag_id "
             "WHERE rt.transcription_id = 10")}
-    assert names == {"AI", "ручний"}, "чатовий тег знято, ручний лишився"
+    assert names == {"AI", "ручний"}, "the chat tag was removed, the manual one stayed"
 
 
 def test_prior_correction_damps_giant_category():
-    """Гігант не має вигравати лише через розмір — але й карлик не має через малість."""
+    """The giant must not win merely by size - but the dwarf must not win by smallness either."""
     cands = [{"category_id": 1, "name": "Фонд", "score": 0.55},
              {"category_id": 2, "name": "NOVA", "score": 0.45}]
     ranked = scope._prior_correct(cands, {1: 2000, 2: 50})
-    assert ranked[0]["category_id"] == 2, "менша категорія з майже тим самим скором має вигравати"
+    assert ranked[0]["category_id"] == 2, "the smaller category with almost the same score must win"
 
-    # Але при явній перевазі гігант лишається першим — коригування мʼяке.
+    # But with a clear lead the giant stays first - the correction is soft.
     ranked2 = scope._prior_correct(
         [{"category_id": 1, "name": "Фонд", "score": 0.95},
          {"category_id": 2, "name": "NOVA", "score": 0.05}], {1: 2000, 2: 50})
@@ -204,8 +204,8 @@ def test_prior_correction_damps_giant_category():
 
 
 def test_label_uncategorized_claude_arbiter_sees_project_paths(tmp_path: Path, monkeypatch):
-    """label_uncategorized --claude: арбітр бачить кандидатів шляхами
-    «Напрямок → Проєкт» (контракт C7) і його відповідь пише через `set_category`."""
+    """label_uncategorized --claude: the arbiter sees candidates as paths
+    «Direction -> Project» (contract C7) and its answer is written via `set_category`."""
     path = str(tmp_path / "lc.db")
     init_database(path)
     with get_db_connection(path) as conn:
@@ -244,9 +244,9 @@ def test_label_uncategorized_claude_arbiter_sees_project_paths(tmp_path: Path, m
 
 
 def test_label_uncategorized_schedules_point_reembed(tmp_path: Path, monkeypatch):
-    """Контракт C7 (як `apply_chat_categories`): реальний прохід `label-rest`
-    ставить розмічені записи в точковий re-embed рівно одним викликом; `--dry-run`
-    і повторний прохід (усе вже розмічено) — жодного виклику."""
+    """Contract C7 (like `apply_chat_categories`): a real `label-rest` pass
+    puts the labelled records into a targeted re-embed with exactly one call; `--dry-run`
+    and a repeated pass (everything already labelled) - no call."""
     path = str(tmp_path / "lr.db")
     init_database(path)
     with get_db_connection(path) as conn:
@@ -279,20 +279,20 @@ def test_label_uncategorized_schedules_point_reembed(tmp_path: Path, monkeypatch
 
     preview = scope.label_uncategorized(path, use_claude=True, min_confidence=0.6, dry_run=True)
     assert preview["labeled"] == 3
-    assert calls == [], "--dry-run не має нічого писати"
+    assert calls == [], "--dry-run must write nothing"
     with get_db_connection(path) as conn:
         assert all(r["category_id"] is None for r in conn.execute(
             "SELECT category_id FROM transcriptions"))
 
     res = scope.label_uncategorized(path, use_claude=True, min_confidence=0.6)
     assert res["labeled"] == 3
-    assert len(calls) == 1, "рівно один виклик re-embed на прохід"
+    assert len(calls) == 1, "exactly one re-embed call per pass"
     ids, kw = calls[0]
     assert ids == [1, 2, 3]
     assert kw["db_path"] == path
     assert kw["reason"] == "label-rest"
 
-    # Повторний прохід: усе вже розмічено — re-embed не кличеться.
+    # Repeated pass: everything is already labelled - re-embed is not called.
     calls.clear()
     again = scope.label_uncategorized(path, use_claude=True, min_confidence=0.6)
     assert again["labeled"] == 0
@@ -305,8 +305,8 @@ def test_title_matcher_ignores_generic_tokens(db: str):
     by_name = {name: rx for _, name, rx in matchers}
     assert "NOVA" in by_name
     assert by_name["NOVA"].search("NOVA я та Микола по маркетингу")
-    assert not by_name["NOVA"].search("домовились про зустріч"), "не має ловити підрядок у слові"
-    # «Фонд Робота» складається лише зі стоп-слів → матчера для неї немає
+    assert not by_name["NOVA"].search("домовились про зустріч"), "must not catch a substring inside a word"
+    # «Фонд Робота» consists only of stop words -> there is no matcher for it
     assert "Фонд Робота" not in by_name
 
 
@@ -323,7 +323,7 @@ def test_resolve_scope_matches_canonical_and_alias(db: str):
         conn.commit()
 
     assert scope.resolve_scope(db, "acmecorp") == [10]
-    assert scope.resolve_scope(db, "Акмекорп") == [10]          # через аліас
+    assert scope.resolve_scope(db, "Акмекорп") == [10]          # via alias
     assert sorted(scope.resolve_scope(db, "Acmecorp, Ковальчука")) == [10, 11]
     assert scope.resolve_scope(db, "нема такого") == []
 
@@ -342,7 +342,7 @@ def test_scope_excludes_soft_deleted(db: str):
 
 
 def test_retrieval_scope_sql_shape():
-    """Порожній скоуп не додає умови (інакше пошук звузився б до нуля)."""
+    """An empty scope adds no condition (otherwise the search would narrow to zero)."""
     from app.services import retrieval
     sql, params = retrieval._scope_sql(None)
     assert sql == "" and params == []
@@ -351,17 +351,17 @@ def test_retrieval_scope_sql_shape():
 
 
 def test_scope_filter_includes_records_without_graph_links(db: str):
-    """Зріз не має ховати записи, які просто не пройшли enrichment.
+    """The slice must not hide records that simply did not go through enrichment.
 
-    meeting_entities є лише у збагачених (~помітна частина архіву), тож зріз «лише за графом»
-    мовчки викидав решту — саме на цьому валився golden-set кейс із документом.
+    meeting_entities exists only for enriched ones (~a noticeable share of the archive), so a "graph only" slice
+    silently dropped the rest - exactly where the golden-set case with the document failed.
     """
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO entities (id, type, canonical_name, normalized_name) "
                      "VALUES (10, 'project', 'Datalink', 'datalink')")
         conn.execute("INSERT INTO entity_aliases (entity_id, alias, normalized_alias) "
                      "VALUES (10, 'Сенсети', 'сенсети')")
-        # id=1 має лінк у графі; id=2 — жодного, але назва містить аліас.
+        # id=1 has a link in the graph; id=2 has none, but its title contains the alias.
         conn.execute("INSERT INTO meeting_entities (transcription_id, entity_id) VALUES (1, 10)")
         conn.execute("UPDATE transcriptions SET source_name = 'Сенсети, базова інфраструктура' "
                      "WHERE id = 2")
@@ -370,11 +370,11 @@ def test_scope_filter_includes_records_without_graph_links(db: str):
     graph_only = scope.scope_transcription_ids(db, [10])
     full = scope.scope_filter_ids(db, "Datalink")
     assert graph_only == [1]
-    assert set(full) >= {1, 2}, "текстовий шар має підхопити незбагачений запис"
+    assert set(full) >= {1, 2}, "the text layer must pick up the unenriched record"
 
 
 def test_scope_filter_ids_direction_name_includes_projects(tmp_path: Path):
-    """Збіг назви з НАПРЯМКОМ бере піддерево (контракт C2); з ПРОЄКТОМ — лише його."""
+    """A name matching a DIRECTION takes the subtree (contract C2); a PROJECT - only itself."""
     path = str(tmp_path / "st.db")
     init_database(path)
     with get_db_connection(path) as conn:
@@ -396,11 +396,11 @@ def test_scope_filter_ids_direction_name_includes_projects(tmp_path: Path):
 
 
 # ============================================================
-# Волна 4.5.1a: зріз розширюється до цілої нитки
+# Wave 4.5.1a: the slice expands to a whole thread
 # ============================================================
 
 def _tg_thread_fixture(path):
-    """Нитка: назва проєкту звучить один раз, рішення — у сусідній репліці."""
+    """Thread: the project name sounds once, the decision is in a neighbouring reply."""
     conn = sqlite3.connect(path)
     conn.execute("INSERT INTO tg_threads (id, chat_id, label, status) "
                  "VALUES (1, -100, 'Бюджет', 'open')")
@@ -419,18 +419,18 @@ def _tg_thread_fixture(path):
 
 
 def test_scope_expands_mention_to_whole_thread(tmp_path):
-    """Живий замір: Ковальчука згадана 23 рази всередині фонд-чатів, і саме ці
-    23 однорядковики були всім, що бачив project=. Рішення — в сусідніх
-    репліках, де назви вже немає."""
+    """Live measurement: «Ковальчука» was mentioned 23 times inside fund chats, and exactly these
+    23 one-liners were all that project= saw. The decision is in neighbouring
+    replies where the name is gone."""
     path = str(tmp_path / "t.db")
     init_database(path)
     _tg_thread_fixture(path)
     got = set(scope._expand_to_threads(path, {1}))
-    assert got == {1, 2, 3}, "нитка має приїхати цілком"
+    assert got == {1, 2, 3}, "the thread must come whole"
 
 
 def test_scope_expansion_stops_at_thread_boundary(tmp_path):
-    """Розширення до ЧАТУ було б поверненням до того, від чого волна лікує."""
+    """Expanding to the CHAT would be a return to what the wave is curing."""
     path = str(tmp_path / "t.db")
     init_database(path)
     _tg_thread_fixture(path)
@@ -451,14 +451,14 @@ def test_scope_expansion_handles_empty(tmp_path):
 
 
 # ============================================================
-# v47: однойменні вузли в різних напрямках (історія 20)
+# v47: same-named nodes in different directions (story 20)
 # ============================================================
 
 def _two_markets(db: str) -> dict:
-    """«Фонд Робота → Маркетинг» і «Фріланс → Маркетинг» + по запису в кожному.
+    """«Фонд Робота → Маркетинг» and «Фріланс → Маркетинг» + one record in each.
 
-    Назви записів навмисно БЕЗ слова «Маркетинг»: інакше текстовий шар зрізу
-    зловив би їх сам і тест доводив би не те, що перевіряє (дерево)."""
+    Record titles deliberately WITHOUT the word «Маркетинг»: otherwise the text layer of the slice
+    would catch them itself and the test would prove not what it checks (the tree)."""
     from app.services import categories
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO categories (id, name, name_norm, sort_order) "
@@ -478,9 +478,9 @@ def _two_markets(db: str) -> dict:
 
 
 def test_scope_filter_ids_on_a_namesake_raises_instead_of_guessing(db: str):
-    """Гола назва сидить на двох вузлах — зріз не бере ні перший, ні обидва:
-    виняток зі списком шляхів іде нагору (`rag` його не ковтає), бо тихе
-    обʼєднання відповіло б на інше питання, ніж спитали."""
+    """A bare name sits on two nodes - the slice takes neither the first nor both:
+    an exception with a list of paths goes up (`rag` does not swallow it), because a quiet
+    merge would answer a different question than was asked."""
     from app.services import categories
     _two_markets(db)
     with pytest.raises(categories.CategoryError) as exc:
@@ -490,9 +490,9 @@ def test_scope_filter_ids_on_a_namesake_raises_instead_of_guessing(db: str):
 
 
 def test_rag_does_not_swallow_the_ambiguous_scope_error(db: str):
-    """`rag._resolve_project` гасить «нічого не знайшлось» (шукаємо ширше), але
-    НЕ неоднозначність — інакше 409 перетворився б на тиху відповідь по всьому
-    архіву."""
+    """`rag._resolve_project` swallows "nothing found" (we search wider), but
+    NOT ambiguity - otherwise a 409 would turn into a quiet answer over the whole
+    archive."""
     from app.services import categories, rag
     _two_markets(db)
     with pytest.raises(categories.CategoryError):
@@ -513,7 +513,7 @@ def test_scope_filter_ids_direction_still_expands_to_subtree(db: str):
 
 
 def _mock_claude(monkeypatch, answer: str):
-    """Мок анропік-клієнта: арбітр бачить рівно цю відповідь."""
+    """Mock of the anthropic client: the arbiter sees exactly this answer."""
     class _Block:
         type = "text"
 
@@ -542,8 +542,8 @@ def test_claude_arbiter_maps_a_path_answer(db: str, monkeypatch):
 
 
 def test_claude_arbiter_refuses_an_ambiguous_bare_name(db: str, monkeypatch):
-    """Дві однойменні картки — жодної. «Перший збіг» тут означає приписати
-    запис чужому напрямку мовчки; у звіт проходу їдуть обидва шляхи."""
+    """Two same-named cards - none. "The first match" here would mean assigning
+    a record to a foreign direction silently; both paths go into the pass report."""
     _two_markets(db)
     _mock_claude(monkeypatch, "Маркетинг")
     stats = {}
@@ -567,13 +567,13 @@ def test_title_matcher_skips_a_name_that_sits_on_two_nodes(db: str):
     with get_db_connection(db) as conn:
         matchers = scope._title_matchers(conn)
     by_name = {name: rx for _, name, rx in matchers}
-    assert "Маркетинг" not in by_name, "неоднозначна назва не має бути сигналом"
+    assert "Маркетинг" not in by_name, "an ambiguous name must not be a signal"
     assert "NOVA" in by_name
 
 
 def test_chat_map_creates_own_project_instead_of_stealing_a_namesake(
         db: str, tmp_path: Path, monkeypatch):
-    """Рядок із `parent` більше не reparent-ить чужий однойменний вузол."""
+    """A row with `parent` no longer reparents a foreign same-named node."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
     from app.services import categories
@@ -593,7 +593,7 @@ def test_chat_map_creates_own_project_instead_of_stealing_a_namesake(
         bound = conn.execute(
             "SELECT category_id FROM tg_monitored_chats WHERE chat_id = -400"
         ).fetchone()["category_id"]
-    assert rows[m_fund] == 1, "чужий «Маркетинг» лишився під своїм напрямком"
+    assert rows[m_fund] == 1, "the foreign «Маркетинг» stayed under its own direction"
     assert len(rows) == 2
     new_id = next(i for i in rows if i != m_fund)
     assert rows[new_id] == 3 and bound == new_id
@@ -601,8 +601,8 @@ def test_chat_map_creates_own_project_instead_of_stealing_a_namesake(
 
 def test_chat_map_skips_an_ambiguous_row_without_parent(db: str, tmp_path: Path,
                                                         monkeypatch):
-    """Без `parent` неоднозначна назва не призначається нікому — ні в
-    dry-run, ні в реальному проході (інакше чат втратив би напрямок)."""
+    """Without `parent` an ambiguous name is assigned to nobody - neither in
+    dry-run nor in a real pass (otherwise the chat would lose its direction)."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
     _two_markets(db)
@@ -617,7 +617,7 @@ def test_chat_map_skips_an_ambiguous_row_without_parent(db: str, tmp_path: Path,
     preview = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
     assert preview["ambiguous"] == [{"category": "Маркетинг", "candidates": both}]
     note = preview["per_chat"][0]["note"]
-    assert "вкажіть parent" in note and all(p in note for p in both)
+    assert "specify parent" in note and all(p in note for p in both)
 
     res = scope.apply_chat_categories(db, mapping_path=path)
     assert res["ambiguous"] == [{"category": "Маркетинг", "candidates": both}]
@@ -625,17 +625,17 @@ def test_chat_map_skips_an_ambiguous_row_without_parent(db: str, tmp_path: Path,
     with get_db_connection(db) as conn:
         assert conn.execute(
             "SELECT category_id FROM tg_monitored_chats WHERE chat_id = -500"
-        ).fetchone()["category_id"] == 1, "напрямок чату не мав зникнути"
+        ).fetchone()["category_id"] == 1, "the chat's direction must not have disappeared"
 
 
 def test_chat_map_binds_two_rows_of_one_name_to_two_parents(
         db: str, tmp_path: Path, monkeypatch):
-    """Дворядковий випадок того самого, що доводить тест вище: рядок карти
-    резолвиться ПАРОЮ `(parent, category)`, не голою назвою.
+    """A two-row case of the same thing that the test above proves: a map row
+    resolves by the PAIR `(parent, category)`, not by a bare name.
 
-    Кеш за голим імʼям звів би обидва рядки в один вузол і привʼязав до нього
-    обидва чати — історія другого поїхала б у чужий напрямок мовчки, а
-    `--dry-run` показав би одне створення замість двох."""
+    A cache by bare name would merge both rows into one node and bind both chats
+    to it - the second one's history would silently go to a foreign direction, and
+    `--dry-run` would show one creation instead of two."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
     from app.services import categories
@@ -661,7 +661,7 @@ def test_chat_map_binds_two_rows_of_one_name_to_two_parents(
     assert preview["ambiguous"] == []
     assert [c["path"] for c in preview["categories_created"]] == [
         "Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
-    with get_db_connection(db) as conn:      # dry-run нічого не пише
+    with get_db_connection(db) as conn:      # dry-run writes nothing
         assert conn.execute("SELECT COUNT(*) FROM categories WHERE name_norm = 'маркетинг'"
                             ).fetchone()[0] == 0
 
@@ -671,7 +671,7 @@ def test_chat_map_binds_two_rows_of_one_name_to_two_parents(
     with get_db_connection(db) as conn:
         nodes = [r["id"] for r in conn.execute(
             "SELECT id FROM categories WHERE name_norm = 'маркетинг'")]
-        assert len(nodes) == 2, "два батьки — два вузли"
+        assert len(nodes) == 2, "two parents - two nodes"
         assert {categories.node_path(conn, i) for i in nodes} == {
             "Фонд Робота → Маркетинг", "Фріланс → Маркетинг"}
         bound = {c: conn.execute(
@@ -685,16 +685,16 @@ def test_chat_map_binds_two_rows_of_one_name_to_two_parents(
                             ).fetchone()[0] == bound[-402]
 
     again = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
-    assert again["categories_created"] == [], "усе вже створено"
+    assert again["categories_created"] == [], "everything is already created"
 
 
 def test_chat_map_plan_names_the_namesake_it_is_about_to_fork(
         db: str, tmp_path: Path, monkeypatch):
-    """Превʼю мусить назвати вузол, який роздвоїть таксономію.
+    """The preview must name the node that will fork the taxonomy.
 
-    Раніше `categories_created` рахувалось звіркою назви з УСІЄЮ таблицею
-    «до», тож дитина-тезка під іншим батьком у план не потрапляла зовсім:
-    `--dry-run` друкував `[]`, а реальний прохід заводив другий «Акмекорп».
+    Earlier `categories_created` was computed by checking the name against the WHOLE table
+    "before", so a same-named child under another parent did not get into the plan at all:
+    `--dry-run` printed `[]`, while the real pass created a second «Акмекорп».
     """
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
@@ -716,8 +716,8 @@ def test_chat_map_plan_names_the_namesake_it_is_about_to_fork(
     preview = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
     assert preview["categories_created"] == [
         {"path": "Фонд Робота → Акмекорп", "namesake": ["Акмекорп"],
-         "note": "тезка існує: «Акмекорп»"}]
-    assert preview["per_chat"][0]["note"] == "ціль: «Фонд Робота → Акмекорп»"
+         "note": "namesake exists: «Акмекорп»"}]
+    assert preview["per_chat"][0]["note"] == "target: «Фонд Робота → Акмекорп»"
 
     scope.apply_chat_categories(db, mapping_path=path)
     with get_db_connection(db) as conn:
@@ -730,15 +730,15 @@ def test_chat_map_plan_names_the_namesake_it_is_about_to_fork(
         assert conn.execute("SELECT category_id FROM transcriptions WHERE id = 21"
                             ).fetchone()[0] == new["id"]
         assert conn.execute("SELECT category_id FROM transcriptions WHERE id = 20"
-                            ).fetchone()[0] == 4, "записи старого напрямку не чіпаємо"
+                            ).fetchone()[0] == 4, "records of the old direction are not touched"
 
 
 # ============================================================
-# Історія 26: dry-run = той самий писальний шлях із відкотом
+# Story 26: dry-run = the same write path with a rollback
 # ============================================================
 
 def _snapshot(db: str) -> dict:
-    """Усе, що пише карта чатів: вузли, привʼязки чатів, напрямки записів, теги."""
+    """Everything the chat map writes: nodes, chat bindings, record directions, tags."""
     with get_db_connection(db) as conn:
         q = lambda sql: [tuple(r) for r in conn.execute(sql).fetchall()]  # noqa: E731
         return {
@@ -755,7 +755,7 @@ def _snapshot(db: str) -> dict:
 
 
 def _by_path(db: str) -> dict:
-    """Результат проходу, незалежний від id: шляхи вузлів, куди поїхали чати й записи."""
+    """Pass result independent of ids: paths of nodes where chats and records went."""
     from app.services import categories
     with get_db_connection(db) as conn:
         path = lambda cid: categories.node_path(conn, cid) if cid else None  # noqa: E731
@@ -792,12 +792,12 @@ def _add_tg_records(db: str, rows: list[tuple[int, int]]) -> None:
 
 def test_chat_map_dry_run_is_the_real_pass_rolled_back_in_any_row_order(
         db: str, tmp_path: Path, monkeypatch):
-    """Голий «Маркетинг» після/до `{Маркетинг, parent: Фонд Робота}`.
+    """A bare «Маркетинг» after/before `{Маркетинг, parent: Фонд Робота}`.
 
-    Раніше dry-run перевиводив план окремою гілкою, а реальний прохід мутував
-    таблицю по ходу: голий рядок першим заводив напрямок «Маркетинг», другим —
-    бачив свіжу дитину «Фонду». Тепер резолв детермінований (спершу рядки з
-    parent), а превʼю — це той самий прохід із `rollback()`."""
+    Earlier dry-run re-derived the plan in a separate branch, while the real pass mutated
+    the table as it went: the bare row created the direction «Маркетинг» first, the second one
+    saw the fresh child of «Фонд». Now the resolve is deterministic (rows with
+    parent first), and the preview is the same pass with `rollback()`."""
     calls = []
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: calls.append(sorted(ids)) or
@@ -815,21 +815,21 @@ def test_chat_map_dry_run_is_the_real_pass_rolled_back_in_any_row_order(
         path = _mapping(tmp_path / label, rows)
         before = _snapshot(path_db)
         preview = scope.apply_chat_categories(path_db, mapping_path=path, dry_run=True)
-        assert _snapshot(path_db) == before, f"({label}) dry-run лишив слід у БД"
-        assert calls == [], "dry-run не планує re-embed"
+        assert _snapshot(path_db) == before, f"({label}) dry-run left a trace in the DB"
+        assert calls == [], "dry-run does not schedule re-embed"
 
         res = scope.apply_chat_categories(path_db, mapping_path=path)
-        assert _no_reembed(preview) == _no_reembed(res), f"({label}) план ≠ факт"
+        assert _no_reembed(preview) == _no_reembed(res), f"({label}) plan != fact"
         assert preview["reembed_scheduled"] == 0 and res["reembed_scheduled"] > 0
         assert res["ambiguous"] == []
         assert [c["path"] for c in res["categories_created"]] == [
             "Фонд Робота → Маркетинг"]
         notes = {r["title"]: r["note"] for r in res["per_chat"]}
-        assert notes == {"Маркетинг Фонду": "ціль: «Фонд Робота → Маркетинг»",
-                         "Маркетинг голий": "ціль: «Фонд Робота → Маркетинг»"}
+        assert notes == {"Маркетинг Фонду": "target: «Фонд Робота → Маркетинг»",
+                         "Маркетинг голий": "target: «Фонд Робота → Маркетинг»"}
         results[label] = _by_path(path_db)
 
-        # Другий реальний прохід — нуль змін.
+        # The second real pass - zero changes.
         calls.clear()
         again = scope.apply_chat_categories(path_db, mapping_path=path)
         assert again["categories_created"] == []
@@ -838,7 +838,7 @@ def test_chat_map_dry_run_is_the_real_pass_rolled_back_in_any_row_order(
                 again["reembed_scheduled"]) == (0, 0, 0, 0, 0)
         assert calls == []
 
-    assert results["a"] == results["b"], "результат залежить від порядку рядків"
+    assert results["a"] == results["b"], "the result depends on the row order"
     assert results["a"]["chats"][-601] == results["a"]["chats"][-602] == \
         "Фонд Робота → Маркетинг"
     assert results["a"]["records"][60] == results["a"]["records"][61] == \
@@ -848,8 +848,8 @@ def test_chat_map_dry_run_is_the_real_pass_rolled_back_in_any_row_order(
 @pytest.mark.parametrize("parent_first", [True, False])
 def test_chat_map_ambiguity_is_keyed_by_the_row_pair(db: str, tmp_path: Path,
                                                      monkeypatch, parent_first):
-    """Рядок із `parent`, що чисто розвʼязався парою, не відхиляється через
-    голого тезку (раніше `ambiguous` ключувався голою назвою і відхиляв обидва)."""
+    """A row with `parent` that resolved cleanly by the pair is not rejected because of
+    a bare namesake (earlier `ambiguous` was keyed by the bare name and rejected both)."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
     nodes = _two_markets(db)
@@ -869,9 +869,9 @@ def test_chat_map_ambiguity_is_keyed_by_the_row_pair(db: str, tmp_path: Path,
     assert _no_reembed(preview) == _no_reembed(res)
     assert res["ambiguous"] == [{"category": "Маркетинг", "candidates": both}]
     notes = {r["title"]: r for r in res["per_chat"]}
-    assert notes["Маркетинг Фрілансу"]["note"] == "ціль: «Фріланс → Маркетинг»"
+    assert notes["Маркетинг Фрілансу"]["note"] == "target: «Фріланс → Маркетинг»"
     assert notes["Маркетинг Фрілансу"]["records_to_move"] == 1
-    assert notes["Маркетинг голий"]["note"].startswith("неоднозначно, вкажіть parent: ")
+    assert notes["Маркетинг голий"]["note"].startswith("ambiguous, specify parent: ")
     assert notes["Маркетинг голий"]["records_to_move"] == 0
     assert res["categories_created"] == []
 
@@ -879,16 +879,16 @@ def test_chat_map_ambiguity_is_keyed_by_the_row_pair(db: str, tmp_path: Path,
         bound = {r[0]: r[1] for r in conn.execute(
             "SELECT chat_id, category_id FROM tg_monitored_chats WHERE chat_id IN (-603, -604)")}
         assert bound[-603] == nodes["m_free"]
-        assert bound[-604] == 1, "неоднозначний чат лишився, де був"
+        assert bound[-604] == 1, "the ambiguous chat stayed where it was"
         assert conn.execute("SELECT category_id FROM transcriptions WHERE id = 62"
                             ).fetchone()[0] == nodes["m_free"]
 
 
 def test_chat_map_namesake_note_is_the_same_in_dry_run_and_real(
         db: str, tmp_path: Path, monkeypatch):
-    """Другий «Маркетинг» у тому ж проході — тезка першого. Окрема гілка плану
-    рахувала `namesake` по таблиці «до» і друкувала `[]`; реальний прохід
-    бачив уже створений перший."""
+    """A second «Маркетинг» in the same pass is a namesake of the first. A separate plan branch
+    computed `namesake` from the "before" table and printed `[]`; the real pass
+    already saw the created first one."""
     monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
                         lambda ids, **kw: {"mode": "point", "count": len(ids), "stale": 0})
     with get_db_connection(db) as conn:
@@ -906,16 +906,16 @@ def test_chat_map_namesake_note_is_the_same_in_dry_run_and_real(
     expected = [
         {"path": "Фонд Робота → Маркетинг", "namesake": [], "note": None},
         {"path": "Фріланс → Маркетинг", "namesake": ["Фонд Робота → Маркетинг"],
-         "note": "тезка існує: «Фонд Робота → Маркетинг»"}]
+         "note": "namesake exists: «Фонд Робота → Маркетинг»"}]
     assert preview["categories_created"] == expected
     assert res["categories_created"] == expected
 
 
 def test_map_claude_answer_takes_id_only_from_a_whole_integer(db: str):
-    """Цифра всередині назви — не id: «Проєкт 2026» лишається назвою.
+    """A digit inside a name is not an id: «Проєкт 2026» stays a name.
 
-    Раніше бралась перша цифра будь-де у відповіді (пошук регексом по тексту),
-    тож перший же вузол із числом у назві мовчки ламав арбітра."""
+    Earlier the first digit anywhere in the answer was taken (a regex search over the text),
+    so the very first node with a number in its name silently broke the arbiter."""
     from app.services import categories
     _two_markets(db)
     with get_db_connection(db) as conn:

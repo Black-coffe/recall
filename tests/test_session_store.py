@@ -1,4 +1,4 @@
-"""Тести для app.services.recording.session_store (Phase 9.2)."""
+"""Tests for app.services.recording.session_store (Phase 9.2)."""
 from __future__ import annotations
 
 import json
@@ -48,7 +48,7 @@ def test_create_makes_dir_and_manifest(store: SessionStore, tmp_path: Path):
     assert mf['name'] is None
     assert mf['auto_name']  # non-empty
 
-    # Файл реально на диску, валідний JSON
+    # The file is really on disk, valid JSON
     path = tmp_path / 'rec_001' / MANIFEST_FILENAME
     assert path.is_file()
     with open(path, encoding='utf-8') as f:
@@ -126,12 +126,12 @@ def test_set_stream_error(store: SessionStore):
 
 
 def test_set_stream_params_persists_native_rate_channels(store: SessionStore):
-    """Phase 9.10 fix: native (rate, channels) per-stream зберігаються
-    в manifest. Це критично для finalize PCM→WAV з правильним header'ом
-    коли девайс не підтримує запитуваний rate (моно-mic 88200Hz при
+    """Phase 9.10 fix: the native (rate, channels) per stream are stored
+    in the manifest. This is critical for finalize PCM→WAV with the right header
+    when the device does not support the requested rate (a mono mic at 88200Hz with
     requested 48000/2)."""
     store.create('rec_params', 48000, 2)
-    # Спочатку обидва None
+    # First both are None
     mf = store.read('rec_params')
     assert mf['streams'][STREAM_MIC]['sample_rate'] is None
     assert mf['streams'][STREAM_MIC]['channels'] is None
@@ -146,7 +146,7 @@ def test_set_stream_params_persists_native_rate_channels(store: SessionStore):
     assert mf['streams'][STREAM_MIC]['channels'] == 1
     assert mf['streams'][STREAM_SYSTEM]['sample_rate'] == 48000
     assert mf['streams'][STREAM_SYSTEM]['channels'] == 2
-    # Top-level залишається target — не зачіпається per-stream params
+    # Top-level stays the target — per-stream params do not touch it
     assert mf['sample_rate'] == 48000
     assert mf['channels'] == 2
 
@@ -164,16 +164,16 @@ def test_open_segment_closes_previous_and_starts_new(store: SessionStore):
     store.create('rec_seg', 48000, 2)
     store.update_stream_bytes('rec_seg', STREAM_MIC, 5000)
     store.update_stream_bytes('rec_seg', STREAM_SYSTEM, 5000)
-    time.sleep(0.01)  # потрібна секундна різниця в end_ts
+    time.sleep(0.01)  # a one-second difference in end_ts is needed
     new_idx = store.open_segment('rec_seg')
 
     mf = store.read('rec_seg')
     assert len(mf['segments']) == 2
     assert new_idx == 1
-    # Перший segment закритий
+    # The first segment is closed
     assert mf['segments'][0]['end_ts'] is not None
     assert mf['segments'][0]['duration_sec'] is not None
-    # Другий segment відкритий, offset = total bytes на момент створення
+    # The second segment is open, offset = total bytes at the moment of creation
     assert mf['segments'][1]['end_ts'] is None
     assert mf['segments'][1]['mic_offset_bytes'] == 5000
     assert mf['segments'][1]['system_offset_bytes'] == 5000
@@ -191,7 +191,7 @@ def test_close_segment_idempotent(store: SessionStore):
     store.create('rec_idem', 48000, 2)
     store.close_segment('rec_idem')
     first_end = store.read('rec_idem')['segments'][0]['end_ts']
-    store.close_segment('rec_idem')  # повторно — нічого не міняє
+    store.close_segment('rec_idem')  # again — changes nothing
     assert store.read('rec_idem')['segments'][0]['end_ts'] == first_end
 
 
@@ -206,14 +206,14 @@ def test_list_all_returns_all_sessions(store: SessionStore):
 
 def test_list_all_skips_corrupt_manifest(store: SessionStore, tmp_path: Path):
     store.create('rec_ok', 48000, 2)
-    # Створюємо battling manifest у сусідній папці
+    # Create a battling manifest in a neighbouring folder
     bad_dir = tmp_path / 'rec_bad'
     bad_dir.mkdir()
     (bad_dir / MANIFEST_FILENAME).write_text('{not valid json', encoding='utf-8')
 
     listed = store.list_all()
     ids = {m['session_id'] for m in listed}
-    assert ids == {'rec_ok'}  # bad пропущено без exception
+    assert ids == {'rec_ok'}  # bad skipped without an exception
 
 
 def test_list_orphaned_finds_active_statuses(store: SessionStore):
@@ -240,7 +240,7 @@ def test_delete_removes_session(store: SessionStore, tmp_path: Path):
 
 
 def test_delete_nonexistent_is_idempotent(store: SessionStore):
-    # Не повинно кидати (сесія не існує, але session_id валідний формат)
+    # Must not raise (the session does not exist, but the session_id is of a valid format)
     store.delete('rec_never_existed')
 
 
@@ -249,16 +249,16 @@ def test_delete_nonexistent_is_idempotent(store: SessionStore):
 def test_atomic_write_keeps_manifest_valid_on_crash(
     store: SessionStore, tmp_path: Path, monkeypatch
 ):
-    """Симулюємо крах посеред write: os.replace кидає OSError.
-    Маніфест на диску мусить лишитися від попереднього успішного write.
+    """We simulate a crash in the middle of a write: os.replace raises OSError.
+    The manifest on disk must stay as of the previous successful write.
     """
     import os
     store.create('rec_crash', 48000, 2)
-    # Початковий valid manifest на диску
+    # The initial valid manifest on disk
     pre_crash = store.read('rec_crash')
     assert pre_crash['status'] == STATUS_RECORDING
 
-    # Mock os.replace щоб кинуло після написання tmp
+    # Mock os.replace so that it raises after the tmp is written
     real_replace = os.replace
     calls = []
 
@@ -270,22 +270,22 @@ def test_atomic_write_keeps_manifest_valid_on_crash(
     with pytest.raises(OSError):
         store.update_status('rec_crash', STATUS_PAUSED)
 
-    # Скасувати mock і перевірити що manifest на диску = pre_crash
+    # Cancel the mock and check that the manifest on disk = pre_crash
     monkeypatch.setattr(os, 'replace', real_replace)
     after = store.read('rec_crash')
-    assert after['status'] == STATUS_RECORDING  # не зламалось до paused
+    assert after['status'] == STATUS_RECORDING  # did not break down to paused
     assert after == pre_crash
 
 
 def test_atomic_write_concurrent_modify(store: SessionStore):
-    """Бомбардуємо update_stream_bytes з двох потоків — кожен інкремент
-    має бути видимий, manifest завжди валідний."""
+    """We bombard update_stream_bytes from two threads — every increment
+    must be visible, the manifest is always valid."""
     store.create('rec_concurrent', 48000, 2)
     counts = {STREAM_MIC: 1000, STREAM_SYSTEM: 1000}
 
     def writer(stream: str):
         for i in range(counts[stream]):
-            # Інкрементуємо total — звичайний use-case з flush
+            # Increment total — a usual use case with flush
             store.update_stream_bytes('rec_concurrent', stream, (i + 1) * 4096)
 
     t1 = threading.Thread(target=writer, args=(STREAM_MIC,))
@@ -332,8 +332,8 @@ def test_pcm_path_invalid_stream(store: SessionStore):
     'rec_with space',
 ])
 def test_session_dir_rejects_path_traversal(store: SessionStore, malicious_id: str):
-    """session_dir() мусить кидати SessionStoreError на будь-який
-    session_id який не співпадає з ^rec_[a-z0-9_]{1,64}$."""
+    """session_dir() must raise SessionStoreError for any
+    session_id that does not match ^rec_[a-z0-9_]{1,64}$."""
     with pytest.raises(SessionStoreError):
         store.session_dir(malicious_id)
 
@@ -354,14 +354,14 @@ def test_pcm_path_rejects_path_traversal(store: SessionStore):
 
 
 def test_read_manifest_warns_on_version_mismatch(store: SessionStore, caplog):
-    """Якщо manifest має version != MANIFEST_VERSION — warning у лог,
-    але manifest повертається (без exception)."""
+    """If the manifest has version != MANIFEST_VERSION — a warning in the log,
+    but the manifest is returned (without an exception)."""
     import logging
     store.create('rec_oldver', 48000, 2)
-    # Симулюємо старий manifest на диску
+    # Simulate an old manifest on disk
     path = store.session_dir('rec_oldver') / 'manifest.json'
     raw = json.loads(path.read_text(encoding='utf-8'))
-    raw['version'] = 999  # майбутня неіснуюча версія
+    raw['version'] = 999  # a future nonexistent version
     path.write_text(json.dumps(raw), encoding='utf-8')
 
     with caplog.at_level(logging.WARNING):
@@ -371,8 +371,8 @@ def test_read_manifest_warns_on_version_mismatch(store: SessionStore, caplog):
 
 
 def test_session_id_accepts_valid_formats(store: SessionStore):
-    """Всі формати які реально використовуються (uuid hex, prod-style,
-    test-style з підкреслюваннями) приймаються."""
+    """All formats that are really used (uuid hex, prod-style,
+    test-style with underscores) are accepted."""
     valid_ids = [
         'rec_abc',
         'rec_001',
@@ -381,7 +381,7 @@ def test_session_id_accepts_valid_formats(store: SessionStore):
         'rec_a',
     ]
     for sid in valid_ids:
-        # Не кидає — успіх
+        # Does not raise — success
         path = store.session_dir(sid)
         assert path.parent == store.base_dir
         assert path.name == sid
@@ -400,9 +400,9 @@ class TestSelfHealingPaths:
     def test_dead_final_mp3_path_repathed_when_file_exists_in_session_dir(
         self, store: SessionStore, tmp_path: Path,
     ):
-        """Абсолютний шлях зі старого кореня проєкту мертвий, але файл з тим
-        самим ім'ям реально лежить у папці цієї сесії (переїзд проєкту) —
-        read() повертає вилікуваний шлях."""
+        """An absolute path from the old project root is dead, but a file with the same
+        name really lies in this session's folder (a project move) —
+        read() returns the healed path."""
         store.create('rec_moved', 48000, 2)
         session_dir = store.session_dir('rec_moved')
         real_mp3 = session_dir / 'final.mp3'
@@ -416,8 +416,8 @@ class TestSelfHealingPaths:
         assert manifest['final_mp3_path'] == str(real_mp3)
 
     def test_existing_path_left_untouched(self, store: SessionStore, tmp_path: Path):
-        """Шлях, що реально існує (навіть якщо технічно поза session_dir),
-        НЕ підміняється."""
+        """A path that really exists (even if technically outside session_dir)
+        is NOT replaced."""
         store.create('rec_intact', 48000, 2)
         real_file = tmp_path / 'elsewhere.mp3'
         real_file.write_bytes(b'x')
@@ -427,8 +427,8 @@ class TestSelfHealingPaths:
         assert manifest['final_mp3_path'] == str(real_file)
 
     def test_unrecoverable_path_left_as_is(self, store: SessionStore):
-        """Ні старий шлях, ні файл з тим самим basename у session_dir не
-        існують — шлях лишається як був (нічим замінити)."""
+        """Neither the old path nor a file with the same basename in session_dir
+        exists — the path stays as it was (nothing to replace it with)."""
         store.create('rec_orphan', 48000, 2)
         dead_path = r'E:\Projects\Whisper\recordings\rec_orphan\final.mp3'
         _set_manifest_field(store, 'rec_orphan', final_mp3_path=dead_path)
@@ -459,8 +459,8 @@ class TestSelfHealingPaths:
         assert manifest['streams']['video'][0]['path'] == str(real_video)
 
     def test_read_does_not_persist_healed_path_to_disk(self, store: SessionStore):
-        """read() лікує лише повернутий dict; manifest.json на диску
-        лишається незмінним (лікування — не мутація persist-стану)."""
+        """read() heals only the returned dict; manifest.json on disk
+        stays unchanged (healing is not a mutation of persistent state)."""
         store.create('rec_readonly', 48000, 2)
         session_dir = store.session_dir('rec_readonly')
         real_mp3 = session_dir / 'final.mp3'
@@ -474,7 +474,7 @@ class TestSelfHealingPaths:
         assert on_disk['final_mp3_path'] == dead_path
 
     def test_healthy_manifest_no_debug_log(self, store: SessionStore, caplog):
-        """Немає нічого лікувати → healed=0 → жодного DEBUG-запису про
+        """Nothing to heal → healed=0 → no DEBUG record about
         self-healing."""
         import logging
         store.create('rec_healthy', 48000, 2)
@@ -489,7 +489,7 @@ def test_create_writes_system_source_when_stream_exists(store: SessionStore):
     src = {'mode': 'exclude', 'apps': ['zoom.exe'], 'device_index': None}
     mf = store.create('rec_src', 48000, 2, system_source=src)
     sys_mf = mf['streams'][STREAM_SYSTEM]
-    assert sys_mf['enabled'] is True  # include/exclude не має імені endpoint'а
+    assert sys_mf['enabled'] is True  # include/exclude has no endpoint name
     assert sys_mf['source'] == src
     assert sys_mf['source_events'] == []
     assert mf['version'] == MANIFEST_VERSION

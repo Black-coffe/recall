@@ -1,14 +1,14 @@
 """Phase 9: System audio + microphone recording (WASAPI loopback).
 
 Public API:
-- :func:`list_input_devices` — енумерація mic + loopback девайсів.
-- :class:`WasapiRecorder` — низькорівневий wrapper навколо WASAPI стріму.
-- :class:`LevelMeter` — rolling RMS+peak за останні 100ms для VU.
-- :class:`SessionStore` — файлове сховище сесій з atomic manifest.
-- :class:`ChunkedPcmWriter` — append-only PCM writer з fsync.
+- :func:`list_input_devices` — enumeration of mic + loopback devices.
+- :class:`WasapiRecorder` — a low-level wrapper around a WASAPI stream.
+- :class:`LevelMeter` — rolling RMS+peak over the last 100ms for the VU meter.
+- :class:`SessionStore` — a file-based session store with an atomic manifest.
+- :class:`ChunkedPcmWriter` — an append-only PCM writer with fsync.
 
-Higher-level услуги (RecordingService, finalize) додаються в наступних
-фазах 9.3-9.4.
+Higher-level services (RecordingService, finalize) are added in the next
+phases 9.3-9.4.
 """
 from app.services.recording.finalize import (
     FinalizeError,

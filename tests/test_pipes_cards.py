@@ -1,7 +1,7 @@
-"""K5 story 01: брифінг — HTML-картки, які складає код.
+"""K5 story 01: the brief — HTML cards assembled by code.
 
-Власник 15.10.2026: «прям очень кеуча текста который не хочется читать»; «чтобы там была
-четкая категория, направление»; «чтобы по ссылке можно было открыть сам recall»."""
+Owner 15.10.2026: «a really huge wall of text that I don't want to read»; «so that there is
+a clear category, direction»; «so that the link can open Recall itself»."""
 from __future__ import annotations
 
 import re
@@ -32,7 +32,7 @@ def _env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def db(tmp_path):
-    """3 кореневі напрямки × 8 задач; у кожного кореня підкатегорія, половина задач — у ній."""
+    """3 root directions × 8 tasks; each root has a subcategory, half of the tasks are in it."""
     path = str(tmp_path / "c.db")
     init_database(path)
     conn = sqlite3.connect(path)
@@ -106,8 +106,8 @@ def test_blocks_by_root_five_cards_and_more_link(db):
         block = _block(text, root)
         assert block.count("\n• ") == 5
         assert f'<a href="{BASE}/tasks?category_id={cid}">ще 3 →</a>' in block
-    assert "підпроєкт</b>" not in text                    # підкатегорія — не окремий блок
-    assert "📁 Альфа-фонд · підпроєкт" in text        # але видна в картці
+    assert "підпроєкт</b>" not in text                    # a subcategory is not a separate block
+    assert "📁 Альфа-фонд · підпроєкт" in text        # but it is visible in the card
     assert "Сирота" in _block(text, pipes_cards.NO_DIR)
     assert text.index("🏷 <b>Без напрямку") > text.index("🏷 <b>Гамма")
 
@@ -176,7 +176,7 @@ def test_questions_link_record_and_telegram(db):
     text, _ = _render(db, data)
     assert f'<a href="{BASE}/transcript/3">Коли буде договір?</a>' in text
     assert '<a href="https://t.me/c/1/2">у Telegram</a>' in text
-    assert text.index("А звіт?") < text.index("Коли буде договір?")   # довша тиша — першою
+    assert text.index("А звіт?") < text.index("Коли буде договір?")   # the longer silence — first
 
 
 # --------------------------------------------------------------- run_pipe
@@ -216,7 +216,7 @@ def test_without_claude_same_message_without_headline(db, monkeypatch):
 
 
 def test_stop_word_in_direction_name_blocks(db, monkeypatch, tmp_path):
-    """Назву напрямку дає БД, а не пункт: filter_data її не бачить — ловить картка."""
+    """The direction name comes from the DB, not from the item: filter_data does not see it — the card catches it."""
     (tmp_path / "private.txt").write_text("гамма", encoding="utf-8")
     monkeypatch.setitem(pipes.TOOLS, "weekly_digest", lambda db_, n: _digest())
     sent = []
@@ -260,11 +260,11 @@ def test_send_passes_parse_mode(monkeypatch):
     assert calls[0]["parse_mode"] == ["HTML"] and "parse_mode" not in calls[1]
 
 
-# ---------------------- посилання з телефона (story 03, власник 15.10.2026)
+# ---------------------- links from the phone (story 03, owner 15.10.2026)
 
 def test_public_url_used_for_every_recall_link(db, monkeypatch):
-    """«Ссылки в новых карточках брифинга ведут на адрес Recall на этом компьютере, поэтому с телефона
-    они не откроются.»"""
+    """«Links in the new brief cards lead to the Recall address on this computer, so from the phone
+    they will not open.»"""
     public = "https://home-pc.example.ts.net"
     monkeypatch.setenv("RECALL_PUBLIC_URL", public + "/")
     assert pipes_cards.link_base() == public
@@ -295,7 +295,7 @@ def test_no_direction_block_has_more_link(db):
     assert f'<a href="{BASE}/tasks?category_id=none">ще 2 →</a>' in block
 
 
-# --- K5 k5-task-buttons: номери і кнопки ------------------------------------------
+# --- K5 k5-task-buttons: numbers and buttons ------------------------------------------
 
 def test_buttons_number_shown_tasks_in_order_with_footer(db):
     from app.services import brief_actions
@@ -303,7 +303,7 @@ def test_buttons_number_shown_tasks_in_order_with_footer(db):
     text, _ = _render(db, {"weekly_digest": _digest(n_overdue=2)}, buttons=ids)
     nums = [int(n) for n in re.findall(r"<b>(\d+)\.</b> ", text)]
     assert nums == list(range(1, len(ids) + 1)) and len(ids) == len(set(ids)) > 0
-    # Кожен показаний номер — задача, яку видно в тексті (за посиланням з ?task=).
+    # Every displayed number is a task visible in the text (by the link with ?task=).
     for n, iid in enumerate(ids, 1):
         assert re.search(rf"<b>{n}\.</b> <a href=\"[^\"]*\?task={iid}\"", text)
     assert brief_actions.FOOTER in text and _balanced(text)
@@ -336,7 +336,7 @@ def test_run_pipe_with_buttons_passes_keyboard(db, monkeypatch):
     assert len(rows) == len(re.findall(r"<b>\d+\.</b> ", text))
 
 
-# --- english-i18n-08: службові рядки брифінгу мовою налаштування ---------------
+# --- english-i18n-08: service lines of the brief in the language of the setting ---------------
 
 def test_en_render_translates_service_strings_keeps_data(db, monkeypatch):
     from app.services import brief_actions
@@ -348,7 +348,7 @@ def test_en_render_translates_service_strings_keeps_data(db, monkeypatch):
     assert "overdue since" in text and "3 items hidden, see Recall" in text
     assert brief_actions.footer("en") in text and "Buttons work" in text
     assert "ще 3" not in text and "Задачі" not in text and "Без напрямку" not in text
-    assert "Альфа-фонд" in text and "Сирота" in text            # дані — як є
+    assert "Альфа-фонд" in text and "Сирота" in text            # data — as is
     assert pipes_cards.title_for(["weekly_digest"]) == "🗓 Weekly digest"
     kb = brief_actions.keyboard(ids)
     assert kb["inline_keyboard"][0][0]["callback_data"].startswith("a:1:")

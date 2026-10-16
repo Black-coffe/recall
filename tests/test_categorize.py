@@ -1,6 +1,6 @@
-"""Тести авто-підказки напрямку (Phase 15C, k-NN suggester).
+"""Tests of direction auto-suggestion (Phase 15C, k-NN suggester).
 
-Embeddings мокаються (EMBED_DIM=4), реальна модель не вантажиться.
+Embeddings are mocked (EMBED_DIM=4), the real model is not loaded.
 """
 import sqlite3
 
@@ -24,9 +24,9 @@ def db(tmp_path):
     return path
 
 
-#: Поточна епоха, якою мокаємо `embeddings.EMBED_MODEL`/`EMBED_VERSION` — усі
-#: фікстури нижче пишуть цю саму пару в `transcriptions`, якщо явно не просять
-#: іншу (гард епохи, історія 05).
+#: The current epoch with which we mock `embeddings.EMBED_MODEL`/`EMBED_VERSION` - all
+#: fixtures below write this same pair into `transcriptions`, unless explicitly asked
+#: for another (epoch guard, story 05).
 _EPOCH = ("test-model", 3)
 
 
@@ -65,7 +65,7 @@ def test_suggests_nearest_category(db):
     _add_chunk(db, a, 0, [1, 0, 0, 0])
     _add_chunk(db, b, 0, [0, 1, 0, 0])
     target = _add_tx(db, category_id=None)
-    _add_chunk(db, target, 0, [0.96, 0.1, 0, 0])  # близько до A
+    _add_chunk(db, target, 0, [0.96, 0.1, 0, 0])  # close to A
 
     res = categorize.suggest_category(db, target)
     assert res["suggestion"] is not None
@@ -87,8 +87,8 @@ def test_insufficient_labels_cold_start(db):
 
 
 def test_not_embedded(db):
-    _add_tx(db, category_id=1)  # хоч якась розмітка
-    target = _add_tx(db, category_id=None)  # без чанків
+    _add_tx(db, category_id=1)  # at least some labelling
+    target = _add_tx(db, category_id=None)  # no chunks
     res = categorize.suggest_category(db, target)
     assert res["suggestion"] is None
     assert res["reason"] == "not_embedded"
@@ -111,12 +111,12 @@ def test_embeddings_unavailable(db, monkeypatch):
 
 
 # ============================================================
-# Гард епохи (ADR-017, історія 05): `chunks` не має свого
-# embedding_model/embedding_version — епоха живе на `transcriptions`.
+# Epoch guard (ADR-017, story 05): `chunks` has no
+# embedding_model/embedding_version of its own - the epoch lives on `transcriptions`.
 # ============================================================
 
 def test_epoch_homogeneous_suggests_as_before(db):
-    """(а) увесь корпус в одній (поточній) епосі — поведінка не змінюється."""
+    """(a) the whole corpus in one (current) epoch - behaviour does not change."""
     a = _add_tx(db, category_id=1)   # «Фонд Робота»
     b = _add_tx(db, category_id=2)   # «Акмекорп»
     _add_chunk(db, a, 0, [1, 0, 0, 0])
@@ -131,15 +131,15 @@ def test_epoch_homogeneous_suggests_as_before(db):
 
 
 def test_epoch_mixed_when_target_is_stale(db):
-    """(б) частина корпусу — епоха 2 (стара), частина — епоха 3 (поточна);
-    сам запис лишився невереембеджений (епоха 2). Гард не дає порахувати
-    косинус між вектором епохи 2 і корпусом епохи 3 — жодної підказки."""
+    """(b) part of the corpus is epoch 2 (old), part is epoch 3 (current);
+    the record itself stayed un-re-embedded (epoch 2). The guard does not allow computing
+    a cosine between an epoch-2 vector and an epoch-3 corpus - no suggestion."""
     old_epoch = ("legacy-model", 2)
-    a = _add_tx(db, category_id=1, epoch=old_epoch)     # «Фонд Робота», епоха 2
-    b = _add_tx(db, category_id=2)                       # «Акмекорп», поточна епоха 3
+    a = _add_tx(db, category_id=1, epoch=old_epoch)     # «Фонд Робота», epoch 2
+    b = _add_tx(db, category_id=2)                       # «Акмекорп», current epoch 3
     _add_chunk(db, a, 0, [1, 0, 0, 0])
     _add_chunk(db, b, 0, [0, 1, 0, 0])
-    target = _add_tx(db, category_id=None, epoch=old_epoch)   # ще не переембеджений
+    target = _add_tx(db, category_id=None, epoch=old_epoch)   # not re-embedded yet
     _add_chunk(db, target, 0, [0.96, 0.1, 0, 0])
 
     res = categorize.suggest_category(db, target)
@@ -148,10 +148,10 @@ def test_epoch_mixed_when_target_is_stale(db):
 
 
 def test_epoch_mixed_not_confused_with_not_embedded(db):
-    """Запис без жодного чанку лишається `not_embedded`, а не `epoch_mixed` —
-    коди означають різне (нема вектора / вектор не тієї епохи)."""
+    """A record with no chunks stays `not_embedded`, not `epoch_mixed` -
+    the codes mean different things (no vector / a vector of another epoch)."""
     _add_tx(db, category_id=1)
-    target = _add_tx(db, category_id=None, epoch=("legacy-model", 2))  # чанків немає
+    target = _add_tx(db, category_id=None, epoch=("legacy-model", 2))  # no chunks
     res = categorize.suggest_category(db, target)
     assert res["suggestion"] is None
     assert res["reason"] == "not_embedded"

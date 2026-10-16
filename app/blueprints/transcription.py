@@ -1,15 +1,15 @@
 """Transcription endpoints (Phase 5.8).
 
 - POST   /api/transcribe                      (file/youtube → transcript)
-- GET    /api/history                         (list з фільтрами + FTS)
+- GET    /api/history                         (list with filters + FTS)
 - GET    /api/history/<id>                    (get one)
-- PATCH  /api/history/<id>                    (власна назва/опис, v44)
+- PATCH  /api/history/<id>                    (custom title/description, v44)
 - DELETE /api/history/<id>                    (soft-delete one, T4.6)
 - POST   /api/history/<id>/restore            (undo soft-delete, T4.6)
-- POST   /api/history/bulk_delete             (mass, ЗАЛИШАЄТЬСЯ фізичним)
+- POST   /api/history/bulk_delete             (mass, STAYS physical)
 - POST   /api/history/bulk_export             (mass JSON/TXT)
 - POST   /api/transcription/<id>/polish       (Claude API)
-- POST   /api/export/<format>                 (TXT/SRT/JSON одного транскрипту)
+- POST   /api/export/<format>                 (TXT/SRT/JSON of a single transcript)
 """
 from __future__ import annotations
 
@@ -86,8 +86,8 @@ def _empty_source_meta(source_type: str) -> dict:
         'library_audio_id': None,
         'library_recording_sid': None,
         'source_type': source_type,
-        # editable-title-description-02: копія з Аудіотеки (лише 'library'
-        # заповнює), форма (request.form title/description) має пріоритет.
+        # editable-title-description-02: a copy from the Audio Library (only 'library'
+        # fills it), the form (request.form title/description) takes priority.
         'title': None,
         'description': None,
     }
@@ -114,16 +114,16 @@ def resolve_file_source() -> tuple[str, str, dict]:
     upload_dir = current_app.config['UPLOAD_FOLDER']
     filepath = safe_path_within(upload_dir, os.path.join(upload_dir, filename))
     if filepath is None:
-        logger.error(f"Спроба Path Traversal: {filename}")
+        logger.error(f"Path traversal attempt: {filename}")
         raise _SourceResolutionError({"success": False, "error": tr('transcript.err.filename_invalid')}, 400)
 
     file.save(filepath)
     source_name = file.filename
-    logger.info(f"Файл збережено: {filepath}")
+    logger.info(f"File saved: {filepath}")
 
-    # Якщо відео — витягаємо аудіо
+    # If it is a video - extract the audio
     if is_video_file(file.filename):
-        logger.info(f"Виявлено відео файл: {file.filename}")
+        logger.info(f"Video file detected: {file.filename}")
         audio_filename = f"{timestamp}_extracted_audio.mp3"
         audio_filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], audio_filename)
         if not _extract_audio_raw(filepath, audio_filepath, add_log=None):
@@ -132,9 +132,9 @@ def resolve_file_source() -> tuple[str, str, dict]:
             raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_extract_failed')}, 500)
         if os.path.exists(filepath):
             os.remove(filepath)
-            logger.info(f"Відео файл видалено: {filepath}")
+            logger.info(f"Video file removed: {filepath}")
         filepath = audio_filepath
-        logger.info(f"Використовуємо витягнуте аудіо: {filepath}")
+        logger.info(f"Using the extracted audio: {filepath}")
 
     return filepath, source_name, _empty_source_meta('file')
 
@@ -150,7 +150,7 @@ def resolve_youtube_source() -> tuple[str, str, dict]:
     filepath = progress['file_path']
     youtube_info = progress['info']
     source_name = youtube_info['title']
-    state.add_log(download_id, "transcribe", "Начало транскрибации аудио...", 55, "processing")
+    state.add_log(download_id, "transcribe", tr("svc_media.tx.log.start"), 55, "processing")
     meta = _empty_source_meta('youtube')
     meta['youtube_info'] = youtube_info
     meta['download_id'] = download_id
@@ -179,7 +179,7 @@ def resolve_recording_source() -> tuple[str, str, dict]:
 
 
 def resolve_library_source() -> tuple[str, str, dict]:
-    """source_type='library': Phase 9.10+, any Аудіотека (audio_downloads) row by id.
+    """source_type='library': Phase 9.10+, any Audio Library (audio_downloads) row by id.
 
     Inherits the row's original source_type ('youtube'/'recording'/'file') for
     the transcriptions.source_type INSERT further downstream — the caller
@@ -202,18 +202,18 @@ def resolve_library_source() -> tuple[str, str, dict]:
     if not filepath or not os.path.isfile(filepath):
         raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_missing', path=filepath)}, 400)
     source_name = row['title']
-    # Успадковуємо оригінальний source_type щоб transcript у Історії
-    # групувався правильно (YouTube → 'youtube', recording → 'recording')
+    # Inherit the original source_type so the transcript in History
+    # is grouped correctly (YouTube → 'youtube', recording → 'recording')
     inherited = (row['source_type'] if 'source_type' in row.keys() else None) or 'youtube'
     meta = _empty_source_meta(inherited)
     meta['library_audio_id'] = audio_id_int
-    # Успадковуємо власну назву/опис Аудіотеки — форма перебиває це в transcribe().
+    # Inherit the Audio Library custom title/description - the form overrides this in transcribe().
     meta['title'] = row['title'] if 'title' in row.keys() else None
     meta['description'] = row['description'] if 'description' in row.keys() else None
-    # Phase 21: для recording зберігаємо sid → нижче лінкуємо копілот-сесію.
+    # Phase 21: for a recording keep the sid → link the copilot session below.
     if inherited == 'recording':
         meta['library_recording_sid'] = row['recording_session_id'] if 'recording_session_id' in row.keys() else None
-    # Якщо youtube — заповнюємо youtube_info для INSERT
+    # If it is youtube - fill youtube_info for the INSERT
     if inherited == 'youtube':
         meta['youtube_info'] = {
             'video_id': row['youtube_id'],
@@ -236,7 +236,7 @@ _SOURCE_RESOLVERS = {
 
 @transcription_bp.route('/api/transcribe', methods=['POST'])
 def transcribe():
-    """Транскрибація аудіо (file upload або YouTube via download_id)."""
+    """Transcribe audio (file upload or YouTube via download_id)."""
     logger.info(f"=== DEBUG /api/transcribe ===")
     logger.info(f"request.form: {dict(request.form)}")
     logger.info(f"request.files keys: {list(request.files.keys())}")
@@ -247,8 +247,8 @@ def transcribe():
     model_name = request.form.get('model', 'base')
     language = request.form.get('language', 'uk')
 
-    # editable-title-description-02: власні title/description з форми —
-    # валідуємо ДО початку роботи резолвера (файл/завантаження/транскрипція).
+    # editable-title-description-02: custom title/description from the form -
+    # validate BEFORE the resolver starts (file/download/transcription).
     try:
         form_title = record_meta.normalize_title(request.form.get('title'))
         form_description = record_meta.normalize_description(request.form.get('description'))
@@ -263,30 +263,30 @@ def transcribe():
     except _SourceResolutionError as e:
         return jsonify(e.payload), e.status
 
-    # Форма перебиває копію з Аудіотеки (лише 'library'-джерело її несе).
+    # The form overrides the copy from the Audio Library (only the 'library' source carries it).
     record_title = form_title if form_title is not None else meta['title']
     record_description = form_description if form_description is not None else meta['description']
 
     youtube_info = meta['youtube_info']
     download_id = meta['download_id']
-    library_audio_id: int | None = meta['library_audio_id']  # для active_library_transcriptions
-    # Якщо транскрибуємо recording library-шляхом (audio_download_id) — sid
-    # запису для привʼязки копілот-сесії беремо з рядка audio_downloads,
-    # бо у формі recording_session_id немає.
+    library_audio_id: int | None = meta['library_audio_id']  # for active_library_transcriptions
+    # If we transcribe a recording via the library path (audio_download_id) - the recording's
+    # sid for binding the copilot session is taken from the audio_downloads row,
+    # because the form has no recording_session_id.
     library_recording_sid: str | None = meta['library_recording_sid']
-    # library-джерело може успадковувати інший source_type (T7.1) — усе, що
-    # нижче (diarize/INSERT/enrichment), має орієнтуватись саме на нього.
+    # a library source may inherit another source_type (T7.1) - everything
+    # below (diarize/INSERT/enrichment) must follow that one.
     source_type = meta['source_type']
 
     if library_audio_id is not None and state.active_library_transcriptions is not None:
         _existing_job = state.active_library_transcriptions.get(library_audio_id)
         if _existing_job is not None:
-            # Пост-хвильова знахідка 03.07.2026: повторний POST з тим самим
-            # audio_download_id (типовий сценарій — клієнтський HTTP-таймаут
-            # ретраїть запит, поки перша транскрипція ще йде синхронно всередині
-            # попереднього запиту) запускав ДРУГУ повну задачу (whisper+діаризація
-            # вдруге на тому самому файлі — витрачене GPU-час на годинних записах).
-            # 409 замість тихого дубля.
+            # Post-wave finding 03.07.2026: a repeated POST with the same
+            # audio_download_id (a typical scenario - a client HTTP timeout
+            # retries the request while the first transcription is still running synchronously inside
+            # the previous request) started a SECOND full job (whisper+diarization
+            # again on the same file - wasted GPU time on hour-long recordings).
+            # 409 instead of a silent duplicate.
             return jsonify({
                 "success": False,
                 "error": tr('transcript.err.already_running'),
@@ -308,7 +308,7 @@ def transcribe():
                 return
             progress_value = progress_info.get('progress', 0)
             if source_type == 'youtube' and download_id:
-                message = progress_info.get('message', 'Обработка...')
+                message = progress_info.get('message', tr("svc_media.tx.log.processing"))
                 overall_progress = 55 + (progress_value * 0.4)
                 segment = progress_info.get('segment')
                 if segment:
@@ -316,7 +316,7 @@ def transcribe():
                         state.sse_broker.publish(download_id, "segment", segment)
                     except Exception:
                         logger.debug(
-                            "SSE segment publish failed for %s (best-effort, не блокує transcribe)",
+                            "SSE segment publish failed for %s (best-effort, does not block transcribe)",
                             download_id, exc_info=True,
                         )
                 state.add_log(download_id, "transcribe", message, overall_progress, "processing")
@@ -325,7 +325,7 @@ def transcribe():
                 if entry is not None:
                     entry['progress'] = progress_value
 
-        # K1: словник імен і мова — на файлах і записах; YouTube отримує {}.
+        # K1: vocabulary and language - on files and recordings; YouTube gets {}.
         vocab_kind = source_type if source_type in ('youtube', 'recording') else 'file'
         result = state.whisper_manager.transcribe_with_progress(
             filepath, model_name, language,
@@ -336,11 +336,11 @@ def transcribe():
 
         if "error" in result:
             if source_type == 'youtube' and download_id:
-                state.add_log(download_id, "transcribe", f"Помилка: {result['error']}", -1, "error")
+                state.add_log(download_id, "transcribe", tr("svc_media.tx.log.failed", error=result['error']), -1, "error")
             return jsonify(result), 500
 
         if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "transcribe", "Транскрибация завершена", 95, "processing")
+            state.add_log(download_id, "transcribe", tr("svc_media.tx.log.done"), 95, "processing")
 
         result["processing_time"] = round(processing_time, 2)
         result["model_used"] = model_name
@@ -349,9 +349,9 @@ def transcribe():
         if source_type == 'youtube':
             result["youtube_info"] = youtube_info
 
-        # Phase 10.3: speaker diarization (опц., завжди для recording).
-        # Помилка діарізації НЕ ламає transcribe — фічу можна вимкнути в .env
-        # видаленням HF_TOKEN, тоді просто збереже сегменти без speaker-полів.
+        # Phase 10.3: speaker diarization (optional, always for a recording).
+        # A diarization error does NOT break transcribe - the feature can be turned off in .env
+        # by removing HF_TOKEN, then the segments are simply saved without speaker fields.
         diarize_flag = request.form.get('diarize', '').lower() in ('1', 'true', 'yes')
         should_diarize = source_type == 'recording' or diarize_flag
         if should_diarize and library_audio_id is not None and state.active_library_transcriptions is not None:
@@ -369,7 +369,7 @@ def transcribe():
                 svc = DiarizationService.get_instance()
                 if not svc.is_available():
                     logger.info(
-                        "Diarization вимкнено: %s — пропускаю",
+                        "Diarization disabled: %s - skipping",
                         svc.unavailability_reason(),
                     )
                 else:
@@ -399,31 +399,31 @@ def transcribe():
                     result['diarization_time'] = round(diar_time, 2)
                     result['speakers_detected'] = unique_speaker_labels
                     logger.info(
-                        "Diarization: знайдено %d спікерів за %.1fs (wall=%.1fs, embeddings=%d)",
+                        "Diarization: found %d speakers in %.1fs (wall=%.1fs, embeddings=%d)",
                         len(unique_speaker_labels), diar_time,
                         time.time() - diar_t0, len(diar_embeddings),
                     )
             except Exception as e:
                 logger.warning(
-                    "Diarization failed (продовжую без неї): %s", e, exc_info=True,
+                    "Diarization failed (continuing without it): %s", e, exc_info=True,
                 )
 
-        # Phase 14: напрямок (категорія) — з форми, опціонально
+        # Phase 14: direction (category) - from the form, optional
         _cat_raw = request.form.get('category_id')
         category_id = int(_cat_raw) if (_cat_raw and _cat_raw.isdigit()) else None
 
         with _get_db() as conn:
             c = conn.cursor()
-            # Дедуп аудіо (Хвиля A): той самий текст, залитий удруге, лишається
-            # записом (свої коментарі/файл/задачі), але позначається
-            # duplicate_of → id оригіналу і НЕ індексується — інакше обидві
-            # копії конкурують за слоти видачі однаковим вмістом.
+            # Audio dedup (Wave A): the same text uploaded a second time stays
+            # a record (its own comments/file/tasks), but is marked
+            # duplicate_of → the original's id and is NOT indexed - otherwise both
+            # copies compete for result slots with identical content.
             text_hash = dedup_audio.hash_for(source_type, result['text'])
             original = dedup_audio.find_original(conn, text_hash)
             duplicate_of = original['id'] if original else None
             if duplicate_of:
-                logger.info("Дубль аудіо: текст збігається з #%s «%s» — запис "
-                            "зберігаю, але не індексую", duplicate_of,
+                logger.info("Audio duplicate: the text matches #%s «%s» - the record "
+                            "is kept but not indexed", duplicate_of,
                             original.get('source_name'))
             c.execute('''INSERT INTO transcriptions
                          (source_type, source_name, source_url, youtube_id, youtube_title,
@@ -447,14 +447,14 @@ def transcribe():
             if duplicate_of:
                 result['duplicate_of'] = duplicate_of
 
-            # Phase 10.3: створити transcription_speaker_map записи для виявлених
-            # лейблів. 'self' автоматично мапиться на seeded speaker is_self=1 ('Ви'),
-            # інші лейбли (SPEAKER_00, ...) залишаються з NULL speaker_id —
-            # фронтенд покаже "Спікер N" і запропонує іменування.
+            # Phase 10.3: create transcription_speaker_map records for the detected
+            # labels. 'self' is automatically mapped to the seeded speaker is_self=1 ('Ви'),
+            # other labels (SPEAKER_00, ...) stay with a NULL speaker_id -
+            # the frontend shows "Спікер N" and offers naming.
             #
-            # Phase 10.6: voice fingerprinting auto-match. Для кожного нового
-            # SPEAKER_NN з embedding'ом порівнюємо cosine similarity до всіх
-            # збережених speakers.embedding. Match >threshold → авто-link.
+            # Phase 10.6: voice fingerprinting auto-match. For every new
+            # SPEAKER_NN with an embedding we compare cosine similarity to all
+            # saved speakers.embedding. Match >threshold → auto-link.
             if unique_speaker_labels:
                 from app.services.diarization_service import (
                     embedding_to_blob, find_matching_speaker,
@@ -464,7 +464,7 @@ def transcribe():
                 ).fetchone()
                 self_speaker_id = self_id_row[0] if self_id_row else None
 
-                # Завантажуємо всі saved speakers з embeddings одним запитом
+                # Load all saved speakers with embeddings in a single query
                 saved_speakers = c.execute(
                     "SELECT id, embedding FROM speakers WHERE embedding IS NOT NULL AND is_self = 0"
                 ).fetchall()
@@ -478,7 +478,7 @@ def transcribe():
                     if label == 'self':
                         sid_for_label = self_speaker_id
                     else:
-                        # Спробувати auto-match за embedding
+                        # Try auto-match by embedding
                         sid_for_label = None
                         if embedding:
                             match = find_matching_speaker(embedding, saved_list)
@@ -498,12 +498,12 @@ def transcribe():
                     )
                 if auto_matched:
                     logger.info(
-                        "Voice fingerprinting: %d/%d спікерів авто-визначено",
+                        "Voice fingerprinting: %d/%d speakers auto-identified",
                         auto_matched, len(unique_speaker_labels),
                     )
             conn.commit()
-            # Збагачуємо response повним speaker payload — щоб UI міг одразу
-            # рендерити chips без додаткового GET /api/history/<id>.
+            # Enrich the response with the full speaker payload - so the UI can immediately
+            # render chips without an extra GET /api/history/<id>.
             if unique_speaker_labels:
                 speaker_rows = c.execute('''
                     SELECT m.raw_label, m.speaker_id, s.name, s.color, s.is_self
@@ -529,12 +529,12 @@ def transcribe():
                 "whisper_diarizations_total", source=source_type,
             )
 
-        # Phase 13: авто-збагачення (Meeting Memory). Фоновий job — НЕ блокує
-        # відповідь. Витягує сутності (люди/проєкти/орг), summary, action items
-        # одним Claude-викликом і наповнює наскрізний граф для RAG-пошуку.
-        # Авто-вимикається якщо немає ANTHROPIC_API_KEY (enrichment.is_available()).
-        # Дубль не збагачуємо і не чанкуємо: чанки оригіналу вже є, а копія
-        # лише дублювала б їх у видачі (і платила б за Claude-картку вдруге).
+        # Phase 13: auto-enrichment (Meeting Memory). A background job - does NOT block
+        # the response. Extracts entities (people/projects/orgs), summary, action items
+        # in a single Claude call and fills the end-to-end graph for RAG search.
+        # Auto-disables if there is no ANTHROPIC_API_KEY (enrichment.is_available()).
+        # A duplicate is neither enriched nor chunked: the original's chunks already exist, and a copy
+        # would only duplicate them in results (and pay for the Claude card a second time).
         try:
             from app.services import enrichment
             if duplicate_of:
@@ -561,10 +561,10 @@ def transcribe():
                 )
                 result['enrichment'] = {"status": "queued"}
         except Exception as e:
-            logger.warning("Enrichment job не поставлено (продовжую): %s", e)
+            logger.warning("Enrichment job not queued (continuing): %s", e)
 
-        # Phase 19 (Крок 7): прилінкувати копілот-сесію запису до створеного
-        # транскрипту → таймлайн ко-пілота відкривається зі сторінки транскрипту.
+        # Phase 19 (Step 7): link the recording's copilot session to the created
+        # transcript → the copilot timeline opens from the transcript page.
         if source_type == 'recording':
             _rec_sid = request.form.get('recording_session_id') or library_recording_sid
             if _rec_sid and state.copilot_service is not None:
@@ -575,12 +575,12 @@ def transcribe():
                 except Exception as e:
                     logger.warning("copilot link to transcription failed: %s", e)
 
-            # Волна 4: коментарі, написані ПІД ЧАС дзвінка, висіли на сесії
-            # запису (транскрипту тоді ще не існувало). Тепер він є — і саме
-            # тут вони мусять переїхати: інакше все, що власник надиктував по
-            # ходу розмови, лишилось би на id, якого не видно з жодного екрана
-            # архіву. anchor_time переїжджає як є — відлік у сесії й у
-            # транскрипті той самий (секунди від початку запису).
+            # Wave 4: comments written DURING the call hung on the recording
+            # session (the transcript did not exist yet). Now it exists - and this is
+            # where they must move: otherwise everything the owner dictated during
+            # the conversation would stay on an id that is not visible from any screen of the
+            # archive. anchor_time moves as is - the offset in the session and in the
+            # transcript is the same (seconds from the start of the recording).
             if _rec_sid:
                 try:
                     from app.services import comments as comments_svc
@@ -590,26 +590,26 @@ def transcribe():
                         'transcription', transcription_id)
                     if moved:
                         result['comments_moved'] = moved
-                        logger.info("[comments] сесія %s → tx=%s: перецеплено %d",
+                        logger.info("[comments] session %s → tx=%s: re-attached %d",
                                     _rec_sid, transcription_id, moved)
                 except Exception as e:
-                    # Коментарі лишаються на сесії й не губляться; лікує
-                    # повторний запуск або ручний retarget.
+                    # Comments stay on the session and are not lost; a repeated run
+                    # or a manual retarget fixes it.
                     logger.warning("comments retarget failed: %s", e)
 
-        # Phase 12.11 fix: НЕ видаляємо uploaded file після transcribe —
-        # потрібен для audio player у transcript view (Phase 12.3+).
-        # File залишається у UPLOAD_FOLDER; видаляється тільки при DELETE
-        # transcription (handled у delete endpoints).
+        # Phase 12.11 fix: do NOT delete the uploaded file after transcribe -
+        # it is needed for the audio player in the transcript view (Phase 12.3+).
+        # The file stays in UPLOAD_FOLDER; it is deleted only on DELETE of
+        # the transcription (handled in the delete endpoints).
         if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "complete", "Процесс завершен успешно!", 100, "completed")
+            state.add_log(download_id, "complete", tr("svc_media.tx.log.complete"), 100, "completed")
         return jsonify(result)
 
     except Exception as e:
-        logger.error(f"Помилка транскрибування: {e}", exc_info=True)
+        logger.error(f"Transcription error: {e}", exc_info=True)
         if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "transcribe", f"Помилка: {e}", -1, "error")
-        # При помилці uploaded file видаляємо — у DB немає transcription'а на нього.
+            state.add_log(download_id, "transcribe", tr("svc_media.tx.log.failed", error=e), -1, "error")
+        # On error the uploaded file is deleted - there is no transcription in the DB for it.
         if source_type == 'file' and filepath and os.path.exists(filepath):
             os.remove(filepath)
         return jsonify({"success": False, "error": tr('transcript.err.transcribe_failed')}), 500
@@ -620,11 +620,11 @@ def transcribe():
 
 @transcription_bp.route('/api/transcribe/active', methods=['GET'])
 def list_active_library_transcriptions():
-    """Поточні /api/transcribe джоби стартовані з Audio Library.
+    """Current /api/transcribe jobs started from the Audio Library.
 
-    Frontend опитує цей endpoint щоб маркувати картки `.is-transcribing`
-    (вижити після F5). Ключ — audio_download_id, тому одна картка = один
-    активний джоб максимум.
+    The frontend polls this endpoint to mark cards `.is-transcribing`
+    (survive F5). The key is audio_download_id, so one card = one
+    active job at most.
     """
     store = state.active_library_transcriptions or {}
     return jsonify({'active': list(store.values())})
@@ -634,21 +634,21 @@ def list_active_library_transcriptions():
 
 @transcription_bp.route('/api/history', methods=['GET'])
 def get_history():
-    """Список історії з фільтрами + FTS5 пошук."""
+    """History list with filters + FTS5 search."""
     page = max(1, request.args.get('page', 1, type=int))
     per_page = max(1, min(100, request.args.get('per_page', 10, type=int)))
     source_filter = request.args.get('source_type')
     language_filter = request.args.get('language')
     search_query = request.args.get('search', '')
     speaker_id_filter = request.args.get('speaker_id', type=int)  # Phase 12.7
-    # Контекстні фасет-фільтри (зʼявляються в UI під конкретне джерело):
-    # Telegram — відправник + чат/група/канал; YouTube — автор/канал. LIKE по
-    # метаданих (не транскрипту), тому доповнюють, а не замінюють FTS-пошук.
+    # Contextual facet filters (appear in the UI for a specific source):
+    # Telegram - sender + chat/group/channel; YouTube - author/channel. LIKE on
+    # metadata (not the transcript), so they complement, not replace, the FTS search.
     tg_sender_q = (request.args.get('tg_sender') or '').strip()
     tg_chat_q = (request.args.get('tg_chat') or '').strip()
     yt_author_q = (request.args.get('yt_author') or '').strip()
-    # C4: напрямок (з розкриттям на проєкти), теги (OR), період — спільний
-    # набір осей фільтра усіх спискових поверхонь (`app/services/categories.py`).
+    # C4: direction (expanding to projects), tags (OR), period - a shared
+    # set of filter axes for all list surfaces (`app/services/categories.py`).
     try:
         category_value = cat_svc.parse_filter(request.args.get('category_id'))
         tag_names = cat_svc.parse_tags(request.args.get('tags'))
@@ -659,18 +659,18 @@ def get_history():
 
     with _get_db() as conn:
         c = conn.cursor()
-        # T4.6: soft-deleted (undo-вікно) ніколи не показуємо у списках/пошуку —
-        # обов'язковий системний фільтр, не залежить від query-параметрів.
+        # T4.6: soft-deleted (undo window) are never shown in lists/search -
+        # a mandatory system filter, independent of query parameters.
         where_clauses = ['deleted_at IS NULL']
         params = []
-        fts_query = None  # Phase 12.2: lifted з if-block для use later у snippet
+        fts_query = None  # Phase 12.2: lifted out of the if-block for later use in the snippet
         if source_filter:
             where_clauses.append('source_type = ?'); params.append(source_filter)
         if language_filter:
             where_clauses.append('language = ?'); params.append(language_filter)
         if speaker_id_filter:
-            # Phase 12.7: фільтр по speaker_id — JOIN з map'ом, distinct щоб не
-            # дублювати при кількох raw_label з тим же speaker_id (рідкісно, але буває).
+            # Phase 12.7: filter by speaker_id - JOIN with the map, distinct so as not to
+            # duplicate for several raw_labels with the same speaker_id (rare, but it happens).
             where_clauses.append(
                 'id IN (SELECT DISTINCT transcription_id FROM transcription_speaker_map WHERE speaker_id = ?)'
             )
@@ -684,16 +684,16 @@ def get_history():
         if search_query:
             fts_query = sanitize_fts_query(search_query)
             if fts_query:
-                # Пошук по Бібліотеці бачить і КОМЕНТАРІ до запису, не лише його
-                # текст (Волна 2.5). Інакше виходила дірка: власник пише
-                # «Барселона» уточненням до дзвінка, де це слово не звучало, —
-                # семантичний пошук той коментар знаходить, а Бібліотека, у якій
-                # запис і треба відкрити, каже «нічого не знайдено».
+                # Search over the Library also sees the COMMENTS on a recording, not just its
+                # text (Wave 2.5). Otherwise there was a hole: the owner writes
+                # «Барселона» as a clarification to a call where that word was not spoken -
+                # semantic search finds that comment, while the Library, in which the
+                # recording has to be opened, says "nothing found".
                 #
-                # Через окремий FTS коментарів, а не LIKE: та сама токенізація,
-                # що й у транскриптів, тож «бюджету» знаходить «бюджет».
-                # Відсутність таблиці (стара БД) не має ламати пошук — тому
-                # гілка перевіряє її наявність, а не покладається на except.
+                # Via a separate comments FTS, not LIKE: the same tokenization
+                # as for transcripts, so «бюджету» finds «бюджет».
+                # A missing table (an old DB) must not break search - so the
+                # branch checks for its presence instead of relying on except.
                 cond = ('id IN (SELECT rowid FROM transcriptions_fts '
                         'WHERE transcriptions_fts MATCH ?)')
                 params.append(fts_query)
@@ -714,10 +714,10 @@ def get_history():
                 where_clauses.append('1 = 0')
 
         where_sql = 'WHERE ' + ' AND '.join(where_clauses) if where_clauses else ''
-        # C4-осі напрямку/тегів/періоду — окремі фрагменти (кожен починається
-        # з " AND "), додаються ПІСЛЯ .replace() нижче, щоб `category_id IN
-        # (SELECT id FROM …)` не постраждав від того рядкового хака (він шукає
-        # підрядок `id IN`, а не якір на початку клаузи).
+        # The C4 direction/tags/period axes are separate fragments (each starts
+        # with " AND "), added AFTER the .replace() below, so that `category_id IN
+        # (SELECT id FROM …)` does not suffer from that string hack (it looks for the
+        # substring `id IN`, not an anchor at the start of the clause).
         cat_frag, cat_params = cat_svc.filter_sql('t.category_id', category_value)
         tags_frag, tags_params = cat_svc.tags_sql('t.id', tag_names)
         date_frag, date_params = cat_svc.date_sql(
@@ -729,16 +729,16 @@ def get_history():
         total = c.execute(count_sql, params + extra_params).fetchone()[0]
 
         offset = (page - 1) * per_page
-        # Phase 12.2: коли search активний, використовуємо FTS5 snippet()
-        # для виділення фрагмента навколо matche'у. Інакше — звичайний preview
-        # перших 200 символів.
-        # Спільний набір колонок для обох гілок. Список у Бібліотеці рендерить
-        # рядок ПО ТИПУ джерела (телеграм-повідомлення ≠ дзвінок ≠ документ), і
-        # кожна форма потребує своїх полів: TG — чат/відправник/лінк, дзвінок —
-        # тривалість/спікери/скільки задач, документ — сторінки/ім'я файлу.
-        # Два корельовані підзапити на сторінку в 20 рядків — дешево.
-        # `title`/`description` (v44) — поруч із `source_name`, не замість нього:
-        # source_name лишається провенансом, display_name рахує record_meta.
+        # Phase 12.2: when search is active, use the FTS5 snippet()
+        # to highlight a fragment around the match. Otherwise - a regular preview of
+        # the first 200 characters.
+        # A shared set of columns for both branches. The Library list renders
+        # a row BY SOURCE TYPE (a telegram message ≠ a call ≠ a document), and
+        # each shape needs its own fields: TG - chat/sender/link, call -
+        # duration/speakers/how many tasks, document - pages/file name.
+        # Two correlated subqueries per page of 20 rows - cheap.
+        # `title`/`description` (v44) - next to `source_name`, not instead of it:
+        # source_name stays provenance, display_name is computed by record_meta.
         cols = '''t.id, t.created_at, t.source_type, t.source_name, t.title, t.description,
                        t.youtube_thumbnail,
                        t.language, t.model_used, t.processing_time, t.category_id, t.doc_type,
@@ -766,9 +766,9 @@ def get_history():
             transcriptions = c.execute(
                 select_sql, [fts_query] + params + extra_params + [per_page, offset]).fetchall()
         else:
-            # Аліас `t` обов'язковий і тут: без нього `ai.transcription_id = id`
-            # у підзапиті звʼязався б з action_items.id, а не з транскриптом.
-            # Некваліфіковані імена у where_sql далі резолвляться в `t`.
+            # The alias `t` is mandatory here too: without it `ai.transcription_id = id`
+            # in the subquery would bind to action_items.id, not to the transcript.
+            # Unqualified names in where_sql are resolved to `t` further on.
             select_sql = f'''
                 SELECT {cols},
                        SUBSTR(t.transcript_text, 1, 200) as transcript_preview
@@ -804,7 +804,7 @@ def get_history():
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['GET'])
 def get_transcription(transcription_id):
-    """Один транскрипт зі всіма даними."""
+    """A single transcript with all its data."""
     with _get_db() as conn:
         transcription = conn.execute(
             'SELECT * FROM transcriptions WHERE id = ? AND deleted_at IS NULL',
@@ -812,7 +812,7 @@ def get_transcription(transcription_id):
         ).fetchone()
         if not transcription:
             return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
-        # Phase 10.3: speaker map (raw_label → speaker info) для UI chip-рендеру.
+        # Phase 10.3: speaker map (raw_label → speaker info) for UI chip rendering.
         speaker_rows = conn.execute('''
             SELECT m.raw_label, m.speaker_id, s.name, s.color, s.is_self
             FROM transcription_speaker_map m
@@ -820,9 +820,9 @@ def get_transcription(transcription_id):
             WHERE m.transcription_id = ?
         ''', (transcription_id,)).fetchall()
 
-        # Зв'язки для нової сторінки транскрипту: сутності та action items
-        # цього запису. Порожні списки, якщо enrichment ще не відпрацював.
-        # Additive — наявні споживачі ігнорують нові ключі.
+        # Links for the new transcript page: the entities and action items
+        # of this recording. Empty lists if enrichment has not run yet.
+        # Additive - existing consumers ignore the new keys.
         entity_rows = conn.execute('''
             SELECT e.id, e.type, e.canonical_name, e.role,
                    me.mention_count, me.salience, me.role_in_meeting
@@ -855,18 +855,18 @@ def get_transcription(transcription_id):
     result['action_items'] = [dict(r) for r in action_item_rows]
     result['tags'] = record_tags
     result['suggested_tags'] = record_suggested
-    # title/description приходять із SELECT * (v44); display_name — похідне поле.
+    # title/description come from SELECT * (v44); display_name is a derived field.
     result['display_name'] = record_meta.display_name(result)
     return jsonify(result)
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['PATCH'])
 def patch_transcription_meta(transcription_id):
-    """Змінити власну назву/опис запису після збереження (спека editable-title-description).
+    """Change the custom title/description of a record after saving (editable-title-description spec).
 
-    JSON ``{"title"?: str|null, "description"?: str|null}`` — міняються лише
-    передані ключі. Порожній рядок означає «прибрати» (``NULL``), а НЕ копію
-    ``source_name``: провенанс запису лишається недоторканим у будь-якому разі.
+    JSON ``{"title"?: str|null, "description"?: str|null}`` - only the
+    passed keys are changed. An empty string means "remove" (``NULL``), NOT a copy of
+    ``source_name``: the record's provenance stays untouched in any case.
     """
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
@@ -881,30 +881,30 @@ def patch_transcription_meta(transcription_id):
     if 'description' in payload:
         kwargs['description'] = payload['description']
 
-    # Лениво, як у recording.py: пакет recording тягне WASAPI/finalize.
+    # Lazily, as in recording.py: the recording package pulls in WASAPI/finalize.
     from app.services.recording import library as rec_library
 
     linked_changed: list = []
     try:
         with _get_db() as conn:
             record = record_meta.update_meta(conn, transcription_id, **kwargs)
-            # recording-meta-suggest-02: назва запису одна в Бібліотеці,
-            # Медіатеці й manifest сесії. Не-записи link=None — як раніше.
+            # recording-meta-suggest-02: a recording's title is one in the Library,
+            # the Media library and the session manifest. Non-recordings: link=None - as before.
             link = (rec_library.linked_recording(conn, transcription_id=transcription_id)
                     if record is not None else None)
             if link:
                 linked_changed = rec_library.sync_recording_meta(
                     conn, link, {k: record[k] for k in kwargs}, store=_recording_store())
     except ValueError as e:
-        # Контрольована помилка нормалізації (довжина) — її текст писався для людини.
+        # A controlled normalization error (length) - its text was written for a person.
         return jsonify({"success": False, "error": str(e)}), 400
 
     if record is None:
         return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
     changed = record.pop('changed', False)
-    # db_path явно від запиту (той самий, яким відкрито зʼєднання вище): без
-    # нього re-embed пішов би в Config.DATABASE і переписав чанки чужої БД.
+    # db_path explicitly from the request (the same one the connection above was opened with): without
+    # it the re-embed would go to Config.DATABASE and rewrite the chunks of another DB.
     record_meta.after_meta_update(transcription_id, changed=changed,
                                   db_path=current_app.config['DATABASE'])
     for other_id in linked_changed:
@@ -915,17 +915,17 @@ def patch_transcription_meta(transcription_id):
 
 
 def _recording_store():
-    """SessionStore запису або None (запис вимкнено / сервіс не піднятий)."""
+    """The recording's SessionStore or None (recording disabled / service not up)."""
     rs = state.recording_service
     return getattr(rs, 'store', None) if rs is not None else None
 
 
 def _recording_active() -> bool:
-    """Чи йде зараз запис — за сесіями самого сервера, не за тілом запиту.
+    """Whether a recording is in progress - by the server's own sessions, not by the request body.
 
-    Під час запису локальна модель належить копілоту: `local_llm.generate()`
-    тримає процесний `_GEN_LOCK`, і 40 с пропозиції назви заморозили б
-    підказки в дзвінку (`docs/defects/local-llm-during-recording.md`)."""
+    During a recording the local model belongs to the copilot: `local_llm.generate()`
+    holds the process-wide `_GEN_LOCK`, and 40 s of title suggestions would freeze the
+    hints in the call (`docs/defects/local-llm-during-recording.md`)."""
     rs = state.recording_service
     if rs is None:
         return False
@@ -937,10 +937,10 @@ def _recording_active() -> bool:
 
 @transcription_bp.route('/api/history/<int:transcription_id>/suggest-meta', methods=['POST'])
 def suggest_transcription_meta(transcription_id):
-    """Варіанти назви й опису від локальної моделі (спека recording-meta-suggest).
+    """Title and description variants from the local model (recording-meta-suggest spec).
 
-    Нічого не зберігає — вибраний варіант іде звичайним PATCH. Поки йде запис,
-    модель не кличеться взагалі: 409 ``RECORDING_ACTIVE``.
+    Saves nothing - the chosen variant goes through a regular PATCH. While a recording is in progress,
+    the model is not called at all: 409 ``RECORDING_ACTIVE``.
     """
     if _recording_active():
         return jsonify({
@@ -959,15 +959,15 @@ def suggest_transcription_meta(transcription_id):
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['DELETE'])
 def delete_transcription(transcription_id):
-    """Soft-delete одного транскрипту (T4.6, REMEDIATION_PLAN Волна 2, Варіант A).
+    """Soft-delete a single transcript (T4.6, REMEDIATION_PLAN Wave 2, Option A).
 
-    Ставить ``deleted_at`` замість фізичного видалення — файл (youtube/file
-    джерело) НЕ стирається одразу, лишається доступним для
-    ``POST /api/history/<id>/restore`` протягом grace-періоду
-    (``RECALL_SOFTDELETE_GRACE_DAYS``, дефолт 7д; фізично прибирає
-    ``app.services.retention.purge_soft_deleted`` на старті сервера).
-    Bulk-delete (``/api/history/bulk_delete``) лишається фізичним — undo
-    свідомо підтримується лише для одиничного delete.
+    Sets ``deleted_at`` instead of a physical delete - the file (youtube/file
+    source) is NOT erased immediately, it stays available for
+    ``POST /api/history/<id>/restore`` during the grace period
+    (``RECALL_SOFTDELETE_GRACE_DAYS``, default 7d; physically removed by
+    ``app.services.retention.purge_soft_deleted`` at server start).
+    Bulk-delete (``/api/history/bulk_delete``) stays physical - undo
+    is deliberately supported only for a single delete.
     """
     try:
         with _get_db() as conn:
@@ -984,13 +984,13 @@ def delete_transcription(transcription_id):
             conn.commit()
         return jsonify({"success": True, "id": transcription_id})
     except Exception as e:
-        logger.error(f"Помилка видалення транскрибування: {e}")
+        logger.error(f"Transcription delete error: {e}")
         return jsonify({"success": False, "error": tr('transcript.err.delete_failed')}), 500
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>/restore', methods=['POST'])
 def restore_transcription(transcription_id):
-    """Скасувати soft-delete (undo). 404 якщо запису нема або він не видалений."""
+    """Undo a soft-delete. 404 if the record does not exist or is not deleted."""
     try:
         with _get_db() as conn:
             row = conn.execute(
@@ -1006,13 +1006,13 @@ def restore_transcription(transcription_id):
             conn.commit()
         return jsonify({"success": True, "id": transcription_id})
     except Exception as e:
-        logger.error(f"Помилка відновлення транскрибування: {e}")
+        logger.error(f"Transcription restore error: {e}")
         return jsonify({"success": False, "error": tr('transcript.err.restore_failed')}), 500
 
 
 @transcription_bp.route('/api/history/bulk_delete', methods=['POST'])
 def bulk_delete_transcriptions():
-    """Масове видалення."""
+    """Bulk delete."""
     try:
         data = request.json
         ids = data.get('ids', [])
@@ -1029,7 +1029,7 @@ def bulk_delete_transcriptions():
                 f'SELECT id, file_path, source_type FROM transcriptions WHERE id IN ({placeholders})',
                 ids,
             ).fetchall()
-            # Phase 10.3: чистимо speaker map перед видаленням transcriptions
+            # Phase 10.3: clean the speaker map before deleting transcriptions
             conn.execute(
                 f'DELETE FROM transcription_speaker_map WHERE transcription_id IN ({placeholders})',
                 ids,
@@ -1038,7 +1038,7 @@ def bulk_delete_transcriptions():
             conn.commit()
 
         deleted_files = 0
-        # Phase 12.11: file + youtube → видаляємо. recording → ні.
+        # Phase 12.11: file + youtube → delete. recording → no.
         for file_info in files_info:
             if file_info['source_type'] in ('youtube', 'file') and file_info['file_path']:
                 try:
@@ -1046,22 +1046,22 @@ def bulk_delete_transcriptions():
                         os.remove(file_info['file_path'])
                         deleted_files += 1
                 except Exception as e:
-                    logger.error(f"Помилка видалення файлу {file_info['file_path']}: {e}")
+                    logger.error(f"File delete error {file_info['file_path']}: {e}")
         return jsonify({
             "message": tr('transcript.msg.deleted_n', n=len(files_info)),
             "deleted_files": deleted_files,
         })
     except Exception as e:
-        logger.error(f"Помилка масового видалення: {e}")
+        logger.error(f"Bulk delete error: {e}")
         return jsonify({"success": False, "error": tr('transcript.err.bulk_delete_failed')}), 500
 
 
 @transcription_bp.route('/api/history/bulk_export', methods=['POST'])
 def bulk_export_transcriptions():
-    """Масовий експорт (JSON/TXT/MD).
+    """Bulk export (JSON/TXT/MD).
 
-    Phase 10.9: для діаризованих транскриптів TXT і MD містять speaker
-    префікси (Імʼя: текст). JSON включає resolved speakers map per item.
+    Phase 10.9: for diarized transcripts TXT and MD contain speaker
+    prefixes (Name: text). JSON includes the resolved speakers map per item.
     """
     try:
         data = request.json
@@ -1083,7 +1083,7 @@ def bulk_export_transcriptions():
             if not transcriptions:
                 return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
 
-            # Phase 10.9: підтягуємо speaker maps для всіх transcripts одним запитом
+            # Phase 10.9: pull the speaker maps for all transcripts in a single query
             speaker_maps_rows = conn.execute(f'''
                 SELECT m.transcription_id, m.raw_label, s.name, s.is_self
                 FROM transcription_speaker_map m
@@ -1101,7 +1101,7 @@ def bulk_export_transcriptions():
             })
 
         def _resolver(speakers_list):
-            """Повертає функцію resolve(raw_label) → display name."""
+            """Returns a resolve(raw_label) → display name function."""
             display = {s['raw_label']: s['name'] for s in speakers_list if s.get('name')}
             def _r(raw_label: str) -> str:
                 if not raw_label:
@@ -1109,11 +1109,11 @@ def bulk_export_transcriptions():
                 if raw_label in display:
                     return display[raw_label]
                 if raw_label == 'self':
-                    return 'Ви'
+                    return tr('svc_media.export.you')
                 if raw_label == 'SPEAKER_UNKNOWN':
                     return '?'
                 m = re.match(r'^SPEAKER_(\d+)$', raw_label)
-                return f'Спікер {int(m.group(1)) + 1}' if m else raw_label
+                return tr('svc_media.export.speaker_n', n=int(m.group(1)) + 1) if m else raw_label
             return _r
 
         def _fmt_ts(seconds: float) -> str:
@@ -1126,9 +1126,9 @@ def bulk_export_transcriptions():
             item = dict(t)
             item['segments'] = json.loads(item['segments']) if item['segments'] else []
             item['speakers'] = speaker_maps_by_tid.get(item['id'], [])
-            # Коментарі власника (Волна 5) — по одному запиту на запис. Дешево
-            # (індекс по target) і в масштабі bulk-експорту незначуще проти
-            # витягування самих транскриптів.
+            # The owner's comments (Wave 5) - one query per record. Cheap
+            # (index on target) and negligible at bulk-export scale compared with
+            # fetching the transcripts themselves.
             item['comments'] = _export_comments(item['id'])
             item['display_name'] = record_meta.display_name(item)
             export_data.append(item)
@@ -1143,9 +1143,9 @@ def bulk_export_transcriptions():
             with open(export_path, 'w', encoding='utf-8') as f:
                 for item in export_data:
                     f.write(f"\n{'='*60}\n")
-                    f.write(f"Джерело: {item['display_name']}\n")
-                    f.write(f"Дата: {item['created_at']}\n")
-                    f.write(f"Мова: {item['language']}\n")
+                    f.write(f"{tr('svc_media.export.source')}: {item['display_name']}\n")
+                    f.write(f"{tr('svc_media.export.date')}: {item['created_at']}\n")
+                    f.write(f"{tr('svc_media.export.language')}: {item['language']}\n")
                     f.write(f"{'='*60}\n\n")
                     f.write(_comments_text(item.get('comments') or []))
                     segs = item['segments']
@@ -1183,13 +1183,14 @@ def bulk_export_transcriptions():
             for idx, item in enumerate(export_data):
                 if idx > 0:
                     doc.add_page_break()
-                doc.add_heading(item['display_name'] or 'Транскрипт', level=1)
+                doc.add_heading(item['display_name'] or tr('svc_media.export.transcript'), level=1)
                 meta = doc.add_paragraph()
-                meta.add_run(f'Дата: {item["created_at"]}   ·   Мова: {item["language"]}').italic = True
+                meta.add_run(f'{tr("svc_media.export.date")}: {item["created_at"]}   ·   '
+                             f'{tr("svc_media.export.language")}: {item["language"]}').italic = True
                 for c in (item.get('comments') or []):
                     p = doc.add_paragraph()
                     ts = _cm_ts(c.get('anchor_time'))
-                    p.add_run(f'{_CM_LABEL.get(c.get("kind"), "НОТАТКА")}'
+                    p.add_run(f'{_cm_label(c.get("kind"))}'
                               f'{" · " + ts if ts else ""}: ').bold = True
                     p.add_run(c.get('body') or '')
                     p.paragraph_format.space_after = Pt(6)
@@ -1203,7 +1204,7 @@ def bulk_export_transcriptions():
                         for s in segs if (s.get('text') or '').strip()
                     )
                     sp_p = doc.add_paragraph()
-                    sp_p.add_run('Спікери: ').bold = True
+                    sp_p.add_run(f'{tr("svc_media.export.speakers")}: ').bold = True
                     sp_p.add_run(', '.join(f'{n} ({c})' for n, c in spk_counts.most_common()))
                     doc.add_paragraph()
 
@@ -1238,7 +1239,8 @@ def bulk_export_transcriptions():
             with open(export_path, 'w', encoding='utf-8') as f:
                 for item in export_data:
                     f.write(f'# {item["display_name"]}\n\n')
-                    f.write(f'**Дата:** {item["created_at"]} · **Мова:** {item["language"]}\n\n')
+                    f.write(f'**{tr("svc_media.export.date")}:** {item["created_at"]} · '
+                            f'**{tr("svc_media.export.language")}:** {item["language"]}\n\n')
                     f.write(_comments_md(item.get('comments') or []))
                     segs = item['segments']
                     has_sp = any(s.get('speaker') for s in segs)
@@ -1250,7 +1252,7 @@ def bulk_export_transcriptions():
                             for s in segs if (s.get('text') or '').strip()
                         )
                         spk_line = ', '.join(f'**{n}** ({c})' for n, c in spk_counts.most_common())
-                        f.write(f'**Спікери:** {spk_line}\n\n---\n\n')
+                        f.write(f'**{tr("svc_media.export.speakers")}:** {spk_line}\n\n---\n\n')
 
                         prev = None
                         turn: list[str] = []
@@ -1291,16 +1293,16 @@ def bulk_export_transcriptions():
                 logger.debug("export cleanup failed for %s (best-effort)", export_path, exc_info=True)
         return response
     except Exception as e:
-        logger.error(f"Помилка масового експорту: {e}")
+        logger.error(f"Bulk export error: {e}")
         return jsonify({"success": False, "error": tr('transcript.err.bulk_export_failed')}), 500
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/audio', methods=['GET'])
 def get_transcription_audio(transcription_id):
-    """Phase 12.3: streamити вихідний аудіо-файл транскрипції для player'а.
+    """Phase 12.3: stream the transcription's source audio file for the player.
 
-    Range-headers підтримує send_file автоматично — браузер може seek'ати
-    у середину файлу для click-on-segment-to-play.
+    Range headers are supported by send_file automatically - the browser can seek
+    into the middle of the file for click-on-segment-to-play.
     """
     with _get_db() as conn:
         row = conn.execute(
@@ -1312,7 +1314,7 @@ def get_transcription_audio(transcription_id):
     file_path = row['file_path']
     if not file_path or not os.path.isfile(file_path):
         return jsonify({"success": False, "error": tr('transcript.err.audio_unavailable')}), 404
-    # Path-traversal protection: file_path має бути у відомих директоріях
+    # Path-traversal protection: file_path must be in the known directories
     allowed_roots = [
         current_app.config.get('UPLOAD_FOLDER', ''),
         os.path.join(current_app.config.get('BASE_DIR', '.'), 'youtube_downloads'),
@@ -1330,18 +1332,18 @@ def get_transcription_audio(transcription_id):
 # ============================================================
 
 def _save_segments(conn, transcription_id: int, segments: list[dict]) -> None:
-    """Зберігає segments JSON та оновлює transcript_text.
+    """Saves the segments JSON and updates transcript_text.
 
-    transcript_text = ' '.join(seg.text) — використовується у FTS5 і
-    /api/history list. Тригери на FTS оновлюються автоматично.
-    Якщо є polished_text — він НЕ перезаписується (зберігає Claude версію).
+    transcript_text = ' '.join(seg.text) - used in FTS5 and
+    the /api/history list. The FTS triggers are updated automatically.
+    If polished_text exists - it is NOT overwritten (keeps the Claude version).
     """
     transcript_text = ' '.join(s.get('text', '').strip() for s in segments).strip()
     conn.execute(
         'UPDATE transcriptions SET segments = ?, transcript_text = ? WHERE id = ?',
         (json.dumps(segments, ensure_ascii=False), transcript_text, transcription_id),
     )
-    # Інвалідуємо кеш summary (текст змінився).
+    # Invalidate the summary cache (the text changed).
     conn.execute(
         'UPDATE transcriptions SET summary_json = NULL, summary_at = NULL, '
         'summary_model = NULL WHERE id = ?',
@@ -1351,11 +1353,11 @@ def _save_segments(conn, transcription_id: int, segments: list[dict]) -> None:
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/segments/merge', methods=['POST'])
 def merge_segments(transcription_id):
-    """Об'єднати кілька consecutive сегментів у один.
+    """Merge several consecutive segments into one.
 
-    Body: {"indices": [i, i+1, ...]} — мають бути послідовні числа.
-    Speaker беремо з першого, time = [first.start, last.end],
-    text = ' '.join всіх text'ів trimmed, words = concat (якщо є).
+    Body: {"indices": [i, i+1, ...]} - must be consecutive numbers.
+    Speaker is taken from the first, time = [first.start, last.end],
+    text = ' '.join of all trimmed texts, words = concat (if present).
     """
     data = request.get_json(silent=True) or {}
     indices = data.get('indices')
@@ -1365,7 +1367,7 @@ def merge_segments(transcription_id):
         indices = sorted(set(int(x) for x in indices))
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': tr('transcript.err.indices_numbers')}), 400
-    # Перевірка послідовності
+    # Sequence check
     if any(indices[k+1] - indices[k] != 1 for k in range(len(indices) - 1)):
         return jsonify({'success': False, 'error': tr('transcript.err.indices_sequential')}), 400
 
@@ -1390,7 +1392,7 @@ def merge_segments(transcription_id):
             'text': ' '.join((segments[i].get('text') or '').strip() for i in indices).strip(),
             'speaker': first.get('speaker'),
         }
-        # Concat words якщо є
+        # Concat words if present
         words: list = []
         for i in indices:
             w = segments[i].get('words')
@@ -1400,7 +1402,7 @@ def merge_segments(transcription_id):
             merged['words'] = words
 
         new_segments = segments[:indices[0]] + [merged] + segments[indices[-1] + 1:]
-        # Re-id послідовно
+        # Re-id sequentially
         for k, s in enumerate(new_segments):
             s['id'] = k
         _save_segments(conn, transcription_id, new_segments)
@@ -1412,16 +1414,16 @@ def merge_segments(transcription_id):
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/segments/split', methods=['POST'])
 def split_segment(transcription_id):
-    """Розділити segments[index] у точці split_at_seconds.
+    """Split segments[index] at the split_at_seconds point.
 
     Body: {
         "index": int,
-        "split_at_seconds": float,    // абсолютний час (між seg.start і seg.end)
-        "right_speaker": str|null     // optional — змінити speaker правої половини
+        "split_at_seconds": float,    // absolute time (between seg.start and seg.end)
+        "right_speaker": str|null     // optional - change the speaker of the right half
     }
 
-    Текст ділиться пропорційно: якщо є words[] — по найближчому word
-    boundary, інакше по character ratio (split_at - start) / duration.
+    The text is split proportionally: if words[] exist - at the nearest word
+    boundary, otherwise by the character ratio (split_at - start) / duration.
     """
     data = request.get_json(silent=True) or {}
     try:
@@ -1473,7 +1475,7 @@ def split_segment(transcription_id):
             # Fallback — character ratio
             ratio = (split_at - start) / max(0.001, end - start)
             cut = max(1, min(len(text) - 1, int(round(len(text) * ratio))))
-            # Прив'язати до word boundary (whitespace)
+            # Snap to a word boundary (whitespace)
             while cut > 0 and not text[cut].isspace():
                 cut -= 1
             if cut == 0:
@@ -1558,11 +1560,11 @@ def _call_claude_endpoint(label: str, fn, *args, error_msg: str | None = None, *
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/polish', methods=['POST'])
 def polish_transcription(transcription_id):
-    """Покращити транскрипт через Claude API. Кешує результат у БД.
+    """Improve the transcript via the Claude API. Caches the result in the DB.
 
-    Phase 10.7: для diarized транскриптів (segments мають speaker field)
-    автоматично використовується polish_diarized_transcript який зберігає
-    speaker-розмітку у форматі 'Імʼя: текст'.
+    Phase 10.7: for diarized transcripts (segments have a speaker field)
+    polish_diarized_transcript is used automatically, which keeps the
+    speaker markup in the 'Name: text' format.
     """
     if not text_polishing.is_available():
         return jsonify({
@@ -1637,9 +1639,9 @@ def polish_transcription(transcription_id):
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/summarize', methods=['POST'])
 def summarize_transcription(transcription_id):
-    """Phase 12.5: згенерувати summary + key points + action items через Claude.
+    """Phase 12.5: generate summary + key points + action items via Claude.
 
-    Кешує JSON у summary_json. Body: {"force": bool, "model": str}.
+    Caches the JSON in summary_json. Body: {"force": bool, "model": str}.
     """
     if not text_polishing.is_available():
         return jsonify({
@@ -1670,10 +1672,10 @@ def summarize_transcription(transcription_id):
     raw_text = row['transcript_text'] or ''
     polished = row['polished_text'] or ''
 
-    # Перевага: polished > diarized formatted > raw
+    # Priority: polished > diarized formatted > raw
     diarized_text = None
     if has_speakers and speaker_map:
-        # Reuse polish formatter — формує 'Ім'я: текст\n\nІм'я: текст'.
+        # Reuse the polish formatter - it forms 'Name: text\n\nName: text'.
         diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
 
     body = polished if polished.strip() else (diarized_text or raw_text)
@@ -1722,7 +1724,7 @@ def summarize_transcription(transcription_id):
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/sentiment', methods=['POST'])
 def sentiment_transcription(transcription_id):
-    """Phase 12.25: per-speaker sentiment analysis. Потребує diarized transcript."""
+    """Phase 12.25: per-speaker sentiment analysis. Requires a diarized transcript."""
     if not text_polishing.is_available():
         return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
 
@@ -1775,10 +1777,10 @@ def sentiment_transcription(transcription_id):
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/translate', methods=['POST'])
 def translate_transcription(transcription_id):
-    """Phase 12.11: переклад транскрипту через Claude.
+    """Phase 12.11: transcript translation via Claude.
 
     Body: {"target_lang": "en"|"uk"|"ru", "force": bool, "model": str}.
-    Кешує у translations_json: {lang_code: {text, model, created_at}}.
+    Caches in translations_json: {lang_code: {text, model, created_at}}.
     """
     if not text_polishing.is_available():
         return jsonify({
@@ -1878,7 +1880,7 @@ def translate_transcription(transcription_id):
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/topics', methods=['POST'])
 def extract_topics_endpoint(transcription_id):
-    """Phase 12.19: витягнути topic tags через Claude. Кеш у topics_json."""
+    """Phase 12.19: extract topic tags via Claude. Cache in topics_json."""
     if not text_polishing.is_available():
         return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
 
@@ -1936,21 +1938,19 @@ def extract_topics_endpoint(transcription_id):
     })
 
 
-#: Підписи типів коментаря в експортах. Тримаються тут, а не в UI: вигрузку
-#: читає людина або інша система, і «correction» англійським слугом посеред
-#: українського документа виглядало б як службове сміття.
-_CM_LABEL = {
-    "correction": "ВИПРАВЛЕННЯ",
-    "decision": "РІШЕННЯ",
-    "note": "НОТАТКА",
-    "context": "КОНТЕКСТ",
-    "question": "ПИТАННЯ",
-}
+#: Comment kinds that have an export label. Labelled server-side, not in the UI: the export
+#: is read by a person or another system, and a bare "correction" slug in the middle of a
+#: document would look like service junk.
+_CM_KINDS = ("correction", "decision", "note", "context", "question")
+
+
+def _cm_label(kind) -> str:
+    return tr(f"svc_media.export.kind.{kind if kind in _CM_KINDS else 'note'}")
 
 
 def _export_comments(transcription_id) -> list[dict]:
-    """Коментарі власника для вигрузки. Порожньо, якщо їх немає, немає id або
-    шар ще не мігровано — експорт не має падати через надбудову."""
+    """The owner's comments for the export. Empty if there are none, there is no id, or
+    the layer has not been migrated yet - the export must not fail because of an add-on."""
     if not transcription_id:
         return []
     try:
@@ -1958,7 +1958,7 @@ def _export_comments(transcription_id) -> list[dict]:
         return comments_svc.list_for(current_app.config['DATABASE'],
                                      'transcription', int(transcription_id))
     except Exception:
-        logger.debug("[export] коментарі не долучено для tx=%s",
+        logger.debug("[export] comments not attached for tx=%s",
                      transcription_id, exc_info=True)
         return []
 
@@ -1970,24 +1970,24 @@ def _cm_ts(seconds) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def _comments_text(rows: list[dict], heading: str = "КОМЕНТАРІ ВЛАСНИКА") -> str:
-    """Блок коментарів для текстових вигрузок.
+def _comments_text(rows: list[dict], heading: str | None = None) -> str:
+    """Comments block for text exports.
 
-    Іде ПЕРЕД транскриптом, а не додатком у кінці: сенс шару в тому, що
-    уточнення власника важить більше за сиру стенограму, і в документі це має
-    читатись у тому ж порядку, у якому працює пошук. Явна рамка потрібна, щоб
-    у вигрузці не сплуталось, що прозвучало на дзвінку, а що дописано після.
+    Goes BEFORE the transcript, not as an appendix at the end: the point of the layer is that
+    the owner's clarifications weigh more than the raw transcript, and in the document this should
+    read in the same order in which search works. An explicit frame is needed so that
+    the export does not confuse what was said on the call with what was added afterwards.
     """
     if not rows:
         return ""
+    heading = heading or tr("svc_media.export.comments.heading").upper()
     out = [heading, "=" * len(heading),
-           "(написані про запис уже після нього; при суперечності з текстом "
-           "нижче правильні саме вони)", ""]
+           f"({tr('svc_media.export.comments.note')})", ""]
     for c in rows:
         ts = _cm_ts(c.get("anchor_time"))
-        head = f"[{_CM_LABEL.get(c.get('kind'), 'НОТАТКА')}]"
+        head = f"[{_cm_label(c.get('kind'))}]"
         if c.get("pinned"):
-            head += " [закріплено]"
+            head += f" [{tr('svc_media.export.comments.pinned')}]"
         if ts:
             head += f" ~{ts}"
         head += f" · {str(c.get('created_at') or '')[:10]}"
@@ -2002,14 +2002,13 @@ def _comments_text(rows: list[dict], heading: str = "КОМЕНТАРІ ВЛАС
 def _comments_md(rows: list[dict]) -> str:
     if not rows:
         return ""
-    out = ["## Коментарі власника", "",
-           "_Написані про запис уже після нього. При суперечності з "
-           "транскриптом нижче правильні саме вони._", ""]
+    out = [f"## {tr('svc_media.export.comments.heading')}", "",
+           f"_{tr('svc_media.export.comments.note')}_", ""]
     for c in rows:
         ts = _cm_ts(c.get("anchor_time"))
-        bits = [f"**{_CM_LABEL.get(c.get('kind'), 'НОТАТКА')}**"]
+        bits = [f"**{_cm_label(c.get('kind'))}**"]
         if c.get("pinned"):
-            bits.append("закріплено")
+            bits.append(tr("svc_media.export.comments.pinned"))
         if ts:
             bits.append(f"`{ts}`")
         bits.append(str(c.get("created_at") or "")[:10])
@@ -2023,21 +2022,21 @@ def _comments_md(rows: list[dict]) -> str:
 
 @transcription_bp.route('/api/export/<format>', methods=['POST'])
 def export_transcript(format):
-    """Експорт одного транскрипту (TXT/SRT/MD/DOCX/JSON/PDF).
+    """Export a single transcript (TXT/SRT/MD/DOCX/JSON/PDF).
 
-    Phase 10.5: якщо segments мають поле 'speaker' (raw_label) і body містить
-    'speakers' (список з resolved name), додаємо префікс 'Ім'я: …' у TXT/SRT.
-    Для unnamed labels — fallback 'Спікер N' (по індексу появи).
+    Phase 10.5: if segments have a 'speaker' field (raw_label) and the body contains
+    'speakers' (a list with resolved name), add the prefix 'Name: …' in TXT/SRT.
+    For unnamed labels - the fallback 'Спікер N' (by order of appearance).
     """
     data = request.json
     text = data.get('text', '')
     segments = data.get('segments', [])
-    # editable-title-description-02: заголовок у контенті та імʼя
-    # згенерованого файлу — display_name (title → source_name → «Запис #id»);
-    # поле source_name у JSON-payload лишається недоторканим (провенанс).
-    # Коли в payload нема ні title, ні source_name, ні id — беремо старий
-    # нейтральний фолбек: `display_name` дав би «Запис #None» у заголовку
-    # документа й в імені файлу.
+    # editable-title-description-02: the heading in the content and the name of the
+    # generated file - display_name (title → source_name → «Запис #id»);
+    # the source_name field in the JSON payload stays untouched (provenance).
+    # When the payload has neither title, nor source_name, nor id - we take the old
+    # neutral fallback: `display_name` would give «Запис #None» in the document
+    # heading and in the file name.
     if any(data.get(k) for k in ('title', 'source_name', 'id')):
         record_display_name = record_meta.display_name(data)
     else:
@@ -2050,27 +2049,27 @@ def export_transcript(format):
         rl = s.get('raw_label')
         if rl and s.get('name'):
             speaker_display[rl] = s['name']
-    # Fallback для unnamed: SPEAKER_NN → "Спікер N+1", self → "Ви", UNKNOWN → "?"
+    # Fallback for unnamed: SPEAKER_NN → "Спікер N+1", self → "Ви", UNKNOWN → "?"
     def resolve_speaker(raw_label: str) -> str:
         if not raw_label:
             return ''
         if raw_label in speaker_display:
             return speaker_display[raw_label]
         if raw_label == 'self':
-            return 'Ви'
+            return tr('svc_media.export.you')
         if raw_label == 'SPEAKER_UNKNOWN':
             return '?'
         m = re.match(r'^SPEAKER_(\d+)$', raw_label)
         if m:
-            return f'Спікер {int(m.group(1)) + 1}'
+            return tr('svc_media.export.speaker_n', n=int(m.group(1)) + 1)
         return raw_label
 
     has_speakers = any(s.get('speaker') for s in segments)
 
-    # Коментарі власника (Волна 5). Ідуть у txt/md/docx/json — тобто у формати,
-    # які людина читає або система переінджестить. У SRT їх немає свідомо:
-    # субтитрова доріжка синхронна з аудіо, і врізати туди репліку, якої на
-    # плівці не звучало, означало б зіпсувати сам формат.
+    # The owner's comments (Wave 5). They go into txt/md/docx/json - i.e. the formats
+    # a person reads or a system re-ingests. SRT deliberately has none:
+    # the subtitle track is synchronous with the audio, and inserting a line that was not spoken
+    # on the tape would spoil the format itself.
     export_comments = _export_comments(data.get('id'))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2082,12 +2081,12 @@ def export_transcript(format):
     if format == 'txt':
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.txt"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
             f.write(_comments_text(export_comments))
             if has_speakers and segments:
-                # Group consecutive segments by speaker для читабельності
+                # Group consecutive segments by speaker for readability
                 prev_speaker = None
                 for seg in segments:
                     sp = resolve_speaker(seg.get('speaker', ''))
@@ -2108,7 +2107,7 @@ def export_transcript(format):
     elif format == 'srt':
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.srt"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
             for i, segment in enumerate(segments, 1):
@@ -2121,11 +2120,11 @@ def export_transcript(format):
                 else:
                     f.write(f"{seg_text}\n\n")
     elif format == 'md':
-        # Phase 10.9: Markdown — найкращий формат для діалогових транскриптів.
-        # Заголовок з summary спікерів, secondary headers per turn з timestamp.
+        # Phase 10.9: Markdown is the best format for dialog transcripts.
+        # A heading with a speaker summary, secondary headers per turn with a timestamp.
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.md"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
         def _fmt_ts(seconds: float) -> str:
@@ -2141,7 +2140,7 @@ def export_transcript(format):
                 from collections import Counter
                 spk_counts = Counter(resolve_speaker(s.get('speaker', '')) for s in segments if s.get('text', '').strip())
                 spk_line = ', '.join(f'**{name}** ({n})' for name, n in spk_counts.most_common())
-                f.write(f'**Спікери:** {spk_line}\n\n---\n\n')
+                f.write(f'**{tr("svc_media.export.speakers")}:** {spk_line}\n\n---\n\n')
 
                 # Group consecutive segments by speaker
                 prev_speaker = None
@@ -2166,12 +2165,12 @@ def export_transcript(format):
                         turn_text.append(seg_text)
                 _flush()
             else:
-                # Fallback: plain text без speakers
+                # Fallback: plain text without speakers
                 f.write(text or '')
                 f.write('\n')
     elif format == 'docx':
-        # Phase 10.11: DOCX через python-docx — для архіву Word, передачі
-        # замовнику, друку. Зберігає speaker structure у вигляді H3-headings.
+        # Phase 10.11: DOCX via python-docx - for a Word archive, handing over to
+        # a client, printing. Keeps the speaker structure as H3 headings.
         try:
             from docx import Document
             from docx.shared import Pt, RGBColor
@@ -2183,7 +2182,7 @@ def export_transcript(format):
 
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.docx"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
         def _fmt_ts(seconds: float) -> str:
@@ -2192,16 +2191,15 @@ def export_transcript(format):
             return f'{hrs:02d}:{mins:02d}:{secs:02d}' if hrs else f'{mins:02d}:{secs:02d}'
 
         doc = Document()
-        doc.add_heading(record_display_name or 'Транскрипт', level=1)
+        doc.add_heading(record_display_name or tr('svc_media.export.transcript'), level=1)
 
         if export_comments:
-            doc.add_heading('Коментарі власника', level=2)
+            doc.add_heading(tr('svc_media.export.comments.heading'), level=2)
             note = doc.add_paragraph()
-            note.add_run('Написані про запис уже після нього. При суперечності '
-                         'з транскриптом нижче правильні саме вони.').italic = True
+            note.add_run(tr('svc_media.export.comments.note')).italic = True
             for c in export_comments:
                 p = doc.add_paragraph()
-                head = _CM_LABEL.get(c.get('kind'), 'НОТАТКА')
+                head = _cm_label(c.get('kind'))
                 ts = _cm_ts(c.get('anchor_time'))
                 p.add_run(f'{head}{" · " + ts if ts else ""}: ').bold = True
                 p.add_run(c.get('body') or '')
@@ -2215,7 +2213,7 @@ def export_transcript(format):
                 for s in segments if (s.get('text') or '').strip()
             )
             summary_p = doc.add_paragraph()
-            summary_p.add_run('Спікери: ').bold = True
+            summary_p.add_run(f'{tr("svc_media.export.speakers")}: ').bold = True
             spk_parts = [f'{name} ({n})' for name, n in spk_counts.most_common()]
             summary_p.add_run(', '.join(spk_parts))
             doc.add_paragraph()  # spacer
@@ -2252,19 +2250,19 @@ def export_transcript(format):
     elif format == 'json':
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.json"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
         with open(export_path, 'w', encoding='utf-8') as f:
-            # Окремим полем, а не вперемішку з сегментами: споживач JSON має
-            # бачити, що це інший шар — свідомо написане про запис, а не
-            # розпізнане з нього.
+            # A separate field, not mixed in with the segments: the JSON consumer must
+            # see that this is a different layer - deliberately written about the recording, not
+            # recognized from it.
             payload = dict(data)
             payload['display_name'] = record_display_name
             if export_comments:
                 payload['comments'] = export_comments
             json.dump(payload, f, ensure_ascii=False, indent=2)
     elif format == 'pdf':
-        # Phase 12.13: PDF export via reportlab. Cyrillic-friendly font (Arial з Windows).
+        # Phase 12.13: PDF export via reportlab. Cyrillic-friendly font (Arial from Windows).
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -2278,11 +2276,11 @@ def export_transcript(format):
 
         export_path = os.path.abspath(os.path.join(transcripts_dir, f"{timestamp}_{safe_source_name}.pdf"))
         if not export_path.startswith(transcripts_dir):
-            logger.error(f"Спроба Path Traversal при експорті: {export_path}")
+            logger.error(f"Path traversal attempt on export: {export_path}")
             return jsonify({"success": False, "error": tr('transcript.err.filename_invalid')}), 400
 
-        # Реєструємо Arial для cyrillic. У Windows він є; на інших OS fallback to Helvetica.
-        # registerFont — global state; повторні виклики того ж name OK (no-op).
+        # Register Arial for cyrillic. It is present on Windows; on other OSes fallback to Helvetica.
+        # registerFont is global state; repeated calls with the same name are OK (no-op).
         font_name = 'Helvetica'
         font_bold = 'Helvetica-Bold'
         registered = getattr(pdfmetrics, '_fonts', None) or {}
@@ -2302,7 +2300,7 @@ def export_transcript(format):
                         pdfmetrics.registerFont(TTFont(name_bold, bold_ttf))
                     font_bold = name_bold
                 else:
-                    font_bold = name  # fallback — той же шрифт (без bold variant)
+                    font_bold = name  # fallback - the same font (no bold variant)
                 logger.debug(f"[pdf] fonts: regular={font_name}, bold={font_bold}")
                 break
             except Exception as e:
@@ -2334,16 +2332,16 @@ def export_transcript(format):
         )
 
         def _esc(s: str) -> str:
-            # Reportlab paragraph parses minimal HTML; екрануємо < > & щоб не ламати.
+            # Reportlab paragraph parses minimal HTML; escape < > & so as not to break it.
             return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         story = []
         story.append(Paragraph(_esc(record_display_name), title_style))
         meta_parts = [datetime.now().strftime('%Y-%m-%d %H:%M')]
         if data.get('language'):
-            meta_parts.append(f"мова: {data['language']}")
+            meta_parts.append(f"{tr('svc_media.export.language').lower()}: {data['language']}")
         if data.get('model'):
-            meta_parts.append(f"модель: {data['model']}")
+            meta_parts.append(f"{tr('svc_media.export.model').lower()}: {data['model']}")
         story.append(Paragraph(' · '.join(meta_parts), meta_style))
 
         if has_speakers and segments:
@@ -2421,7 +2419,7 @@ _ANALYZE_FLOAT = ('step', 'min_res', 'threshold', 'settle')
 
 
 def _running_video_job(tid):
-    """Задача аналізу цього запису, що вже йде (щоб не ставити дубль)."""
+    """The already-running analysis task for this recording (so as not to queue a duplicate)."""
     if state.job_queue is None:
         return None
     for job in state.job_queue.list(kind='video_analysis', active_only=True):
@@ -2436,19 +2434,19 @@ def _max_frames_default():
         from app.core import settings as _s
         return _s.env_int('RECORDING_VIDEO_ANALYSIS_MAX_FRAMES') or video_frames.DEFAULT_MAX_FRAMES
     except Exception:
-        logger.debug("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES не прочитано", exc_info=True)
+        logger.debug("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES could not be read", exc_info=True)
         return video_frames.DEFAULT_MAX_FRAMES
 
 
 @transcription_bp.route('/api/transcription/<int:tid>/analyze-video', methods=['POST'])
 def analyze_video_endpoint(tid):
-    """Нарізка запису на ключові кадри + OCR (+ опис лише при describe) фоновою задачею.
+    """Slicing a recording into key frames + OCR (+ description only with describe) as a background task.
 
-    Body (JSON, усе опційно): force, method ('thumbs'|'bisect'), step, min_res,
-    threshold, settle, ignore_regions ([[x, y, w, h]] частками кадру), max_frames,
-    ocr (дефолт true), describe (дефолт false), vision_backend ('local'|'claude').
-    → {"success": true, "job_id"} або {"success": true, "ready": true} (уже пораховано з
-    тими самими параметрами), або {"success": false, "error_code": "NO_VIDEO"}.
+    Body (JSON, all optional): force, method ('thumbs'|'bisect'), step, min_res,
+    threshold, settle, ignore_regions ([[x, y, w, h]] as fractions of the frame), max_frames,
+    ocr (default true), describe (default false), vision_backend ('local'|'claude').
+    → {"success": true, "job_id"} or {"success": true, "ready": true} (already computed with
+    the same parameters), or {"success": false, "error_code": "NO_VIDEO"}.
     """
     data = request.get_json(silent=True) or {}
     vision_backend = data.get('vision_backend')
@@ -2457,8 +2455,8 @@ def analyze_video_endpoint(tid):
     method = data.get('method')
     if method not in ('thumbs', 'bisect', None):
         return jsonify({'success': False, 'error': tr('transcript.err.method_invalid')}), 400
-    # Явний vision_backend без describe — запит на опис: так шле UI-чекбокс
-    # «Claude-опис» (transcript.js), і до нового конвеєра він описував кадри.
+    # An explicit vision_backend without describe is a request for a description: that is what the UI checkbox
+    # «Claude-опис» (transcript.js) sends, and before the new pipeline it described frames.
     describe = bool(data['describe']) if 'describe' in data else vision_backend is not None
     kwargs = {'method': method, 'ocr': bool(data.get('ocr', True)), 'describe': describe}
     try:
@@ -2505,7 +2503,7 @@ def analyze_video_endpoint(tid):
                     json.loads(row['video_analysis_params'] or 'null') == params:
                 return jsonify({'success': True, 'ready': True})
         except Exception:
-            logger.debug("перевірка готового аналізу tid=%s не вдалась — ставлю задачу", tid,
+            logger.debug("check for a ready analysis tid=%s failed - queueing the task", tid,
                          exc_info=True)
 
     def _video_job(job, _db=db_path, _tid=tid, _force=force, _vb=vision_backend, _kw=kwargs):
@@ -2628,8 +2626,8 @@ def list_keyframes(tid):
 
 @transcription_bp.route('/api/transcription/<int:tid>/keyframe/<int:kf_id>', methods=['GET'])
 def get_keyframe_image(tid, kf_id):
-    """Кадр-представник відрізка. Зображення не зберігаються — ріжеться з відео
-    на льоту, рамки секретів зафарбовані."""
+    """Representative frame of a segment. Images are not stored - cut from the video
+    on the fly, secret boxes are painted over."""
     try:
         with _get_db() as conn:
             row = conn.execute(
@@ -2663,7 +2661,7 @@ def _frame_response(tid, t, size):
     except vt.TimelineError as exc:
         return _timeline_error(exc)
     except Exception:
-        logger.exception("кадр tid=%s t=%s не віддано", tid, t)
+        logger.exception("frame tid=%s t=%s not served", tid, t)
         return jsonify({'success': False, 'error': tr('transcript.err.frame_cut_failed')}), 500
     buf = io.BytesIO()
     img.save(buf, 'JPEG', quality=82)
@@ -2690,7 +2688,7 @@ def _video_job_status(tid):
 
 @transcription_bp.route('/api/transcription/<int:tid>/frame', methods=['GET'])
 def get_frame_image(tid):
-    """Кадр у момент t (час стрічки, с) як JPEG; size=thumb|full. Секрети зафарбовані."""
+    """Frame at moment t (timeline time, s) as JPEG; size=thumb|full. Secrets are painted over."""
     try:
         t = _float_arg('t')
     except ValueError:
@@ -2702,7 +2700,7 @@ def get_frame_image(tid):
 
 @transcription_bp.route('/api/transcription/<int:tid>/frames', methods=['GET'])
 def get_frames_json(tid):
-    """Кадри як base64-JPEG для MCP: один за t або представники відрізків у [from, to]."""
+    """Frames as base64-JPEG for MCP: one by t or segment representatives in [from, to]."""
     from app.services import video_timeline as vt
     try:
         res = vt.frames(current_app.config['DATABASE'], tid, t=_float_arg('t'),
@@ -2715,14 +2713,14 @@ def get_frames_json(tid):
     except vt.TimelineError as exc:
         return _timeline_error(exc, _video_job_status(tid))
     except Exception:
-        logger.exception("кадри tid=%s не віддано", tid)
+        logger.exception("frames tid=%s not served", tid)
         return jsonify({'success': False, 'error': tr('transcript.err.frames_cut_failed')}), 500
     return jsonify(res)
 
 
 @transcription_bp.route('/api/transcription/<int:tid>/visual-timeline', methods=['GET'])
 def get_visual_timeline(tid):
-    """Стрічка «кадр + фрази» з пагінацією; format=json|markdown."""
+    """The "frame + phrases" timeline with pagination; format=json|markdown."""
     from app.services import video_timeline as vt
     try:
         res = vt.build(current_app.config['DATABASE'], tid, start=_float_arg('from'),
@@ -2748,7 +2746,7 @@ def get_visual_timeline(tid):
 
 @transcription_bp.route('/api/transcription/<int:tid>/frames-for-text', methods=['GET'])
 def get_frames_for_text(tid):
-    """Фраза (query) або індекс сегмента (segment_index) → кадри у вікні ±window с."""
+    """A phrase (query) or a segment index (segment_index) → frames in the ±window s window."""
     from app.services import video_timeline as vt
     try:
         seg = request.args.get('segment_index')
@@ -2766,7 +2764,7 @@ def get_frames_for_text(tid):
 
 @transcription_bp.route('/api/video/search', methods=['GET'])
 def search_visual_endpoint():
-    """Пошук по OCR і описах кадрів усього архіву (текст уже замаскований)."""
+    """Search over OCR and frame descriptions across the whole archive (text is already masked)."""
     from app.services import video_timeline as vt
     ids = [x for x in (request.args.get('transcription_ids') or '').split(',') if x.strip()]
     try:

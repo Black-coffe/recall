@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Eval-харнес для retrieval/RAG (REMEDIATION_PLAN Волна 3, T6.1).
+"""Eval harness for retrieval/RAG (REMEDIATION_PLAN Wave 3, T6.1).
 
-Ганяє golden-set питань проти реального архіву (``app/services/retrieval.py``
-+ ``app/services/rag.py``) і рахує recall@k / наявність цитат / (опційно)
-LLM-judge релевантність. Призначення — ловити регрес ПЕРЕД релізом або перед/
-після зміни промпта, чанкінгу чи моделі, а не ганяти в CI на кожен коміт (див.
+Runs a golden-set of questions against the real archive (``app/services/retrieval.py``
++ ``app/services/rag.py``) and computes recall@k / citation presence / (optionally)
+LLM-judge relevance. The purpose is to catch regressions BEFORE a release or before/
+after a change of prompt, chunking or model, not to run in CI on every commit (see
 evals/README.md).
 
-Приклади:
-    # Тільки retrieval (безкоштовно, без ANTHROPIC_API_KEY, без GPU якщо
-    # embeddings недоступні — FTS-фолбек):
+Examples:
+    # Retrieval only (free, no ANTHROPIC_API_KEY, no GPU if
+    # embeddings are unavailable - FTS fallback):
     python -m evals.run_eval --golden evals/golden_set.example.json --retrieval-only
 
-    # Повний прогін: retrieval + генерація відповіді (Claude API, платно):
+    # Full run: retrieval + answer generation (Claude API, paid):
     python -m evals.run_eval --golden evals/golden_set.local.json --db whisper_history.db
 
-    # + LLM-judge релевантності (ДОДАТКОВИЙ виклик Claude на кожне питання,
-    # ОПЦІЙНО, вимкнено за замовчуванням):
+    # + LLM-judge relevance (an ADDITIONAL Claude call per question,
+    # OPTIONAL, off by default):
     python -m evals.run_eval --golden evals/golden_set.local.json --llm-judge
 """
 from __future__ import annotations
@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Дозволяє запускати і як `python evals/run_eval.py`, і як `python -m evals.run_eval`
-# без встановлення пакету — вставляємо корінь проєкту в sys.path.
+# Allows running both as `python evals/run_eval.py` and as `python -m evals.run_eval`
+# without installing the package: we insert the project root into sys.path.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -44,8 +44,8 @@ def _load_golden_set(path: str) -> list[dict]:
     items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(items, list):
         raise ValueError(
-            f"Golden-set {path!r} має бути або списком записів, або "
-            f'об\'єктом з ключем "items" (список).'
+            f"Golden-set {path!r} must be either a list of records or "
+            f'an object with an "items" key (a list).'
         )
     return items
 
@@ -71,7 +71,7 @@ def _run_answer(db_path: str, item: dict, top_k: int, model: Optional[str],
     )
 
 
-# --- LLM-judge (опційно, платно — вимкнено за замовчуванням) ---
+# --- LLM-judge (optional, paid - off by default) ---
 
 _JUDGE_PROMPT = """Ти оцінюєш якість відповіді RAG-системи по архіву мітингів.
 
@@ -99,15 +99,15 @@ def _get_judge_client():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY не встановлено — LLM-judge вимагає реального "
-            "виклику Claude API. Або приберіть --llm-judge, або задайте ключ."
+            "ANTHROPIC_API_KEY is not set: the LLM-judge requires a real "
+            "Claude API call. Either remove --llm-judge or set the key."
         )
     return anthropic.Anthropic(api_key=api_key)
 
 
 def _llm_judge_score(client, item: dict, answer: str, model: Optional[str]) -> dict:
-    """Один виклик Claude-суддя. Іде через app/services/models.py (ID моделі)
-    і app/services/claude_retry.py (retry на 429/5xx) — узгоджено з T6.2/T6.3."""
+    """One Claude-judge call. Goes through app/services/models.py (model ID)
+    and app/services/claude_retry.py (retry on 429/5xx), consistent with T6.2/T6.3."""
     from app.services import claude_retry
     from app.services.models import get_default_model, supports_adaptive_thinking
 
@@ -149,18 +149,18 @@ def _llm_judge_score(client, item: dict, answer: str, model: Optional[str]) -> d
 
 def _print_table(agg: dict, per_item: list[dict], judge_scores: Optional[list[dict]]) -> None:
     print()
-    print(f"Golden-set: {agg['total_items']} записів")
+    print(f"Golden-set: {agg['total_items']} records")
     print("-" * 60)
 
     def _fmt(row_name: str, d: dict, pct: bool = True) -> None:
         if d["n"] == 0:
-            print(f"{row_name:<28} —  (немає записів з цим критерієм)")
+            print(f"{row_name:<28} -  (no records with this criterion)")
             return
         val = d["mean"] * 100 if pct else d["mean"]
         unit = "%" if pct else ""
         print(f"{row_name:<28} {val:6.1f}{unit}  (n={d['n']})")
 
-    _fmt("recall@k (частка джерел)", agg["recall_at_k"])
+    _fmt("recall@k (source share)", agg["recall_at_k"])
     _fmt("source_name_hit_rate", agg["source_name_hit_rate"])
     _fmt("citation_rate", agg["citation_rate"])
     _fmt("citations_valid_rate", agg["citations_valid_rate"])
@@ -171,7 +171,7 @@ def _print_table(agg: dict, per_item: list[dict], judge_scores: Optional[list[di
             print(f"{'llm_judge_score (1-5)':<28} {sum(valid) / len(valid):6.2f}   (n={len(valid)})")
     print("-" * 60)
 
-    print("\nПо кожному запису:")
+    print("\nPer record:")
     for r in per_item:
         parts = [f"  {r['id']}:"]
         if r["recall_at_k"] is not None:
@@ -187,40 +187,40 @@ def _print_table(agg: dict, per_item: list[dict], judge_scores: Optional[list[di
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--golden", required=True, help="Шлях до golden-set JSON (див. golden_set.example.json)")
-    parser.add_argument("--db", default="whisper_history.db", help="Шлях до SQLite БД архіву (default: whisper_history.db)")
-    parser.add_argument("--top-k", type=int, default=8, help="top_k для retrieval.search (default: 8)")
-    parser.add_argument("--model", default=None, help="Override моделі Claude (default: app/services/models.get_default_model())")
-    parser.add_argument("--timeout", type=float, default=180.0, help="Timeout на виклик rag.answer_question (сек)")
+    parser.add_argument("--golden", required=True, help="Path to the golden-set JSON (see golden_set.example.json)")
+    parser.add_argument("--db", default="whisper_history.db", help="Path to the archive SQLite DB (default: whisper_history.db)")
+    parser.add_argument("--top-k", type=int, default=8, help="top_k for retrieval.search (default: 8)")
+    parser.add_argument("--model", default=None, help="Override the Claude model (default: app/services/models.get_default_model())")
+    parser.add_argument("--timeout", type=float, default=180.0, help="Timeout for the rag.answer_question call (sec)")
     parser.add_argument("--retrieval-only", action="store_true",
-                         help="Тільки retrieval.search — без виклику Claude (безкоштовно, без ANTHROPIC_API_KEY)")
+                         help="retrieval.search only, no Claude call (free, no ANTHROPIC_API_KEY)")
     parser.add_argument("--llm-judge", action="store_true",
-                         help="ДОДАТКОВО оцінити кожну відповідь окремим викликом Claude-судді "
-                              "(платно, ОПЦІЙНО — вимкнено за замовчуванням; ігнорується з --retrieval-only)")
+                         help="ADDITIONALLY score each answer with a separate Claude-judge call "
+                              "(paid, OPTIONAL, off by default; ignored with --retrieval-only)")
     parser.add_argument("--rerank", action="store_true",
-                         help="T6.4: увімкнути локальний cross-encoder rerank для цього прогону "
-                              "(bge-reranker-v2-m3, lazy-load при першому виклику). З --retrieval-only "
-                              "передається напряму у retrieval.search(rerank=True); без нього — виставляє "
-                              "RECALL_RERANK_ENABLED=1 ДО імпорту app.services.rag, щоб rag.answer_question "
-                              "теж реранжував (той самий шлях, що RAG-чат). Порівняння до/після: прогнати "
-                              "той самий golden-set з і без --rerank, звірити recall@k/citation_rate.")
-    parser.add_argument("--json-out", default=None, help="Записати повний результат (per-item + агрегати) у JSON-файл")
+                         help="T6.4: enable the local cross-encoder rerank for this run "
+                              "(bge-reranker-v2-m3, lazy-load on first call). With --retrieval-only "
+                              "it is passed directly to retrieval.search(rerank=True); without it, it sets "
+                              "RECALL_RERANK_ENABLED=1 BEFORE importing app.services.rag, so that rag.answer_question "
+                              "also reranks (the same path as the RAG chat). Before/after comparison: run "
+                              "the same golden-set with and without --rerank and compare recall@k/citation_rate.")
+    parser.add_argument("--json-out", default=None, help="Write the full result (per-item + aggregates) to a JSON file")
     args = parser.parse_args(argv)
 
     if args.rerank and not args.retrieval_only:
-        # rag.py читає RECALL_RERANK_ENABLED у модульну константу ПРИ ІМПОРТІ
-        # (як COPILOT_ENABLED) — виставляємо ДО першого `from app.services import rag`
-        # (той відбувається лениво всередині _run_answer, отже до цього рядка модуль
-        # ще не імпортований жодного разу в цьому процесі).
+        # rag.py reads RECALL_RERANK_ENABLED into a module constant AT IMPORT
+        # (like COPILOT_ENABLED), so we set it BEFORE the first `from app.services import rag`
+        # (which happens lazily inside _run_answer, so before this line the module
+        # has not been imported even once in this process).
         os.environ["RECALL_RERANK_ENABLED"] = "1"
 
     if not os.path.exists(args.db):
-        print(f"[eval] БД не знайдено: {args.db}. Вкажіть --db шлях до вашого whisper_history.db.", file=sys.stderr)
+        print(f"[eval] DB not found: {args.db}. Pass --db with the path to your whisper_history.db.", file=sys.stderr)
         return 2
 
     golden_items = _load_golden_set(args.golden)
     if not golden_items:
-        print(f"[eval] Golden-set {args.golden!r} порожній.", file=sys.stderr)
+        print(f"[eval] Golden-set {args.golden!r} is empty.", file=sys.stderr)
         return 2
 
     per_item: list[dict] = []
@@ -234,9 +234,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.retrieval_only:
             ans = _run_answer(args.db, item, args.top_k, args.model, args.timeout)
             answer_text = ans.get("answer", "")
-            # rag.answer_question робить ВЛАСНИЙ retrieval.search всередині — щоб не
-            # платити за пошук двічі і рахувати метрики на ТИХ САМИХ чанках, що
-            # реально пішли в промпт моделі, беремо "sources" з його відповіді.
+            # rag.answer_question does its OWN retrieval.search inside; so as not to
+            # pay for the search twice and to compute metrics on the SAME chunks that
+            # actually went into the model prompt, we take "sources" from its answer.
             chunks = ans.get("sources", chunks)
 
         row = ev_metrics.evaluate_item(item, chunks, answer_text)
@@ -260,7 +260,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             out["llm_judge"] = judge_scores
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
-        print(f"\n[eval] Повний результат записано у {args.json_out}")
+        print(f"\n[eval] Full result written to {args.json_out}")
 
     return 0
 

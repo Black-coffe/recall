@@ -1,43 +1,43 @@
-"""Замір впливу шару коментарів на видачу (Волна 2.5).
+"""Measuring the effect of the comments layer on the results (Wave 2.5).
 
-ЩО САМЕ ТУТ МІРЯЄТЬСЯ І ЧОМУ НЕ recall@k.
+WHAT IS MEASURED HERE AND WHY IT IS NOT recall@k.
 
-Звичайний recall@k відповідає на питання «чи знайшли потрібний запис». Шар
-коментарів ставить інше питання: «чи не зіпсував буст те, що працювало». Це
-різні виміри, і для другого golden-set із очікуваними id не потрібен — потрібен
-ДИФ між двома прогонами того самого запиту:
+Plain recall@k answers the question "did we find the right record". The comments
+layer asks a different question: "did the boost spoil what used to work". These are
+different dimensions, and for the second one a golden-set with expected ids is not needed; what is needed is
+a DIFF between two runs of the same query:
 
-  A. `include_comments=False` — видача, якою вона була до шару;
-  B. `include_comments=True`  — видача з коментарями і бустом.
+  A. `include_comments=False` - the results as they were before the layer;
+  B. `include_comments=True`  - the results with comments and the boost.
 
-Три числа з цього дифу:
+Three numbers come out of this diff:
 
-  * **drift** — скільки записів з A випало з B. Це і є «витіснив щось корисне».
-  * **comment_slots** — скільки слотів у B зайняли самі коментарі.
-  * **rank_shift** — на скільки позицій зсунулись ті, хто вцілів.
+  * **drift** - how many records from A dropped out of B. This is "pushed out something useful".
+  * **comment_slots** - how many slots in B were taken by comments themselves.
+  * **rank_shift** - by how many positions the survivors moved.
 
-ДВА k ОБОВʼЯЗКОВІ. На k=8 і k=12 вердикт уже одного разу перевернувся
-(memory/eval-verdict-flips-with-k): вузьке вікно карає будь-яке додавання, бо
-слотів мало, широке — прощає. Один k дає впевнену відповідь, яка не витримує
-перевірки другим.
+TWO k ARE MANDATORY. At k=8 and k=12 the verdict has already flipped once
+(memory/eval-verdict-flips-with-k): a narrow window punishes any addition because
+there are few slots, a wide one forgives. A single k gives a confident answer that does not survive
+a check with the second.
 
-ІНВАРІАНТ ПОРОЖНЬОГО АРХІВУ. Поки коментарів немає, A і B мусять збігатися
-ПОБАЙТОВО. Якщо ні — шар щось міняє в кожному запиті ще до того, як у ньому
-зʼявився бодай один коментар, і це не «невеликий вплив», а баг. Режим
-`--invariant` перевіряє саме це і повертає ненульовий код при розбіжності.
+EMPTY-ARCHIVE INVARIANT. While there are no comments, A and B must match
+BYTE FOR BYTE. If not, the layer changes something in every query even before a single
+comment appears in it, and that is not a "small effect" but a bug. The `--invariant`
+mode checks exactly this and returns a non-zero code on a mismatch.
 
-РЕЖИМ --seed. Без коментарів у БД міряти зсув нема на чому. `--seed N` садить
-на КОПІЮ бази синтетичні коментарі, зроблені з тексту РЕАЛЬНИХ чанків, які
-видача вже повертає (тобто максимально «правдоподібні» — вони гарантовано
-релевантні запиту й тому дають ВЕРХНЮ оцінку зсуву, гіршу за реальність).
-Бойову БД скрипт не чіпає ніколи: `--db` має вказувати на копію.
+--seed MODE. Without comments in the DB there is nothing to measure the shift on. `--seed N` plants
+synthetic comments on a COPY of the database, made from the text of REAL chunks that the
+results already return (i.e. maximally "plausible": they are guaranteed to be
+relevant to the query and therefore give an UPPER estimate of the shift, worse than reality).
+The script never touches the live DB: `--db` must point to a copy.
 
-Використання:
+Usage:
 
-    # 1. Інваріант на бойовій БД (безпечно, лише читання):
+    # 1. Invariant on the live DB (safe, read-only):
     python -m evals.comments_eval --golden evals/golden_set.local.json --invariant
 
-    # 2. Зсув на копії з посадженими коментарями:
+    # 2. Shift on a copy with planted comments:
     python -m evals.comments_eval --golden evals/golden_set.local.json \\
         --db copy.db --seed 2 --json-out evals/comments_drift.json
 """
@@ -54,7 +54,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-#: Обидва k міряються завжди — див. модульний докстрінг.
+#: Both k are always measured - see the module docstring.
 K_VALUES = (8, 12)
 
 
@@ -68,10 +68,10 @@ def _load_questions(path: str) -> list[dict]:
 
 
 def _key(ch: dict):
-    """Ідентичність елемента видачі для дифу.
+    """Identity of a result item for the diff.
 
-    Для чанка архіву — його id; для коментаря — окремий простір, щоб
-    відʼємні id не змішувались із додатними (та сама причина, що в retrieval).
+    For an archive chunk, its id; for a comment, a separate space so that
+    negative ids do not mix with positive ones (same reason as in retrieval).
     """
     if ch.get("source_type") == "comment":
         return ("comment", ch.get("comment_id"))
@@ -79,7 +79,7 @@ def _key(ch: dict):
 
 
 def _run_pair(db_path: str, item: dict, k: int) -> dict:
-    """Один запит, два прогони, диф між ними."""
+    """One query, two runs, a diff between them."""
     from app.services import retrieval
 
     base = retrieval.search(db_path, item["question"], top_k=k,
@@ -96,8 +96,8 @@ def _run_pair(db_path: str, item: dict, k: int) -> dict:
 
     dropped = [kk for kk in base_keys if kk not in new_pos]
     comment_slots = [kk for kk in new_keys if kk[0] == "comment"]
-    # Зсув рангу рахуємо лише по тих, хто лишився в обох — інакше «зник»
-    # порахувався б і як drift, і як гігантський зсув.
+    # Rank shift is counted only for those that remain in both - otherwise "disappeared"
+    # would be counted both as drift and as a giant shift.
     shifts = [abs(new_pos[kk] - base_pos[kk]) for kk in base_keys if kk in new_pos]
 
     return {
@@ -129,11 +129,11 @@ def _aggregate(rows: list[dict], k: int) -> dict:
 # ------------------------------------------------------------------ seeding
 
 def seed_comments(db_path: str, questions: list[dict], per_question: int) -> dict:
-    """Посадити синтетичні коментарі на КОПІЮ бази.
+    """Plant synthetic comments on a COPY of the database.
 
-    Джерело тексту — реальні чанки, які видача вже повертає на ці ж питання.
-    Це навмисно найгірший випадок: такі коментарі гарантовано релевантні, тож
-    зсув, який вони дадуть, — верхня межа, а не типова величина.
+    The text source is real chunks that the results already return for these same questions.
+    This is deliberately the worst case: such comments are guaranteed to be relevant, so
+    the shift they produce is an upper bound, not a typical value.
     """
     from app.services import comments, retrieval
 
@@ -163,21 +163,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--golden", required=True)
     p.add_argument("--db", default="whisper_history.db")
     p.add_argument("--invariant", action="store_true",
-                   help="вимагати, щоб A і B збігались (архів без коментарів)")
+                   help="require A and B to match (an archive without comments)")
     p.add_argument("--seed", type=int, default=0,
-                   help="посадити N коментарів на питання ПЕРЕД заміром (лише копія БД!)")
+                   help="plant N comments per question BEFORE measuring (DB copy only!)")
     p.add_argument("--json-out", default=None)
     a = p.parse_args(argv)
 
     questions = _load_questions(a.golden)
     if not questions:
-        print("golden-set порожній", file=sys.stderr)
+        print("golden-set is empty", file=sys.stderr)
         return 2
 
     if a.seed:
         if os.path.abspath(a.db) == os.path.abspath(
                 os.path.join(_PROJECT_ROOT, "whisper_history.db")):
-            print("ВІДМОВА: --seed пише в БД. Вкажіть КОПІЮ через --db.",
+            print("REFUSED: --seed writes to the DB. Pass a COPY via --db.",
                   file=sys.stderr)
             return 2
         print(f"seed: {seed_comments(a.db, questions, a.seed)}")
@@ -185,8 +185,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     rows = [_run_pair(a.db, item, k) for k in K_VALUES for item in questions]
     aggs = [_aggregate(rows, k) for k in K_VALUES]
 
-    print(f"\n{'k':>3} {'питань':>7} {'ідентично':>10} {'drift':>7} "
-          f"{'drift/зпт':>10} {'слотів CM':>10} {'top1≠':>6} {'max зсув':>9}")
+    print(f"\n{'k':>3} {'questions':>9} {'identical':>10} {'drift':>7} "
+          f"{'drift/avg':>10} {'CM slots':>10} {'top1!=':>6} {'max shift':>9}")
     for g in aggs:
         print(f"{g['k']:>3} {g['items']:>7} {g['identical']:>10} {g['drift_total']:>7} "
               f"{g['drift_mean']:>10} {g['comment_slots_total']:>10} "
@@ -194,10 +194,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     changed = [r for r in rows if not r["identical"]]
     if changed:
-        print(f"\nЗмінені запити ({len(changed)}):")
+        print(f"\nChanged queries ({len(changed)}):")
         for r in sorted(changed, key=lambda x: -x["drift"])[:12]:
             print(f"  k={r['k']:>2} {r['id']:<28} drift={r['drift']} "
-                  f"слотів CM={r['comment_slots']} max зсув={r['max_rank_shift']}")
+                  f"CM slots={r['comment_slots']} max shift={r['max_rank_shift']}")
 
     if a.json_out:
         with open(a.json_out, "w", encoding="utf-8") as f:
@@ -207,10 +207,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if a.invariant:
         if changed:
-            print(f"\n❌ ІНВАРІАНТ ПОРУШЕНО: {len(changed)} запитів змінились, "
-                  f"хоча коментарів в архіві не має бути.", file=sys.stderr)
+            print(f"\n❌ INVARIANT VIOLATED: {len(changed)} queries changed, "
+                  f"although there should be no comments in the archive.", file=sys.stderr)
             return 1
-        print("\n✅ Інваріант тримається: без коментарів видача незмінна.")
+        print("\n✅ Invariant holds: without comments the results are unchanged.")
     return 0
 
 

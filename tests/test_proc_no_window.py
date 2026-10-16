@@ -1,13 +1,13 @@
-"""Тести app/utils/proc.py — прапорець CREATE_NO_WINDOW для дочірніх процесів.
+"""Tests of app/utils/proc.py — the CREATE_NO_WINDOW flag for child processes.
 
-Навіщо окремий файл: втрата прапорця нічого не ламає функціонально. Ffmpeg
-відпрацює, транскрипт буде той самий, усі інші тести лишаться зеленими — а
-користувач на Windows побачить чорне вікно, що блимає весь дзвінок (бойовий
-app.py іде через pythonw.exe, тобто БЕЗ консолі, і кожна консольна дитина
-дістає власне вікно). Тому інваріант пінимо тут явно.
+Why a separate file: losing the flag breaks nothing functionally. Ffmpeg
+will work, the transcript will be the same, all other tests will stay green — while
+a user on Windows will see a black window flashing throughout the call (the live
+app.py runs via pythonw.exe, i.e. WITHOUT a console, and every console child
+gets its own window). So the invariant is pinned here explicitly.
 
-Патчі бібліотек мутують атрибути самих бібліотек — на POSIX вони no-op
-(NO_WINDOW == 0), тому перевірки прапорця йдуть під skipif.
+Library patches mutate the attributes of the libraries themselves — on POSIX they are no-ops
+(NO_WINDOW == 0), so the flag checks run under skipif.
 """
 from __future__ import annotations
 
@@ -19,24 +19,24 @@ import pytest
 from app.utils import proc
 
 WINDOWS_ONLY = pytest.mark.skipif(
-    os.name != 'nt', reason='CREATE_NO_WINDOW існує лише на Windows',
+    os.name != 'nt', reason='CREATE_NO_WINDOW exists only on Windows',
 )
 
 
 @pytest.fixture()
 def popen_flags(monkeypatch):
-    """Збирає creationflags, з якими реально створювались процеси.
+    """Collects the creationflags with which processes were really created.
 
-    Спай ставиться на Popen.__init__, а не на subprocess.run: обгортки
-    захоплюють посилання на subprocess.run у момент патчу, тож підміна
-    самого run їх уже не видно.
+    The spy is put on Popen.__init__, not on subprocess.run: wrappers
+    capture the reference to subprocess.run at patch time, so replacing
+    run itself is no longer visible to them.
     """
     seen: list = []
     real_init = subprocess.Popen.__init__
 
     def spy(self, *args, **kwargs):
         seen.append(kwargs.get('creationflags', 'MISSING'))
-        raise FileNotFoundError('спай: реальний процес не запускаємо')
+        raise FileNotFoundError('spy: we do not launch a real process')
 
     monkeypatch.setattr(subprocess.Popen, '__init__', spy)
     try:
@@ -49,7 +49,7 @@ def test_no_window_constant_matches_platform():
     if os.name == 'nt':
         assert proc.NO_WINDOW == subprocess.CREATE_NO_WINDOW
     else:
-        # creationflags=0 на POSIX дозволений, будь-що інше — ValueError
+        # creationflags=0 is allowed on POSIX, anything else is a ValueError
         assert proc.NO_WINDOW == 0
 
 
@@ -57,12 +57,12 @@ def test_no_window_constant_matches_platform():
 def test_pydub_spawns_without_console_window(popen_flags):
     pytest.importorskip('pydub')
     proc.silence_pydub_console_windows()
-    proc.silence_pydub_console_windows()  # ідемпотентність
+    proc.silence_pydub_console_windows()  # idempotency
 
     import pydub.audio_segment as pas
     import pydub.utils as pu
 
-    # Проксі мусить лишатись прозорим для решти атрибутів subprocess
+    # The proxy must stay transparent for the rest of the subprocess attributes
     assert pas.subprocess.PIPE == subprocess.PIPE
     assert pas.subprocess.DEVNULL == subprocess.DEVNULL
 
@@ -92,7 +92,7 @@ def test_pytesseract_version_probe_spawns_without_console_window(popen_flags):
 
     import pytesseract.pytesseract as pt
 
-    # Popen НЕ підмінений: image_to_string подає власний startupinfo зі SW_HIDE
+    # Popen is NOT replaced: image_to_string passes its own startupinfo with SW_HIDE
     assert pt.subprocess.Popen is subprocess.Popen
     assert pt.subprocess.PIPE == subprocess.PIPE
 

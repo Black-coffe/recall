@@ -1,8 +1,8 @@
-"""«Питання → локальна модель» (Історія 02, mcp-live-call), офлайн.
+"""«Question → local model» (Story 02, mcp-live-call), offline.
 
-Два шари: `app/services/live_ask.py` (LLM/пошук інжектяться — без Ollama/torch)
-і HTTP-контракт `POST /api/copilot/live-ask` (легкий Flask-app з одним
-блюпринтом, `live_ask.ask_local` замокано — без реальної БД/торч/Ollama).
+Two layers: `app/services/live_ask.py` (the LLM/search are injected — without Ollama/torch)
+and the HTTP contract `POST /api/copilot/live-ask` (a light Flask app with a single
+blueprint, `live_ask.ask_local` is mocked — without a real DB/torch/Ollama).
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def test_scope_call_ignores_archive():
     assert out["answer"] == "Відповідь моделі"
     assert out["sources"] == []
     assert out["used_transcript_chars"] > 0
-    assert not search.calls  # C2/приймання: scope='call' не звертається до архіву
+    assert not search.calls  # C2/acceptance: scope='call' does not touch the archive
 
 
 def test_scope_archive_ignores_transcript():
@@ -82,7 +82,7 @@ def test_scope_archive_ignores_transcript():
         "chunk_id": 5, "transcription_id": 7, "title": "Дзвінок з клієнтом",
         "date": "2026-05-14", "snippet": CHUNK["text"][:400].rstrip() + "…",
     }
-    assert search.calls  # scope='archive' МАЄ звернутись до архіву
+    assert search.calls  # scope='archive' MUST touch the archive
 
 
 def test_scope_both_uses_transcript_and_archive():
@@ -94,7 +94,7 @@ def test_scope_both_uses_transcript_and_archive():
     assert out["used_transcript_chars"] > 0
     assert len(out["sources"]) == 1
     assert search.calls
-    # обидва джерела реально потрапили в промпт моделі
+    # both sources really got into the model prompt
     prompt = llm.prompts[0]
     assert "живий текст дзвінка" in prompt
     assert "Дзвінок з клієнтом" in prompt
@@ -108,7 +108,7 @@ def test_ollama_unavailable_returns_200_shaped_result_not_raises():
     assert out["available"] is False
     assert out["reason"] == "Ollama недоступний на http://localhost:11434"
     assert out["answer"] == ""
-    assert not llm.prompts  # generate() не викликався
+    assert not llm.prompts  # generate() was not called
 
 
 def test_generate_failure_degrades_not_raises():
@@ -121,8 +121,8 @@ def test_generate_failure_degrades_not_raises():
 
 
 def test_no_active_session_scope_call_gives_understandable_reason():
-    """session_id=null (немає активної сесії) → transcript_text=None → зрозумілий
-    reason, а не виняток/порожня відповідь без пояснення."""
+    """session_id=null (no active session) → transcript_text=None → a clear
+    reason, not an exception/an empty answer without an explanation."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text=None,
@@ -161,9 +161,9 @@ def test_unknown_scope_falls_back_to_both():
 
 
 def test_generation_bounded_below_dispatcher_tick_budget():
-    """A10-гардрейл: замок генерації спільний з тіками копілота — бюджет
-    ask_local() має бути заведомо коротшим за прийнятий тіковий виклик
-    диспетчера (max_tokens=1024, dispatcher.py)."""
+    """A10 guardrail: the generation lock is shared with the copilot ticks — the budget
+    of ask_local() must be deliberately shorter than the accepted tick call of the
+    dispatcher (max_tokens=1024, dispatcher.py)."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text="текст",
@@ -182,9 +182,9 @@ def test_top_k_clamped_to_upper_bound():
 
 
 def test_top_k_infinite_does_not_raise():
-    """`int(float('inf'))` кидає OverflowError без цього фолбека — прямий
-    виклик ask_local() (напр. з MCP) не повинен падати навіть якщо HTTP-шар
-    пропустив нескінченне значення."""
+    """`int(float('inf'))` raises OverflowError without this fallback — a direct
+    call of ask_local() (e.g. from MCP) must not fail even if the HTTP layer
+    let an infinite value through."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text=None,
@@ -194,9 +194,9 @@ def test_top_k_infinite_does_not_raise():
 
 
 def test_recording_active_never_calls_llm():
-    """C1/acceptance Історії 08: під час активного запису `llm` не отримує
-    жодного виклику (ні availability(), ні generate()) — замок генерації не
-    береться ні на мить."""
+    """C1/acceptance of Story 08: during an active recording `llm` gets
+    no call at all (neither availability() nor generate()) — the generation lock is
+    not taken even for a moment."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text="живий текст дзвінка",
@@ -207,17 +207,17 @@ def test_recording_active_never_calls_llm():
     assert out["model"] == ""
     assert out["transcript_text"] == "живий текст дзвінка"
     assert len(out["sources"]) == 1
-    assert not llm.prompts  # generate() не викликався
+    assert not llm.prompts  # generate() was not called
 
 
 def test_recording_active_llm_availability_not_called():
-    """Окремо доводимо, що навіть `availability()` не викликається — не лише
+    """We prove separately that even `availability()` is not called — not only
     generate()."""
     search = _search_fn([CHUNK])
 
     class _SpyLLM(_FakeLLM):
         def availability(self):
-            raise AssertionError("availability() не мало викликатись у raw-режимі")
+            raise AssertionError("availability() must not be called in raw mode")
 
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text="живий текст",
                              scope="both", llm=_SpyLLM(), search_fn=search, recording_active=True)
@@ -225,8 +225,8 @@ def test_recording_active_llm_availability_not_called():
 
 
 def test_recording_active_still_runs_retrieval():
-    """Retrieval (e5) продовжує працювати в raw-режимі — скорочується лише
-    генерація."""
+    """Retrieval (e5) keeps working in raw mode — only the generation
+    is cut."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text=None,
@@ -247,8 +247,8 @@ def test_recording_active_empty_material_gives_reason():
 
 
 def test_recording_inactive_keeps_generated_mode():
-    """За замовчуванням (recording_active=False, дефолт) поведінка не
-    змінилась — повна відповідь локальної моделі, mode="generated"."""
+    """By default (recording_active=False, the default) the behaviour has not
+    changed — the full answer of the local model, mode="generated"."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     out = live_ask.ask_local("db.sqlite", "що вирішили?", transcript_text="текст",
@@ -259,8 +259,8 @@ def test_recording_inactive_keeps_generated_mode():
 
 
 def test_rerank_matches_env_flag(monkeypatch):
-    """Розбіжність з ask_archive (rag.py::_RERANK_ENABLED) усунена — той самий
-    env var керує rerank і тут."""
+    """The divergence from ask_archive (rag.py::_RERANK_ENABLED) is removed — the same
+    env var controls rerank here too."""
     search = _search_fn([CHUNK])
     llm = _FakeLLM()
     monkeypatch.setattr(live_ask, "_RERANK_ENABLED", True)
@@ -269,7 +269,7 @@ def test_rerank_matches_env_flag(monkeypatch):
     assert search.calls[0][3] is True
 
 
-# ------------------------------------------------------------- HTTP-контракт
+# ------------------------------------------------------------- HTTP contract
 
 
 @pytest.fixture
@@ -307,7 +307,7 @@ def test_endpoint_resolves_active_session_when_none_given(monkeypatch, app_clien
     _patch_ask_local(monkeypatch, captured)
     monkeypatch.setattr("app.state.recording_service",
                         SimpleNamespace(active_session_id="sid-42"))
-    monkeypatch.setattr("app.state.live_transcribe_worker", None)  # воркер вимкнений
+    monkeypatch.setattr("app.state.live_transcribe_worker", None)  # the worker is off
 
     r = app_client.post('/api/copilot/live-ask',
                         json={"question": "що там?", "scope": "call"})
@@ -315,7 +315,7 @@ def test_endpoint_resolves_active_session_when_none_given(monkeypatch, app_clien
     body = r.get_json()
     assert body["success"] is True
     assert body["session_id"] == "sid-42"
-    assert captured["transcript_text"] is None  # воркера нема → None, не помилка
+    assert captured["transcript_text"] is None  # no worker → None, not an error
 
 
 def test_endpoint_no_active_session_scope_call_not_500(monkeypatch, app_client):
@@ -352,8 +352,8 @@ def test_endpoint_builds_transcript_from_live_worker(monkeypatch, app_client):
     assert r.status_code == 200
     assert "перше" in captured["transcript_text"]
     assert "нульове" in captured["transcript_text"]
-    # C3/приймання: транскрипт розрізняє оператора і співрозмовника, а не
-    # просто конкатенує текст сегментів без атрибуції.
+    # C3/acceptance: the transcript distinguishes the operator from the other party, rather than
+    # simply concatenating the segment text without attribution.
     assert "[Співрозмовник] перше" in captured["transcript_text"]
     assert "[Оператор] нульове" in captured["transcript_text"]
 
@@ -364,7 +364,7 @@ def test_endpoint_scope_archive_never_touches_live_worker(monkeypatch, app_clien
 
     class _ExplodingWorker:
         def is_active(self, session_id):
-            raise AssertionError("scope='archive' не мало торкатись live-воркера")
+            raise AssertionError("scope='archive' must not touch the live worker")
 
     monkeypatch.setattr("app.state.recording_service", SimpleNamespace(active_session_id="sid-1"))
     monkeypatch.setattr("app.state.live_transcribe_worker", _ExplodingWorker())
@@ -388,8 +388,8 @@ def test_endpoint_defaults_top_k_and_scope(monkeypatch, app_client):
 
 
 def test_endpoint_top_k_infinite_is_400_not_500(monkeypatch, app_client):
-    """Flask/JSON приймає ``Infinity``; `int(float('inf'))` кидає OverflowError —
-    без валідації запит падав у 500."""
+    """Flask/JSON accepts ``Infinity``; `int(float('inf'))` raises OverflowError —
+    without validation the request fell into a 500."""
     captured: dict = {}
     _patch_ask_local(monkeypatch, captured)
 
@@ -410,8 +410,8 @@ def test_endpoint_top_k_non_numeric_is_400(monkeypatch, app_client):
 
 
 def test_endpoint_recording_active_derived_from_state(monkeypatch, app_client):
-    """recording_active передається в ask_local ЛИШЕ за станом сервера
-    (`state.recording_service.active_session_id`), не за телом запиту."""
+    """recording_active is passed to ask_local ONLY from the server state
+    (`state.recording_service.active_session_id`), not from the request body."""
     captured: dict = {}
     _patch_ask_local(monkeypatch, captured)
     monkeypatch.setattr("app.state.recording_service", SimpleNamespace(active_session_id="sid-1"))
@@ -436,8 +436,8 @@ def test_endpoint_recording_inactive_derived_from_state(monkeypatch, app_client)
 
 
 def test_endpoint_ignores_client_supplied_recording_active_param(monkeypatch, app_client):
-    """Агент не має способу форсувати generated-режим під час запису
-    навіть підсунувши власне поле в тілі запиту — сервер його ігнорує."""
+    """The agent has no way to force the generated mode during a recording
+    even by slipping its own field into the request body — the server ignores it."""
     captured: dict = {}
     _patch_ask_local(monkeypatch, captured)
     monkeypatch.setattr("app.state.recording_service", SimpleNamespace(active_session_id="sid-1"))
@@ -446,7 +446,7 @@ def test_endpoint_ignores_client_supplied_recording_active_param(monkeypatch, ap
     r = app_client.post('/api/copilot/live-ask',
                         json={"question": "що там?", "scope": "archive", "recording_active": False})
     assert r.status_code == 200
-    assert captured["recording_active"] is True  # тіло проігноровано, взято зі стану сервера
+    assert captured["recording_active"] is True  # the body is ignored, taken from the server state
 
 
 def test_endpoint_top_k_clamped_to_upper_bound(monkeypatch, app_client):

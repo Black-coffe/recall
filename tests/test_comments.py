@@ -1,8 +1,8 @@
-"""Шар коментарів, Волна 0: схема v37, CRUD, індексер, деградація.
+"""Comments layer, Wave 0: schema v37, CRUD, indexer, degradation.
 
-Модель ембедингів мокається (EMBED_DIM=4) — реальний e5-large (2GB) не
-вантажиться. FTS5 справжній: тригери comment_chunks_ai наповнюють
-comment_chunks_fts при INSERT, і саме це перевіряє тест лексичного шляху.
+The embedding model is mocked (EMBED_DIM=4) — the real e5-large (2GB) is not
+loaded. FTS5 is real: the comment_chunks_ai triggers fill
+comment_chunks_fts on INSERT, and that is exactly what the lexical-path test checks.
 """
 import sqlite3
 
@@ -62,7 +62,7 @@ def _add_audio(path, title="Аудіо"):
     return aid
 
 
-# ---------------------------------------------------------------- схема (v37)
+# ---------------------------------------------------------------- schema (v37)
 
 def test_v37_creates_tables_and_fts(db):
     conn = sqlite3.connect(db)
@@ -76,7 +76,7 @@ def test_v37_creates_tables_and_fts(db):
 
 
 def test_v37_is_idempotent(db):
-    init_database(db)   # другий прогін на тій самій БД не має падати
+    init_database(db)   # a second run on the same DB must not fail
     conn = sqlite3.connect(db)
     n = conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 37").fetchone()[0]
     conn.close()
@@ -96,8 +96,8 @@ def test_create_and_list(db):
 
 
 def test_comment_on_media_card_without_transcript(db):
-    """Головний сценарій, заради якого індекс окремий: картка Медіатеки без
-    транскрипта коментується і зберігається."""
+    """The main scenario, the reason the index is separate: a Media Library card without
+    a transcript is commented and saved."""
     aid = _add_audio(db)
     c = comments.create(db, "audio_download", aid, "Тут з 14:20 говорить підрядник")
     assert c["target_type"] == "audio_download"
@@ -137,8 +137,8 @@ def test_missing_target_rejected(db):
 
 
 def test_recording_session_target_needs_no_row(db):
-    """Сесія запису не має таблиці з INTEGER-ключем — існування не перевіряємо,
-    інакше коментар під час дзвінка створити було б неможливо."""
+    """A recording session has no table with an INTEGER key — we do not check existence,
+    otherwise creating a comment during a call would be impossible."""
     c = comments.create(db, "recording_session", 42, "оператор: клієнт передумав",
                         source="live", anchor_time=137.5)
     assert c["anchor_time"] == 137.5
@@ -162,8 +162,8 @@ def test_counts_for_batch(db):
 
 
 def test_counts_for_handles_large_id_list(db):
-    """>999 id мають розбиватись на пачки, інакше SQLite падає на ліміті
-    параметрів (а «вибрати всі за фільтром» у Бібліотеці дає до 3000)."""
+    """>999 ids must be split into batches, otherwise SQLite fails on the parameter
+    limit (and "select all by filter" in the Library gives up to 3000)."""
     tid = _add_tx(db)
     comments.create(db, "transcription", tid, "x")
     counts = comments.counts_for(db, "transcription", [tid] + list(range(5000, 8000)))
@@ -196,7 +196,7 @@ def test_list_recent_filters(db):
     assert len(comments.list_recent(db)["comments"]) == 2
 
 
-# ------------------------------------------------------------------ індексер
+# ------------------------------------------------------------------ indexer
 
 def test_index_writes_chunks_and_vectors(db, mock_embeddings):
     tid = _add_tx(db)
@@ -222,7 +222,7 @@ def test_index_is_idempotent(db, mock_embeddings):
 
 
 def test_fts_finds_comment_text(db, mock_embeddings):
-    """Лексичний шлях працює через справжні тригери FTS5."""
+    """The lexical path works through real FTS5 triggers."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "Підрядник зірвав дедлайн по фасаду")
     comments.index_comment(db, c["id"])
@@ -235,8 +235,8 @@ def test_fts_finds_comment_text(db, mock_embeddings):
 
 
 def test_degrades_without_model_but_stays_searchable(db, no_embeddings):
-    """Без моделі коментар усе одно ріжеться і лягає у FTS, але лишається в
-    черзі на векторизацію — тихої втрати немає."""
+    """Without a model the comment is still cut and lands in FTS, but stays in
+    the vectorization queue — there is no silent loss."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "унікальнеслово тут")
     res = comments.index_comment(db, c["id"])
@@ -248,14 +248,14 @@ def test_degrades_without_model_but_stays_searchable(db, no_embeddings):
         "SELECT rowid FROM comment_chunks_fts WHERE comment_chunks_fts MATCH ?",
         ('"унікальнеслово"',)).fetchall()
     conn.close()
-    assert row[0] is None            # вектора немає
-    assert len(hits) == 1            # але знайти можна
-    assert c["id"] in comments.pending_ids(db)   # і робота лишилась видимою
+    assert row[0] is None            # no vector
+    assert len(hits) == 1            # but it can be found
+    assert c["id"] in comments.pending_ids(db)   # and the work stays visible
 
 
 def test_edit_body_drops_stale_index(db, mock_embeddings):
-    """Правка тіла має знімати старий вектор одразу, інакше пошук віддавав би
-    текст, якого на картці вже немає."""
+    """Editing the body must drop the old vector right away, otherwise search would return
+    text that is no longer on the card."""
     tid = _add_tx(db)
     c = comments.create(db, "transcription", tid, "стара редакція")
     comments.index_comment(db, c["id"])
@@ -306,7 +306,7 @@ def test_reindex_backfills_and_converges(db, mock_embeddings):
         comments.create(db, "transcription", tid, f"коментар {i}")
     first = comments.reindex(db)
     assert first["pending"] == 3 and first["embedded"] == 3
-    # Другий прогін не має знаходити роботи — інакше бекфіл не сходиться.
+    # A second pass must not find work — otherwise the backfill does not converge.
     assert comments.reindex(db)["pending"] == 0
     assert comments.pending_ids(db) == []
 
@@ -329,7 +329,7 @@ def test_stats_shape(db, mock_embeddings):
     assert s["by_kind"]["correction"] == 1
 
 
-# ------------------------------ граф: інваріант відносно морфо-прапорця TG
+# ------------------------------ graph: invariant relative to the TG morph flag
 
 def _add_entity(path, etype, name):
     conn = sqlite3.connect(path)
@@ -351,18 +351,18 @@ def _entity_links(path, tid):
 
 
 def test_link_entities_ignores_tg_morph_flag(db, monkeypatch):
-    """`comments.link_entities` лишається на точному матчері незалежно від
-    `TG_ENTITIES_MORPH_ENABLED` — прапорець належить інжесту TG (history 04),
-    замір коментарів його не бачив і вимикання прапорця не знімає вже
-    записані звʼязки. Тому ON і OFF мають писати однакові звʼязки — навіть на
-    словоформі («Юлією»), яку морфо-гілка TG-інжесту саме ловить."""
+    """`comments.link_entities` stays on the exact matcher regardless of
+    `TG_ENTITIES_MORPH_ENABLED` — the flag belongs to TG ingest (history 04),
+    the comments measurement did not see it and turning the flag off does not remove already
+    written links. So ON and OFF must write identical links — even on the
+    word form («Юлією») that the TG ingest morph branch does catch."""
     from app.services import tg_entities
     tid = _add_tx(db, text="текст")
     _add_entity(db, "person", "Юлія")
     comments.create(db, "transcription", tid, "домовились із Юлією про дзвінок")
 
-    # Контроль: цю саму словоформу морфо-матчер TG-інжесту (`find_mentions`)
-    # ловить, коли прапорець увімкнений — інакше тест нічого не доводить.
+    # Control: this very word form is caught by the TG ingest morph matcher (`find_mentions`)
+    # when the flag is on — otherwise the test proves nothing.
     monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
     live_names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("домовились із Юлією про дзвінок", live_names)

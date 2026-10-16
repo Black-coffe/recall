@@ -1,16 +1,16 @@
 /* Recall — Tasks (action items) dashboard. Wraps /api/memory/action-items.
 
-   Це НЕ список справ, а звід зобовʼязань із семимісячним хвостом: відкритих
-   задач ~1.5k, дедлайн має лише кожна пʼята, протермінованих сотні. Тому екран
-   побудований навколо ЧАСУ ДО ДІЇ, а не навколо порядку інджесту:
+   This is NOT a to-do list but a digest of commitments with a seven-month tail: open
+   tasks ~1.5k, only every fifth has a deadline, overdue ones number in the hundreds. So the screen
+   is built around TIME TO ACTION, not around ingest order:
 
-   · відра «Протерміновано / Найближчі 7 днів / Пізніше / Без дати» —
-     взаємно виключні, лічильники приходять з бекенда (`windows`) і тому
-     правдиві навіть коли сам список обрізаний лімітом;
-   · фасет власника — 800+ задач привʼязані до графа, і «чиє це» звужує
-     сильніше за будь-який інший фільтр;
-   · статус-пілюля лише на ВИНЯТКАХ (протерміновано / застаріло / дубль):
-     «open» на кожному з 1480 рядків — це шум, а не інформація.
+   · buckets «Протерміновано / Найближчі 7 днів / Пізніше / Без дати» —
+  mutually exclusive, the counters come from the backend (`windows`) and are therefore
+  truthful even when the list itself is cut by the limit;
+   · the owner facet — 800+ tasks are linked to the graph, and "whose is this" narrows
+  more strongly than any other filter;
+   · the status pill only on EXCEPTIONS (overdue / stale / duplicate):
+  "open" on each of 1480 rows is noise, not information.
 */
 (function () {
     'use strict';
@@ -20,13 +20,13 @@
     const STATUSES = [
         { k: 'open', label: T('knowledge.tasks.status.open') },
         { k: 'done', label: T('knowledge.tasks.status.done') },
-        // Трек 1: sweep_stale переводить давно протерміноване у 'stale'. Без
-        // цього чипа тисячі таких задач недосяжні з UI взагалі.
+        // Track 1: sweep_stale moves long-overdue items to 'stale'. Without
+        // this chip thousands of such tasks are unreachable from the UI altogether.
         { k: 'stale', label: T('knowledge.tasks.status.stale') },
         { k: 'cancelled', label: T('knowledge.tasks.status.cancelled') },
         { k: 'all', label: T('knowledge.tasks.status.all') },
     ];
-    // Період — за датою запису-джерела. «all» = без ліміту по часу.
+    // Period — by the date of the source record. "all" = no time limit.
     const PERIODS = [
         { k: '24h', label: T('knowledge.tasks.period.24h') },
         { k: '7d', label: T('knowledge.tasks.period.7d') },
@@ -34,22 +34,22 @@
         { k: 'year', label: T('knowledge.tasks.period.year') },
         { k: 'all', label: T('knowledge.tasks.period.all') },
     ];
-    // Порядок = порядок терміновості. `lead` — скільки рядків показуємо одразу;
-    // «Без дати» згорнуте, бо це археологія, а не план на сьогодні.
+    // Order = order of urgency. `lead` — how many rows we show right away;
+    // «Без дати» is collapsed because it is archaeology, not a plan for today.
     const BUCKETS = [
         { k: 'overdue', label: T('knowledge.tasks.bucket.overdue'), tone: 'err', lead: 25 },
         { k: 'soon', label: T('knowledge.tasks.bucket.soon'), tone: 'accent', lead: 50 },
         { k: 'later', label: T('knowledge.tasks.bucket.later'), tone: 'plain', lead: 25 },
         { k: 'no_date', label: T('knowledge.tasks.bucket.noDate'), tone: 'muted', lead: 0 },
     ];
-    const PAGE = 50;    // скільки дотягуємо за один «показати ще»
+    const PAGE = 50;    // how many we fetch per one "show more"
 
     let listEl = null, cats = null, state = null;
-    // Скільки рядків уже завантажено у кожному відрі + чи воно розгорнуте.
+    // How many rows are already loaded in each bucket + whether it is expanded.
     let shown = {}, opened = {}, windows = {}, owners = [];
 
-    // C9: той самий фільтр-бар, що на Бібліотеці/Медіатеці/Графі, дубльований
-    // навмисно (09 — лише спільні хелпери, не спільний компонент фільтр-бару).
+    // C9: the same filter bar as on Library/Media library/Graph, duplicated
+    // on purpose (09 — only shared helpers, not a shared filter-bar component).
     const FILTER_HINT = T('knowledge.tasks.filterHint');
 
     async function render(ctx) {
@@ -168,8 +168,8 @@
         }, extra);
     }
 
-    // Одне відро = один запит. Так «Без дати» (тисяча з гаком рядків) не з'їдає
-    // ліміт у протермінованих, і кожне відро гортається незалежно.
+    // One bucket = one request. This way «Без дати» (a thousand-plus rows) does not eat
+    // the limit of the overdue ones, and every bucket scrolls independently.
     async function load(ctx) {
         listEl.innerHTML = UI.skeletonList(6);
         try {
@@ -182,7 +182,7 @@
 
             const rest = await Promise.all(BUCKETS.slice(1).map(b =>
                 (b.lead === 0 && !opened[b.k])
-                    ? Promise.resolve({ action_items: [] })     // згорнуте не тягнемо
+                    ? Promise.resolve({ action_items: [] })     // a collapsed one is not fetched
                     : R.api.actionItems(params({ window: b.k, limit: bucketLimit(b.k) }))
                         .catch(() => ({ action_items: [] }))));
             if (!ctx.isCurrent()) return;
@@ -210,7 +210,7 @@
         const box = ctx.mount.querySelector('#rcTaskOwners');
         if (!box) return;
         if (!owners.length) { box.innerHTML = ''; return; }
-        // Показуємо топ-8 — далі хвіст із одиничними задачами, який лише шумить.
+        // We show the top 8 — beyond that is a tail of single tasks that only adds noise.
         const top = owners.slice(0, 8);
         const active = state.owner && !top.some(o => o.owner === state.owner)
             ? [owners.find(o => o.owner === state.owner) || { owner: state.owner, n: 0 }] : [];
@@ -239,19 +239,19 @@
 
     function taskHTML(a, bucket) {
         const owner = a.owner_canonical || a.owner_name;
-        // Підпис джерела. Для дзвінка це назва запису, для переписки —
-        // ЧАТ і автор репліки: source_name у TG склеєний з тексту самого
-        // повідомлення, тож повторював би текст задачі замість того, щоб
-        // сказати, куди написати.
+        // Source label. For a call it is the record title, for a conversation —
+        // the CHAT and the author of the line: source_name in TG is glued from the text of the
+        // message itself, so it would repeat the task text instead of
+        // saying where to write.
         const label = (a.source_type === 'telegram' && a.tg_chat_title)
             ? a.tg_chat_title + (a.tg_sender ? ' · ' + a.tg_sender : '')
             : (a.source_name || ('#' + a.transcription_id));
         const src = a.transcription_id
             ? `<a class="rc-task__src" href="/transcript/${U.slug(a.transcription_id, a.source_name)}">${U.esc(label)}</a>`
             : '';
-        // Дата: чим ближче/глибше прострочено, тим гучніше. Точність із Треку 1
-        // показуємо лише коли дата НЕ денна — інакше «до 27.07» брехало б про
-        // точність там, де в оригіналі було «десь у серпні».
+        // Date: the closer/deeper overdue, the louder. The precision from Track 1
+        // is shown only when the date is NOT a day — otherwise "до 27.07" would lie about
+        // precision where the original said "somewhere in August".
         const prec = U.DUE_PRECISION[a.due_precision];
         let due = '';
         if (a.due_date) {
@@ -262,10 +262,10 @@
                      ${prec ? `<span class="rc-task__due-prec">≈ ${U.esc(prec)}</span>` : ''}
                    </span>`;
         } else if (a.due) {
-            // Сира фраза без розпізнаної дати — краще показати як є, ніж мовчати.
+            // A raw phrase without a recognized date — better to show as is than stay silent.
             due = `<span class="rc-task__due" data-tone="muted"><span class="rc-task__due-rel">${U.esc(a.due)}</span></span>`;
         }
-        // Пілюля лише на винятках. Дефолтний 'open' не показуємо взагалі.
+        // The pill only on exceptions. The default 'open' is not shown at all.
         const flags = [
             a.status === 'stale' ? '<span class="rc-task__flag" data-s="stale">' + T('knowledge.tasks.flag.stale') + '</span>' : '',
             a.status === 'done' ? '<span class="rc-task__flag" data-s="done">' + T('knowledge.tasks.flag.done') + '</span>' : '',
@@ -273,8 +273,8 @@
             a.dup_of ? '<span class="rc-task__flag" data-s="dup">' + T('knowledge.tasks.flag.dup') + '</span>' : '',
         ].filter(Boolean).join('');
 
-        // Дату зустрічі підписуємо явно: без підпису вона у тому ж форматі, що
-        // й дедлайн у рейці зліва, і рядок читався як «дві дати, обидві дедлайн».
+        // We label the meeting date explicitly: without a label it is in the same format
+        // as the deadline in the rail on the left, and the row read as "two dates, both deadlines".
         const metaBits = [
             owner ? `<span class="rc-task__owner">${U.esc(owner)}</span>` : '',
             src,
@@ -300,7 +300,7 @@
             h.addEventListener('click', () => {
                 const k = h.dataset.bucket;
                 const b = BUCKETS.find(x => x.k === k);
-                // Розгортання відра з lead>0 не має сенсу — воно вже відкрите.
+                // Expanding a bucket with lead>0 makes no sense — it is already open.
                 if (b && b.lead > 0) return;
                 opened[k] = !opened[k];
                 if (opened[k] && !shown[k]) shown[k] = PAGE;
@@ -332,11 +332,11 @@
         });
     }
 
-    // T5.5: три різні порожні стани замість одного повідомлення, яке маскує
-    // «архів порожній» під «усе зроблено».
-    //   1. звужений фільтр/статус → «розширте фільтр»
-    //   2. дефолт + архів без записів → CTA додати перший запис
-    //   3. дефолт + записи є → справді «все під контролем»
+    // T5.5: three different empty states instead of one message that masks
+    // "the archive is empty" as "everything is done".
+    //   1. narrowed filter/status → "widen the filter"
+    //   2. default + an archive without records → CTA to add the first record
+    //   3. default + records exist → truly "everything under control"
     function filterExplain() {
         const bits = [];
         if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(T('knowledge.filter.inCat', { path: p })); }
@@ -359,7 +359,7 @@
             const s = R.state.stats || await R.api.stats();
             if (ctx.isCurrent()) R.state.stats = s;
             hasRecords = !!(s && s.transcriptions && s.transcriptions.total > 0);
-        } catch (_) { /* stats недоступні — не блокуємо, показуємо нейтральний стан "усе під контролем" */ }
+        } catch (_) { /* stats unavailable — do not block, show the neutral state "усе під контролем" */ }
         if (!ctx.isCurrent()) return;
         if (!hasRecords) {
             const actions = [

@@ -1,11 +1,11 @@
-"""Шар коментарів, Волна 2.5: пошук по Бібліотеці + математика заміру.
+"""Comments layer, Wave 2.5: Library search + measurement math.
 
-Дірка, яку закриває перша половина: власник пише «Барселона» уточненням до
-дзвінка, де це слово не звучало. Семантичний пошук коментар знаходить, а
-Бібліотека — там, де запис і треба відкрити — каже «нічого не знайдено».
+The hole closed by the first half: the owner writes «Барселона» as a clarification to a
+call where that word was not spoken. Semantic search finds the comment, while
+the Library, where the record needs to be opened, says "nothing found".
 
-Друга половина — детермінована математика `evals/comments_eval.py`: диф між
-видачею з коментарями і без. Без мережі, GPU і БД (як `evals/metrics.py`).
+The second half is the deterministic math of `evals/comments_eval.py`: the diff between
+results with and without comments. No network, GPU or DB (like `evals/metrics.py`).
 """
 import sqlite3
 
@@ -58,7 +58,7 @@ def _ids(resp):
     return [t["id"] for t in resp.get_json()["transcriptions"]]
 
 
-# --------------------------------------------------- пошук по Бібліотеці
+# --------------------------------------------------- Library search
 
 def test_search_finds_record_by_its_comment(client):
     c, db = client
@@ -69,7 +69,7 @@ def test_search_finds_record_by_its_comment(client):
 
 
 def test_search_still_finds_by_transcript(client):
-    """Регресія: додавання гілки коментарів не має зламати основний шлях."""
+    """Regression: adding the comments branch must not break the main path."""
     c, db = client
     tid = _add_tx(db)
     assert _ids(c.get('/api/history?search=фасад')) == [tid]
@@ -82,7 +82,7 @@ def test_search_misses_stay_misses(client):
 
 
 def test_search_uses_same_tokenizer_as_transcripts(client):
-    """Через FTS коментарів, а не LIKE: «бюджету» мусить знаходити «бюджет»."""
+    """Via the comments FTS, not LIKE: «бюджету» must find «бюджет»."""
     c, db = client
     tid = _add_tx(db)
     cm = comments.create(db, "transcription", tid, "тут про бюджет")
@@ -110,7 +110,7 @@ def test_comment_on_other_record_does_not_leak(client):
 
 
 def test_search_survives_db_without_comment_tables(client):
-    """Стара БД без v37: пошук мусить працювати як раніше, а не падати."""
+    """An old DB without v37: search must work as before, not crash."""
     c, db = client
     tid = _add_tx(db)
     conn = sqlite3.connect(db)
@@ -121,7 +121,7 @@ def test_search_survives_db_without_comment_tables(client):
 
 
 def test_search_does_not_duplicate_when_both_match(client):
-    """Збіг і в транскрипті, і в коментарі — це ОДИН запис, не два."""
+    """A match in both the transcript and the comment is ONE record, not two."""
     c, db = client
     tid = _add_tx(db)
     cm = comments.create(db, "transcription", tid, "теж про фасад")
@@ -129,7 +129,7 @@ def test_search_does_not_duplicate_when_both_match(client):
     assert _ids(c.get('/api/history?search=фасад')) == [tid]
 
 
-# ----------------------------------------------------- математика заміру
+# ----------------------------------------------------- measurement math
 
 def _ch(cid, tid=1):
     return {"chunk_id": cid, "transcription_id": tid, "source_type": "file"}
@@ -140,8 +140,8 @@ def _cm(cid):
 
 
 def test_key_separates_comment_and_chunk_spaces():
-    """Простори id перетинаються — диф не має рахувати чанк №5 і коментар №5
-    за той самий елемент."""
+    """The id spaces overlap: the diff must not count chunk #5 and comment #5
+    as the same item."""
     assert comments_eval._key(_ch(5)) != comments_eval._key(_cm(5))
 
 
@@ -162,13 +162,13 @@ def test_aggregate_counts_drift_and_slots():
 
 
 def test_aggregate_survives_empty_k():
-    """Ділення на кількість без захисту дало б ZeroDivisionError рівно тоді,
-    коли замір і так нічого не знайшов."""
+    """Division by the count without protection would raise ZeroDivisionError exactly when
+    the measurement found nothing anyway."""
     assert comments_eval._aggregate([], 8)["items"] == 0
 
 
 def test_two_k_values_are_mandatory():
-    """Один k дає впевнену відповідь, яка не витримує перевірки другим
+    """A single k gives a confident answer that does not survive a check with the second
     (memory/eval-verdict-flips-with-k)."""
     assert comments_eval.K_VALUES == (8, 12)
 
@@ -184,8 +184,8 @@ def test_load_questions_accepts_both_shapes(tmp_path):
 
 
 def test_seed_refuses_to_write_to_the_live_db():
-    """--seed пише в БД. Промах повз копію зіпсував би бойовий архів
-    синтетичними коментарями, які потім довелось би виловлювати руками."""
+    """--seed writes to the DB. Missing the copy would spoil the live archive
+    with synthetic comments that would then have to be fished out by hand."""
     rc = comments_eval.main(["--golden", "evals/golden_set.example.json",
                              "--db", "whisper_history.db", "--seed", "1"])
     assert rc == 2

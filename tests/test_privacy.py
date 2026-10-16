@@ -1,4 +1,4 @@
-"""Ядро приватного (spec mcp-visual-privacy): напрямки стоп-листа, стоп-слова, режим."""
+"""Private core (spec mcp-visual-privacy): stop-list directions, stop words, mode."""
 import sqlite3
 
 import pytest
@@ -12,7 +12,7 @@ def db(tmp_path, monkeypatch):
     path = str(tmp_path / 'r.db')
     init_database(path)
     conn = sqlite3.connect(path)
-    # «Юридичне» — проєкт під «Фріланс» (як у бойовій), під ним ще підпроєкт
+    # «Юридичне» is a project under «Фріланс» (as in the live DB), with one more subproject under it
     conn.execute("INSERT INTO categories (id, name, name_norm, parent_id) VALUES "
                  "(15, 'Юридичне', 'юридичне', 5)")
     conn.execute("INSERT INTO categories (id, name, name_norm, parent_id) VALUES "

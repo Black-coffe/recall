@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
-"""Замір словника імен і змішаних мов (K1, історії 02–03).
+"""Measurement of the name vocabulary and mixed languages (K1, stories 02–03).
 
-Висновків інструмент не робить: він готує матеріал, який власник переглядає й
-судить, а підсумок рахує історія 03. Підкоманди:
+The tool draws no conclusions: it prepares material that the owner reviews and
+judges, and the summary is computed by story 03. Subcommands:
 
-    candidates  БД (mode=ro) → measure/fragments.md (+ fragments.json):
-                ≥20 іменних фрагментів (в тексті стоїть аліас-помилка імені
-                зі словника), ≥10 контрольних без імен, ≥10 вікон ≤60 с зі
-                змішаною uk/ru мовою. Вибірка детермінована (SEED).
-    run         ті самі фрагменти → варіанти через той самий
-                ``transcribe_with_progress(decode_options=…)``, що й прод:
-                імена/контроль — baseline / hotwords / initial_prompt,
-                змішана — baseline / multilingual (вікно 30 с) / multilingual +
-                ``chunk_length=10``; швидкість — ті самі три варіанти словника
-                на 3 повних записах 10–30 хв. Виходи й час → measure/raw/*.json.
-                Відмовляє, якщо в Recall іде запис.
-    ab          raw/mixed.json → measure/ab.md (сліпі пари «А/Б») +
-                measure/ab-key.json (ключ, до вердикту не відкривати).
-    score       розмітка власника + raw → measure/report.md і рішення щодо
-                дефолтів (історія 03).
+    candidates  DB (mode=ro) → measure/fragments.md (+ fragments.json):
+                ≥20 name fragments (the text contains an error alias of a vocabulary
+                name), ≥10 control ones without names, ≥10 windows ≤60 s with
+                mixed uk/ru language. The sample is deterministic (SEED).
+    run         the same fragments → variants through the same
+                ``transcribe_with_progress(decode_options=…)`` as prod:
+                names/control — baseline / hotwords / initial_prompt,
+                mixed — baseline / multilingual (30 s window) / multilingual +
+                ``chunk_length=10``; speed — the same three vocabulary variants
+                on 3 full recordings of 10–30 min. Outputs and time → measure/raw/*.json.
+                Refuses if a recording is in progress in Recall.
+    ab          raw/mixed.json → measure/ab.md (blind «А/Б» pairs) +
+                measure/ab-key.json (the key, do not open before the verdict).
+    score       the owner's markup + raw → measure/report.md and the decision on
+                defaults (story 03).
 
-Фрагмент запису довше 10 хв декодується так само, як декодувався б увесь запис:
-batched-шляхом (менеджер обирає його за тривалістю файлу, тож тривалість
-підставляється тривалістю джерела). Оригінали не чіпаються: ffmpeg ріже кліп
-у тимчасову теку.
+A recording fragment longer than 10 min is decoded the same way the whole recording would be:
+by the batched path (the manager picks it by file duration, so the duration
+is substituted with the source duration). Originals are not touched: ffmpeg cuts a clip
+into a temporary folder.
 
     .venv/Scripts/python.exe tools/measure_vocabulary.py candidates
     .venv/Scripts/python.exe tools/measure_vocabulary.py run
@@ -50,26 +50,26 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services import vocabulary  # noqa: E402 — легкий модуль, без torch
+from app.services import vocabulary  # noqa: E402 — a light module, no torch
 from app.utils.proc import NO_WINDOW  # noqa: E402
 
 MEASURE_DIR = ROOT / "docs" / "specs" / "k1-name-vocabulary" / "measure"
 SEED = 20261008
-NAME_TARGET = 30          # з запасом: власник викреслить частину, лишитись має ≥20
+NAME_TARGET = 30          # with a margin: the owner will strike some, ≥20 must remain
 CONTROL_TARGET = 12
 MIXED_TARGET = 10
 SPEED_RECORDINGS = 3
 SPEED_MIN_S, SPEED_MAX_S = 10 * 60, 30 * 60
-#: Повтори заміру швидкості: один прогін давав розкид +7…+16 % на тих самих записах.
+#: Speed measurement repeats: a single run gave a +7…+16 % spread on the same recordings.
 SPEED_REPS = 3
-#: Фрагменти беруться лише для перших імен словника: 40 імен = 174 токени
-#: (замір плану на токенайзері large-v3-turbo) — гарантовано вміщаються в 223.
+#: Fragments are taken only for the first vocabulary names: 40 names = 174 tokens
+#: (the plan's measurement on the large-v3-turbo tokenizer) — guaranteed to fit in 223.
 VOCAB_HEAD = 40
 PER_ENTITY = 2
 PAD_S = 1.0
 MIXED_WINDOW_S = 60.0
 CONTROL_MIN_S, CONTROL_MAX_S, CONTROL_MIN_WORDS = 4.0, 20.0, 8
-BATCHED_FROM_S = 600.0    # поріг менеджера: довші файли йдуть batched-шляхом
+BATCHED_FROM_S = 600.0    # the manager's threshold: longer files go the batched path
 DEFAULT_API = "http://127.0.0.1:5050"
 DEFAULT_MODEL = "large-v3-turbo"
 
@@ -83,7 +83,7 @@ _REVIEWED = re.compile(r"^\s*-\s*\[[xX]\]\s*([NC]\d+)\b")
 
 
 # ============================================================
-# Дані (лише читання)
+# Data (read-only)
 # ============================================================
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -94,7 +94,7 @@ def connect_ro(db_path: str) -> sqlite3.Connection:
 
 
 def load_records(conn) -> list[dict]:
-    """Аудіо-записи з файлом на диску і сегментами (файл, запис; YouTube ні)."""
+    """Audio records with a file on disk and segments (file, recording; not YouTube)."""
     out = []
     for r in conn.execute(
         "SELECT id, source_type, source_name, title, file_path, language, segments "
@@ -128,11 +128,11 @@ def _levenshtein(a: str, b: str) -> int:
 
 
 def looks_like_mangling(alias: str, canonical: str) -> bool:
-    """Аліас схожий на спотворене імʼя, а не на інше слово, приліплене до сутності.
+    """The alias resembles a mangled name rather than another word glued to the entity.
 
-    Відстань Левенштейна між фонетичними ключами (``vocabulary.phonetic_keys``) —
-    не більше половини ключа імені: «Акмеец» (brgts) при Acmecorp (brgds) —
-    так; «штучний інтелект» при Anthropic, «Спікер 7» при «Руслан» — ні."""
+    Levenshtein distance between phonetic keys (``vocabulary.phonetic_keys``) —
+    at most half of the name key: «Акмеец» (brgts) for Acmecorp is
+    a yes; «штучний інтелект» for Anthropic, «Спікер 7» for «Руслан» are no."""
     a_keys = vocabulary.phonetic_keys("".join(vocabulary._words(alias)))
     c_keys = set(vocabulary.phonetic_keys("".join(vocabulary._words(canonical))))
     for w in vocabulary._words(canonical):
@@ -141,12 +141,12 @@ def looks_like_mangling(alias: str, canonical: str) -> bool:
 
 
 def error_alias_targets(conn, names: list[str]) -> list[dict]:
-    """Для імен словника (у порядку рангу) — їхні аліаси-помилки і звʼязані записи.
+    """For vocabulary names (in rank order) — their error aliases and linked records.
 
-    Помилка — за ``vocabulary.is_error_alias``: відмінок і переклад («Адаму» при
-    «Адам», «Гугл» при Google) помилкою не є. Для заміру лишаються лише аліаси,
-    схожі на спотворене імʼя (:func:`looks_like_mangling`): на аліасі-сміттю
-    («AdWords» при Google) словник нічого не може виправити."""
+    An error is judged by ``vocabulary.is_error_alias``: a case and a translation («Адаму» for
+    «Адам», «Гугл» for Google) are not an error. Only aliases that resemble a mangled name
+    remain for the measurement (:func:`looks_like_mangling`): on a junk alias
+    («AdWords» for Google) the vocabulary cannot correct anything."""
     by_name: dict[str, dict] = {}
     for name in names:
         by_name.setdefault(name.casefold(), {"canonical": name, "aliases": [], "tids": set()})
@@ -175,7 +175,7 @@ def _contains(text: str, alias: str) -> bool:
 
 def find_name_fragments(records: list[dict], targets: list[dict], rng: random.Random,
                         target_n: int = NAME_TARGET) -> list[dict]:
-    """По черзі за рангом імен — до ``PER_ENTITY`` фрагментів на імʼя, різні аліаси першими."""
+    """Round-robin by name rank — up to ``PER_ENTITY`` fragments per name, different aliases first."""
     by_tid = {r["tid"]: r for r in records}
     pools = []
     for t in targets:
@@ -213,7 +213,7 @@ def find_name_fragments(records: list[dict], targets: list[dict], rng: random.Ra
 
 
 def proper_words(conn) -> set[str]:
-    """Слова імен і аліасів, написані з великої (імена власні), ≥3 літер, casefold."""
+    """Words of names and aliases written with a capital (proper names), ≥3 letters, casefold."""
     words: set[str] = set()
     marks = ",".join("?" * len(vocabulary.ENTITY_TYPES))
     for (text,) in conn.execute(
@@ -229,7 +229,7 @@ def proper_words(conn) -> set[str]:
 
 def find_control_fragments(records: list[dict], proper: set[str], rng: random.Random,
                            target_n: int = CONTROL_TARGET) -> list[dict]:
-    """Сегменти без імен: ні латиниці, ні слова з імен/аліасів графа; по одному на запис."""
+    """Segments without names: no Latin, no word from graph names/aliases; one per recording."""
     order = list(records)
     rng.shuffle(order)
     out = []
@@ -260,8 +260,8 @@ def lang_of(text: str) -> str | None:
 
 
 def mixed_window(segments: list[dict], window_s: float = MIXED_WINDOW_S) -> dict | None:
-    """Найкраще вікно ≤ ``window_s``: у ньому є і ы/э/ъ/ё, і і/ї/є/ґ; ранг —
-    кількість перемикань мови між сегментами (швидкий діалог вище)."""
+    """The best window ≤ ``window_s``: it contains both ``ы/э/ъ/ё`` and ``і/ї/є/ґ``; rank is
+    the number of language switches between segments (fast dialogue ranks higher)."""
     best = None
     for i in range(len(segments)):
         start = float(segments[i]["start"])
@@ -331,7 +331,7 @@ def build_candidates(db_path: str, seed: int = SEED) -> dict:
 
 
 # ============================================================
-# fragments.md і перегляд власника
+# fragments.md and the owner's review
 # ============================================================
 
 def _ts(sec: float) -> str:
@@ -368,7 +368,7 @@ def render_fragments_md(c: dict) -> str:
 
 
 def reviewed_ids(md_text: str) -> set[str]:
-    """Id іменних і контрольних рядків, які власник лишив (`[x]`, не закреслені)."""
+    """Ids of name and control rows the owner kept (`[x]`, not struck through)."""
     keep = set()
     for line in md_text.splitlines():
         m = _REVIEWED.match(line)
@@ -378,11 +378,11 @@ def reviewed_ids(md_text: str) -> set[str]:
 
 
 # ============================================================
-# Прогін
+# Run
 # ============================================================
 
 def recording_active(api: str, timeout: float = 5.0) -> bool | None:
-    """True/False — чи йде запис у Recall; None — API недоступний (Recall не запущено)."""
+    """True/False — whether a recording is in progress in Recall; None — API unavailable (Recall is not running)."""
     try:
         with urllib.request.urlopen(f"{api}/api/recordings/active", timeout=timeout) as resp:
             return bool(json.load(resp).get("active"))
@@ -393,9 +393,9 @@ def recording_active(api: str, timeout: float = 5.0) -> bool | None:
 def refuse_if_recording(api: str) -> None:
     state = recording_active(api)
     if state:
-        raise SystemExit("Іде запис у Recall — GPU-прогін не запускаю. Повторіть після зупинки запису.")
+        raise SystemExit("A recording is in progress in Recall — not starting the GPU run. Retry after the recording stops.")
     if state is None:
-        print(f"[measure] API {api} недоступний — вважаю, що запису немає (Recall не запущено).")
+        print(f"[measure] API {api} unavailable — assuming there is no recording (Recall is not running).")
 
 
 def cut_clip(src: str, start: float, end: float, dst: str) -> None:
@@ -421,7 +421,7 @@ def _env(**values):
 
 
 def decode_options(variant: str, db_path: str) -> dict:
-    """Опції варіанта тим самим ``vocabulary.decode_options_for``, що й прод."""
+    """Variant options through the same ``vocabulary.decode_options_for`` as prod."""
     if variant == "baseline":
         return {}
     if variant in ("hotwords", "initial_prompt"):
@@ -435,7 +435,7 @@ def decode_options(variant: str, db_path: str) -> dict:
 
 
 def transcribe(wm, path: str, model: str, language: str, opts: dict, source_duration: float | None):
-    """Один прогін через прод-шлях. ``source_duration`` > 600 с → batched, як для всього запису."""
+    """One run through the prod path. ``source_duration`` > 600 s → batched, as for the whole recording."""
     real = wm.__class__._get_duration_ffprobe
     if source_duration is not None:
         wm._get_duration_ffprobe = lambda _p: source_duration
@@ -470,16 +470,16 @@ def run_set(wm, fragments: list[dict], variants: tuple, db_path: str, model: str
             src_dur = f["rec_duration"] if (force_batched or f["rec_duration"] > BATCHED_FROM_S) else None
             if force_batched:
                 src_dur = max(src_dur or 0.0, BATCHED_FROM_S + 1)
-            # multilingual діє лише без явної мови (4.8.1) — варіанти ml* ідуть на «auto».
+            # multilingual works only without an explicit language (4.8.1) — the ml* variants go on «auto».
             lang = "auto" if opts[v].get("multilingual") else f["language"]
             out["variants"][v][f["id"]] = transcribe(wm, clips[f["id"]], model, lang, opts[v], src_dur)
-        print(f"[measure] {v}: {len(fragments)} фрагментів")
+        print(f"[measure] {v}: {len(fragments)} fragments")
     return out
 
 
 def run_speed(wm, records: list[dict], db_path: str, model: str, api: str, reps: int = SPEED_REPS) -> dict:
-    """Ті самі три варіанти на цілих записах, ``reps`` повторів із круговим порядком
-    (перший прогін не завжди baseline), у ``seconds`` — медіана повторів."""
+    """The same three variants on whole recordings, ``reps`` repeats in round-robin order
+    (the first run is not always baseline), ``seconds`` is the median of the repeats."""
     out = {"model": model, "reps": reps, "variants": {v: {} for v in NAME_VARIANTS}}
     for rec in records:
         runs: dict[str, list] = {v: [] for v in NAME_VARIANTS}
@@ -499,11 +499,11 @@ def run_speed(wm, records: list[dict], db_path: str, model: str, api: str, reps:
 def cmd_run(args) -> int:
     cands = json.loads((MEASURE_DIR / "fragments.json").read_text(encoding="utf-8"))
     refuse_if_recording(args.api)
-    from whisper_manager_new import ModernWhisperManager  # важкий імпорт лише тут
+    from whisper_manager_new import ModernWhisperManager  # heavy import only here
 
     wm = ModernWhisperManager()
     if wm.load_model(args.model) is None:
-        raise SystemExit(f"модель {args.model} не завантажилась")
+        raise SystemExit(f"model {args.model} failed to load")
     raw = MEASURE_DIR / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     sets = args.sets.split(",")
@@ -516,13 +516,13 @@ def cmd_run(args) -> int:
             elif name == "speed":
                 data = run_speed(wm, cands["speed"], args.db, args.model, args.api, args.reps)
             else:
-                raise SystemExit(f"невідомий набір: {name}")
+                raise SystemExit(f"unknown set: {name}")
             (raw / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0
 
 
 # ============================================================
-# Сліпі пари A/B
+# Blind A/B pairs
 # ============================================================
 
 def _norm(text: str) -> str:
@@ -530,10 +530,10 @@ def _norm(text: str) -> str:
 
 
 def build_ab(mixed: list[dict], raw: dict, seed: int = SEED) -> tuple[str, dict]:
-    """По парі «baseline проти варіанта» на кожен фрагмент і кожне вікно (ml30, ml10).
+    """One pair "baseline against variant" per fragment and per window (ml30, ml10).
 
-    Однакові тексти — нічия без показу власнику. Порядок пар і сторони А/Б
-    перемішані; який варіант де — лише в ключі."""
+    Identical texts are a tie not shown to the owner. The order of pairs and the A/B sides
+    are shuffled; which variant is where is only in the key."""
     rng = random.Random(seed)
     pairs, ties = [], []
     for f in mixed:
@@ -573,25 +573,25 @@ def cmd_ab(args) -> int:
     md, key = build_ab(cands["mixed"], raw)
     (MEASURE_DIR / "ab.md").write_text(md, encoding="utf-8")
     (MEASURE_DIR / "ab-key.json").write_text(json.dumps(key, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"[measure] ab.md: {len(key['pairs'])} пар, нічиїх {len(key['auto_ties'])}")
+    print(f"[measure] ab.md: {len(key['pairs'])} pairs, ties {len(key['auto_ties'])}")
     return 0
 
 
 # ============================================================
-# Підсумок (історія 03)
+# Summary (story 03)
 # ============================================================
 
 SLOWDOWN_LIMIT = 0.10
-#: Більшість із 10 пар на кожне вікно multilingual.
+#: A majority of the 10 pairs for each multilingual window.
 AB_MAJORITY = 6
 _VERDICT = re.compile(r"^## Пара (\d+) ·.*?^Вердикт:[ \t]*(\S*)", re.S | re.M)
 
 
 def target_word(alias: str, canonical: str) -> str:
-    """Слово канону, яке спотворив аліас: найближче за фонетичним ключем.
+    """The canon word that the alias distorted: the closest by phonetic key.
 
-    «Мельнюк» при «Василь Мельник» → «Мельник», «Rebuild» при «Upbuild Ukraine» →
-    «Upbuild»: інакше «Василь»/«Ukraine» зараховували б влучання і baseline."""
+    «Мельнюк» for «Василь Мельник» → «Мельник», «Rebuild» for «Upbuild Ukraine» →
+    «Upbuild»: otherwise «Василь»/«Ukraine» would be credited as hits to baseline too."""
     words = [w for w in vocabulary._words(canonical) if len(w) >= 3] or vocabulary._words(canonical)
     a_keys = vocabulary.phonetic_keys("".join(vocabulary._words(alias))) or {alias.casefold()}
 
@@ -601,7 +601,7 @@ def target_word(alias: str, canonical: str) -> str:
 
 
 def strict_hit(text: str, word: str) -> bool:
-    """Слово канону стоїть у тексті в будь-якому відмінку: основа після casefold."""
+    """The canon word stands in the text in any case: the stem after casefold."""
     w0 = word.casefold()
     for w in vocabulary._words(text):
         w = w.casefold()
@@ -611,7 +611,7 @@ def strict_hit(text: str, word: str) -> bool:
 
 
 def tolerant_hit(text: str, word: str) -> bool:
-    """Те саме, але переклад/транслітерація теж влучання («Клода» при Claude)."""
+    """The same, but a translation/transliteration is a hit too («Клода» for Claude)."""
     return any(vocabulary.same_name(w, word) for w in vocabulary._words(text))
 
 
@@ -636,7 +636,7 @@ def score_names(fragments: list[dict], raw: dict, keep: set[str]) -> dict:
 
 
 def score_control(fragments: list[dict], raw: dict, keep: set[str], vocab: list[str]) -> dict:
-    """Розбіжності з baseline і «зайві» імена словника, яких у baseline не було."""
+    """Divergences from baseline and "extra" vocabulary names that baseline did not have."""
     kept = [f for f in fragments if f["id"] in keep]
     base = raw["variants"]["baseline"]
     out = {}
@@ -688,8 +688,8 @@ def score_ab(verdicts: dict[str, str], key: dict) -> dict:
 
 def decide(names: dict, control: dict, speed: dict, ab: dict, owner_vocab: str | None = None,
            owner_note: str = "") -> dict:
-    """Правила плану: словник — частка зросла, сповільнення ≤10 %, контроль без
-    зайвих імен; multilingual — перемога у більшості з 10 пар свого вікна."""
+    """The plan's rules: vocabulary — the share grew, slowdown ≤10 %, control without
+    extra names; multilingual — a win in the majority of the 10 pairs of its window."""
     base = names["baseline"]["strict"]
     vocab = {}
     for v in ("hotwords", "initial_prompt"):
@@ -714,7 +714,7 @@ def decide(names: dict, control: dict, speed: dict, ab: dict, owner_vocab: str |
                 "multilingual": window is not None, "chunk_length": 10 if window == "ml10" else None,
                 "ab_accepted": ml}
     if owner_vocab and owner_vocab != mode:
-        # Слово власника переважає правило, але правило лишається у звіті поруч.
+        # The owner's word outweighs the rule, but the rule stays in the report beside it.
         decision.update(vocab_mode=owner_vocab, owner_note=owner_note)
     return decision
 
@@ -802,13 +802,13 @@ def cmd_candidates(args) -> int:
     MEASURE_DIR.mkdir(parents=True, exist_ok=True)
     (MEASURE_DIR / "fragments.json").write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
     (MEASURE_DIR / "fragments.md").write_text(render_fragments_md(c), encoding="utf-8")
-    print(f"[measure] іменних {len(c['names'])}, контрольних {len(c['control'])}, "
-          f"змішаних {len(c['mixed'])}, швидкість {len(c['speed'])}")
+    print(f"[measure] name {len(c['names'])}, control {len(c['control'])}, "
+          f"mixed {len(c['mixed'])}, speed {len(c['speed'])}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Замір словника імен і змішаних мов (K1).")
+    parser = argparse.ArgumentParser(description="Measurement of the name vocabulary and mixed languages (K1).")
     parser.add_argument("--db", default=str(ROOT / "whisper_history.db"))
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("candidates")
@@ -821,8 +821,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("ab")
     p = sub.add_parser("score")
     p.add_argument("--owner-vocab", choices=("off",) + NAME_VARIANTS[1:],
-                   help="рішення власника щодо словника, якщо воно розходиться з правилом")
-    p.add_argument("--owner-note", default="", help="дослівна причина рішення власника")
+                   help="the owner's decision on the vocabulary, if it diverges from the rule")
+    p.add_argument("--owner-note", default="", help="the verbatim reason for the owner's decision")
     args = parser.parse_args(argv)
     return {"candidates": cmd_candidates, "run": cmd_run, "ab": cmd_ab, "score": cmd_score}[args.cmd](args)
 

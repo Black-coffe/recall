@@ -1,4 +1,4 @@
-"""Тесты для JobQueue (Phase 2)."""
+"""Tests for JobQueue (Phase 2)."""
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +14,7 @@ def test_submit_completes():
         return 42
 
     job = queue.submit("test", job_fn, meta={"key": "value"})
-    # Чекаємо завершення
+    # Wait for completion
     job._future.result(timeout=5)
     assert job.state == "completed"
     assert job.error is None
@@ -41,7 +41,7 @@ def test_cancel_before_start():
     executor = ThreadPoolExecutor(max_workers=1)
     queue = JobQueue(executor=executor)
 
-    # Заблокуємо executor першою задачею
+    # Block the executor with the first task
     block = []
 
     def slow(job):
@@ -49,12 +49,12 @@ def test_cancel_before_start():
             time.sleep(0.05)
 
     queue.submit("test", slow)
-    # Тепер створимо другу — вона буде queued
+    # Now create the second — it will be queued
     job2 = queue.submit("test", lambda j: 1)
-    # Cancel — Future ще не стартував, повинен спрацювати
+    # Cancel — the Future has not started yet, it must work
     ok = queue.cancel(job2.id)
     assert ok is True
-    # Розблокуємо і дочекаємось
+    # Unblock and wait
     block.append(True)
 
 
@@ -63,24 +63,24 @@ def test_list_filter_active_only():
     queue = JobQueue(executor=executor)
 
     job1 = queue.submit("kind1", lambda j: 1)
-    job1._future.result(timeout=5)  # дочекатись завершення
+    job1._future.result(timeout=5)  # wait for completion
 
     job2 = queue.submit("kind1", lambda j: 1)
     job2._future.result(timeout=5)
 
-    # Обидва completed → active_only=True має повернути порожньо
+    # Both completed → active_only=True must return empty
     assert queue.list(kind="kind1", active_only=True) == []
-    # Без фільтру — обидва
+    # Without a filter — both
     assert len(queue.list(kind="kind1")) == 2
 
 
 def test_live_kind_routes_to_live_executor_and_isnt_blocked_by_batch():
-    """T2.5 (Волна 2): 'live' kind не має чекати за довгою batch-задачею.
+    """T2.5 (Wave 2): a 'live' kind must not wait behind a long batch task.
 
-    Одна batch-задача займає ЄДИНИЙ batch-воркер (max_workers=1) надовго.
-    Без розведення пулів наступна задача (навіть live-kind) чекала б у черзі
-    за нею. З live_executor — live-kind задача виконується одразу, паралельно
-    до batch.
+    One batch task occupies the SINGLE batch worker (max_workers=1) for a long time.
+    Without separating the pools the next task (even a live kind) would wait in the queue
+    behind it. With live_executor — the live-kind task runs at once, in parallel
+    to the batch.
     """
     batch_executor = ThreadPoolExecutor(max_workers=1)
     live_executor = ThreadPoolExecutor(max_workers=1)
@@ -108,7 +108,7 @@ def test_live_kind_routes_to_live_executor_and_isnt_blocked_by_batch():
     assert batch_started.wait(timeout=5), "batch job never started"
 
     live_job = queue.submit("recording_finalize", fast_live)
-    # live job має завершитись швидко, НЕ чекаючи на batch (окремий пул).
+    # the live job must finish quickly, NOT waiting for the batch (a separate pool).
     assert live_ran.wait(timeout=5), "live job was blocked behind batch job"
     live_job._future.result(timeout=5)
     assert live_job.state == "completed"
@@ -136,8 +136,8 @@ def test_to_dict_excludes_internal():
     queue = JobQueue(executor=executor)
     job = queue.submit("k", lambda j: 1, meta={"foo": "bar"})
     d = job.to_dict()
-    # Внутрішні поля (Future, Event) не повинні попасти у dict
+    # Internal fields (Future, Event) must not get into the dict
     assert "_future" not in d
     assert "_cancel_event" not in d
-    # А meta повинна
+    # But meta must
     assert d["meta"] == {"foo": "bar"}

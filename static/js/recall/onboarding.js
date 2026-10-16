@@ -1,21 +1,21 @@
-/* Recall — T5.3: перший запуск (guided onboarding).
-   Легкий чек-лист (не тур): модель Whisper → API-ключ Claude → mic-дозвіл →
-   Telegram opt-in. Кожен крок веде у вже наявне місце (Налаштування/Telegram)
-   і сам перевіряє, чи вже виконаний — нічого не дублює з T5.1/T5.2/T5.7.
+/* Recall — T5.3: first run (guided onboarding).
+   A light checklist (not a tour): Whisper model → Claude API key → mic permission →
+   Telegram opt-in. Each step leads to an already existing place (Settings/Telegram)
+   and checks itself whether it is already done — duplicates nothing from T5.1/T5.2/T5.7.
 
-   Персист: localStorage (НЕ sessionStorage) під ключем recall_onboarding_done —
-   переживає перезапуск браузера. Ставиться на будь-яке явне закриття
-   (Пропустити / × / Escape / клік по підкладці / дія кроку — «веди й закрий»),
-   бо неявний авто-показ при кожному навігейті між кроками був би нав'язливим.
-   Реюз завжди доступний — іконка у топбарі (shell.html #rcOnbTrigger) відкриває
-   вікно незалежно від прапорця (force-режим).
+   Persistence: localStorage (NOT sessionStorage) under the key recall_onboarding_done —
+   survives a browser restart. Set on any explicit close
+   (Skip / × / Escape / click on the backdrop / a step action — "go and close"),
+   because an implicit auto-show on every navigation between steps would be intrusive.
+   Reuse is always available — the icon in the topbar (shell.html #rcOnbTrigger) opens
+   the window regardless of the flag (force mode).
 
-   Detection per step (жива перевірка при кожному відкритті, не кешується
-   довше одного показу):
-     (a) модель:    GET /api/models         → є m.downloaded === true
-     (b) API-ключ:  GET /api/settings/anthropic-key/status → {configured}
-     (c) mic:       navigator.permissions.query({name:'microphone'}) якщо є,
-                     інакше статус "невідомо" доки не натиснуть дію
+   Detection per step (a live check on every open, not cached
+   longer than one showing):
+     (a) model:    GET /api/models         → exists m.downloaded === true
+     (b) API key:  GET /api/settings/anthropic-key/status → {configured}
+     (c) mic:       navigator.permissions.query({name:'microphone'}) if present,
+                     otherwise status "unknown" until the action is pressed
      (d) telegram:  GET /api/telegram/status → alive && monitored.length>0
 */
 (function () {
@@ -37,11 +37,11 @@
     // Called once from shell.init() on every page load. No-op if the user
     // already finished or skipped (localStorage), or if an overlay is
     // somehow already open (defensive — shouldn't happen this early).
-    // Перший запуск — це перший запуск АРХІВУ, а не адреси: прапорець живе в
-    // localStorage, а він у кожного origin свій. Відкриття через новий адрес
-    // (tailscale serve, K5) показувало чек-лист поверх запису з посилання брифінгу.
-    // Тому: за посиланням на конкретну сторінку — не показуємо; архів уже
-    // налаштований (модель завантажена) — мовчки ставимо прапорець.
+    // First run means the first run of the ARCHIVE, not of an address: the flag lives in
+    // localStorage, and every origin has its own. Opening via a new address
+    // (tailscale serve, K5) showed the checklist over the record from a briefing link.
+    // So: on a link to a specific page — we do not show it; the archive is already
+    // set up (model downloaded) — we silently set the flag.
     onb.maybeShowFirstRun = async function () {
         if (isDone() || overlayEl) return;
         if (location.pathname !== '/') return;
@@ -209,8 +209,8 @@
             return !!(s && s.alive && Array.isArray(s.monitored) && s.monitored.length > 0);
         } catch (_) { return false; }
     }
-    // Виконано, коли в дереві напрямків є хоча б один проєкт (не сам факт
-    // існування напрямків — вони можуть лишатись плоским списком назавжди).
+    // Done when the category tree has at least one project (not the mere fact
+    // that categories exist — they may stay a flat list forever).
     async function checkHasProjects() {
         try {
             const cats = await UI.loadCategories();

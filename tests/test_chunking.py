@@ -1,7 +1,7 @@
-"""Тести чанкінгу (Phase 16B провенанс блоків).
+"""Chunking tests (Phase 16B block provenance).
 
-Лёгкі — embeddings імпортується без torch (модель вантажиться лише при encode).
-build_chunks НЕ викликає модель → безпечно під час запису/транскрибації.
+Light: embeddings is imported without torch (the model is loaded only on encode).
+build_chunks does NOT call the model -> safe during recording/transcription.
 """
 import json
 
@@ -22,15 +22,15 @@ def test_blocks_keep_page_provenance():
 def test_large_block_splits_but_keeps_same_page():
     big = {"text": "Речення номер один. " * 300, "page": 5, "section": "Розділ"}
     chunks = e.build_chunks(None, "", {}, json.dumps([big]))
-    assert len(chunks) > 1  # розбився на під-чанки
+    assert len(chunks) > 1  # split into sub-chunks
     assert all(c["page"] == 5 for c in chunks)
     assert all(c["section"] == "Розділ" for c in chunks)
-    # індекси послідовні
+    # indexes are consecutive
     assert [c["chunk_index"] for c in chunks] == list(range(len(chunks)))
 
 
 def test_blocks_do_not_cross_page_boundary():
-    # короткі блоки → кожен лишається окремим чанком зі своєю сторінкою
+    # short blocks -> each stays a separate chunk with its own page
     blocks = [{"text": f"Сторінка {i}", "page": i, "section": None} for i in range(1, 6)]
     chunks = e.build_chunks(None, "", {}, json.dumps(blocks))
     assert [c["page"] for c in chunks] == [1, 2, 3, 4, 5]
@@ -51,7 +51,7 @@ def test_plain_text_path_unaffected():
 
 
 def test_empty_structure_falls_back_to_text():
-    # structure_json з порожніми блоками → не падаємо, йдемо у текстовий шлях
+    # structure_json with empty blocks -> do not fail, take the text path
     chunks = e.build_chunks(None, "запасний текст", {}, json.dumps([{"text": "", "page": 1}]))
     assert chunks and chunks[0]["text"] == "запасний текст"
     assert chunks[0].get("page") is None

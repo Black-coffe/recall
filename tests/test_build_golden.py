@@ -1,8 +1,8 @@
-"""Смок-тести трьох CLI eval-gate-02: build_golden / build_tasks_golden / tasks_eval.
+"""Smoke tests of the three eval-gate-02 CLIs: build_golden / build_tasks_golden / tasks_eval.
 
-Усе офлайн — синтетичний лог MCP, тимчасова SQLite (мінімальні таблиці:
+Everything is offline: a synthetic MCP log, a temporary SQLite (minimal tables:
 transcriptions/action_items/entities/entity_aliases), `app.services.retrieval.search`
-підмінено. Жодних реальних запитів чи назв архіву тут немає (Non-goals історії).
+is replaced. There are no real queries or archive names here (the story's Non-goals).
 """
 import json
 import sqlite3
@@ -13,12 +13,12 @@ from evals import build_golden, build_tasks_golden, tasks_eval
 
 
 # ============================================================
-# Фікстури
+# Fixtures
 # ============================================================
 
 def _make_db(path: str) -> None:
-    """Мінімальні таблиці, яких вистачає трьом CLI (не повна `init_database` —
-    вони й так торкаються лише чотирьох таблиць)."""
+    """Minimal tables sufficient for the three CLIs (not the full `init_database`:
+    they only touch four tables anyway)."""
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, source_type TEXT, "
                  "meeting_date TEXT, created_at TEXT)")
@@ -44,7 +44,7 @@ def _fake_search(chunks_by_query: dict):
 
 
 # ============================================================
-# build_golden — мінінг логу (C8)
+# build_golden: log mining (C8)
 # ============================================================
 
 def test_mine_queries_parses_dedupes_and_survives_truncation(tmp_path):
@@ -53,10 +53,10 @@ def test_mine_queries_parses_dedupes_and_survives_truncation(tmp_path):
     log.write_text(
         "10:00:00 ── initialize (handshake)\n"
         '10:00:01 →   START search_archive args={"query": "бюджет на Q2", "top_k": 8}\n'
-        # дубль нормалізовано (регістр/пробіли) — не має влізти вдруге
+        # the duplicate is normalized (case/whitespace) and must not get in a second time
         '10:00:02 →   START search_archive args={"query": "  Бюджет НА q2  ", "top_k": 5}\n'
         '10:00:03 →   START ask_archive args={"question": "хто відповідає за онбординг", "k": 12}\n'
-        # обрізаний JSON (600-символьний ліміт mcp_server.py) — без закритої лапки/дужки
+        # truncated JSON (the 600-character limit of mcp_server.py): no closing quote/brace
         f'10:00:04 →   START ask_archive args={{"question": {truncated_question}\n'
         '10:00:05 OK  search_archive 12ms\n'
         '10:00:06 →   START get_transcript args={"transcription_id": 5}\n',
@@ -66,9 +66,9 @@ def test_mine_queries_parses_dedupes_and_survives_truncation(tmp_path):
     questions = [q["question"] for q in out]
     assert questions[0] == "бюджет на Q2"
     assert "хто відповідає за онбординг" in questions
-    # третій рядок (дубль) не додався
+    # the third line (a duplicate) was not added
     assert len(questions) == 3
-    # обрізаний рядок все одно дав придатний (нехай і обрізаний) текст питання
+    # the truncated line still gave a usable (if truncated) question text
     assert questions[2].startswith("Дуже довге питання")
     assert out[0]["tool"] == "search_archive"
     assert out[2]["tool"] == "ask_archive"
@@ -85,9 +85,9 @@ def test_slice_majority_vote():
 
 
 def test_slice_tie_resolved_by_first_seen_order():
-    """Нічия за кількістю (по 1) — перемагає той зріз, що зʼявився першим
-    у видачі (той самий принцип, що в
-    test_build_golden_writes_unlabeled_items_with_candidates нижче)."""
+    """A tie in count (1 each): the slice that appeared first
+    in the results wins (the same principle as in
+    test_build_golden_writes_unlabeled_items_with_candidates below)."""
     tie_calls_first = [{"source_type": "file"}, {"source_type": "telegram"}]
     assert build_golden._slice_for_chunks(tie_calls_first) == "calls"
     tie_tg_first = [{"source_type": "telegram"}, {"source_type": "file"}]
@@ -95,13 +95,13 @@ def test_slice_tie_resolved_by_first_seen_order():
 
 
 def test_slice_comment_provenance_does_not_vote_toward_calls():
-    """Коментар (`source_type="comment"`, `app/services/retrieval.py`) не додає
-    голос за `calls` — інакше питання, відповідь на яке взято здебільшого з
-    коментарів у TG-нитці, хибно осідає в `calls` замість `tg` (finding 22)."""
+    """A comment (`source_type="comment"`, `app/services/retrieval.py`) does not add
+    a vote for `calls`; otherwise a question whose answer was taken mostly from
+    comments in a TG thread wrongly settles in `calls` instead of `tg` (finding 22)."""
     tg_with_comments = [{"source_type": "telegram"}] + [{"source_type": "comment"}] * 3
     assert build_golden._slice_for_chunks(tg_with_comments) == "tg"
-    # немає жодного не-коментарного кандидата — голосувати нема за що, дефолт "calls"
-    # (той самий дефолт, що для порожнього списку, а не голос коментаря)
+    # there is no non-comment candidate: nothing to vote for, default "calls"
+    # (the same default as for an empty list, not a comment vote)
     assert build_golden._slice_for_chunks([{"source_type": "comment"}] * 3) == "calls"
 
 
@@ -115,17 +115,17 @@ def test_scratch_copy_removes_temp_file_when_copyfile_raises(db, monkeypatch):
         return fd, path
 
     def _raising_copyfile(*a, **kw):
-        raise OSError("диск повний")
+        raise OSError("disk full")
 
     monkeypatch.setattr(build_golden.tempfile, "mkstemp", _tracking_mkstemp)
     monkeypatch.setattr(build_golden.shutil, "copyfile", _raising_copyfile)
 
     with pytest.raises(OSError):
         with build_golden._scratch_copy(db):
-            pass  # copyfile кидає до yield — сюди не дійде
+            pass  # copyfile raises before the yield: it never gets here
 
-    assert created, "mkstemp мав бути викликаний"
-    assert not build_golden.os.path.exists(created[0]), "заглушка від mkstemp не прибралася"
+    assert created, "mkstemp should have been called"
+    assert not build_golden.os.path.exists(created[0]), "the mkstemp stub was not cleaned up"
 
 
 # ============================================================
@@ -160,7 +160,7 @@ def test_build_golden_writes_unlabeled_items_with_candidates(tmp_path, db, monke
         {"transcription_id": 1, "source_name": "Дзвінок 1", "source_type": "file"},
         {"transcription_id": 2, "source_name": "TG чат", "source_type": "telegram"},
     ]
-    assert item["slice"] == "calls"  # 1 file vs 1 telegram — file зверху, нічия рахує file
+    assert item["slice"] == "calls"  # 1 file vs 1 telegram: file on top, the tie counts file
 
 
 def test_build_golden_merge_preserves_labeled_and_skips_known(tmp_path, db, monkeypatch):
@@ -174,7 +174,7 @@ def test_build_golden_merge_preserves_labeled_and_skips_known(tmp_path, db, monk
 
     log = tmp_path / "mcp_calls.log"
     log.write_text(
-        # дубль вже розміченого питання — не повинен додатись вдруге
+        # a duplicate of an already labeled question must not be added a second time
         '12:00:00 →   START search_archive args={"query": "стара розмічена", "top_k": 8}\n'
         '12:00:01 →   START search_archive args={"query": "нове питання", "top_k": 8}\n',
         encoding="utf-8",
@@ -188,7 +188,7 @@ def test_build_golden_merge_preserves_labeled_and_skips_known(tmp_path, db, monk
 
     items = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert len(items) == 2
-    assert items[0] == existing[0]  # байт-у-байт за змістом
+    assert items[0] == existing[0]  # identical in content, byte for byte
     assert items[1]["question"] == "нове питання"
     assert items[1]["status"] == "unlabeled"
 
@@ -200,7 +200,7 @@ def test_build_golden_refuses_live_db_without_yes_live(tmp_path, db, monkeypatch
 
 
 # ============================================================
-# build_golden — безпека перезапису ручної розмітки (D9, finding 12)
+# build_golden: safety of overwriting manual labelling (D9, finding 12)
 # ============================================================
 
 def _labeled_item(id_="mined-0001", question="розмічене питання"):
@@ -225,7 +225,7 @@ def test_build_golden_refuses_overwrite_without_merge_when_labeled_present(tmp_p
     err = capsys.readouterr().err
     assert "--merge" in err
     assert "--yes-overwrite-labeled" in err
-    assert out.read_text(encoding="utf-8") == original  # ручна розмітка не зачеплена
+    assert out.read_text(encoding="utf-8") == original  # manual labelling untouched
 
 
 def test_build_golden_yes_overwrite_labeled_forces_overwrite(tmp_path, db, monkeypatch):
@@ -242,7 +242,7 @@ def test_build_golden_yes_overwrite_labeled_forces_overwrite(tmp_path, db, monke
     assert rc == 0
 
     items = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    # свідомий прапорець дійсно перезаписує — старе розмічене питання зникає
+    # the deliberate flag really overwrites: the old labeled question disappears
     assert len(items) == 1
     assert items[0]["question"] == "нове після форсу"
 
@@ -255,12 +255,12 @@ def test_build_golden_merge_invalid_existing_out_exits_2_not_traceback(tmp_path,
 
 
 # ============================================================
-# build_golden — унікальність id (D13/finding 16)
+# build_golden: id uniqueness (D13/finding 16)
 # ============================================================
 
 def test_build_golden_next_id_skips_gap_after_manual_deletion(tmp_path, db, monkeypatch):
-    """`mined-0002` видалено вручну — новий пункт не повинен ані перевикористати
-    його номер, ані зіткнутися з `mined-0003`, що лишився."""
+    """`mined-0002` was deleted by hand: the new item must neither reuse
+    its number nor collide with the remaining `mined-0003`."""
     out = tmp_path / "golden.local.jsonl"
     existing = [_labeled_item("mined-0001", "перше"), _labeled_item("mined-0003", "третє")]
     out.write_text("\n".join(json.dumps(it, ensure_ascii=False) for it in existing) + "\n", encoding="utf-8")
@@ -275,27 +275,27 @@ def test_build_golden_next_id_skips_gap_after_manual_deletion(tmp_path, db, monk
     assert rc == 0
 
     ids = [json.loads(line)["id"] for line in out.read_text(encoding="utf-8").splitlines()]
-    assert len(ids) == len(set(ids))  # без дублів
-    assert ids[-1] == "mined-0004"  # не mined-0002 (дірка) і не mined-0003 (колізія)
+    assert len(ids) == len(set(ids))  # no duplicates
+    assert ids[-1] == "mined-0004"  # not mined-0002 (the gap) and not mined-0003 (collision)
 
 
 def test_build_golden_refuses_to_write_when_existing_ids_collide(tmp_path, db, capsys):
     out = tmp_path / "golden.local.jsonl"
     dupe_a = _labeled_item("mined-0001", "перше")
-    dupe_b = _labeled_item("mined-0001", "друге")  # той самий id — зіпсований файл
+    dupe_b = _labeled_item("mined-0001", "друге")  # the same id: a corrupted file
     original = "\n".join(json.dumps(it, ensure_ascii=False) for it in (dupe_a, dupe_b)) + "\n"
     out.write_text(original, encoding="utf-8")
 
-    # неіснуючий лог — mine_queries віддає [] (без цього main() тягне дефолтний
-    # logs/mcp_calls.log і б'ється об retrieval.search на тестовій БД без chunks)
+    # a non-existent log: mine_queries returns [] (without this main() pulls the default
+    # logs/mcp_calls.log and runs into retrieval.search on a test DB without chunks)
     rc = build_golden.main(["--mcp-log", str(tmp_path / "no_such.log"), "--db", db,
                              "--out", str(out), "--merge"])
     assert rc == 2
-    assert out.read_text(encoding="utf-8") == original  # дублі не згорнулися мовчки в новий файл
+    assert out.read_text(encoding="utf-8") == original  # duplicates were not silently collapsed into a new file
 
 
 # ============================================================
-# build_golden — --stats (дефіцит до цілі SLICE_TARGET на зріз)
+# build_golden: --stats (deficit to the SLICE_TARGET target per slice)
 # ============================================================
 
 def test_print_stats_computes_deficit_per_slice(capsys):
@@ -307,9 +307,9 @@ def test_print_stats_computes_deficit_per_slice(capsys):
     build_golden.print_stats(items)
     rows = {line.split()[0]: line.split() for line in capsys.readouterr().out.splitlines()
             if line.split() and line.split()[0] in build_golden.SLICES}
-    # calls: 3 labeled, ціль=SLICE_TARGET -> дефіцит=SLICE_TARGET-3
+    # calls: 3 labeled, target=SLICE_TARGET -> deficit=SLICE_TARGET-3
     assert rows["calls"][-1] == str(build_golden.SLICE_TARGET - 3)
-    # tg/docs: 0 labeled (unlabeled/negative не рахуються) -> дефіцит=SLICE_TARGET
+    # tg/docs: 0 labeled (unlabeled/negative are not counted) -> deficit=SLICE_TARGET
     assert rows["tg"][-1] == str(build_golden.SLICE_TARGET)
     assert rows["docs"][-1] == str(build_golden.SLICE_TARGET)
 
@@ -326,21 +326,21 @@ def test_build_golden_cli_stats_flag_prints_deficit_table(tmp_path, db, monkeypa
     rc = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out), "--stats"])
     assert rc == 0
     captured = capsys.readouterr().out
-    assert "дефіцит" in captured
+    assert "deficit" in captured
     assert "calls" in captured
 
 
 def test_print_stats_treats_missing_status_as_labeled_legacy_default(capsys):
-    """Legacy-пункт без явного "status" (старий golden_set.local.json) — це вже
-    розмічений вручну запис (golden_io._read_legacy за умовчанням "labeled"),
-    а не щойно намінений unlabeled."""
+    """A legacy item without an explicit "status" (the old golden_set.local.json) is already a
+    hand-labeled record (golden_io._read_legacy defaults to "labeled"),
+    not a freshly mined unlabeled one."""
     items = [{"slice": "calls", "question": "стара розмічена", "expected_facts": ["x"]}]
     build_golden.print_stats(items)
     captured = capsys.readouterr().out
     assert "labeled 1 / target" in captured
     rows = {line.split()[0]: line.split() for line in captured.splitlines()
             if line.split() and line.split()[0] in build_golden.SLICES}
-    assert rows["calls"][1] == "1"  # колонка "labeled"
+    assert rows["calls"][1] == "1"  # the "labeled" column
 
 
 def test_print_stats_prints_total_labeled_over_target(capsys):
@@ -353,15 +353,15 @@ def test_print_stats_prints_total_labeled_over_target(capsys):
 
 
 # ============================================================
-# build_golden — мінінг: впорядкування за частотою (production-rag-wave-b-01)
+# build_golden: mining: ordering by frequency (production-rag-wave-b-01)
 # ============================================================
 
 def test_mine_queries_orders_repeated_questions_first_with_frequency_in_notes(tmp_path):
     log = tmp_path / "mcp_calls.log"
     log.write_text(
-        # "рідкісне питання" зустрічається один раз, а "часте питання" — тричі,
-        # але перша поява "часте питання" йде ПІСЛЯ рідкісного в самому лозі —
-        # частота, а не порядок появи, вирішує підсумкове впорядкування.
+        # "рідкісне питання" occurs once, while "часте питання" occurs three times,
+        # but the first appearance of "часте питання" comes AFTER the rare one in the log itself:
+        # frequency, not order of appearance, decides the final ordering.
         '10:00:00 →   START search_archive args={"query": "рідкісне питання", "top_k": 8}\n'
         '10:00:01 →   START search_archive args={"query": "часте питання", "top_k": 8}\n'
         '10:00:02 →   START search_archive args={"query": "Часте ПИТАННЯ", "top_k": 8}\n'
@@ -372,7 +372,7 @@ def test_mine_queries_orders_repeated_questions_first_with_frequency_in_notes(tm
     questions = [q["question"] for q in out]
     assert questions == ["часте питання", "рідкісне питання"]
     assert "3" in out[0]["notes"]
-    assert out[1].get("notes", "") == ""  # частота 1 — нотатку не додаємо
+    assert out[1].get("notes", "") == ""  # frequency 1: we add no note
 
 
 # ============================================================
@@ -410,14 +410,14 @@ def test_build_golden_merges_into_legacy_json_preserves_old_items_verbatim(tmp_p
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["description"] == "Локальний набір, НЕ комітити."
     assert len(data["items"]) == 2
-    assert data["items"][0] == old_item  # 15 наявних пунктів — незмінні
+    assert data["items"][0] == old_item  # the 15 existing items are unchanged
     new_item = data["items"][1]
     assert new_item["question"] == "нове мінене питання"
     assert new_item["status"] == "unlabeled"
     assert new_item["source"] == "mcp_log"
     assert new_item["slice"] == "tg"
     assert new_item["candidates"] == fake_chunks
-    assert new_item["expected_transcription_ids"] == []  # НЕ розмічено (Non-goals)
+    assert new_item["expected_transcription_ids"] == []  # NOT labeled (Non-goals)
 
 
 def test_build_golden_second_run_same_snapshot_adds_zero_new_items(tmp_path, db, monkeypatch, capsys):
@@ -439,17 +439,17 @@ def test_build_golden_second_run_same_snapshot_adds_zero_new_items(tmp_path, db,
     capsys.readouterr()
     rc2 = build_golden.main(["--mcp-log", str(log), "--db", db, "--out", str(out), "--merge"])
     assert rc2 == 0
-    assert "нових=0" in capsys.readouterr().out
+    assert "new=0" in capsys.readouterr().out
     after_second = json.loads(out.read_text(encoding="utf-8"))
-    assert after_second == after_first  # той самий знімок — 0 нових пунктів
+    assert after_second == after_first  # the same snapshot: 0 new items
 
 
 # ============================================================
-# build_golden — --limit ріже лише лог, не ask_log (production-rag-wave-b-01)
+# build_golden: --limit cuts only the log, not ask_log (production-rag-wave-b-01)
 # ============================================================
 
 def _add_ask_log(db_path: str, rows: list[tuple]) -> None:
-    """`ask_log` (міграція v41) — лише колонки, які читає `mine_ask_log`."""
+    """`ask_log` (migration v41): only the columns that `mine_ask_log` reads."""
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE ask_log (id INTEGER PRIMARY KEY, question TEXT, scope_json TEXT, "
                  "source_ids_json TEXT, rating INTEGER, note TEXT)")
@@ -460,8 +460,8 @@ def _add_ask_log(db_path: str, rows: list[tuple]) -> None:
 
 
 def test_build_golden_limit_cuts_log_questions_but_keeps_ask_log(tmp_path, db, monkeypatch, capsys):
-    """Спільний ліміт з'їдали сотні питань логу, і прогін «з обох джерел» мовчки
-    давав одне — ask_log (десяток рядків з оцінкою власника) ліміт не ріже."""
+    """A shared limit used to be eaten by hundreds of log questions, and a run "from both sources" silently
+    yielded just one: ask_log (about ten rows with the owner's rating) is not cut by the limit."""
     _add_ask_log(db, [("питання власника з оцінкою", "{}", "[]", -1, "")])
     log = tmp_path / "mcp_calls.log"
     log.write_text(
@@ -480,12 +480,12 @@ def test_build_golden_limit_cuts_log_questions_but_keeps_ask_log(tmp_path, db, m
     items = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     questions = [it["question"] for it in items]
     assert questions == ["часте питання логу", "питання власника з оцінкою"]
-    assert "рідке питання логу" not in questions  # зрізане лімітом
-    assert "пропущено_лімітом=1" in capsys.readouterr().out
+    assert "рідке питання логу" not in questions  # cut by the limit
+    assert "skipped_by_limit=1" in capsys.readouterr().out
 
 
 # ============================================================
-# build_tasks_golden — стратифікована вибірка (C7)
+# build_tasks_golden: stratified sample (C7)
 # ============================================================
 
 def _seed_action_items(db_path: str):
@@ -502,7 +502,7 @@ def _seed_action_items(db_path: str):
         (6, "tg_thread", "2026-06-08", "Олена"),
         (7, "tg_thread", None, "Павло"),
         (8, "tg_thread", None, "Павло"),
-        # коментарний провенанс — НЕ входить у C7 (лише null|tg_thread)
+        # comment provenance is NOT part of C7 (only null|tg_thread)
         (9, "comment", "2026-06-09", "Хтось"),
     ]
     for aid, source, due, owner in rows:
@@ -523,8 +523,8 @@ def test_sample_action_items_excludes_comment_source_and_covers_strata(db):
         conn.close()
 
     ids = {r["id"] for r in picked}
-    assert 9 not in ids  # comment-джерело виключено
-    assert len(picked) == 8  # рівно по 2 на кожну з 4 страт
+    assert 9 not in ids  # the comment source is excluded
+    assert len(picked) == 8  # exactly 2 for each of the 4 strata
 
     seen_keys = {(r["source"], bool(r["due"] and str(r["due"]).strip())) for r in picked}
     assert seen_keys == {(None, True), (None, False), ("tg_thread", True), ("tg_thread", False)}
@@ -543,8 +543,8 @@ def test_build_tasks_golden_merge_does_not_duplicate_action_item_id(tmp_path, db
     assert rc2 == 0
     items2 = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     ids2 = [it["action_item_id"] for it in items2]
-    assert len(ids2) == len(set(ids2))  # без дублів
-    assert len(items2) == 8  # той самий детермінований набір, нового нема
+    assert len(ids2) == len(set(ids2))  # no duplicates
+    assert len(items2) == 8  # the same deterministic set, nothing new
 
 
 def test_build_tasks_golden_refuses_live_db_without_yes_live(tmp_path, db, monkeypatch):
@@ -563,7 +563,7 @@ def _seed_owner_graph(db_path: str):
                  "VALUES (100, 'telegram', '2026-06-01', '2026-06-01T10:00:00')")
     conn.execute("INSERT INTO entities (id, canonical_name) VALUES (1, 'Андрій')")
     conn.execute("INSERT INTO entity_aliases (entity_id, alias) VALUES (1, 'Andrew')")
-    # #10 — правильно звʼязана задача (owner_entity_id=1), #11 — нічого не звʼязано
+    # #10 is a correctly linked task (owner_entity_id=1), #11 has nothing linked
     conn.execute("INSERT INTO action_items (id, transcription_id, task, owner_name, "
                  "owner_entity_id, due, source) VALUES (10, 100, 'зробити щось', 'Андрій', 1, "
                  "'2026-06-02', NULL)")
@@ -604,9 +604,9 @@ def test_evaluate_due_and_owner_accuracy_via_alias(db):
         conn.close()
 
     assert result["n_total"] == 3
-    assert result["n_labeled"] == 2  # unlabeled не рахується
-    # task-0001: власник збігся по аліасу "Andrew", дедлайн збігся → обидва ok
-    # task-0002: власник збігся (обидва None), дедлайн НЕ збігся (правда 2026-01-01 != 2026-06-03)
+    assert result["n_labeled"] == 2  # unlabeled is not counted
+    # task-0001: the owner matched by the alias "Andrew", the deadline matched -> both ok
+    # task-0002: the owner matched (both None), the deadline did NOT match (truth 2026-01-01 != 2026-06-03)
     assert result["due_accuracy"] == 0.5
     assert result["owner_accuracy"] == 1.0
     assert len(result["misses"]) == 1

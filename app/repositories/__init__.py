@@ -1,14 +1,14 @@
-"""Repository-шар (T7.2): централізовані SQL-запити по таблицях.
+"""Repository layer (T7.2): centralized SQL queries per table.
 
-Виникнення: сирі `conn.execute()` дублювалися прямо в HTTP-хендлерах
-(app/blueprints/*) і сервісах (app/services/*), часто з різним набором
-колонок для того самого "читання рядка за id". Зміна схеми вимагала grep по
-всьому проєкту. Цей пакет — інкрементальна заміна: функції по таблицях,
-що приймають вже відкритий `sqlite3.Connection` (той самий, що дає
-`app.db.connection.get_db_connection()`), і повертають `sqlite3.Row`/список.
+Origin: raw `conn.execute()` calls were duplicated directly in HTTP handlers
+(app/blueprints/*) and services (app/services/*), often with a different set of
+columns for the same "read a row by id". A schema change required a grep across
+the whole project. This package is an incremental replacement: per-table functions
+that accept an already open `sqlite3.Connection` (the same one that
+`app.db.connection.get_db_connection()` provides) and return `sqlite3.Row`/a list.
 
-НЕ плутати з видаленим (T7.3) `app/services/database.py` (`DatabaseService`) —
-той був мертвим кодом (жодних імпортів), цей пакет — новий, підключений
-навмисно. Переносимо запити інкрементально, найдубльованіші — першими;
-див. docs/REMEDIATION_PLAN.md, задача T7.2.
+NOT to be confused with the removed (T7.3) `app/services/database.py` (`DatabaseService`) —
+that was dead code (no imports), this package is new, wired in
+on purpose. Queries are moved incrementally, the most duplicated first;
+see docs/REMEDIATION_PLAN.md, task T7.2.
 """

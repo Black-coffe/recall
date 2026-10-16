@@ -1,17 +1,17 @@
-"""Офлайн-смок-тест напрямків (Phase 14.1): casefold-унікальність + керування.
+"""Offline smoke test of directions (Phase 14.1): casefold uniqueness + management.
 
-Без моделей / Ollama / мережі. Підіймає МІНІМАЛЬНИЙ Flask лише з memory_bp на
-тимчасовій БД (повна міграційна схема через init_database) і перевіряє:
-  A. Міграція v20: колонка categories.name_norm + засіви мають name_norm.
-  B. Створення: name_norm = casefold(name); кириличний дубль («Фонд» vs «фонд»)
-     відбивається 409 (SQLite COLLATE NOCASE цього НЕ ловив — суть фікса).
-  C. Перейменування: оновлює name_norm; колізія casefold → 409; виключає себе.
-  D. Перенесення/обʼєднання (merge): записи src → dst; delete_source видаляє src.
-  E. Видалення напрямку: посилання (transcriptions.category_id) обнуляються,
-     самі записи лишаються.
-  F. _norm_cat: casefold + стиск пробілів.
+No models / Ollama / network. Brings up a MINIMAL Flask with only memory_bp on a
+temporary DB (the full migration schema via init_database) and verifies:
+  A. Migration v20: column categories.name_norm + the seeds have name_norm.
+  B. Creation: name_norm = casefold(name); a Cyrillic duplicate («Фонд» vs «фонд»)
+     is rejected with 409 (SQLite COLLATE NOCASE did NOT catch it - the point of the fix).
+  C. Renaming: updates name_norm; a casefold collision -> 409; excludes itself.
+  D. Move/merge: records src -> dst; delete_source deletes src.
+  E. Deleting a direction: references (transcriptions.category_id) are nulled,
+     the records themselves stay.
+  F. _norm_cat: casefold + whitespace collapsing.
 
-Запуск:  .venv/Scripts/python.exe test_categories.py
+Run:  .venv/Scripts/python.exe test_categories.py
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _cat_id(client, name):
 
 
 def _insert_tx(db_path, category_id):
-    """Вставити мінімальний транскрипт із заданим напрямком, повернути id."""
+    """Insert a minimal transcript with the given direction, return its id."""
     conn = sqlite3.connect(db_path)
     cur = conn.execute(
         "INSERT INTO transcriptions (source_type, source_name, category_id) VALUES (?, ?, ?)",
@@ -75,84 +75,84 @@ def _tx_category(db_path, tid):
 
 
 def main():
-    print("\n=== Напрямки: casefold-унікальність + керування ===\n")
+    print("\n=== Directions: casefold uniqueness + management ===\n")
 
     # --- F. _norm_cat ----------------------------------------------------
-    check(_norm_cat("  Фонд   Робота  ") == "фонд робота", "F1 _norm_cat: casefold + стиск пробілів")
-    check(_norm_cat("AI / Професія") == _norm_cat("ai / професія"), "F2 _norm_cat: регістр не впливає (кирилиця+латиниця)")
+    check(_norm_cat("  Фонд   Робота  ") == "фонд робота", "F1 _norm_cat: casefold + whitespace collapsing")
+    check(_norm_cat("AI / Професія") == _norm_cat("ai / професія"), "F2 _norm_cat: case does not matter (Cyrillic+Latin)")
 
     tmpdir = tempfile.mkdtemp(prefix="recall_cat_test_")
     db_path = os.path.join(tmpdir, "test.db")
     app = _make_app(db_path)
     client = app.test_client()
 
-    # --- A. Міграція -----------------------------------------------------
+    # --- A. Migration ----------------------------------------------------
     conn = sqlite3.connect(db_path)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(categories)").fetchall()}
-    check("name_norm" in cols, "A1 міграція v20: колонка categories.name_norm існує")
+    check("name_norm" in cols, "A1 migration v20: column categories.name_norm exists")
     seeded = conn.execute("SELECT name, name_norm FROM categories WHERE name_norm IS NOT NULL").fetchall()
-    check(len(seeded) >= 5, "A2 засіви напрямків мають name_norm backfill")
-    check(all(nn == _norm_cat(n) for n, nn in seeded), "A3 name_norm засівів == casefold(name)")
+    check(len(seeded) >= 5, "A2 direction seeds have a name_norm backfill")
+    check(all(nn == _norm_cat(n) for n, nn in seeded), "A3 seeds' name_norm == casefold(name)")
     conn.close()
 
-    # --- B. Створення + casefold-дубль -----------------------------------
+    # --- B. Creation + casefold duplicate --------------------------------
     r1 = client.post("/api/memory/categories", json={"name": "Проєкт Альфа"})
-    check(r1.status_code == 200 and r1.get_json().get("success"), "B1 створення нового напрямку → 200")
+    check(r1.status_code == 200 and r1.get_json().get("success"), "B1 creating a new direction -> 200")
     new_id = r1.get_json()["id"]
 
     conn = sqlite3.connect(db_path)
     nn = conn.execute("SELECT name_norm FROM categories WHERE id = ?", (new_id,)).fetchone()[0]
     conn.close()
-    check(nn == "проєкт альфа", "B2 збережений name_norm = lowercase/casefold ключ")
+    check(nn == "проєкт альфа", "B2 the stored name_norm = lowercase/casefold key")
 
     r2 = client.post("/api/memory/categories", json={"name": "проєкт альфа"})
-    check(r2.status_code == 409, "B3 кириличний casefold-дубль («проєкт альфа») → 409 (фікс NOCASE-дірки)")
+    check(r2.status_code == 409, "B3 Cyrillic casefold duplicate («проєкт альфа») -> 409 (the NOCASE hole fix)")
 
     r2b = client.post("/api/memory/categories", json={"name": "  ПРОЄКТ   альфа "})
-    check(r2b.status_code == 409, "B4 дубль із іншим регістром+пробілами → 409")
+    check(r2b.status_code == 409, "B4 duplicate with another case+spaces -> 409")
 
     r3 = client.post("/api/memory/categories", json={"name": "   "})
-    check(r3.status_code == 400, "B5 порожня назва → 400")
+    check(r3.status_code == 400, "B5 empty name -> 400")
 
-    # --- C. Перейменування -----------------------------------------------
+    # --- C. Renaming -----------------------------------------------------
     rB = client.post("/api/memory/categories", json={"name": "Проєкт Бета"})
     beta_id = rB.get_json()["id"]
     rc1 = client.patch(f"/api/memory/categories/{beta_id}", json={"name": "проєкт альфа"})
-    check(rc1.status_code == 409, "C1 перейменування у casefold-зайняту назву → 409")
+    check(rc1.status_code == 409, "C1 renaming to a casefold-taken name -> 409")
     rc2 = client.patch(f"/api/memory/categories/{beta_id}", json={"name": "Проєкт Гамма"})
-    check(rc2.status_code == 200, "C2 валідне перейменування → 200")
+    check(rc2.status_code == 200, "C2 valid rename -> 200")
     conn = sqlite3.connect(db_path)
     nn2 = conn.execute("SELECT name_norm FROM categories WHERE id = ?", (beta_id,)).fetchone()[0]
     conn.close()
-    check(nn2 == "проєкт гамма", "C3 перейменування оновило name_norm")
+    check(nn2 == "проєкт гамма", "C3 rename updated name_norm")
     rc3 = client.patch(f"/api/memory/categories/{beta_id}", json={"name": "Проєкт Гамма", "color": "#ff0000"})
-    check(rc3.status_code == 200, "C4 «перейменування» на ту саму назву (виключає себе) → 200")
+    check(rc3.status_code == 200, "C4 \"rename\" to the same name (excludes itself) -> 200")
 
-    # --- D. Перенесення / обʼєднання -------------------------------------
-    tid = _insert_tx(db_path, new_id)          # транскрипт у «Проєкт Альфа»
+    # --- D. Move / merge -------------------------------------------------
+    tid = _insert_tx(db_path, new_id)          # a transcript in «Проєкт Альфа»
     rm = client.post(f"/api/memory/categories/{new_id}/merge",
                      json={"target_id": beta_id, "delete_source": True})
-    check(rm.status_code == 200 and rm.get_json().get("moved") == 1, "D1 merge: 1 запис перенесено")
-    check(_tx_category(db_path, tid) == beta_id, "D2 merge: transcript.category_id → цільовий напрямок")
+    check(rm.status_code == 200 and rm.get_json().get("moved") == 1, "D1 merge: 1 record moved")
+    check(_tx_category(db_path, tid) == beta_id, "D2 merge: transcript.category_id -> target direction")
     conn = sqlite3.connect(db_path)
     gone = conn.execute("SELECT 1 FROM categories WHERE id = ?", (new_id,)).fetchone()
     conn.close()
-    check(gone is None, "D3 merge delete_source: джерело видалено")
+    check(gone is None, "D3 merge delete_source: the source is deleted")
 
     rm2 = client.post(f"/api/memory/categories/{beta_id}/merge", json={"target_id": beta_id})
-    check(rm2.status_code == 400, "D4 merge у самого себе → 400")
+    check(rm2.status_code == 400, "D4 merge into itself -> 400")
 
-    # --- E. Видалення обнуляє посилання ----------------------------------
+    # --- E. Deleting nulls the references --------------------------------
     tid2 = _insert_tx(db_path, beta_id)
     rd = client.delete(f"/api/memory/categories/{beta_id}")
-    check(rd.status_code == 200, "E1 видалення напрямку → 200")
-    check(_tx_category(db_path, tid2) is None, "E2 видалення: transcript.category_id обнулено (запис лишився)")
+    check(rd.status_code == 200, "E1 deleting a direction -> 200")
+    check(_tx_category(db_path, tid2) is None, "E2 deleting: transcript.category_id nulled (the record stayed)")
     conn = sqlite3.connect(db_path)
     still = conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid2,)).fetchone()
     conn.close()
-    check(still is not None, "E3 сам транскрипт НЕ видалено")
+    check(still is not None, "E3 the transcript itself is NOT deleted")
 
-    print(f"\n=== Підсумок: {'усі пройшли' if _fail == 0 else str(_fail) + ' впало'} ===\n")
+    print(f"\n=== Summary: {'all passed' if _fail == 0 else str(_fail) + ' failed'} ===\n")
     return 1 if _fail else 0
 
 

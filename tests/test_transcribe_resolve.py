@@ -84,7 +84,7 @@ class TestResolveFileSource:
                 'youtube_info': {}, 'download_id': None,
                 'library_audio_id': None, 'library_recording_sid': None,
                 'source_type': 'file',
-                # editable-title-description-02: лише 'library' заповнює це.
+                # editable-title-description-02: only 'library' fills this.
                 'title': None, 'description': None,
             }
 

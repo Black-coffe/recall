@@ -24,7 +24,7 @@ from typing import Optional
 
 try:
     from app.utils.proc import NO_WINDOW
-except ImportError:  # запуск файлу напряму (`python app/services/recording/video_probe.py`)
+except ImportError:  # the file is run directly (`python app/services/recording/video_probe.py`)
     NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def probe_capabilities(ffmpeg: Optional[str] = None) -> dict[str, bool]:
         pass  # leave ddagrab False
 
     try:
-        # gdigrab — це INPUT-DEVICE (libavdevice), він у списку `-devices`, НЕ `-filters`.
+        # gdigrab is an INPUT-DEVICE (libavdevice): it is in the `-devices` list, NOT in `-filters`.
         dev_result = subprocess.run(
             [ff, '-hide_banner', '-devices'],
             capture_output=True, text=True, timeout=15,

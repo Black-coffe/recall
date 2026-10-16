@@ -1,9 +1,9 @@
-"""Тести питань без відповіді (Волна 5.3).
+"""Tests for unanswered questions (Wave 5.3).
 
-Перевіряється те, що замір спіймав на живих даних і що коштувало б довіри до
-всього списку: query-рядок посилання не є питанням, відповідь у СУСІДНІЙ нитці
-того ж чату закриває питання, а групове питання без звернення не видається за
-адресоване власнику.
+They check what the measurement caught on live data and what would cost trust in
+the whole list: a link's query string is not a question, a reply in a NEIGHBOURING thread
+of the same chat closes the question, and a group question without an address is not passed off as
+addressed to the owner.
 """
 import sqlite3
 from datetime import datetime
@@ -15,15 +15,15 @@ from app.services import tg_questions as tq
 
 
 ME = "Я Власник"
-CHAT = -5162514111          # legacy-група: tg_link там не існує
-PRIVATE = 250264900         # лічка
+CHAT = -5162514111          # legacy group: tg_link does not exist there
+PRIVATE = 250264900         # personal chat
 
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
     path = str(tmp_path / "q.db")
     init_database(path)
-    # Особу задаємо явно — тест не має ходити ні до слухача, ні до кешу на диску.
+    # We set the person explicitly — the test must go neither to the listener nor to the on-disk cache.
     monkeypatch.setenv("TELEGRAM_SELF_NAME", ME)
     monkeypatch.setenv("TELEGRAM_SELF_USERNAME", "vlasnyk")
     return path
@@ -53,25 +53,25 @@ def _questions(db, **kw):
     return tq.open_questions(db, today=NOW, **kw)["questions"]
 
 
-# --- що взагалі є питанням ------------------------------------------------
+# --- what is a question at all -------------------------------------------
 
 def test_url_query_string_is_not_a_question():
-    """`?igsh=` у посиланні дало 77 хибних кандидатів з 574 на живому архіві."""
+    """`?igsh=` in a link gave 77 false candidates out of 574 on the live archive."""
     assert tq.is_question("а коли зустріч?")
     assert not tq.is_question("https://www.instagram.com/p/DbtP/?igsh=MTd6MWll")
     assert not tq.is_question("дивись https://opendatabot.ua/c/46078764?from=search")
-    # Посилання поруч зі справжнім питанням питання не скасовує.
+    # A link next to a real question does not cancel the question.
     assert tq.is_question("глянь https://x.com/a?b=1 що думаєш?")
 
 
-# --- кому адресовано ------------------------------------------------------
+# --- to whom it is addressed ---------------------------------------------
 
 def test_group_question_without_address_is_not_claimed(db):
-    """233 з 294 кандидатів — групові без звернення. Мовчимо про них навмисно."""
+    """233 of 294 candidates are group ones without an address. We stay silent about them on purpose."""
     _msg(db, sender="Колега", text="а можемо на 15:00?", date="2026-06-01T10:00:00+00:00")
     res = tq.open_questions(db, today=NOW)
     assert res["questions"] == []
-    assert res["skipped_group"] == 1          # але кажемо, скільки сховали
+    assert res["skipped_group"] == 1          # but we say how many were hidden
 
 
 def test_mention_of_my_username_is_addressed_to_me(db):
@@ -79,7 +79,7 @@ def test_mention_of_my_username_is_addressed_to_me(db):
          date="2026-06-01T10:00:00+00:00")
     got = _questions(db)
     assert [q["addressed"] for q in got] == ["mention"]
-    assert got[0]["silence_h"] is None        # більше не писав у чаті
+    assert got[0]["silence_h"] is None        # did not write in the chat any more
 
 
 def test_mention_of_someone_else_is_not_mine(db):
@@ -89,23 +89,23 @@ def test_mention_of_someone_else_is_not_mine(db):
 
 
 def test_private_chat_question_is_always_mine(db):
-    """У чаті 1:1 більше нікого — звернення не потрібне."""
+    """In a 1:1 chat there is no one else — no address is needed."""
     _msg(db, sender="Співрозмовник", text="зміг створити Ноушн?", chat_id=PRIVATE,
          title="Співрозмовник", thread_id=7, date="2026-06-01T10:00:00+00:00")
     assert [q["addressed"] for q in _questions(db)] == ["private"]
 
 
-# --- що вважати відповіддю ------------------------------------------------
+# --- what counts as an answer --------------------------------------------
 
 def test_reply_in_neighbour_thread_closes_the_question(db):
-    """Головна знахідка заміру: у 4 випадках з 10 відповідь лягла в СУСІДНЮ нитку.
+    """The main finding of the measurement: in 4 cases of 10 the answer landed in a NEIGHBOURING thread.
 
-    Нитки розмічені моделлю, тож присутність рахуємо по чату. Інакше список
-    називає забутим те, на що людина відповіла через 12 хвилин.
+    Threads are labelled by the model, so we count presence by chat. Otherwise the list
+    calls forgotten what the person answered after 12 minutes.
     """
     _msg(db, sender="Колега", text="@vlasnyk коли зможемо?", thread_id=1,
          date="2026-06-01T10:00:00+00:00")
-    _msg(db, sender=ME, text="давай о 15:00", thread_id=2,   # інша нитка того ж чату
+    _msg(db, sender=ME, text="давай о 15:00", thread_id=2,   # another thread of the same chat
          date="2026-06-01T10:12:00+00:00")
     assert _questions(db) == []
 
@@ -113,21 +113,21 @@ def test_reply_in_neighbour_thread_closes_the_question(db):
 def test_presence_after_the_window_still_counts_as_unanswered(db):
     _msg(db, sender="Колега", text="@vlasnyk коли зможемо?",
          date="2026-06-01T10:00:00+00:00")
-    _msg(db, sender=ME, text="про інше", date="2026-06-05T10:00:00+00:00")   # +96 год
+    _msg(db, sender=ME, text="про інше", date="2026-06-05T10:00:00+00:00")   # +96 h
     got = _questions(db)
     assert len(got) == 1
     assert got[0]["silence_h"] == 96.0
-    # А з добовим вікном у 5 діб те саме питання вважається побаченим.
+    # And with a daily window of 5 days the same question counts as seen.
     assert _questions(db, window_h=200) == []
 
 
 def test_direct_reply_closes_question_even_outside_window(db):
-    """`tg_reply_to` — частина записів, але де він є, він сильніший за присутність."""
+    """`tg_reply_to` — a share of the records, but where it exists it is stronger than presence."""
     qid = 5001
     _msg(db, sender="Колега", text="@vlasnyk коли зможемо?", msg_id=qid,
          date="2026-06-01T10:00:00+00:00")
     _msg(db, sender=ME, text="ось відповідь", reply_to=qid, thread_id=9,
-         date="2026-06-09T10:00:00+00:00")      # через 8 діб, поза вікном
+         date="2026-06-09T10:00:00+00:00")      # 8 days later, outside the window
     assert _questions(db) == []
 
 
@@ -137,7 +137,7 @@ def test_my_own_question_is_not_mine_to_answer(db):
 
 
 def test_window_and_address_pair_are_returned(db):
-    """Адреса — пара id: у legacy-групі t.me-посилання не існує (урок 5.2)."""
+    """The address is an id pair: in a legacy group a t.me link does not exist (lesson 5.2)."""
     _msg(db, sender="Колега", text="@vlasnyk підкажи?", msg_id=515741,
          date="2026-06-01T10:00:00+00:00")
     q = _questions(db)[0]
@@ -153,7 +153,7 @@ def test_days_window_cuts_old_questions(db):
     assert len(_questions(db, days=365)) == 1
 
 
-# --- хто такий «я» --------------------------------------------------------
+# --- who "I" am ----------------------------------------------------------
 
 def test_self_from_env_wins(db):
     me = tq.resolve_self(db)
@@ -161,7 +161,7 @@ def test_self_from_env_wins(db):
 
 
 def test_self_derived_from_private_chat(db, monkeypatch, tmp_path):
-    """Запасний шлях: у лічці власник — той, хто не є назвою чату."""
+    """Fallback: in a personal chat the owner is the one who is not the chat title."""
     monkeypatch.delenv("TELEGRAM_SELF_NAME", raising=False)
     monkeypatch.delenv("TELEGRAM_SELF_USERNAME", raising=False)
     monkeypatch.setattr(tq, "_SELF_CACHE", tmp_path / "nope.json")
@@ -175,17 +175,17 @@ def test_self_derived_from_private_chat(db, monkeypatch, tmp_path):
 
 
 def test_unknown_owner_returns_reason_not_empty_list(db, monkeypatch, tmp_path):
-    """Порожній список без пояснення читався б як «нічого не висить»."""
+    """An empty list without explanation would read as «nothing hangs»."""
     monkeypatch.delenv("TELEGRAM_SELF_NAME", raising=False)
     monkeypatch.setattr(tq, "_SELF_CACHE", tmp_path / "nope.json")
     monkeypatch.setattr(tq, "_listener_status", lambda *a, **k: None)
     res = tq.open_questions(db, today=NOW)
     assert res["questions"] == [] and res["me"] is None
-    assert "власник" in res["reason"]
+    assert "archive" in res["reason"]
 
 
 def test_stale_cache_without_username_is_refreshed(db, monkeypatch, tmp_path):
-    """Кеш від старого слухача (без ніка) не має назавжди вимикати детект по @."""
+    """A cache from an old listener (without a handle) must not disable @ detection forever."""
     cache = tmp_path / "tg_self.local.json"
     cache.write_text('{"id": 1, "name": "Хтось", "username": null}', encoding="utf-8")
     monkeypatch.delenv("TELEGRAM_SELF_NAME", raising=False)

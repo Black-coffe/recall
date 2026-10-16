@@ -1,7 +1,7 @@
-"""Пропозиції назви й опису від локальної моделі (спека recording-meta-suggest, історія 01).
+"""Title and description suggestions from the local model (spec recording-meta-suggest, story 01).
 
-Офлайн: `local_llm` підмінено фейком із сигнатурою справжньої `generate_json`
-(памʼятка graceful-degradation-hides-test-fake-drift), БД — тимчасова з міграціями.
+Offline: `local_llm` is replaced by a fake with the signature of the real `generate_json`
+(memory note graceful-degradation-hides-test-fake-drift), the DB is a temporary one with migrations.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ SUMMARY = {
 
 
 class FakeLLM:
-    """Підміна `local_llm.generate_json` + `availability`; пише кожен виклик."""
+    """Replaces `local_llm.generate_json` + `availability`; records every call."""
 
     def __init__(self, data=None, error=None, available=(True, "OK")):
         self.calls: list[dict] = []
@@ -108,7 +108,7 @@ class _Rec:
         return list(self._ids)
 
 
-# ---------- вхід моделі ----------
+# ---------- model input ----------
 
 def test_summary_is_the_basis_when_present(client, db, fake):
     tid = _add(db, summary=SUMMARY)
@@ -154,7 +154,7 @@ def test_generate_json_passes_keep_alive_to_ollama(monkeypatch):
     assert sent["keep_alive"] == "0"
 
 
-# ---------- чистка варіантів ----------
+# ---------- variant cleaning ----------
 
 def test_variants_are_cleaned():
     long_title = "Д" * 300
@@ -174,7 +174,7 @@ def test_long_description_is_cut_to_limit(client, db, fake):
     assert len(body["descriptions"][0]) <= record_meta.DESCRIPTION_MAX
 
 
-# ---------- помилки ----------
+# ---------- errors ----------
 
 def test_missing_record_404(client, fake):
     assert client.post("/api/history/999/suggest-meta").status_code == 404
@@ -197,7 +197,7 @@ def test_ollama_down_503_with_reason(client, db, fake):
 
 
 def test_llm_error_503_without_traceback(client, db, fake):
-    fake.error = local_llm.LocalLLMError("Модель не повернула валідний JSON")
+    fake.error = local_llm.LocalLLMError("The model did not return valid JSON")
     tid = _add(db, summary=SUMMARY)
     r = client.post(f"/api/history/{tid}/suggest-meta")
     assert r.status_code == 503
@@ -210,7 +210,15 @@ def test_empty_variants_503(client, db, fake):
     assert client.post(f"/api/history/{tid}/suggest-meta").status_code == 503
 
 
-# ---------- запис іде: модель не чіпаємо ----------
+def test_suggest_error_texts_come_from_the_catalog():
+    from app.core.i18n import tr
+    assert tr("svc_embed.suggest.empty", lang="en") == "The model returned empty variants - try again"
+    assert tr("svc_embed.suggest.empty", lang="uk") == "Модель повернула порожні варіанти — спробуйте ще раз"
+    assert tr("svc_embed.meta.title.too_long", lang="en", limit=200) == \
+        "The title is too long: at most 200 characters"
+
+
+# ---------- a recording is in progress: the model is not touched ----------
 
 def test_recording_active_409_and_no_model_call(client, db, fake, monkeypatch):
     monkeypatch.setattr(state, "recording_service", _Rec(["rec_7aba448a2c394b79"]))

@@ -1,42 +1,41 @@
-"""Нитки розмови всередині Telegram-чату (Волна 4.5).
+"""Conversation threads inside a Telegram chat (Wave 4.5).
 
-**Проблема.** Чат із повідомлень — це 955 незвʼязаних записів, і «Ок»
-фізично не несе контексту. Живий провал: на «коли зустріч з губернатором» пошук
-віддав 7 слотів із 8, і всі сім — питання без жодної відповіді. Відповідь була
-наступним повідомленням треда, спільних слів із запитом нема, тож її не знайшов
-ні вектор, ні FTS. Дзеркальна біда з мітками: категорію дає чат цілком, тому
-будь-яке повідомлення з «ACMECORP&Робота» потрапляє у зріз по Acmecorp,
-навіть якщо воно про відпустку.
+**Problem.** A chat of messages is 955 unconnected records, and «Ок»
+physically carries no context. A live failure: for «коли зустріч з губернатором» search
+returned 7 slots of 8, and all seven were questions without any answer. The answer was
+the next message of the thread, shares no words with the query, so neither the vector nor
+FTS found it. The mirror problem with labels: the category comes from the whole chat, so
+any message from «ACMECORP&Робота» lands in the Acmecorp slice,
+even if it is about a vacation.
 
-**Одиниця сенсу — нитка всередині чату**, не чат і не окреме повідомлення.
+**The unit of meaning is a thread inside a chat**, not the chat and not a single message.
 
-Чому саме такий каскад (кожна ступінь стоїть на замірі, а не на здогадці):
+Why exactly this cascade (each step stands on a measurement, not a guess):
 
-- **`tg_reply_to` — жорсткий оверрайд, але майже порожній.** Це те, що САМ
-  Telegram знає про нитку, помилитись тут неможливо. Колонка forward-only
-  (зʼявилась у Волні 4, 03.08), тож на живому архіві покриває 24 записи з 3951
-  — 0.6%. Далі росте, але історію нею не зшити.
+- **`tg_reply_to` is a hard override, but almost empty.** This is what Telegram ITSELF
+  knows about the thread, a mistake here is impossible. The column is forward-only
+  (appeared in Wave 4, 03.08), so in the live archive it covers some records— 0.6%. It keeps growing, but history cannot be stitched with it.
 
-- **Косинус e5 НЕ ухвалює рішення.** Замір на архіві: reply-пари (справжня
-  нитка) дають середній косинус 0.828, випадкові пари в тому ж чаті — 0.827.
-  Розділення +0.02σ, тобто нуль. Центрування (відняти середнє корпусу) піднімає
-  до +0.61σ — усе одно близько третини помилок. Причина видна в самих парах:
-  «Дзвінка не буде?» ← «ні, нічого Адам не писав» — справжня нитка з косинусом
-  0.837, як у випадкової пари. **Короткій репліці нема чого вкладати в тему:**
-  «ні» не про предмет, а про регістр мовлення. Тому центроїд тут — лише
-  РАНЖУВАЛЬНИК кандидатів для LLM, і жодного абсолютного порога в коді немає.
+- **The e5 cosine does NOT decide.** Measured on the archive: reply pairs (a real
+  thread) give a mean cosine of 0.828, random pairs in the same chat 0.827.
+  Separation +0.02 sigma, i.e. zero. Centering (subtracting the corpus mean) raises it
+  to +0.61 sigma — still about a third of errors. The cause is visible in the pairs themselves:
+  «Дзвінка не буде?» <- «ні, нічого Адам не писав» is a real thread with cosine
+  0.837, like a random pair. **A short reply has nothing to embed as a topic:**
+  «ні» is about the speech register, not the subject. So the centroid here is only a
+  RANKER of candidates for the LLM, and there is no absolute threshold in the code.
 
-- **Рішення ухвалює локальна LLM, але не на кожне повідомлення.** Повідомлення
-  кучкуються у сплески: при паузі 3 год архів згортається у 569 сплесків
-  (медіана 4 повідомлення), з них 484 містять більше одного. Це 484 виклики
-  замість 3900 — вісім разів дешевше при тій самій роздільній здатності.
-  Склейка за вікном часу як ФІНАЛЬНА відповідь зарубана редколегією і
-  правильно: у чаті з паралельними темами вона зшиває незвʼязане. Тут вона
-  лише генератор кандидатів, а теми ВСЕРЕДИНІ сплеску розділяє модель.
+- **The decision is made by the local LLM, but not for every message.** Messages
+  are clustered into bursts: with a 3 h pause the archive collapses to 569 bursts
+  (median 4 messages), of which 484 contain more than one. That is 484 calls
+  instead of 3900 — eight times cheaper at the same resolution.
+  Gluing by time window as the FINAL answer was rejected by the editorial board, and
+  rightly so: in a chat with parallel topics it stitches unrelated things. Here it is
+  only a candidate generator, and topics INSIDE a burst are separated by the model.
 
-Все локально і безкоштовно (Ollama, `LOCAL_LLM_MODEL`). Нема Ollama — модуль
-деградує: сплеск лишається однією ниткою, `tg_thread_src='burst'`, і це видно
-в даних, а не ховається.
+All local and free (Ollama, `LOCAL_LLM_MODEL`). No Ollama: the module
+degrades: a burst stays a single thread, `tg_thread_src='burst'`, and this is visible
+in the data, not hidden.
 
 CLI:
     python -m app.services.tg_threads backfill --dry-run
@@ -61,59 +60,59 @@ from app.db.connection import get_db_connection
 logger = logging.getLogger(__name__)
 
 
-# Пауза, після якої розмова вважається новим сплеском. 180 хв — з заміру
-# розподілу: на 30 хв третина сплесків вироджується в одинаків (нема чого
-# групувати), на 1440 хв сплеск розростається до повідомлень і в нього
-# заходить кілька робочих днів. На 180 хв медіана 4, одинаків 15%.
+# The pause after which a conversation counts as a new burst. 180 min comes from measuring
+# the distribution: at 30 min a third of the bursts degenerate into singletons (nothing to
+# group), at 1440 min a burst grows to messages and several working days
+# get into it. At 180 min the median is 4, singletons 15%.
 BURST_GAP_MIN = int(os.environ.get("TG_THREAD_BURST_GAP_MIN", "180"))
 
-# Скільки повідомлень і символів віддаємо моделі за раз. Довгі сплески (до 130
-# повідомлень, до 338k символів) ріжемо на під-пачки, переносячи вже відкриті
-# нитки далі — інакше промпт не влазить у контекст і модель мовчки обрізає хвіст.
+# How many messages and characters we give the model at a time. Long bursts (up to 130
+# messages, up to 338k characters) are cut into sub-batches, carrying the already open
+# threads over: otherwise the prompt does not fit in the context and the model silently truncates the tail.
 MAX_BATCH_MSGS = int(os.environ.get("TG_THREAD_BATCH_MSGS", "25"))
 MAX_BATCH_CHARS = int(os.environ.get("TG_THREAD_BATCH_CHARS", "6000"))
 
-# Скільки відкритих ниток чату показувати моделі як кандидатів на продовження.
+# How many open threads of a chat to show the model as continuation candidates.
 OPEN_THREAD_CANDIDATES = int(os.environ.get("TG_THREAD_CANDIDATES", "5"))
 
-# Модель для розбиття сплесків. Окрема від LOCAL_LLM_MODEL навмисно: копілот
-# працює в реальному часі під час дзвінка і налаштований на свою модель, а тут
-# задача структурна (згрупувати 4–10 коротких реплік) — на замірі 7b дала те
-# саме розбиття, що й 32b, за вчетверо менший час. None = взяти LOCAL_LLM_MODEL.
+# The model for splitting bursts. Deliberately separate from LOCAL_LLM_MODEL: the copilot
+# works in real time during a call and is tuned to its own model, while here the
+# task is structural (group 4-10 short replies): in the measurement the 7b gave the same
+# split as the 32b in a quarter of the time. None = take LOCAL_LLM_MODEL.
 THREAD_MODEL = os.environ.get("TG_THREAD_MODEL") or None
 
-# Нитка без нових повідомлень стільки днів вважається закритою і більше не
-# пропонується як кандидат. Не видаляє нічого — лише прибирає з активних.
+# A thread with no new messages for this many days is considered closed and is no longer
+# offered as a candidate. It deletes nothing — it only removes it from the active ones.
 #
-# 3, а не 21. Це НЕ смакова правка: на прогоні з вікном 21 день максимальний
-# розрив усередині нитки упирався рівно в 21 (max=21.0 при медіані 2.8), тобто
-# межу ставило саме вікно, а не зміст. частина ниток мали внутрішній розрив понад
-# 3 дні, 34% — понад тиждень, і нитка «Попередження про дзвінок» тягнулась із
-# 18.06 по 30.07, склеївши календар, «давай зараз з Настею» і жарти.
-# Причина: моделі показують список відкритих ниток із назвами, і 7B охоче
-# обирає щось зі списку — тиску «нічого не підходить» у неї немає. Тому
-# продовження стримує ВІКНО, а не судження моделі. 3 дні лишають справжні
-# випадки (розмова, що продовжилась наступного ранку; пʼятниця → понеділок) і
-# прибирають склейку через тижні.
+# 3, not 21. This is NOT a matter of taste: in a run with a 21-day window the maximum
+# gap inside a thread hit exactly 21 (max=21.0 at a median of 2.8), i.e. the
+# boundary was set by the window, not by the content. a share of the threads had an internal gap over
+# 3 days, 34% over a week, and the thread «Попередження про дзвінок» stretched from
+# 18.06 to 30.07, gluing together a calendar, «давай зараз з Настею» and jokes.
+# Reason: the model is shown a list of open threads with names, and the 7B readily
+# picks something from the list — it has no «nothing fits» pressure. So the
+# continuation is restrained by the WINDOW, not by the model's judgement. 3 days keep the real
+# cases (a conversation that continued the next morning; Friday -> Monday) and
+# remove gluing across weeks.
 THREAD_IDLE_DAYS = int(os.environ.get("TG_THREAD_IDLE_DAYS", "3"))
 
-# Нитка закривається і за ОБСЯГОМ, не лише за тишею. Без цього вона росте, доки
-# в чат пишуть частіше за THREAD_IDLE_DAYS: на першому проході ниток зібрали
-# 1594 повідомлення (значна частина архіву), найбільша — повідомлень за два місяці, і
-# всередині неї адреса офісу, презентація, сценарії й окрема розмова про Адама.
-# Це вже не тема, а чат усередині чату — тобто рівно те, від чого волна лікує.
-# 30 — з розподілу: нитки до повідомлень тримають основну масу і виглядають
-# темами, далі починається накопичення.
+# A thread also closes by VOLUME, not only by silence. Without this it grows as long as
+# the chat is written to more often than THREAD_IDLE_DAYS: on the first pass a few threads collected
+# messages (a large share of the archive), the largest messages over two months, and
+# inside it an office address, a presentation, scenarios and a separate conversation about Adam.
+# That is no longer a topic but a chat inside a chat — exactly what the wave cures.
+# 30 comes from the distribution: threads many messages hold the bulk and look like
+# topics, beyond that accumulation begins.
 #
-# Стеля МʼЯКА, і це навмисно: вона забороняє нитці приймати НОВУ розмову, але
-# ніколи не рве одну розмову навпіл. Група, яку модель визнала однією темою,
-# заходить цілком, тож фактичний розмір може перевищити стелю на розмір групи
-# (спостережено 49 при стелі 30). Розірвати звʼязну розмову заради круглого
-# числа було б гірше за саме накопичення: сенс нитки в тому, що вона ціла.
+# The ceiling is SOFT, deliberately: it forbids a thread to accept a NEW conversation, but
+# never tears one conversation in half. A group the model judged to be one topic
+# enters whole, so the actual size may exceed the ceiling by the group size
+# (observed 49 at a ceiling of 30). Tearing a coherent conversation for a round
+# number would be worse than the accumulation itself: the point of a thread is that it is whole.
 THREAD_MAX_MSGS = int(os.environ.get("TG_THREAD_MAX_MSGS", "30"))
 
-# Обрізка тексту повідомлення у промпті. Довгі пересилання (статті, документи)
-# не мають витісняти сусідів зі сплеску — для віднесення до теми вистачає початку.
+# Truncation of message text in the prompt. Long forwards (articles, documents)
+# must not crowd out neighbours in a burst — the beginning is enough to assign a topic.
 _MSG_PREVIEW_CHARS = 400
 
 _SCHEMA = {
@@ -145,7 +144,7 @@ _SYSTEM = (
 
 
 # ============================================================
-# Сплески
+# Bursts
 # ============================================================
 
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
@@ -158,11 +157,11 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def segment_bursts(messages: list, gap_min: int = BURST_GAP_MIN) -> list[list]:
-    """Порізати впорядковані за часом повідомлення чату на сплески.
+    """Cut time-ordered chat messages into bursts.
 
-    Сплеск — щільна в часі пачка. Це НЕ тема (всередині сплеску їх буває
-    кілька — саме тому далі йде модель), а лише кандидат, який різко звужує
-    обсяг роботи: 3951 повідомлення → 569 сплесків."""
+    A burst is a time-dense batch. It is NOT a topic (there can be several inside a burst
+    — which is why the model goes next), only a candidate that sharply narrows
+    the amount of work: messages -> 569 bursts."""
     bursts: list[list] = []
     current: list = []
     prev: Optional[datetime] = None
@@ -180,7 +179,7 @@ def segment_bursts(messages: list, gap_min: int = BURST_GAP_MIN) -> list[list]:
 
 
 def _batches(burst: list) -> list[list]:
-    """Порізати сплеск на під-пачки, що влазять у контекст моделі."""
+    """Cut a burst into sub-batches that fit the model's context."""
     out: list[list] = []
     cur: list = []
     chars = 0
@@ -197,7 +196,7 @@ def _batches(burst: list) -> list[list]:
 
 
 # ============================================================
-# Кандидати-нитки
+# Candidate threads
 # ============================================================
 
 def _vec(blob: Optional[bytes]) -> Optional[np.ndarray]:
@@ -207,7 +206,7 @@ def _vec(blob: Optional[bytes]) -> Optional[np.ndarray]:
 
 
 def _burst_centroid(conn, burst: list) -> Optional[np.ndarray]:
-    """Середній вектор сплеску з уже порахованих чанків (GPU не потрібен)."""
+    """Mean vector of a burst from already computed chunks (no GPU needed)."""
     ids = [m["id"] for m in burst]
     if not ids:
         return None
@@ -228,14 +227,14 @@ def _burst_centroid(conn, burst: list) -> Optional[np.ndarray]:
 def _candidate_threads(conn, chat_id: int, before: Optional[str],
                        centroid: Optional[np.ndarray],
                        limit: int = OPEN_THREAD_CANDIDATES) -> list[dict]:
-    """Відкриті нитки чату, найсхожіші на сплеск — щоб модель могла сказати
-    «це продовження вчорашньої розмови», а не плодити дублікати теми.
+    """Open threads of the chat most similar to the burst — so the model can say
+    «this continues yesterday's conversation» instead of spawning duplicate topics.
 
-    Косинус тут РАНЖУЄ, а не вирішує: жодного порога, просто порядок показу.
-    Абсолютний поріг на цих даних необґрунтований (див. модульний docstring)."""
+    The cosine RANKS here and does not decide: no threshold, just a display order.
+    An absolute threshold on this data is unjustified (see the module docstring)."""
     rows = conn.execute(
-        # msg_count < THREAD_MAX_MSGS: переповнена нитка більше не продовжується,
-        # інакше вона накопичує чат за місяці і перестає бути темою.
+        # msg_count < THREAD_MAX_MSGS: an overfull thread is no longer continued,
+        # otherwise it accumulates the chat over months and stops being a topic.
         "SELECT id, label, centroid, last_date, msg_count FROM tg_threads "
         "WHERE chat_id = ? AND status = 'open' AND msg_count < ? "
         "AND (? IS NULL OR last_date <= ?) "
@@ -244,7 +243,7 @@ def _candidate_threads(conn, chat_id: int, before: Optional[str],
     ).fetchall()
     cands = []
     for r in rows:
-        # Нитка, що мовчить довше THREAD_IDLE_DAYS до цього сплеску, не кандидат.
+        # A thread silent longer than THREAD_IDLE_DAYS before this burst is not a candidate.
         if before and r["last_date"]:
             gap = _parse_date(before), _parse_date(r["last_date"])
             if gap[0] and gap[1] and (gap[0] - gap[1]) > timedelta(days=THREAD_IDLE_DAYS):
@@ -262,7 +261,7 @@ def _candidate_threads(conn, chat_id: int, before: Optional[str],
 
 
 # ============================================================
-# Розбиття сплеску моделлю
+# Splitting a burst with the model
 # ============================================================
 
 def _preview(text: Optional[str]) -> str:
@@ -293,11 +292,11 @@ def _build_prompt(chat_title: str, batch: list, candidates: list[dict]) -> str:
 
 def split_batch(chat_title: str, batch: list, candidates: list[dict],
                 model: Optional[str] = None) -> Optional[list[dict]]:
-    """Віддати пачку моделі і повернути [{"msgs":[idx…], "label":…,
-    "continues": thread_id|None}] у 1-based індексах пачки.
+    """Hand a batch to the model and return [{"msgs":[idx…], "label":…,
+    "continues": thread_id|None}] in 1-based batch indices.
 
-    None — модель недоступна або відповіла нерозбірливо; викликач тоді лишає
-    пачку однією ниткою. Мовчазної «нитки навмання» тут не буває."""
+    None — the model is unavailable or answered unparseably; the caller then leaves the
+    batch as one thread. There is no silent «random thread» here."""
     from app.services import local_llm
 
     prompt = _build_prompt(chat_title, batch, candidates)
@@ -306,14 +305,14 @@ def split_batch(chat_title: str, batch: list, candidates: list[dict],
         resp = local_llm.generate_json(prompt, schema=_SCHEMA, system=_SYSTEM,
                                        max_tokens=800, model=model or THREAD_MODEL)
     except Exception as exc:
-        logger.warning("[tg_threads] локальна модель не відповіла (%s) — "
-                       "сплеск лишається однією ниткою", exc)
+        logger.warning("[tg_threads] local model did not respond (%s) — "
+                       "the burst stays a single thread", exc)
         return None
 
     data = resp.get("data") or {}
     raw = data.get("threads")
     if not isinstance(raw, list) or not raw:
-        logger.warning("[tg_threads] відповідь без threads — сплеск однією ниткою")
+        logger.warning("[tg_threads] response without threads — burst as a single thread")
         return None
 
     out: list[dict] = []
@@ -330,22 +329,22 @@ def split_batch(chat_title: str, batch: list, candidates: list[dict],
         out.append({
             "msgs": sorted(idxs),
             "label": (item.get("label") or "").strip()[:120] or None,
-            # Модель охоче вигадує id — беремо лише ті, що ми самі показали.
+            # The model readily invents ids — we take only those we showed ourselves.
             "continues": cont if isinstance(cont, int) and cont in valid_ids else None,
         })
-    # Повідомлення, які модель загубила, не мають зникнути з архіву. Позначаємо
-    # їх окремо: це не «модель вирішила, що тема самотня», а «модель промовчала»,
-    # і зливати ці два випадки в один провенанс — значить втратити можливість
-    # потім перерахувати саме промахи.
+    # Messages the model lost must not vanish from the archive. We mark
+    # them separately: this is not «the model decided the topic is lonely» but «the model stayed silent»,
+    # and merging these two cases into one provenance means losing the ability
+    # to recompute exactly the misses later.
     #
-    # Куди їх класти. Окрема нитка на кожного — це гарантовано нитка без
-    # контексту (на першому проході так вийшло повідомлень, 10.дрібна частка архіву).
-    # Сусід по позиції — здогадка, але в переписці сусідні репліки сплеску
-    # майже завжди про те саме, тож вона майже завжди краща за самотність.
-    # Здогадку видно у провенансі (`orphan`), і її можна перерахувати окремо.
+    # Where to put them. A separate thread per message is guaranteed to be a thread without
+    # context (on the first pass that gave messages, 10.a small share of the archive).
+    # A positional neighbour is a guess, but in a conversation adjacent replies of a burst
+    # are almost always about the same thing, so it is almost always better than loneliness.
+    # The guess is visible in provenance (`orphan`) and can be recomputed separately.
     missed = [i for i in range(1, len(batch) + 1) if i not in seen]
     if missed:
-        logger.info("[tg_threads] модель не віднесла %d повідомлень — кладу до сусідів",
+        logger.info("[tg_threads] model did not assign %d messages — placing with neighbours",
                     len(missed))
         for i in missed:
             host = min(out, key=lambda g: min(abs(j - i) for j in g["msgs"]),
@@ -359,16 +358,16 @@ def split_batch(chat_title: str, batch: list, candidates: list[dict],
 
 
 # ============================================================
-# Запис
+# Writing
 # ============================================================
 
 def _fallback_label(messages: list, max_chars: int = 60) -> Optional[str]:
-    """Назва нитки без моделі — початок першого змістовного повідомлення.
+    """A thread title without the model — the start of the first substantive message.
 
-    Потрібна не для краси: назви відкритих ниток — це рівно те, що бачить
-    модель, коли вирішує «чи продовжує цей сплеск щось із раніше». Нитка без
-    назви у списку кандидатів марна, а сплеск з одного повідомлення моделі не
-    показують узагалі (групувати нема з чим), тож інакше він лишався б німим."""
+    Not for beauty: the names of open threads are exactly what the model
+    sees when deciding «does this burst continue something from before». A thread without
+    a name is useless in the candidate list, and a one-message burst is not shown to the model at all
+    (nothing to group with), so otherwise it would stay mute."""
     for m in messages:
         text = " ".join((m["transcript_text"] or "").split())
         if text and not text.startswith("["):
@@ -384,7 +383,7 @@ def _create_thread(conn, chat_id: int, label: Optional[str]) -> int:
 
 
 def _attach(conn, thread_id: int, messages: list, src: str) -> None:
-    """Привʼязати повідомлення до нитки і перерахувати її агрегати."""
+    """Attach a message to a thread and recompute its aggregates."""
     conn.executemany(
         "UPDATE transcriptions SET tg_thread_id = ?, tg_thread_src = ? WHERE id = ?",
         [(thread_id, src, m["id"]) for m in messages])
@@ -392,11 +391,11 @@ def _attach(conn, thread_id: int, messages: list, src: str) -> None:
 
 
 def _refresh_thread(conn, thread_id: int) -> None:
-    """Перерахувати centroid / msg_count / межі дат із фактичного складу нитки.
+    """Recompute centroid / msg_count / date bounds from the thread's actual composition.
 
-    Рахуємо ЗАНОВО, а не інкрементально: повідомлення можна перевіднести
-    (рішення пересматриваемое за задумом), і накопичене середнє тоді розʼїхалось
-    би з реальним складом непомітно."""
+    We count AFRESH, not incrementally: messages can be reassigned
+    (the decision is revisable by design), and an accumulated mean would then silently
+    drift from the real composition."""
     rows = conn.execute(
         "SELECT t.tg_date, ch.embedding FROM transcriptions t "
         "LEFT JOIN chunks ch ON ch.transcription_id = t.id AND ch.chunk_index = 0 "
@@ -420,9 +419,9 @@ def _refresh_thread(conn, thread_id: int) -> None:
         "centroid = COALESCE(?, centroid) WHERE id = ?",
         (len(rows), dates[0] if dates else None, dates[-1] if dates else None,
          centroid_blob, thread_id))
-    # Закриття за обсягом. Нитка, що набрала стелю, більше не продовжується —
-    # наступна розмова піде окремою ниткою (з власною назвою), а не доліпиться
-    # до цієї. Тиша закриває нитку окремо, у close_idle_threads.
+    # Closing by volume. A thread that reached the ceiling is no longer continued —
+    # the next conversation goes into a separate thread (with its own name) and is not stuck
+    # onto this one. Silence closes a thread separately, in close_idle_threads.
     if len(rows) >= THREAD_MAX_MSGS:
         conn.execute("UPDATE tg_threads SET status = 'closed', "
                      "closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP) "
@@ -431,8 +430,8 @@ def _refresh_thread(conn, thread_id: int) -> None:
 
 def close_idle_threads(db_path: str, *, now: Optional[datetime] = None,
                        idle_days: int = THREAD_IDLE_DAYS) -> int:
-    """Закрити нитки, що мовчать довше idle_days. Нічого не видаляє —
-    закрита нитка просто перестає бути кандидатом на продовження."""
+    """Close threads silent longer than idle_days. Deletes nothing —
+    a closed thread simply stops being a continuation candidate."""
     cutoff = ((now or datetime.now()) - timedelta(days=idle_days)).isoformat()
     with get_db_connection(db_path) as conn:
         cur = conn.execute(
@@ -444,11 +443,11 @@ def close_idle_threads(db_path: str, *, now: Optional[datetime] = None,
 
 
 # ============================================================
-# Каскад
+# Cascade
 # ============================================================
 
 def _reply_parent_thread(conn, msg) -> Optional[int]:
-    """Ступінь 0: нитка батька по tg_reply_to. Точно і безкоштовно."""
+    """Step 0: the parent's thread by tg_reply_to. Exact and free."""
     if not msg["tg_reply_to"]:
         return None
     row = conn.execute(
@@ -460,7 +459,7 @@ def _reply_parent_thread(conn, msg) -> Optional[int]:
 
 def assign_burst(conn, chat_id: int, chat_title: str, burst: list, *,
                  model: Optional[str] = None, use_llm: bool = True) -> dict:
-    """Рознести один сплеск по нитках. Повертає зведення для звіту."""
+    """Distribute one burst across threads. Returns a summary for the report."""
     created = 0
     continued = 0
     by_reply = 0
@@ -473,18 +472,18 @@ def assign_burst(conn, chat_id: int, chat_title: str, burst: list, *,
         groups = split_batch(chat_title, batch, candidates, model=model) if use_llm else None
         src = "llm"
         if groups is None:
-            # Деградація без вигадок: уся пачка — одна нитка, і це видно в даних
-            # через tg_thread_src, тож потім можна перерахувати саме їх.
+            # Degradation without inventions: the whole batch is one thread, and this is visible in the data
+            # via tg_thread_src, so exactly these can be recomputed later.
             groups = [{"msgs": list(range(1, len(batch) + 1)), "label": None,
                        "continues": None}]
-            # Пачка з одного повідомлення моделі не потребувала: воно самотнє
-            # тривіально, а не через збій. Змішати це з реальною деградацією —
-            # значить зробити прапорець марним саме тоді, коли він потрібен.
+            # A one-message batch did not need the model: it is lonely
+            # trivially, not because of a failure. Mixing this with real degradation
+            # makes the flag useless exactly when it is needed.
             src = "single" if len(batch) == 1 else "burst"
 
         for g in groups:
             msgs = [batch[i - 1] for i in g["msgs"]]
-            # Ступінь 0 має пріоритет над моделлю: Telegram знає нитку точно.
+            # Step 0 has priority over the model: Telegram knows the thread exactly.
             thread_id = None
             for m in msgs:
                 parent = _reply_parent_thread(conn, m)
@@ -501,7 +500,7 @@ def assign_burst(conn, chat_id: int, chat_title: str, burst: list, *,
                                            g["label"] or _fallback_label(msgs))
                 created += 1
             elif g["label"]:
-                # Нитка живе далі — оновлюємо назву лише якщо її не було.
+                # The thread lives on — update the name only if it had none.
                 conn.execute("UPDATE tg_threads SET label = COALESCE(label, ?) WHERE id = ?",
                              (g["label"], thread_id))
             if msg_src == "llm":
@@ -509,10 +508,10 @@ def assign_burst(conn, chat_id: int, chat_title: str, burst: list, *,
                     msg_src = "orphan"
                 elif len(msgs) == 1:
                     msg_src = "single"
-            # Провенанс поштучний: у групі можуть лежати і рішення моделі, і
-            # дописані сусідством промахи. Один src на всю групу зробив би
-            # здогадку невідрізненною від рішення — а це саме те, заради чого
-            # поле й існує.
+            # Provenance is per message: a group may hold both the model's decisions and
+            # misses appended by adjacency. One src for the whole group would make
+            # the guess indistinguishable from a decision — which is exactly what the
+            # field exists for.
             orphan_idx = set(g.get("orphan_msgs") or [])
             if orphan_idx and msg_src != "reply":
                 decided = [batch[i - 1] for i in g["msgs"] if i not in orphan_idx]
@@ -530,9 +529,9 @@ def assign_burst(conn, chat_id: int, chat_title: str, burst: list, *,
 def backfill(db_path: str, *, chat_id: Optional[int] = None, dry_run: bool = True,
              limit_bursts: Optional[int] = None, model: Optional[str] = None,
              use_llm: bool = True, only_unassigned: bool = True) -> dict:
-    """Прохід по архіву: розкласти TG-повідомлення по нитках.
+    """Pass over the archive: distribute TG messages into threads.
 
-    Ідемпотентний: за замовчуванням чіпає лише повідомлення без нитки."""
+    Idempotent: by default it touches only messages without a thread."""
     started = datetime.now()
     with get_db_connection(db_path) as conn:
         where = ["source_type = 'telegram'", "deleted_at IS NULL", "tg_date IS NOT NULL"]
@@ -575,7 +574,7 @@ def backfill(db_path: str, *, chat_id: Optional[int] = None, dry_run: bool = Tru
             for burst in segment_bursts(msgs):
                 if limit_bursts is not None and done >= limit_bursts:
                     break
-                # Сплеск з одного повідомлення моделі не потребує: групувати нема що.
+                # A one-message burst does not need the model: nothing to group.
                 res = assign_burst(conn, cid, title, burst, model=model,
                                    use_llm=use_llm and len(burst) > 1)
                 for k in totals:
@@ -583,7 +582,7 @@ def backfill(db_path: str, *, chat_id: Optional[int] = None, dry_run: bool = Tru
                 done += 1
                 conn.commit()
                 if done % 25 == 0:
-                    logger.info("[tg_threads] сплесків оброблено: %d/%d", done, total_bursts)
+                    logger.info("[tg_threads] bursts processed: %d/%d", done, total_bursts)
             if limit_bursts is not None and done >= limit_bursts:
                 break
         conn.commit()
@@ -595,21 +594,21 @@ def backfill(db_path: str, *, chat_id: Optional[int] = None, dry_run: bool = Tru
 
 
 # ============================================================
-# Живий інжест
+# Live ingest
 # ============================================================
 
 def assign_incoming(db_path: str, transcription_id: int) -> Optional[int]:
-    """Віднести щойно прийняте повідомлення до нитки — БЕЗ виклику моделі.
+    """Assign a just-accepted message to a thread — WITHOUT calling the model.
 
-    Рішення тут навмисно попереднє (`tg_thread_src='pending'`). Причина у
-    вимозі власника: рішення має бути ПЕРЕСМАТРИВАЄМИМ — повідомлення, схоже
-    на нову тему, може виявитись продовженням після наступних трьох, і
-    безвідкличний вибір на кожну репліку цю можливість убиває. Плюс модель на
-    кожне повідомлення — це рівно та поштучна ціна, заради уникнення якої
-    сплеск і вигадали.
+    The decision here is deliberately provisional (`tg_thread_src='pending'`). The reason is
+    the owner's requirement: the decision must be REVISABLE — a message that looks
+    like a new topic may turn out to be a continuation after the next three, and
+    an irrevocable choice per reply kills that possibility. Besides, a model call per
+    message is exactly the per-item price that the burst
+    was invented to avoid.
 
-    Тому в реальному часі працюють лише точні й безкоштовні ступені, а
-    ``resettle_pending`` перерозкладає сплеск моделлю, коли той договорив."""
+    So only exact and free steps work in real time, and
+    ``resettle_pending`` redistributes the burst with the model once it has finished talking."""
     with get_db_connection(db_path) as conn:
         msg = conn.execute(
             "SELECT id, tg_chat_id, tg_message_id, tg_reply_to, tg_date, transcript_text "
@@ -621,7 +620,7 @@ def assign_incoming(db_path: str, transcription_id: int) -> Optional[int]:
         thread_id = _reply_parent_thread(conn, msg)
         src = "reply"
         if thread_id is None:
-            # Той самий сплеск, що й попереднє повідомлення чату?
+            # The same burst as the previous message of the chat?
             cutoff = None
             ts = _parse_date(msg["tg_date"])
             if ts is not None:
@@ -642,11 +641,11 @@ def assign_incoming(db_path: str, transcription_id: int) -> Optional[int]:
 
 def resettle_pending(db_path: str, *, model: Optional[str] = None,
                      now: Optional[datetime] = None) -> dict:
-    """Перерозкласти моделлю сплески, які вже договорили.
+    """Redistribute with the model the bursts that have finished talking.
 
-    Бере повідомлення з ``tg_thread_src='pending'``, чий сплеск завершився
-    (тиша довша за BURST_GAP_MIN), відвʼязує їх і проганяє звичайним каскадом.
-    Ідемпотентно: те, що вже розклала модель, не чіпає."""
+    Takes messages with ``tg_thread_src='pending'`` whose burst has ended
+    (silence longer than BURST_GAP_MIN), detaches them and runs them through the usual cascade.
+    Idempotent: what the model has already distributed is not touched."""
     cutoff = ((now or datetime.now()) - timedelta(minutes=BURST_GAP_MIN)).isoformat()
     processed = 0
     totals = {"created": 0, "continued": 0, "by_reply": 0}
@@ -679,8 +678,8 @@ def resettle_pending(db_path: str, *, model: Optional[str] = None,
                     totals[k] += res[k]
                 processed += len(burst)
 
-        # Нитки, які спорожніли після відвʼязування, прибирати не треба —
-        # _refresh_thread виставить msg_count=0, і вони не потраплять у видачу.
+        # Threads that became empty after detaching need no cleanup:
+        # _refresh_thread sets msg_count=0, and they do not get into the output.
         for tid in stale_threads:
             if tid:
                 _refresh_thread(conn, tid)
@@ -689,12 +688,12 @@ def resettle_pending(db_path: str, *, model: Optional[str] = None,
 
 
 # ============================================================
-# Читання (для retrieval / RAG)
+# Reading (for retrieval / RAG)
 # ============================================================
 
 def thread_messages(db_path: str, thread_id: int, *, limit: int = 40) -> list[dict]:
-    """Повідомлення нитки в хронологічному порядку — те, чим зшивається
-    питання з відповіддю у видачі."""
+    """Thread messages in chronological order — what stitches
+    a question to its answer in the results."""
     with get_db_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT id, tg_message_id, tg_date, tg_sender, transcript_text "
@@ -747,27 +746,27 @@ def main(argv: Optional[list] = None) -> int:
     default_db = str(Config.BASE_DIR / Config.DATABASE)
 
     p = argparse.ArgumentParser(prog="tg_threads",
-                                description="Нитки розмови в Telegram-чатах (Волна 4.5).")
+                                description="Conversation threads in Telegram chats (Wave 4.5).")
     p.add_argument("--db", default=default_db)
     sub = p.add_subparsers(dest="command", required=True)
 
-    b = sub.add_parser("backfill", help="Розкласти повідомлення по нитках")
-    b.add_argument("--dry-run", action="store_true", help="Порахувати обсяг, нічого не писати")
-    b.add_argument("--chat", type=int, default=None, help="Лише один чат (tg_chat_id)")
-    b.add_argument("--limit-bursts", type=int, default=None, help="Обробити не більше N сплесків")
-    b.add_argument("--model", default=None, help="Перекрити LOCAL_LLM_MODEL")
+    b = sub.add_parser("backfill", help="Distribute messages into threads")
+    b.add_argument("--dry-run", action="store_true", help="Count the volume, write nothing")
+    b.add_argument("--chat", type=int, default=None, help="Only one chat (tg_chat_id)")
+    b.add_argument("--limit-bursts", type=int, default=None, help="Process at most N bursts")
+    b.add_argument("--model", default=None, help="Override LOCAL_LLM_MODEL")
     b.add_argument("--no-llm", action="store_true",
-                   help="Без моделі: сплеск = нитка (для замірів деградації)")
+                   help="No model: burst = thread (for degradation measurements)")
     b.add_argument("--redo", action="store_true",
-                   help="Перерозкласти і вже віднесені повідомлення")
+                   help="Redistribute already assigned messages too")
 
-    r = sub.add_parser("resettle", help="Перерозкласти моделлю сплески, що договорили")
+    r = sub.add_parser("resettle", help="Redistribute with the model the bursts that have finished talking")
     r.add_argument("--model", default=None)
 
-    c = sub.add_parser("close-idle", help="Закрити нитки, що мовчать")
+    c = sub.add_parser("close-idle", help="Close silent threads")
     c.add_argument("--days", type=int, default=THREAD_IDLE_DAYS)
 
-    sub.add_parser("stats", help="Скільки ниток і чим вони віднесені")
+    sub.add_parser("stats", help="How many threads and how they were assigned")
 
     args = p.parse_args(argv)
     if args.command == "backfill":

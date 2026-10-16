@@ -10,7 +10,7 @@ Recall is a **monolithic Flask server** + **2 separate child processes**:
    `app.py` via `subprocess.Popen` (if `TELEGRAM_ENABLED` + a `telegram.session` exists).
    Control API on localhost:5051; posts messages back to Flask `/api/telegram/ingest`.
 3. **`mcp_server.py`** — a separate MCP server: a **read-first** bridge to Recall for
-   Claude Code/Desktop (35 read-only tools; the write surface was removed in Wave 1). The stdio connector (**default**) is spawned by the client itself
+   Claude Code/Desktop (41 read-only tools; the write surface was removed in Wave 1). The stdio connector (**default**) is spawned by the client itself
    (`claude mcp add`, user-scope) — no need to start it separately; http+key is optional.
    Hybrid: reads SQLite directly, while writes/live/AI actions are proxied to the running `app.py`.
 
@@ -46,6 +46,8 @@ proxies HTTP to the running `app.py` (hybrid).
   fetch+reader, NOT EventSource** (werkzeug keep-alive deadlock — see frontend.md).
 - **Background tasks**: `job_queue` on top of `ThreadPoolExecutor(max_workers=2)`. State machine
   queued→running→completed/failed/cancelled. Cancel is cooperative (`job.is_cancelled()`).
+- **Language**: code, comments and logs are English; user-facing server texts via `tr()` (uk/en catalog `app/core/i18n_catalog/`,
+  incl. `svc_*` service modules); MCP runs with `RECALL_UI_LANG=en` + `X-Recall-Lang: en` (see root-processes.md); guard `tests/test_code_english.py`.
 - **Logs**: `whisper_app.log` (10MB×5). anthropic/httpx/hf are silenced; torchaudio→CRITICAL.
 - **Rate-limit**: flask_limiter memory-backed, per IP. 429 → JSON.
 - **Security**: security headers on HTML only (CSP not on JSON/files, so as not to break fetch);

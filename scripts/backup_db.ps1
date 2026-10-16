@@ -1,45 +1,45 @@
-# backup_db.ps1 — ЩОДЕННИЙ легкий бекап SQLite БД Recall (whisper_history.db).
+# backup_db.ps1 - DAILY light backup of the Recall SQLite DB (whisper_history.db).
 #
-# Навіщо окремий скрипт від backup.ps1:
-#   backup.ps1 — важкий тижневий прогін (recordings/uploads/db_backups/...).
-#   Вікно втрати даних до 7 днів неприйнятне саме для БД — вона мала (десятки-
-#   сотні МБ) і містить транскрипти/сутності/action items, які повторно не
-#   отримати (на відміну від медіафайлів, які фізично лишаються на диску).
-#   Тому БД бекапиться цим скриптом ЩОДНЯ (окремий Scheduled Task), а важкий
-#   restic-прогін медіа лишається тижневим у backup.ps1.
+# Why a separate script from backup.ps1:
+#   backup.ps1 - the heavy weekly run (recordings/uploads/db_backups/...).
+#   A data-loss window of up to 7 days is unacceptable for the DB specifically - it is small (tens to
+#   hundreds of MB) and holds transcripts/entities/action items that cannot be
+#   obtained again (unlike media files, which physically stay on disk).
+#   So the DB is backed up by this script DAILY (a separate Scheduled Task), and the heavy
+#   restic run of the media stays weekly in backup.ps1.
 #
-# Консистентність:
-#   Копіюється НЕ сирим файлом (Copy-Item живого .db поруч із -wal/-shm — у
-#   WAL-режимі це може дати биту копію під активним записом), а через SQLite
-#   backup-механізм VACUUM INTO — атомарний знімок на рівні самої БД, коректний
-#   навіть якщо в цей момент триває запис. Виконується через
-#   .venv\Scripts\python.exe (sqlite3 з stdlib) — сам python.exe гарантовано
-#   є в проєкті, окремий sqlite3.exe в PATH на цій машині відсутній.
+# Consistency:
+#   It is copied NOT as a raw file (Copy-Item of a live .db next to -wal/-shm - in
+#   WAL mode this can give a broken copy under active writing), but via the SQLite
+#   backup mechanism VACUUM INTO - an atomic snapshot at the level of the DB itself, correct
+#   even if a write is in progress at that moment. Runs through
+#   .venv\Scripts\python.exe (sqlite3 from the stdlib) - python.exe itself is guaranteed
+#   to be in the project, a separate sqlite3.exe is absent from PATH on this machine.
 #
-# Що робить:
-#   1) VACUUM INTO -> db_backups\whisper_history-<stamp>.db (атомарний знімок).
-#   2) PRAGMA integrity_check на щойно створеному знімку — якщо НЕ "ok",
-#      знімок вважається битим, видаляється, скрипт завершується з помилкою
-#      (краще без бекапу за цей день, ніж тихо зберегти биту копію).
-#   3) Ротація локальних знімків: лишає $KeepLocal останніх (за замовчуванням 30
-#      -> місяць щоденних знімків), решту видаляє.
-#   4) (опційно, -OffsiteBackup, за замовчуванням увімкнено) Швидкий offsite
-#      restic backup --tag daily ЛИШЕ по db_backups\ (не по важких медіа) у
-#      той самий репозиторій, що й backup.ps1 (rest:http://127.0.0.1:8765/
-#      через rclone serve restic -> gdrive:WhisperBackup/restic). Дедуплікація
-#      restic робить це дешевим day-to-day (тільки дельта БД, не вся тека).
-#      forget --keep-daily $KeepDailyOffsite --prune для ротації offsite-версій.
-#      Якщо restic/rclone або DPAPI-пароль відсутні — offsite-крок ПРОПУСКАЄТЬСЯ
-#      з попередженням у лог (локальний VACUUM-знімок все одно створюється).
-#   5) Лог у logs\backup-db-YYYYMMDD-HHmmss.log.
+# What it does:
+#   1) VACUUM INTO -> db_backups\whisper_history-<stamp>.db (an atomic snapshot).
+#   2) PRAGMA integrity_check on the freshly created snapshot - if NOT "ok",
+#      the snapshot is considered broken, deleted, and the script ends with an error
+#      (better no backup for that day than silently keeping a broken copy).
+#   3) Rotation of local snapshots: keeps the last $KeepLocal (default 30
+#      -> a month of daily snapshots), deletes the rest.
+#   4) (optional, -OffsiteBackup, enabled by default) A fast offsite
+#      restic backup --tag daily ONLY over db_backups\ (not the heavy media) into
+#      the same repository as backup.ps1 (rest:http://127.0.0.1:8765/
+#      via rclone serve restic -> gdrive:WhisperBackup/restic). restic deduplication
+#      makes this cheap day-to-day (only the DB delta, not the whole folder).
+#      forget --keep-daily $KeepDailyOffsite --prune rotates the offsite versions.
+#      If restic/rclone or the DPAPI password is missing - the offsite step is SKIPPED
+#      with a warning in the log (the local VACUUM snapshot is still created).
+#   5) Log to logs\backup-db-YYYYMMDD-HHmmss.log.
 #
-# ProjectRoot параметризовано так само, як у backup.ps1: -ProjectRoot <path>
-# або env RECALL_PROJECT_ROOT, за замовчуванням E:\Projects\Recall.
+# ProjectRoot is parameterized the same way as in backup.ps1: -ProjectRoot <path>
+# or env RECALL_PROJECT_ROOT, by default E:\Projects\Recall.
 #
-# Запуск вручну:      pwsh -NoProfile -File .\scripts\backup_db.ps1
-# Тільки локально
-# (без offsite):       pwsh -NoProfile -File .\scripts\backup_db.ps1 -OffsiteBackup:$false
-# Scheduled Task (щодня, наприклад 03:15):
+# Run manually:      pwsh -NoProfile -File .\scripts\backup_db.ps1
+# Local only
+# (without offsite):       pwsh -NoProfile -File .\scripts\backup_db.ps1 -OffsiteBackup:$false
+# Scheduled Task (daily, for example 03:15):
 #   pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Projects\Recall\scripts\backup_db.ps1"
 
 param(
@@ -83,35 +83,35 @@ try {
     Log "=== Recall DB backup started (ProjectRoot=$ProjectRoot) ==="
 
     if (-not (Test-Path $LiveDb)) {
-        throw "Live DB не знайдено: $LiveDb"
+        throw "Live DB not found: $LiveDb"
     }
 
     $pyExe = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
     if (-not (Test-Path $pyExe)) {
-        throw ".venv\Scripts\python.exe не найден; не можу зробити VACUUM INTO"
+        throw ".venv\Scripts\python.exe not found; cannot do VACUUM INTO"
     }
 
-    # 1) Консистентний знімок через VACUUM INTO (атомарно, без блокувань,
-    #    коректно навіть під активним WAL-записом).
+    # 1) A consistent snapshot via VACUUM INTO (atomic, no locks,
+    #    correct even under an active WAL write).
     $DbSnap = Join-Path $DbBackupDir "whisper_history-$Stamp.db"
     Log "VACUUM INTO $DbSnap"
     $vacuumSql = "VACUUM INTO '$($DbSnap.Replace('\','/').Replace("'","''"))';"
     & $pyExe -c "import sqlite3,sys; c=sqlite3.connect(r'$LiveDb'); c.execute(sys.argv[1]); c.close()" $vacuumSql
-    if ($LASTEXITCODE -ne 0) { throw "VACUUM INTO завершився з кодом $LASTEXITCODE" }
-    if (-not (Test-Path $DbSnap)) { throw "VACUUM INTO не створив файл $DbSnap" }
+    if ($LASTEXITCODE -ne 0) { throw "VACUUM INTO finished with code $LASTEXITCODE" }
+    if (-not (Test-Path $DbSnap)) { throw "VACUUM INTO did not create the file $DbSnap" }
     Log "DB snapshot size: $([math]::Round((Get-Item $DbSnap).Length/1MB,1)) MB"
 
-    # 2) integrity_check на щойно створеному знімку — гарантія, що це не
-    #    просто "файл існує", а валідна SQLite БД.
-    Log "PRAGMA integrity_check на $DbSnap"
+    # 2) integrity_check on the freshly created snapshot - a guarantee that this is not
+    #    just "the file exists" but a valid SQLite DB.
+    Log "PRAGMA integrity_check on $DbSnap"
     $checkResult = & $pyExe -c "import sqlite3; c=sqlite3.connect(r'$DbSnap'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.close()"
     Log "integrity_check result: $checkResult"
     if ($checkResult -ne 'ok') {
         Remove-Item $DbSnap -Force -ErrorAction SilentlyContinue
-        throw "integrity_check провалено ($checkResult) — биту копію видалено, бекап за цей запуск НЕ створено"
+        throw "integrity_check failed ($checkResult) - the broken copy was deleted, NO backup was created for this run"
     }
 
-    # 3) Ротація локальних знімків.
+    # 3) Rotation of local snapshots.
     $oldSnaps = Get-ChildItem $DbBackupDir -Filter 'whisper_history-*.db' |
         Sort-Object LastWriteTime -Descending |
         Select-Object -Skip $KeepLocal
@@ -120,9 +120,9 @@ try {
         Remove-Item $s.FullName -Force -ErrorAction SilentlyContinue
     }
 
-    # 4) Offsite (опційно) — легкий restic backup лише по db_backups\, тег daily.
+    # 4) Offsite (optional) - a light restic backup only over db_backups\, tag daily.
     if (-not $OffsiteBackup) {
-        Log "OffsiteBackup вимкнено параметром — локальний знімок готовий, offsite пропущено."
+        Log "OffsiteBackup disabled by the parameter - the local snapshot is ready, offsite skipped."
         Log "=== Recall DB backup OK (local-only) ==="
         exit 0
     }
@@ -131,7 +131,7 @@ try {
     $Restic = Resolve-ToolPath -Name 'restic' -PreferredFull 'C:\bin\restic.exe'
     $Rclone = Resolve-ToolPath -Name 'rclone' -PreferredFull 'C:\bin\rclone.exe'
     if (-not $Restic -or -not $Rclone -or -not (Test-Path $PasswordDpapiFile)) {
-        Log "WARN: restic/rclone/DPAPI-пароль недоступні — offsite-крок пропущено. Локальний VACUUM-знімок у $DbBackupDir є."
+        Log "WARN: restic/rclone/DPAPI password unavailable - offsite step skipped. The local VACUUM snapshot is in $DbBackupDir."
         Log "=== Recall DB backup OK (local-only, offsite skipped) ==="
         exit 0
     }
@@ -162,14 +162,14 @@ try {
             $alive = $true; break
         } catch { Start-Sleep -Milliseconds 500 }
     }
-    if (-not $alive) { throw "rclone serve не відповідає на 127.0.0.1:$RclonePort" }
+    if (-not $alive) { throw "rclone serve is not responding on 127.0.0.1:$RclonePort" }
     Log "rclone serve PID=$($rcloneProc.Id) ready"
 
     $resticOut = "$LogDir\restic-backup-db-$Stamp.out"
     $resticErr = "$LogDir\restic-backup-db-$Stamp.err"
     $resticArgs = @('-r',$ResticRepo,'backup','--tag','daily','--verbose=1',
         '--exclude','*.tmp','--exclude','*.partial', $DbBackupDir)
-    Log "restic backup --tag daily (лише db_backups\, виведення -> $(Split-Path -Leaf $resticOut))"
+    Log "restic backup --tag daily (only db_backups\, output -> $(Split-Path -Leaf $resticOut))"
     $proc = Start-Process -FilePath $Restic -ArgumentList $resticArgs `
         -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $resticOut -RedirectStandardError $resticErr
@@ -180,13 +180,13 @@ try {
     }
     if ($proc.ExitCode -ne 0) { throw "restic backup (daily) exited with code $($proc.ExitCode)" }
 
-    Log "restic unlock (чистимо stale locks якщо є)"
+    Log "restic unlock (cleaning stale locks if any)"
     Start-Process -FilePath $Restic -ArgumentList @('-r',$ResticRepo,'unlock') `
         -NoNewWindow -Wait -RedirectStandardOutput "$LogDir\restic-unlock-db-$Stamp.out" `
         -RedirectStandardError "$LogDir\restic-unlock-db-$Stamp.err" | Out-Null
 
-    # Ротація offsite daily-тегованих знімків. Тег --keep-tag тримає лише
-    # daily-тег обмеженим, weekly-тег (з backup.ps1) не чіпаємо.
+    # Rotation of offsite daily-tagged snapshots. The --keep-tag keeps only the
+    # daily tag bounded, the weekly tag (from backup.ps1) is not touched.
     Log "--- forget (daily) + prune ---"
     $forgetOut = "$LogDir\restic-forget-db-$Stamp.out"
     $forgetProc = Start-Process -FilePath $Restic -ArgumentList @('-r',$ResticRepo,'forget',

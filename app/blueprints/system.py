@@ -34,21 +34,21 @@ from app.utils.proc import NO_WINDOW
 logger = logging.getLogger(__name__)
 system_bp = Blueprint('system', __name__)
 
-# Спільне з /api/health — одна версія на весь blueprint (T8.1).
-APP_VERSION = "4.16.1"
+# Shared with /api/health — one version for the whole blueprint (T8.1).
+APP_VERSION = "4.17.0"
 
 
 @system_bp.route('/', defaults={'_path': ''}, methods=['GET'])
 @system_bp.route('/<path:_path>', methods=['GET'])
 def app_shell(_path):
-    """Новий клієнтський каркас (shell). Віддається на будь-який не-API шлях,
-    щоб клієнтський роутер міг обробити deep-links на холодному старті
-    (напр. /transcript/2125-..., /entities/5).
+    """New client shell. Served on any non-API path,
+    so the client router can handle deep links on a cold start
+    (e.g. /transcript/2125-..., /entities/5).
 
-    Точніші правила (Flask static, конкретні /api/... маршрути, /favicon.ico,
-    /sw.js) мають вищий пріоритет за специфічністю і матчаться першими.
-    Guard на 'api/' — страхувальна сітка: невідомий /api/... має повертати
-    JSON-404, а не HTML-shell (інакше fetch-споживачі мовчки ламаються)."""
+    More specific rules (Flask static, concrete /api/... routes, /favicon.ico,
+    /sw.js) have higher priority by specificity and are matched first.
+    The guard on 'api/' is a safety net: an unknown /api/... must return
+    a JSON 404, not the HTML shell (otherwise fetch consumers break silently)."""
     if _path.startswith('api/'):
         abort(404)
     if current_app.config.get('HEADLESS'):
@@ -58,7 +58,7 @@ def app_shell(_path):
 
 @system_bp.route('/favicon.ico')
 def favicon():
-    """Favicon з static/ папки — usnuvaye 404 при default GET."""
+    """Favicon from the static/ folder — avoids a 404 on a default GET."""
     from flask import send_from_directory
     return send_from_directory(
         os.path.join(current_app.root_path, 'static'),
@@ -69,9 +69,9 @@ def favicon():
 
 @system_bp.route('/sw.js')
 def service_worker():
-    """Service worker — мусить віддаватись з кореня, щоб scope був '/'.
-    Якщо віддавати з /static/sw.js — scope обмежується '/static/*'.
-    Альтернатива: header Service-Worker-Allowed: /, але прямий маршрут чистіший.
+    """Service worker — must be served from the root so the scope is '/'.
+    If served from /static/sw.js, the scope is limited to '/static/*'.
+    Alternative: the Service-Worker-Allowed: / header, but a direct route is cleaner.
     """
     if current_app.config.get('HEADLESS'):
         return jsonify(error="headless", hint="API-only profile"), 404
@@ -81,7 +81,7 @@ def service_worker():
         'sw.js',
         mimetype='application/javascript',
     )
-    # Не кешувати самого SW — щоб оновлення коду SW долетіли швидко.
+    # Do not cache the SW itself — so that SW code updates arrive quickly.
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     resp.headers['Service-Worker-Allowed'] = '/'
     return resp
@@ -89,7 +89,7 @@ def service_worker():
 
 @system_bp.route('/api/health', methods=['GET'])
 def health_check():
-    """Стан системи."""
+    """System state."""
     health = {
         "status": "ok",
         "version": APP_VERSION,
@@ -106,37 +106,37 @@ def health_check():
 
 
 def _check_database_ready(db_path):
-    """Робота-перевірка без побічного створення файлу БД.
+    """Робота check without side-effect creation of the DB file.
 
-    На відміну від старого шляху через `get_db_connection` (автостворює
-    порожній файл на `sqlite3.connect` за замовчуванням), тут відкриваємо
-    ІСНУЮЧИЙ файл у режимі `mode=rw` — інакше стан 'error' був би недосяжний
-    на першому запиті до автостворенної порожньої БД (звіт S3, знахідка 7).
+    Unlike the old path via `get_db_connection` (which auto-creates an
+    empty file on `sqlite3.connect` by default), here we open the
+    EXISTING file in `mode=rw` — otherwise the 'error' state would be unreachable
+    on the first request against an auto-created empty DB (report S3, finding 7).
 
-    Придатною вважається лише БД, де є таблиця `schema_versions` і
-    `MAX(version) >= 1` (звіт S3, знахідка 7 — порожній файл без схеми раніше
-    теж давав 'ok'). `/api/health` викликає той самий хелпер (Round 3, історія 03).
-    Повертає 'ok'/'error'; причина лише в лог (T7.4), клієнту не витікає.
+    A DB is considered usable only if it has a `schema_versions` table and
+    `MAX(version) >= 1` (report S3, finding 7 — an empty file without a schema used to
+    give 'ok' as well). `/api/health` calls the same helper (Round 3, story 03).
+    Returns 'ok'/'error'; the reason goes to the log only (T7.4), it does not leak to the client.
     """
     if not db_path or db_path == ':memory:':
-        logger.warning("/api/ready: DATABASE config відсутній або ':memory:'")
+        logger.warning("/api/ready: DATABASE config is missing or ':memory:'")
         return "error"
     try:
         uri = pathlib.Path(db_path).absolute().as_uri() + '?mode=rw'
         conn = sqlite3.connect(uri, uri=True)
     except Exception as e:
-        # T7.4: лог з причиною, клієнту йде лише узагальнений статус (без str(exc)).
-        logger.warning(f"/api/ready: перевірка БД не пройшла ({db_path}): {e}")
+        # T7.4: log with the reason, the client gets only a generic status (no str(exc)).
+        logger.warning(f"/api/ready: DB check failed ({db_path}): {e}")
         return "error"
     try:
         row = conn.execute('SELECT MAX(version) FROM schema_versions').fetchone()
         version = row[0] if row and row[0] is not None else 0
         if version < 1:
-            logger.warning(f"/api/ready: БД без схеми ({db_path})")
+            logger.warning(f"/api/ready: DB without a schema ({db_path})")
             return "error"
         return "ok"
     except Exception as e:
-        logger.warning(f"/api/ready: перевірка схеми БД не пройшла ({db_path}): {e}")
+        logger.warning(f"/api/ready: DB schema check failed ({db_path}): {e}")
         return "error"
     finally:
         conn.close()
@@ -144,16 +144,16 @@ def _check_database_ready(db_path):
 
 @system_bp.route('/api/ready', methods=['GET'])
 def ready_check():
-    """Готовність до обслуговування трафіку (T03 config-registry-profiles).
+    """Робота to serve traffic (T03 config-registry-profiles).
 
-    На відміну від /api/health (статичний "ок, живий"), тут перевіряється
-    фактична готовність компонентів за станом `state.робота` (пишеться
-    в app.py по фазах старту) + живий SELECT 1 на кожен виклик — цей шматок
-    перекриває поле checks.database, решта полів беруться зі знімку стану.
+    Unlike /api/health (a static "ok, alive"), this checks
+    the actual робота of components by the `state.робота` state (written
+    in app.py by startup phases) + a live SELECT 1 on every call — that piece
+    overrides the checks.database field, the other fields come from the state snapshot.
 
-    `migrations` навмисно не входить у контракт (робота-contract-03):
-    станом 'error' цей ключ ніколи не буває — виняток з `app/db/migrations.py`
-    вбиває boot раніше, ніж робота встигає прочитати результат.
+    `migrations` is deliberately not part of the contract (робота-contract-03):
+    this key is never in the 'error' state — an exception from `app/db/migrations.py`
+    kills boot before робота gets to read the result.
     """
     робота = getattr(state, 'робота', None)
     if робота is None:
@@ -186,13 +186,13 @@ def ready_check():
 
 @system_bp.route('/api/models', methods=['GET'])
 def get_models():
-    """Список Whisper моделей."""
+    """List of Whisper models."""
     return jsonify(state.whisper_manager.get_available_models())
 
 
 @system_bp.route('/api/download_model', methods=['POST'])
 def download_model():
-    """Завантажити модель."""
+    """Download a model."""
     data = request.json
     model_name = data.get('model_name')
     if not model_name:
@@ -204,9 +204,9 @@ def download_model():
 
 @system_bp.route('/api/models/update-status', methods=['GET'])
 def models_update_status():
-    """Кешований статус оновлення faster-whisper (без мережі). Заповнюється
-    фоновим стартовим чеком (раз на ~2 тижні). Header показує рядок, якщо є
-    новіша версія (= можливі нові моделі)."""
+    """Cached faster-whisper update status (no network). Filled in
+    by a background startup check (once per ~2 weeks). The header shows a line if there is
+    a newer version (= possible new models)."""
     from app.services import model_updates
     path = current_app.config.get('MODEL_UPDATE_STATE', 'model_update_state.json')
     return jsonify(model_updates.read_status(path))
@@ -214,7 +214,7 @@ def models_update_status():
 
 @system_bp.route('/api/models/check-updates', methods=['POST'])
 def models_check_updates():
-    """Примусово перевірити PyPI зараз (кнопка «перевірити» у Налаштуваннях)."""
+    """Force a PyPI check now (the "check" button in Settings)."""
     from app.services import model_updates
     path = current_app.config.get('MODEL_UPDATE_STATE', 'model_update_state.json')
     return jsonify(model_updates.check_now(path))
@@ -222,35 +222,35 @@ def models_check_updates():
 
 @system_bp.route('/api/system_info', methods=['GET'])
 def system_info():
-    """Інформація про систему."""
+    """System information."""
     return jsonify(state.whisper_manager.get_system_info())
 
 
-# ---- T8.1 (Волна 4): діагностичний пакет ------------------------------
-# Простий варіант з REMEDIATION_PLAN (без Sentry): один zip з останніми
-# рядками файлових логів трьох процесів (app.py/telegram_listener.py/
-# mcp_server.py — див. app/core/logger.py, telegram_listener.py:43-70,
-# mcp_server.py:41-74) + system_info + версія/коміт, для ручної відправки
-# при жалобі. НІКОЛИ не включає транскрипти/БД/.env — лише короткий
-# хвіст логів, пропущений через redaction нижче.
+# ---- T8.1 (Wave 4): diagnostic package ------------------------------
+# The simple variant from REMEDIATION_PLAN (no Sentry): one zip with the latest
+# lines of the file logs of three processes (app.py/telegram_listener.py/
+# mcp_server.py — see app/core/logger.py, telegram_listener.py:43-70,
+# mcp_server.py:41-74) + system_info + version/commit, for manual sending
+# with a complaint. NEVER includes transcripts/DB/.env — only a short
+# log tail, passed through the redaction below.
 DIAGNOSTIC_LOG_TAIL_LINES = 500
 
-# arcname у zip -> шлях відносно кореня проєкту (current_app.root_path).
-# whisper_ui.log — конфігурований (config.LOG_FILE), інші два — фіксовані
-# імена окремих процесів (навмисно різні файли, щоб уникнути WinError 32
-# при одночасному rollover з кількох процесів — див. коментарі там).
+# arcname in the zip -> path relative to the project root (current_app.root_path).
+# whisper_ui.log is configurable (config.LOG_FILE), the other two are fixed
+# names of separate processes (deliberately different files, to avoid WinError 32
+# on simultaneous rollover from several processes — see the comments there).
 _DIAGNOSTIC_LOG_SOURCES = (
-    ("whisper_ui.log", None),  # None -> читається з current_app.config['LOG_FILE']
+    ("whisper_ui.log", None),  # None -> read from current_app.config['LOG_FILE']
     ("telegram_listener.log", "telegram_listener.log"),
     ("mcp_server.log", "mcp_server.log"),
 )
 
-# Значення, схожі на ключі/токени/хеші — маскуємо перед пакуванням.
-# 1) "голі" Anthropic-ключі (sk-ant-...), навіть якщо трапляються поза
-#    парою ім'я=значення (напр. у тексті помилки SDK).
+# Values that look like keys/tokens/hashes — masked before packing.
+# 1) "bare" Anthropic keys (sk-ant-...), even when they occur outside a
+#    name=value pair (e.g. in an SDK error text).
 _RE_BARE_ANTHROPIC_KEY = re.compile(r'sk-ant-[A-Za-z0-9_\-]{10,}')
-# 2) пари ІМ'Я=значення / ІМ'Я: значення, де ІМ'Я виглядає як секрет:
-#    *_KEY, *_TOKEN, *_HASH, *_SECRET, *_PASSWORD, а також api_id/api_hash
+# 2) NAME=value / NAME: value pairs where NAME looks like a secret:
+#    *_KEY, *_TOKEN, *_HASH, *_SECRET, *_PASSWORD, as well as api_id/api_hash
 #    (TELEGRAM_API_ID, TELEGRAM_API_HASH, ANTHROPIC_API_KEY, SECRET_KEY, …).
 _RE_SECRET_ASSIGNMENT = re.compile(
     r'(?i)\b([A-Za-z][\w.]*(?:api[_-]?key|api[_-]?hash|api[_-]?id|secret|token|'
@@ -259,14 +259,14 @@ _RE_SECRET_ASSIGNMENT = re.compile(
 
 
 def _redact_secrets(line: str) -> str:
-    """Маскує значення, схожі на ключі/токени/хеші, в одному рядку логу."""
+    """Masks values that look like keys/tokens/hashes in a single log line."""
     line = _RE_BARE_ANTHROPIC_KEY.sub('sk-ant-***REDACTED***', line)
     line = _RE_SECRET_ASSIGNMENT.sub(r'\1\2***REDACTED***', line)
     return line
 
 
 def _tail_redacted(path: str, max_lines: int) -> str:
-    """Останні max_lines рядків файлу, кожен пропущений через redaction."""
+    """The last max_lines lines of a file, each passed through redaction."""
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     tail = lines[-max_lines:]
@@ -274,7 +274,7 @@ def _tail_redacted(path: str, max_lines: int) -> str:
 
 
 def _git_commit_short():
-    """Короткий git-коміт, якщо дешево дістати (repo є, git у PATH). None інакше."""
+    """Short git commit, if cheap to get (repo exists, git in PATH). None otherwise."""
     try:
         res = subprocess.run(
             ['git', 'rev-parse', '--short', 'HEAD'],
@@ -290,8 +290,8 @@ def _git_commit_short():
 
 @system_bp.route('/api/system/diagnostic-package', methods=['GET'])
 def diagnostic_package():
-    """Zip для ручної відправки при жалобі: хвости логів (redacted) +
-    system_info + версія/коміт + manifest. Кнопка в Налаштуваннях (T8.1)."""
+    """Zip for manual sending with a complaint: log tails (redacted) +
+    system_info + version/commit + manifest. A button in Settings (T8.1)."""
     buf = io.BytesIO()
     included_logs = []
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -303,7 +303,7 @@ def diagnostic_package():
             try:
                 content = _tail_redacted(path, DIAGNOSTIC_LOG_TAIL_LINES)
             except OSError as e:
-                logger.warning(f"Не вдалося прочитати лог {path} для діагностичного пакету: {e}")
+                logger.warning(f"Failed to read log {path} for the diagnostic package: {e}")
                 continue
             zf.writestr(f"logs/{arcname}", content)
             included_logs.append(arcname)
@@ -334,17 +334,17 @@ def diagnostic_package():
 
 @system_bp.route('/api/system_stats', methods=['GET'])
 def get_system_stats():
-    """Snapshot CPU/GPU/RAM (Phase 2: non-blocking, читає з SystemMonitor)."""
+    """Snapshot CPU/GPU/RAM (Phase 2: non-blocking, reads from SystemMonitor)."""
     try:
         return jsonify(state.system_monitor.get_snapshot())
     except Exception as e:
-        logger.error(f"Помилка отримання статистики: {e}")
+        logger.error(f"Error getting statistics: {e}")
         return jsonify({"success": False, "error": tr("core.system.stats_failed")}), 500
 
 
 @system_bp.route('/api/polish/availability', methods=['GET'])
 def polish_availability():
-    """Доступність Claude polish + перелік моделей (Phase 4.4+)."""
+    """Claude polish availability + list of models (Phase 4.4+)."""
     return jsonify({
         "available": text_polishing.is_available(),
         "default_model": get_default_model(),
@@ -379,7 +379,7 @@ def polish_availability():
 
 @system_bp.route('/api/metrics', methods=['GET'])
 def get_metrics():
-    """Prometheus-сумісний metrics endpoint (Phase 6.3)."""
+    """Prometheus-compatible metrics endpoint (Phase 6.3)."""
     active_jobs = len(state.job_queue.list(active_only=True))
     snap = state.system_monitor.get_snapshot()
     gauges = {

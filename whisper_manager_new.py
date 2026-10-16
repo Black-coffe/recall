@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-ModernWhisperManager — менеджер моделей Whisper с pluggable backend.
+ModernWhisperManager — a Whisper model manager with a pluggable backend.
 
 Backends:
-- "faster" — faster-whisper (CTranslate2). 3-5x быстрее на GPU, ниже VRAM.
-- "openai" — официальный openai-whisper (референсная реализация, fallback).
+- "faster" — faster-whisper (CTranslate2). 3-5x faster on GPU, lower VRAM.
+- "openai" — the official openai-whisper (reference implementation, fallback).
 
-Контракт API сохранён: app.py не меняет вызовы.
-Параллельность: load_model сериализован, transcribe идёт под семафором.
+API contract preserved: app.py does not change its calls.
+Parallelism: load_model is serialized, transcribe runs under a semaphore.
 """
 
 import os
@@ -97,12 +97,12 @@ def _repo_cached(repo: str) -> bool:
 
 
 def _join_names_within_budget(names, count_tokens: Callable[[str], int], budget: int) -> str:
-    """Склеїти імена через кому, обрізавши список за межею імені в ``budget`` токенів.
+    """Join names with commas, truncating the list at a name boundary within ``budget`` tokens.
 
-    faster-whisper сам ріже ``hotwords`` до ``max_length // 2 - 1`` токенів хвостом
-    посеред імені, а ``initial_prompt`` у послідовному режимі — з голови
-    (``previous_tokens[-(max_length // 2 - 1):]``), тобто губить перші, найважливіші
-    імена. Тому список обрізаємо самі, цілими іменами, у тому ж бюджеті."""
+    faster-whisper itself cuts ``hotwords`` to ``max_length // 2 - 1`` tokens from the tail
+    in the middle of a name, and ``initial_prompt`` in sequential mode — from the head
+    (``previous_tokens[-(max_length // 2 - 1):]``), i.e. it loses the first, most important
+    names. So we truncate the list ourselves, by whole names, within the same budget."""
     kept: List[str] = []
     for name in names:
         name = (name or "").strip()
@@ -119,13 +119,13 @@ def _join_names_within_budget(names, count_tokens: Callable[[str], int], budget:
 # ============================================================================
 
 class WhisperBackend(ABC):
-    """Базовый интерфейс backend'а Whisper."""
+    """Base interface of a Whisper backend."""
 
     name: str = "abstract"
 
     @abstractmethod
     def load(self, model_name: str, device: str) -> Any:
-        """Загрузить модель в память. Возвращает handle, который потом передаётся в transcribe."""
+        """Load the model into memory. Returns a handle that is later passed to transcribe."""
 
     @abstractmethod
     def transcribe(
@@ -137,28 +137,28 @@ class WhisperBackend(ABC):
         progress_callback: Optional[Callable] = None,
         decode_options: Optional[Dict] = None,
     ) -> Dict:
-        """Транскрибировать. Должен вернуть {text, segments, language}.
+        """Transcribe. Must return {text, segments, language}.
 
-        ``decode_options`` — словник/мова (K1, див. ``transcribe_with_progress``)."""
+        ``decode_options`` — vocabulary/language (K1, see ``transcribe_with_progress``)."""
 
     @abstractmethod
     def supports_batched(self) -> bool:
-        """Поддерживает ли backend batched inference для длинных файлов."""
+        """Whether the backend supports batched inference for long files."""
 
     def unload(self, model_handle: Any) -> None:
-        """Освободить ресурсы (опционально)."""
+        """Free resources (optional)."""
         del model_handle
 
 
 class OpenAIWhisperBackend(WhisperBackend):
-    """Референсный openai-whisper. Используется как fallback."""
+    """Reference openai-whisper. Used as a fallback."""
 
     name = "openai"
 
     def __init__(self):
         import whisper  # lazy
-        # whisper.audio кличе ffmpeg на кожен чанк власним `run` — без цього
-        # під pythonw.exe блимає консоль на кожні 5 хв аудіо.
+        # whisper.audio calls ffmpeg for every chunk with its own `run` — without this
+        # under pythonw.exe the console flashes every 5 minutes of audio.
         silence_openai_whisper_console_windows()
         self._whisper = whisper
 
@@ -168,7 +168,7 @@ class OpenAIWhisperBackend(WhisperBackend):
     def transcribe(self, model_handle, audio_path, language, task, progress_callback=None,
                    decode_options=None):
         if decode_options:
-            logger.debug("openai backend ігнорує decode_options %s", sorted(decode_options))
+            logger.debug("openai backend ignores decode_options %s", sorted(decode_options))
         if progress_callback:
             progress_callback({"status": "processing", "progress": 50, "message": "Transcribing audio..."})
 
@@ -194,12 +194,12 @@ class OpenAIWhisperBackend(WhisperBackend):
 
 
 class FasterWhisperBackend(WhisperBackend):
-    """faster-whisper (CTranslate2). Основной backend для скорости."""
+    """faster-whisper (CTranslate2). The main backend for speed."""
 
     name = "faster"
 
-    # Маппинг наших коротких имён моделей в имена для faster-whisper.
-    # large-v3-turbo поддерживается с faster-whisper >= 1.0.3.
+    # Mapping of our short model names to faster-whisper model names.
+    # large-v3-turbo is supported since faster-whisper >= 1.0.3.
     _MODEL_NAME_MAP = {
         "tiny": "tiny",
         "base": "base",
@@ -217,7 +217,7 @@ class FasterWhisperBackend(WhisperBackend):
 
     def load(self, model_name: str, device: str) -> Any:
         fw_name = self._MODEL_NAME_MAP.get(model_name, model_name)
-        # На GPU используем float16, на CPU — int8 (быстро и достаточно качественно).
+        # On GPU we use float16, on CPU — int8 (fast and good enough quality).
         compute_type = "float16" if device == "cuda" else "int8"
         logger.info(f"[faster-whisper] Loading {fw_name} on {device} (compute_type={compute_type})")
         model = self._WhisperModel(fw_name, device=device, compute_type=compute_type)
@@ -226,18 +226,18 @@ class FasterWhisperBackend(WhisperBackend):
     @staticmethod
     def _decode_kwargs(model_handle, decode_options: Optional[Dict], batched: bool,
                        language: Optional[str] = None) -> Dict:
-        """``decode_options`` → kwargs faster-whisper. Порожні опції → ``{}``, тобто
-        виклик байт у байт як до K1.
+        """``decode_options`` → faster-whisper kwargs. Empty options → ``{}``, i.e. the
+        call is byte for byte as before K1.
 
-        - ``hotwords`` / ``initial_prompt``: список імен → рядок, обрізаний за межею
-          імені в ``max_length // 2 - 1`` (223) токенів токенайзером цієї моделі;
-        - ``multilingual``: мова визначається раз на вікно (до 30 с мовлення в
-          послідовному режимі, VAD-шматок до ``chunk_length`` у batched) — лише
-          коли мову не задано (``auto``/порожньо). Явна мова («uk») — закон: у
-          faster-whisper multilingual перекрив би її на кожному вікні, а заміряли
-          його тільки на змішаних дзвінках (4.8.1, рішення власника);
-        - ``chunk_length``: лише batched (у послідовному режимі це довжина вікна
-          фіч-екстрактора, її не чіпаємо)."""
+        - ``hotwords`` / ``initial_prompt``: a list of names → a string truncated at the
+          name boundary at ``max_length // 2 - 1`` (223) tokens by this model's tokenizer;
+        - ``multilingual``: the language is detected once per window (up to 30 s of speech in
+          sequential mode, a VAD chunk up to ``chunk_length`` in batched) — only
+          when no language is set (``auto``/empty). An explicit language ("uk") is law: in
+          faster-whisper multilingual would override it on every window, and it was measured
+          only on mixed calls (4.8.1, owner's decision);
+        - ``chunk_length``: batched only (in sequential mode it is the feature-extractor
+          window length, which we do not touch)."""
         if not decode_options:
             return {}
         kwargs: Dict[str, Any] = {}
@@ -248,7 +248,7 @@ class FasterWhisperBackend(WhisperBackend):
             if not names:
                 continue
             if tokenizer is None:
-                logger.warning("[faster-whisper] у моделі нема токенайзера — %s пропущено", key)
+                logger.warning("[faster-whisper] the model has no tokenizer — %s skipped", key)
                 continue
             text = _join_names_within_budget(
                 names,
@@ -257,13 +257,13 @@ class FasterWhisperBackend(WhisperBackend):
             )
             if text:
                 kwargs[key] = text
-                logger.debug("[faster-whisper] %s: %d з %d імен", key, text.count(", ") + 1, len(names))
+                logger.debug("[faster-whisper] %s: %d of %d names", key, text.count(", ") + 1, len(names))
         if "hotwords" in kwargs and not batched:
-            # faster-whisper 1.2.1 get_prompt (transcribe.py:1542-1550) кладе hotwords ПОРЯД із
-            # previous_tokens[-223:], а не замість них: з 3-го вікна промпт 1+222+223+3 = 449 > 448,
-            # і CTranslate2 падає «maximum decoding length must be > 0» — губиться вся транскрипція.
-            # Batched-шлях сам передає condition_on_previous_text=False (:547); те саме тут
-            # (скидання контексту після кожного вікна, :1373-1383) тримає промпт ≤ 1+223+3.
+            # faster-whisper 1.2.1 get_prompt (transcribe.py:1542-1550) puts hotwords NEXT TO
+            # previous_tokens[-223:], not instead of them: from the 3rd window the prompt is 1+222+223+3 = 449 > 448,
+            # and CTranslate2 fails with "maximum decoding length must be > 0" — the whole transcription is lost.
+            # The batched path itself passes condition_on_previous_text=False (:547); the same here
+            # (context reset after each window, :1373-1383) keeps the prompt <= 1+223+3.
             kwargs["condition_on_previous_text"] = False
         if decode_options.get("multilingual") and (not language or language == "auto"):
             kwargs["multilingual"] = True
@@ -278,10 +278,10 @@ class FasterWhisperBackend(WhisperBackend):
 
         # faster-whisper API:
         #   model.transcribe(...) -> (segments_generator, info)
-        # segments — это generator, считается ленивенько; для прогресса нам нужно его потреблять.
-        # Silero VAD через onnxruntime (bundled с faster-whisper) убирает паузы и тишину
-        # перед инференсом — меньше галлюцинаций (фантомных фраз в тишине), на ~5-10%
-        # быстрее, плюс точнее границы сегментов. (Phase 4.1)
+        # segments is a generator, evaluated lazily; for progress we need to consume it.
+        # Silero VAD via onnxruntime (bundled with faster-whisper) removes pauses and silence
+        # before inference — fewer hallucinations (phantom phrases in silence), ~5-10%
+        # faster, plus more accurate segment boundaries. (Phase 4.1)
         segments_iter, info = model_handle.transcribe(
             audio_path,
             language=language if language and language != "auto" else None,
@@ -293,14 +293,14 @@ class FasterWhisperBackend(WhisperBackend):
             **self._decode_kwargs(model_handle, decode_options, batched=False, language=language),
         )
 
-        # info.duration — общая длительность файла в секундах.
+        # info.duration — total file duration in seconds.
         total_duration = max(getattr(info, "duration", 0.0) or 0.0, 0.001)
         detected_language = getattr(info, "language", language) or language
 
         all_segments = []
         all_text_parts = []
         last_progress_report = 0.0
-        report_step = 2.0  # обновляем прогресс не чаще, чем раз в 2 секунды реального аудио-времени
+        report_step = 2.0  # update progress no more often than once per 2 seconds of real audio time
 
         for seg in segments_iter:
             seg_dict = {
@@ -312,7 +312,7 @@ class FasterWhisperBackend(WhisperBackend):
             all_segments.append(seg_dict)
             all_text_parts.append(seg.text)
 
-            # Streaming: пушим каждый сегмент сразу — фронт видит текст растущим (Phase 2)
+            # Streaming: push each segment right away — the frontend sees the text growing (Phase 2)
             if progress_callback:
                 pct = min(95, int(5 + (seg.end / total_duration) * 90))
                 progress_callback({
@@ -334,7 +334,7 @@ class FasterWhisperBackend(WhisperBackend):
 
     def transcribe_batched(self, model_handle, audio_path, language, task, batch_size=8, progress_callback=None,
                            decode_options=None):
-        """Batched inference для длинных файлов через BatchedInferencePipeline."""
+        """Batched inference for long files via BatchedInferencePipeline."""
         if progress_callback:
             progress_callback({"status": "processing", "progress": 5, "message": "Starting batched transcription..."})
 
@@ -367,7 +367,7 @@ class FasterWhisperBackend(WhisperBackend):
             all_segments.append(seg_dict)
             all_text_parts.append(seg.text)
 
-            # Streaming сегментов в реальном времени (Phase 2)
+            # Real-time segment streaming (Phase 2)
             if progress_callback:
                 pct = min(95, int(5 + (seg.end / total_duration) * 90))
                 progress_callback({
@@ -391,11 +391,11 @@ class FasterWhisperBackend(WhisperBackend):
 
 
 def _select_default_backend() -> str:
-    """Выбирает backend по умолчанию: env > наличие faster-whisper > openai."""
+    """Chooses the default backend: env > faster-whisper availability > openai."""
     explicit = os.environ.get("WHISPER_BACKEND", "").strip().lower()
     if explicit in ("faster", "openai"):
         return explicit
-    # Автодетект
+    # Autodetect
     try:
         import faster_whisper  # noqa: F401
         return "faster"
@@ -418,30 +418,30 @@ def _create_backend(name: str) -> WhisperBackend:
 # ============================================================================
 
 class ModernWhisperManager:
-    """Менеджер моделей Whisper с pluggable backend и параллельной транскрипцией.
+    """Whisper model manager with a pluggable backend and parallel transcription.
 
     Threading model:
-    - load_model() сериализован через _load_lock — только одна загрузка в момент.
-    - transcribe_with_progress() идёт под _inference_semaphore.
+    - load_model() is serialized via _load_lock — only one load at a time.
+    - transcribe_with_progress() runs under _inference_semaphore.
 
-    ВАЖНО про параллельность: faster-whisper `WhisperModel.transcribe()` НЕ
-    потокобезопасен для одного instance модели — два потока, дёргающих один и
-    тот же handle, дают либо garbled-вывод, либо нативный краш процесса
-    (0xC0000409). У нас это реальный путь: live-preview поднимает ОТДЕЛЬНЫЙ
-    worker-поток на каждый stream (mic + system, см. recording.py), и оба
-    транскрибируют через один shared handle 'small'. Поэтому default semaphore = 1
-    (сериализуем инференс). Поднимать WHISPER_MAX_PARALLEL>1 безопасно ТОЛЬКО
-    если у каждого потока свой instance модели (сейчас не так — кеш shared).
+    IMPORTANT about parallelism: faster-whisper `WhisperModel.transcribe()` is NOT
+    thread-safe for a single model instance — two threads hitting the same
+    handle produce either garbled output or a native process crash
+    (0xC0000409). For us this is a real path: live preview starts a SEPARATE
+    worker thread per stream (mic + system, see recording.py), and both
+    transcribe through one shared 'small' handle. So the default semaphore = 1
+    (inference is serialized). Raising WHISPER_MAX_PARALLEL>1 is safe ONLY
+    if each thread has its own model instance (not the case now — the cache is shared).
     Ref: https://github.com/SYSTRAN/faster-whisper/discussions/406
     """
 
     def __init__(self, force_cpu: bool = False, backend: Optional[str] = None):
-        # Сериализация load_model
+        # Serialization of load_model
         self._load_lock = threading.RLock()
 
-        # Сериализация transcribe. Default 1 — faster-whisper не потокобезопасен
-        # на shared model handle (см. docstring класса). Не ставь >1 без
-        # per-thread instances модели.
+        # Serialization of transcribe. Default 1 — faster-whisper is not thread-safe
+        # on a shared model handle (see the class docstring). Do not set >1 without
+        # per-thread model instances.
         max_parallel = max(1, int(os.environ.get("WHISPER_MAX_PARALLEL", "1")))
         self._inference_semaphore = threading.Semaphore(max_parallel)
 
@@ -450,34 +450,34 @@ class ModernWhisperManager:
         self._backend: WhisperBackend = _create_backend(self._backend_name)
         logger.info(f"WhisperManager backend: {self._backend.name}")
 
-        # Кеш загруженных моделей (веса в RAM/VRAM).
+        # Cache of loaded models (weights in RAM/VRAM).
         #
-        # Раньше держали ровно ОДНУ модель: каждый swap = del CUDA-модели +
-        # cuda.empty_cache() + load новой. В сценарии record → live-transcribe('small')
-        # → full-transcribe('medium') это эвиктило модели туда-сюда на каждой операции,
-        # и редкий del/reload CTranslate2-модели на CUDA после долгой сессии иногда
-        # ронял процесс нативно (exit 0xC0000409). Теперь — LRU-кеш на несколько
-        # моделей: 'small' (live) и 'medium' (full) спокойно сосуществуют, swap'а
-        # в обычном флоу нет вообще. На 24GB VRAM это с запасом.
+        # Previously exactly ONE model was kept: every swap = del CUDA model +
+        # cuda.empty_cache() + load the new one. In the record → live-transcribe('small')
+        # → full-transcribe('medium') scenario this evicted models back and forth on every operation,
+        # and a frequent del/reload of a CTranslate2 model on CUDA after a long session sometimes
+        # crashed the process natively (exit 0xC0000409). Now — an LRU cache for several
+        # models: 'small' (live) and 'medium' (full) coexist peacefully, there is no swap
+        # in the normal flow at all. On 24GB VRAM this is well within limits.
         self.models_dir = Path.home() / ".cache" / "whisper"
         self._cache_size = max(1, int(os.environ.get("WHISPER_MODEL_CACHE_SIZE", "3")))
-        self._models: "OrderedDict[str, Any]" = OrderedDict()  # name -> handle, LRU (старые слева)
-        # Для обратной совместимости — указывают на последнюю использованную модель.
+        self._models: "OrderedDict[str, Any]" = OrderedDict()  # name -> handle, LRU (oldest on the left)
+        # For backward compatibility — they point to the last used model.
         self.current_model: Optional[Any] = None
         self.current_model_name: Optional[str] = None
 
-        # Информация о моделях (для UI)
+        # Model information (for the UI)
         self.models_info = {
             "tiny": {"size": "39 MB", "params": "39M", "speed": "~32x", "memory": "~1 GB"},
             "base": {"size": "74 MB", "params": "74M", "speed": "~16x", "memory": "~1 GB"},
             "small": {"size": "244 MB", "params": "244M", "speed": "~6x", "memory": "~2 GB"},
             "medium": {"size": "769 MB", "params": "769M", "speed": "~2x", "memory": "~5 GB"},
             "large": {"size": "1550 MB", "params": "1550M", "speed": "~1x", "memory": "~10 GB"},
-            # Доступно только для faster-backend
+            # Available only for the faster backend
             "large-v3-turbo": {"size": "809 MB", "params": "809M", "speed": "~4x large", "memory": "~6 GB"},
         }
 
-        self.logger = logger  # для совместимости с предыдущим API
+        self.logger = logger  # for compatibility with the previous API
 
         # Device
         if force_cpu:
@@ -503,24 +503,24 @@ class ModernWhisperManager:
         return isinstance(self._backend, FasterWhisperBackend)
 
     # -----------------------------------------------------------
-    # Public API (контракт совместимости с app.py)
+    # Public API (compatibility contract with app.py)
     # -----------------------------------------------------------
 
     def get_available_models(self) -> List[Dict]:
-        """Список моделей для UI. Для faster-backend модели лежат в HF cache, не whisper cache."""
+        """List of models for the UI. For the faster backend models live in the HF cache, not the whisper cache."""
         available = []
 
         if self._backend.name == "faster":
-            # ДИНАМІЧНИЙ каталог: читаємо список із faster_whisper._MODELS, тож він
-            # автоматично росте з апгрейдом бібліотеки. META дає опис; downloaded
-            # визначаємо реально за наявністю репо в HF-кеші (а не "завжди true").
+            # DYNAMIC catalog: we read the list from faster_whisper._MODELS, so it
+            # grows automatically with a library upgrade. META gives the description; downloaded
+            # is determined for real by the presence of the repo in the HF cache (not "always true").
             fw = _hf_models_map()
             order = list(FASTER_MODELS_META.keys())
             for name, repo in fw.items():
                 if name in FASTER_MODEL_ALIASES:
                     continue
                 info = dict(FASTER_MODELS_META.get(name, {}))
-                # Невідомі майбутні моделі: .en та distil-* — англо-фокусні за умовч.
+                # Unknown future models: .en and distil-* are English-focused by default.
                 info.setdefault("multilingual", not (name.endswith(".en") or name.startswith("distil")))
                 available.append({
                     "name": name,
@@ -538,10 +538,10 @@ class ModernWhisperManager:
             ))
             return available
 
-        # OpenAI backend: смотрим в ~/.cache/whisper
+        # OpenAI backend: look in ~/.cache/whisper
         if self.models_dir.exists():
             for model_name in self.models_info.keys():
-                # large-v3-turbo не существует в openai-whisper
+                # large-v3-turbo does not exist in openai-whisper
                 if model_name == "large-v3-turbo":
                     continue
                 model_file = self._find_model_file(model_name)
@@ -566,7 +566,7 @@ class ModernWhisperManager:
         return available
 
     def _find_model_file(self, model_name: str) -> Optional[Path]:
-        """Находит .pt файл для openai-whisper (large -> large-v3.pt и т.д.)."""
+        """Finds the .pt file for openai-whisper (large -> large-v3.pt etc.)."""
         direct = self.models_dir / f"{model_name}.pt"
         if direct.exists():
             return direct
@@ -575,7 +575,7 @@ class ModernWhisperManager:
         return None
 
     def download_model(self, model_name: str) -> bool:
-        """Скачать модель. Для faster-backend — просто load (HF Hub скачает сам)."""
+        """Download a model. For the faster backend — just load (HF Hub downloads it itself)."""
         if not self._is_valid_model(model_name):
             logger.error(f"Unknown model: {model_name}")
             return False
@@ -583,7 +583,7 @@ class ModernWhisperManager:
         try:
             logger.info(f"Downloading model {model_name} via {self._backend.name}...")
             with self._load_lock:
-                # Кратковременная загрузка, чтобы скачать веса; затем выгружаем.
+                # A brief load to download the weights; then we unload.
                 handle = self._backend.load(model_name, device="cpu")
                 del handle
                 if torch.cuda.is_available():
@@ -595,14 +595,14 @@ class ModernWhisperManager:
             return False
 
     def _evict_to_fit(self) -> None:
-        """Освободить место в кеше под новую модель (LRU-эвикция). Под _load_lock.
+        """Free space in the cache for a new model (LRU eviction). Under _load_lock.
 
-        Перед уничтожением CUDA-модели делаем synchronize(); после — gc.collect()
-        и empty_cache(). Хотим, чтобы любая незавершённая GPU-работа и питоновские
-        циклы ссылок разрулились вокруг нативного деструктора CTranslate2, а не
-        пересеклись с ним — это снижает шанс нативного краха процесса при эвикции.
-        В обычном флоу (record→live 'small' → full 'medium') эвикции не происходит:
-        обе модели спокойно живут в кеше."""
+        Before destroying a CUDA model we call synchronize(); afterwards — gc.collect()
+        and empty_cache(). We want any unfinished GPU work and Python
+        reference cycles to resolve around the native CTranslate2 destructor, rather than
+        intersect with it — this lowers the chance of a native process crash on eviction.
+        In the normal flow (record→live 'small' → full 'medium') no eviction happens:
+        both models live peacefully in the cache."""
         evicted = False
         while len(self._models) >= self._cache_size:
             old_name = next(iter(self._models))
@@ -617,7 +617,7 @@ class ModernWhisperManager:
                 self._backend.unload(old_handle)
             except Exception as e:
                 logger.warning(f"Error unloading model {old_name}: {e}")
-            del old_handle  # последняя ссылка → деструктор CTranslate2 отрабатывает здесь
+            del old_handle  # last reference → the CTranslate2 destructor runs here
             evicted = True
         if evicted:
             gc.collect()
@@ -628,8 +628,8 @@ class ModernWhisperManager:
                     pass
 
     def _is_valid_model(self, name: str) -> bool:
-        """Чи знаємо ми таку модель: curated models_info АБО динамічний
-        faster_whisper._MODELS (нові моделі бібліотеки приймаються автоматично)."""
+        """Whether we know this model: curated models_info OR the dynamic
+        faster_whisper._MODELS (new library models are accepted automatically)."""
         if name in self.models_info:
             return True
         if self._backend.name == "faster":
@@ -637,7 +637,7 @@ class ModernWhisperManager:
         return False
 
     def load_model(self, model_name: str):
-        """Загрузить модель (потокобезпечно). LRU-кеш на несколько моделей."""
+        """Load a model (thread-safe). LRU cache of several models."""
         with self._load_lock:
             try:
                 if not isinstance(model_name, str):
@@ -645,7 +645,7 @@ class ModernWhisperManager:
                 if not self._is_valid_model(model_name):
                     raise ValueError(f"Unknown model: {model_name}")
 
-                # Cache hit — обновляем LRU и возвращаем.
+                # Cache hit — update the LRU and return.
                 cached = self._models.get(model_name)
                 if cached is not None:
                     self._models.move_to_end(model_name)
@@ -654,14 +654,14 @@ class ModernWhisperManager:
                     logger.debug(f"Model {model_name} already loaded (cached)")
                     return cached
 
-                # Проверка памяти
+                # Memory check
                 if hasattr(psutil, "virtual_memory"):
                     available_gb = psutil.virtual_memory().available / (1024 ** 3)
                     required = {"tiny": 1, "base": 1, "small": 2, "medium": 5, "large": 10, "large-v3-turbo": 6}.get(model_name, 10)
                     if available_gb < required:
                         logger.warning(f"Low memory for {model_name}: need {required}GB, have {available_gb:.1f}GB")
 
-                # Освобождаем место под новую модель (LRU-эвикция).
+                # Free space for the new model (LRU eviction).
                 self._evict_to_fit()
 
                 logger.info(f"Loading model {model_name} via {self._backend.name}...")
@@ -713,20 +713,20 @@ class ModernWhisperManager:
         progress_callback: Optional[Callable] = None,
         decode_options: Optional[Dict] = None,
     ) -> Dict:
-        """Транскрибация. Параллельная (под semaphore), не держит _load_lock.
+        """Transcription. Parallel (under the semaphore), does not hold _load_lock.
 
         ``decode_options`` (K1, ``app.services.vocabulary.decode_options_for``):
-        ``hotwords`` / ``initial_prompt`` — список імен (менеджер сам склеює й
-        обрізає його за межею імені в 223 токени), ``multilingual: bool``,
-        ``chunk_length: int`` (лише batched). ``None``/``{}`` — як до K1.
-        openai-бекенд опції ігнорує."""
+        ``hotwords`` / ``initial_prompt`` — a list of names (the manager joins and
+        truncates it at a name boundary to 223 tokens itself), ``multilingual: bool``,
+        ``chunk_length: int`` (batched only). ``None``/``{}`` — as before K1.
+        The openai backend ignores the options."""
         try:
             if not os.path.exists(audio_path):
                 error_msg = f"File not found: {audio_path}"
                 logger.error(error_msg)
                 return {"error": error_msg}
 
-            # Загрузка модели — короткая критическая секция
+            # Model load — a short critical section
             model_handle = self.load_model(model_name)
             if model_handle is None:
                 return {"error": f"Failed to load model {model_name}"}
@@ -738,23 +738,23 @@ class ModernWhisperManager:
             if progress_callback:
                 progress_callback({"status": "processing", "progress": 0, "message": "Starting transcription..."})
 
-            # Сама транскрипция — параллельная (semaphore)
+            # The transcription itself — parallel (semaphore)
             with self._inference_semaphore:
-                # Локальная ссылка: если кто-то параллельно поменяет current_model, наш handle не пропадёт.
+                # Local reference: if someone changes current_model in parallel, our handle will not vanish.
                 local_handle = model_handle
 
                 start = time.time()
                 if self._backend.name == "faster" and duration_seconds > 600 and self._backend.supports_batched():
-                    # Длинный файл + faster backend: используем BatchedInferencePipeline.
+                    # Long file + faster backend: use BatchedInferencePipeline.
                     result = self._backend.transcribe_batched(
                         local_handle, audio_path, language, task,
                         batch_size=8, progress_callback=progress_callback,
                         decode_options=decode_options,
                     )
                 elif self._backend.name == "openai" and duration_seconds > 600:
-                    # OpenAI backend на длинных файлах — старая ручная нарезка через pydub.
+                    # OpenAI backend on long files — the old manual slicing via pydub.
                     if decode_options:
-                        logger.debug("openai backend ігнорує decode_options %s", sorted(decode_options))
+                        logger.debug("openai backend ignores decode_options %s", sorted(decode_options))
                     result = self._transcribe_chunked_openai(
                         local_handle, audio_path, language, task, progress_callback,
                     )
@@ -790,13 +790,13 @@ class ModernWhisperManager:
             return {"error": error_msg}
 
     # -----------------------------------------------------------
-    # OpenAI-backend chunked fallback (только для длинных файлов на старом backend)
+    # OpenAI backend chunked fallback (only for long files on the old backend)
     # -----------------------------------------------------------
 
     def _transcribe_chunked_openai(self, model_handle, audio_path, language, task, progress_callback=None):
-        """Ручная нарезка для openai-whisper. Для faster-whisper это не нужно — он умеет batched сам."""
-        chunk_length_ms = 300_000  # 5 мин
-        overlap_ms = 5_000  # 5 сек
+        """Manual slicing for openai-whisper. Not needed for faster-whisper — it does batched itself."""
+        chunk_length_ms = 300_000  # 5 min
+        overlap_ms = 5_000  # 5 sec
 
         with tempfile.TemporaryDirectory(prefix="whisper_chunks_") as temp_dir:
             audio = AudioSegment.from_file(audio_path)
@@ -859,7 +859,7 @@ class ModernWhisperManager:
     # -----------------------------------------------------------
 
     def _get_duration_ffprobe(self, audio_path: str) -> float:
-        """Длительность через ffprobe (без загрузки в RAM)."""
+        """Duration via ffprobe (without loading into RAM)."""
         try:
             result = subprocess.run(
                 [
@@ -918,7 +918,7 @@ class ModernWhisperManager:
         return info
 
     def reset_cuda(self):
-        """Force reset CUDA для восстановления после ошибок. Выгружает ВСЕ модели."""
+        """Force reset CUDA to recover from errors. Unloads ALL models."""
         with self._load_lock:
             try:
                 if torch.cuda.is_available():
@@ -947,7 +947,7 @@ class ModernWhisperManager:
                 return False
 
     def cleanup_temp_files(self):
-        """Чистка временных чанков (если остались от прошлых запусков)."""
+        """Clean up temporary chunks (if left over from previous runs)."""
         try:
             temp_dir = tempfile.gettempdir()
             for item in os.listdir(temp_dir):

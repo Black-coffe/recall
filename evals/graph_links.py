@@ -1,29 +1,29 @@
-"""Перемір звʼязків графа TG на ЗНІМКУ БД (entity-graph-tg, історія 04).
+"""Re-measurement of TG graph links on a DB SNAPSHOT (entity-graph-tg, story 04).
 
-**Навіщо.** Історія 03 додала морфо-матчер (`app/services/tg_entities.py`:
-`SOURCE_MORPH`, `TG_ENTITIES_MORPH_ENABLED`, дефолт вимкнено) — рішення
-«вмикати чи ні» має ухвалюватись на числах, а не на враженні. `evals/run_eval.py`
-міряє RAG (recall@k) і графа не бачить — це окремий модуль, не розширення
-RAG-eval (`evals/metrics.py`/`run_eval.py` тут не чіпаються).
+**Why.** Story 03 added a morph matcher (`app/services/tg_entities.py`:
+`SOURCE_MORPH`, `TG_ENTITIES_MORPH_ENABLED`, off by default); the decision
+"whether to enable it" must be made on numbers, not impressions. `evals/run_eval.py`
+measures RAG (recall@k) and does not see the graph; this is a separate module, not an extension of the
+RAG eval (`evals/metrics.py`/`run_eval.py` are not touched here).
 
-**Read-only, тільки на знімку.** Підключення в режимі `file:...?mode=ro`.
-Спроба відкрити файл, що збігається з `Config.DATABASE` (бойова БД), без
-`--yes-live` — відмова: знімок робить власник через `scripts/backup_db.ps1`
-(`VACUUM INTO`), не цей модуль (Non-goals — тут навмисно НЕМА VACUUM).
+**Read-only, on a snapshot only.** The connection is in `file:...?mode=ro` mode.
+An attempt to open a file that matches `Config.DATABASE` (the live DB) without
+`--yes-live` is refused: the snapshot is made by the owner via `scripts/backup_db.ps1`
+(`VACUUM INTO`), not by this module (Non-goals: there is deliberately NO VACUUM here).
 
-**Два зрізи, без автоматичного гейту.** Рахуємо exact-only (як живе зараз
-за замовчуванням) і exact+morph (морфо-гілка «як якби» — увімкнена лише на
-час підрахунку, у БД нічого не пишеться) над ОДНИМИ й тими самими TG-
-повідомленнями знімка, віддаємо дельту на сутність. Як і `evals/README.md`
-(154–159) — жодного «X% просідання = fail», лише два прогони + diff руками.
+**Two slices, no automatic gate.** We count exact-only (how it lives now
+by default) and exact+morph (the morph branch "as if" - enabled only for
+the duration of the count, nothing is written to the DB) over the SAME TG
+messages of the snapshot, and return the per-entity delta. As in `evals/README.md`
+(154-159): no "X% drop = fail", just two runs + a manual diff.
 
-**Другий шар доказу** (урок `derived-claims-need-second-source`): поруч із
-кількістю звʼязків — кількість РІЗНИХ повідомлень і РІЗНИХ чатів, у яких
-сутність зустрілась, щоб приріст від одного чату/однієї сутності
-(як «Україні» — 25% приросту на замірі 14.08) було видно, а не сховано за
-сумарним числом.
+**Second layer of evidence** (lesson `derived-claims-need-second-source`): next to the
+link count, the number of DISTINCT messages and DISTINCT chats in which the
+entity occurred, so that growth from a single chat/single entity
+(like «Україні» - 25% of the growth in the 14.08 measurement) is visible rather than hidden behind
+the total number.
 
-Приклади:
+Examples:
     python -m evals.graph_links --db path\\to\\snapshot.db
     python -m evals.graph_links --db path\\to\\snapshot.db --json-out evals/graph_links_run1.json
     python -m evals.graph_links --db path\\to\\snapshot.db --top-n 30
@@ -42,9 +42,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-# Дозволяє запускати і як `python evals/graph_links.py`, і як
-# `python -m evals.graph_links` без встановлення пакету (той самий трюк, що
-# у evals/run_eval.py).
+# Allows running both as `python evals/graph_links.py` and as
+# `python -m evals.graph_links` without installing the package (the same trick as
+# in evals/run_eval.py).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -52,33 +52,33 @@ if str(_PROJECT_ROOT) not in sys.path:
 from app.services import entity_dedup  # noqa: E402
 from app.services import tg_entities  # noqa: E402
 
-#: Змінна оточення, якою `tg_entities._morph_enabled()`/`find_mentions`
-#: вирішують, чи запускати морфо-гілку. Контракт історії 03 — не власна назва.
+#: The environment variable by which `tg_entities._morph_enabled()`/`find_mentions`
+#: decide whether to run the morph branch. A story 03 contract, not our own name.
 _MORPH_ENV = "TG_ENTITIES_MORPH_ENABLED"
 
 
 # ============================================================
-# Read-only доступ до знімка
+# Read-only access to the snapshot
 # ============================================================
 
 def _ro_uri(db_path: str) -> str:
-    """URI для `sqlite3.connect(..., uri=True)` у режимі `mode=ro` — файл
-    відкривається лише на читання на рівні SQLite, не лише "ми не пишемо"."""
+    """URI for `sqlite3.connect(..., uri=True)` in `mode=ro`: the file
+    is opened read-only at the SQLite level, not merely "we do not write"."""
     return Path(db_path).resolve().as_uri() + "?mode=ro"
 
 
 def _live_db_path() -> Optional[str]:
-    """Абсолютний шлях бойової БД (`Config.DATABASE`). Окрема функція —
-    тести підміняють її, не чіпаючи справжній `config.py`/файлову систему."""
+    """Absolute path of the live DB (`Config.DATABASE`). A separate function:
+    tests replace it without touching the real `config.py`/file system."""
     try:
         from config import Config
-    except Exception:  # noqa: BLE001 — конфіг може бути недоступний у CI/venv без .env
+    except Exception:  # noqa: BLE001 - config may be unavailable in CI/venv without .env
         return None
     return str((Config.BASE_DIR / Config.DATABASE).resolve())
 
 
 def is_live_db(db_path: str) -> bool:
-    """Чи збігається `db_path` з бойовою БД за абсолютним шляхом."""
+    """Whether `db_path` matches the live DB by absolute path."""
     live = _live_db_path()
     if live is None:
         return False
@@ -93,13 +93,13 @@ def open_readonly(db_path: str) -> sqlite3.Connection:
 
 @contextlib.contextmanager
 def _scratch_copy(db_path: str) -> Iterator[str]:
-    """Тимчасова копія знімка для функцій, що НЕ вміють `mode=ro` —
-    `tg_entities.load_names` і `entity_dedup.find_alias_cross_type_collisions`
-    відкривають власне зʼєднання через `get_db_connection`, яке ставить
-    `PRAGMA journal_mode=WAL`; на знімку в режимі `delete` це перекидає
-    journal_mode файлу і лишає поруч `-wal`/`-shm`. Копія приймає цей
-    побічний ефект на себе — знімок, що міряємо, лишається байт-у-байт
-    незмінним."""
+    """A temporary copy of the snapshot for functions that do NOT support `mode=ro`:
+    `tg_entities.load_names` and `entity_dedup.find_alias_cross_type_collisions`
+    open their own connection via `get_db_connection`, which sets
+    `PRAGMA journal_mode=WAL`; on a snapshot in `delete` mode this flips the file's
+    journal_mode and leaves `-wal`/`-shm` next to it. The copy takes this
+    side effect upon itself: the snapshot we measure stays byte-for-byte
+    unchanged."""
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     shutil.copyfile(db_path, tmp_path)
@@ -116,13 +116,13 @@ def _scratch_copy(db_path: str) -> Iterator[str]:
 
 
 # ============================================================
-# Існуючий стан графа (як записано в знімку)
+# Existing state of the graph (as recorded in the snapshot)
 # ============================================================
 
 def existing_graph_state(conn: sqlite3.Connection) -> dict:
-    """Звʼязки графа, що вже стоять у знімку, розкладені за `source`
-    (NULL = успадковано від Claude-збагачення, `thread_match`/`thread_morph`
-    — цей модуль/`tg_entities.py`)."""
+    """Graph links already present in the snapshot, broken down by `source`
+    (NULL = inherited from Claude enrichment, `thread_match`/`thread_morph`
+    - this module/`tg_entities.py`)."""
     rows = conn.execute(
         "SELECT COALESCE(source, 'NULL') AS src, COUNT(*) AS n, "
         "COUNT(DISTINCT entity_id) AS entities FROM meeting_entities "
@@ -149,10 +149,10 @@ def _entity_meta(conn: sqlite3.Connection) -> dict[int, dict]:
 
 
 def _collision_entity_ids(db_path: str) -> set[int]:
-    """Сутності, залучені у кросс-типове зіткнення аліасів
-    (`entity_dedup.find_alias_cross_type_collisions`) — прапорець-застереження
-    в per-entity diff: приріст морфо-гілки на такій сутності вартий подвійної
-    перевірки очима перш ніж вважати доказом."""
+    """Entities involved in a cross-type alias collision
+    (`entity_dedup.find_alias_cross_type_collisions`): a caveat flag
+    in the per-entity diff: growth of the morph branch on such an entity is worth a double
+    check by eye before treating it as evidence."""
     ids: set[int] = set()
     for group in entity_dedup.find_alias_cross_type_collisions(db_path):
         if "keep" in group:
@@ -164,18 +164,18 @@ def _collision_entity_ids(db_path: str) -> set[int]:
 
 
 # ============================================================
-# Симуляція «як якби» (exact-only / exact+morph) — нічого не пишеться
+# "As if" simulation (exact-only / exact+morph): nothing is written
 # ============================================================
 
 def _simulate(rows: list[tuple[int, Optional[int], str]], names: dict[str, int],
               *, morph: bool) -> dict[int, dict]:
-    """entity_id → {"links": кількість повідомлень зі згадкою, "records":
+    """entity_id -> {"links": number of messages with a mention, "records":
     set(transcription_id), "chats": set(tg_chat_id)}.
 
-    `find_mentions` вирішує, чи запускати морфо-гілку, за змінною оточення
-    `TG_ENTITIES_MORPH_ENABLED` (контракт історії 03) — тимчасово виставляємо
-    її на час підрахунку одного зрізу і повертаємо як було. У БД нічого не
-    пишеться: рахуємо над текстом знімка, `meeting_entities` не чіпаємо.
+    `find_mentions` decides whether to run the morph branch by the environment variable
+    `TG_ENTITIES_MORPH_ENABLED` (a story 03 contract); we temporarily set
+    it for the duration of counting one slice and restore it afterwards. Nothing is
+    written to the DB: we count over the snapshot text, `meeting_entities` is not touched.
     """
     prev = os.environ.get(_MORPH_ENV)
     os.environ[_MORPH_ENV] = "1" if morph else "0"
@@ -198,10 +198,10 @@ def _simulate(rows: list[tuple[int, Optional[int], str]], names: dict[str, int],
 
 def per_entity_diff(exact: dict[int, dict], morph: dict[int, dict],
                      entity_meta: dict[int, dict], collisions: set[int]) -> list[dict]:
-    """Рядок на сутність: `+N` звʼязків морфо-гілки понад exact-only, плюс
-    другий шар доказу (різні записи/чати). Сортування — стабільне
-    (`-delta, -morph_links, entity_id`), щоб `--json-out` двох прогонів
-    можна було diff'ити напряму."""
+    """A row per entity: `+N` morph-branch links over exact-only, plus
+    the second layer of evidence (distinct records/chats). Sorting is stable
+    (`-delta, -morph_links, entity_id`) so that the `--json-out` of two runs
+    can be diffed directly."""
     empty = {"links": 0, "records": set(), "chats": set()}
     out = []
     for eid in sorted(set(exact) | set(morph)):
@@ -224,9 +224,9 @@ def per_entity_diff(exact: dict[int, dict], morph: dict[int, dict],
 
 
 def build_report(conn: sqlite3.Connection, db_path: str) -> dict:
-    """`top_n` тут навмисно немає: JSON-артефакт несе повний per-entity diff
-    (`report["diff"]`) незалежно від того, скільки рядків друкується в
-    термінал — `--top-n` впливає лише на `_print_report`."""
+    """`top_n` is deliberately absent here: the JSON artifact carries the full per-entity diff
+    (`report["diff"]`) regardless of how many rows are printed to the
+    terminal; `--top-n` affects only `_print_report`."""
     existing = existing_graph_state(conn)
     entity_meta = _entity_meta(conn)
     tg_rows = _tg_rows(conn)
@@ -257,24 +257,24 @@ def build_report(conn: sqlite3.Connection, db_path: str) -> dict:
 
 def _print_report(report: dict, *, top_n: int) -> None:
     print()
-    print(f"[graph_links] БД: {report['db']}")
+    print(f"[graph_links] DB: {report['db']}")
     print("-" * 60)
     eg = report["existing_graph"]
-    print("Існуючі звʼязки за source (у знімку):")
+    print("Existing links by source (in the snapshot):")
     for src, n in sorted(eg["links_by_source"].items()):
         print(f"  {src:<14} links={n:<6} entities={eg['entities_by_source'].get(src, 0)}")
-    print(f"  entities_with_any_link (усі source разом): {eg['entities_with_any_link']}")
+    print(f"  entities_with_any_link (all sources together): {eg['entities_with_any_link']}")
     print("-" * 60)
     sim = report["simulation"]
-    print(f"Симуляція «як якби» ({sim['messages_total']} TG-повідомлень):")
+    print(f"\"As if\" simulation ({sim['messages_total']} TG messages):")
     print(f"  exact-only:      links={sim['exact_only']['total_links']:<6} "
           f"entities={sim['exact_only']['entities_with_links']}")
     print(f"  exact+morph:     links={sim['exact_plus_morph']['total_links']:<6} "
           f"entities={sim['exact_plus_morph']['entities_with_links']}")
-    print(f"  дельта:          links={sim['delta']['links']:+d}  entities={sim['delta']['entities']:+d}")
+    print(f"  delta:           links={sim['delta']['links']:+d}  entities={sim['delta']['entities']:+d}")
     print("-" * 60)
     shown = [r for r in report["diff"][:top_n] if r["delta"] != 0]
-    print(f"TOP-{len(shown)} за приростом (морфо-гілка):")
+    print(f"TOP-{len(shown)} by growth (morph branch):")
     for r in shown:
         flag = " ⚠ cross-type collision" if r["cross_type_collision"] else ""
         print(f"  [{r['type']}] {r['name']}: +{r['delta']} "
@@ -286,23 +286,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", required=True,
-                         help="Шлях до ЗНІМКА БД (VACUUM INTO — scripts/backup_db.ps1), read-only")
-    parser.add_argument("--json-out", default=None, help="Записати повний звіт у JSON-файл")
+                         help="Path to the DB SNAPSHOT (VACUUM INTO - scripts/backup_db.ps1), read-only")
+    parser.add_argument("--json-out", default=None, help="Write the full report to a JSON file")
     parser.add_argument("--top-n", type=int, default=20,
-                         help="Скільки сутностей показувати в TOP-за-приростом (default: 20)")
+                         help="How many entities to show in TOP-by-growth (default: 20)")
     parser.add_argument("--yes-live", action="store_true",
-                         help="Дозволити відкрити файл, що збігається з Config.DATABASE "
-                              "(за замовчуванням заборонено — ця оснастка для знімка)")
+                         help="Allow opening the file that matches Config.DATABASE "
+                              "(forbidden by default - this tooling is for a snapshot)")
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.db):
-        print(f"[graph_links] БД не знайдено: {args.db}", file=sys.stderr)
+        print(f"[graph_links] DB not found: {args.db}", file=sys.stderr)
         return 2
 
     if is_live_db(args.db) and not args.yes_live:
-        print(f"[graph_links] Відмова: {args.db!r} — це бойова БД (Config.DATABASE). "
-              "Ця оснастка працює на ЗНІМКУ (VACUUM INTO — scripts/backup_db.ps1), "
-              "не на живому файлі. Якщо це свідомий вибір — додайте --yes-live.",
+        print(f"[graph_links] Refused: {args.db!r} is the live DB (Config.DATABASE). "
+              "This tooling works on a SNAPSHOT (VACUUM INTO - scripts/backup_db.ps1), "
+              "not on a live file. If this is a deliberate choice, add --yes-live.",
               file=sys.stderr)
         return 2
 
@@ -317,7 +317,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, sort_keys=True)
-        print(f"\n[graph_links] Повний результат записано у {args.json_out}")
+        print(f"\n[graph_links] Full result written to {args.json_out}")
 
     return 0
 

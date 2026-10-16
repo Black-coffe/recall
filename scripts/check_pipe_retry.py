@@ -1,15 +1,15 @@
-"""Карточка docs/defects/pipe-failure-loses-brief.md: збій труби о 9:00 не має з'їдати брифінг.
+"""Defect card docs/defects/pipe-failure-loses-brief.md: a pipe failure at 9:00 must not eat the briefing.
 
-Використання: check_pipe_retry.py <pipes.py> — вантажить файл як модуль труб і проганяє три
-сценарії на тимчасовій БД; exit 1, якщо в будь-якому брифінг так і не доставлено:
-  A. доставка впала о 9:00, о 9:20 канал живий;
-  B. запуск завис у `running` (процес помер), Recall піднявся об 11:00;
-  C. о 9:30 був ручний `pipes run` (у консоль), Recall піднявся о 12:00;
-  D. фільтр приватного зупинив брифінг (стоп-лист не читається) — у канал має прийти
-     повідомлення про це, а не тиша;
-  E. зведення питань (skip_if_empty) не знає, хто власник Telegram (порожньо + `reason`) — у канал
-     має прийти причина, а не тиша, як при «питань нема».
-Без мережі й Claude: функцію даних підмінено, ключа нема, стоп-слів нема.
+Usage: check_pipe_retry.py <pipes.py> - loads the file as the pipes module and runs five
+scenarios on a temporary DB; exit 1 if in any of them the briefing is never delivered:
+  A. delivery failed at 9:00, the channel is alive at 9:20;
+  B. a run hung in `running` (process died), Recall came back at 11:00;
+  C. a manual `pipes run` (to the console) at 9:30, Recall came back at 12:00;
+  D. the privacy filter stopped the briefing (stop list unreadable) - the channel must get
+     a message about it, not silence;
+  E. the questions digest (skip_if_empty) does not know who the Telegram owner is (empty + `reason`) - the channel
+     must get the reason, not silence as with "no questions".
+No network and no Claude: the data function is replaced, there is no key, no stop words.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ MON = datetime(2026, 10, 19)
 def _load(path: Path):
     spec = importlib.util.spec_from_file_location(f"pipes_under_check_{abs(hash(path))}", path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod                # dataclass шукає свій модуль у sys.modules
+    sys.modules[spec.name] = mod                # dataclass looks up its module in sys.modules
     spec.loader.exec_module(mod)
     mod.TOOLS["weekly_digest"] = lambda db, now: {"this_week": [{"task": "Надіслати Олені звіт"}]}
     return mod
@@ -86,7 +86,7 @@ def scenario_c(mod, db) -> bool:
 
 def scenario_d(mod, db) -> bool:
     words = os.environ["RECALL_PRIVATE_WORDS_FILE"]
-    with open(words, "wb") as f:                  # нечитабельний стоп-лист → blocked
+    with open(words, "wb") as f:                  # unreadable stop list -> blocked
         f.write(b"\xff\xfe\xfa")
     try:
         sent = []
@@ -118,15 +118,15 @@ def main(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         os.environ["RECALL_PRIVATE_WORDS_FILE"] = os.path.join(tmp, "нема.txt")
         mod = _load(target)
-        for name, fn in (("A: збій доставки о 9:00", scenario_a),
-                         ("B: завислий running", scenario_b),
-                         ("C: ручний запуск після 9:00", scenario_c),
-                         ("D: фільтр приватного зупинив — тиша", scenario_d),
-                         ("E: власник Telegram невідомий — тиша", scenario_e)):
+        for name, fn in (("A: delivery failure at 9:00", scenario_a),
+                         ("B: hung running", scenario_b),
+                         ("C: manual run after 9:00", scenario_c),
+                         ("D: privacy filter stopped it - silence", scenario_d),
+                         ("E: Telegram owner unknown - silence", scenario_e)):
             if not fn(mod, _db(tmp, name[0])):
                 lost.append(name)
     for name in lost:
-        print(f"{target}: брифінг пропав — {name}")
+        print(f"{target}: briefing lost - {name}")
     return 1 if lost else 0
 
 

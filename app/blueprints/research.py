@@ -1,10 +1,10 @@
-"""Дослідження бренду / великий експорт (Phase 18).
+"""Brand research / large export (Phase 18).
 
-- GET  /api/research/preview    — швидка статистика згадок (0 токенів, без AI)
-- POST /api/research/originals   — markdown усіх оригіналів-фрагментів (без AI)
-- POST /api/research/summary     — SSE: структурований звіт (дешева модель)
+- GET  /api/research/preview    - quick mention statistics (0 tokens, no AI)
+- POST /api/research/originals   - markdown of all original fragments (no AI)
+- POST /api/research/summary     - SSE: structured report (cheap model)
 
-Логіка у app/services/research.py (тестовно, без app-контексту).
+Logic lives in app/services/research.py (testable, without an app context).
 """
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ def _db() -> str:
 
 
 def _parse_axes(source) -> tuple:
-    """C4: (category_id, tags, since, until) з query-параметрів/JSON-тіла.
+    """C4: (category_id, tags, since, until) from query parameters/a JSON body.
 
-    `source` — будь-що з `.get(key)` (`request.args` або розпарсений JSON).
-    Кидає `ValueError` на кривому значенні — виклики огортають у 400.
+    `source` - anything with `.get(key)` (`request.args` or parsed JSON).
+    Raises `ValueError` on a bad value - callers wrap it into a 400.
     """
     return (
         parse_filter(source.get('category_id')),
@@ -47,9 +47,9 @@ def _filename(terms: list[str], suffix: str, display=None) -> str:
 
 
 def _resolve_query(data) -> "tuple[str, str | None] | tuple[None, None]":
-    """З тіла/параметрів дістати (q, display). Якщо є entity_id — резолвимо
-    сутність у q=ім'я+псевдоніми та display=канонічне ім'я. Інакше — вільний q.
-    Returns (None, None) якщо нічого валідного нема."""
+    """Extract (q, display) from the body/parameters. If there is an entity_id, resolve
+    the entity into q=name+aliases and display=canonical name. Otherwise a free q.
+    Returns (None, None) if nothing valid is there."""
     eid = data.get('entity_id')
     if eid is not None and str(eid).strip().isdigit():
         res = research.entity_terms(_db(), int(eid))
@@ -63,8 +63,8 @@ def _resolve_query(data) -> "tuple[str, str | None] | tuple[None, None]":
 
 @research_bp.route('/api/research/preview', methods=['GET'])
 def preview():
-    """Скільки згадок і де (без витягу повного markdown, без AI).
-    Приймає q АБО entity_id (тоді шукає по імені+псевдонімах сутності)."""
+    """How many mentions and where (without extracting the full markdown, no AI).
+    Accepts q OR entity_id (then searches by the entity's name+aliases)."""
     q, display = _resolve_query(request.args)
     if not q:
         return jsonify({"success": False, "error": tr('knowledge.research.err.query_empty')}), 400
@@ -74,7 +74,7 @@ def preview():
         return jsonify({"success": False, "error": str(e)}), 400
     collected = research.collect(_db(), q, category_id, display=display,
                                  tags=tags, since=since, until=until)
-    # Легкий прев'ю-список (без важких фрагментів) — для UI.
+    # Light preview list (without heavy fragments) - for the UI.
     sample = [{
         "id": r["id"], "source_type": r["source_type"], "title": r["title"],
         "date": research._fmt_date_human(r["date_display"] or r["date_sort"]),
@@ -87,7 +87,7 @@ def preview():
 
 @research_bp.route('/api/research/originals', methods=['POST'])
 def originals():
-    """Повний markdown оригіналів-фрагментів. 0 токенів, без AI."""
+    """Full markdown of the original fragments. 0 tokens, no AI."""
     data = request.get_json(silent=True) or {}
     q, display = _resolve_query(data)
     if not q:
@@ -96,7 +96,7 @@ def originals():
         category_id, tags, since, until = _parse_axes(data)
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
-    base_url = request.host_url  # напр. http://localhost:5050/
+    base_url = request.host_url  # e.g. http://localhost:5050/
     collected = research.collect(_db(), q, category_id, display=display,
                                  tags=tags, since=since, until=until)
     markdown = research.render_originals_md(collected, base_url)
@@ -108,7 +108,7 @@ def originals():
     })
 
 
-# Тексти статусів/помилок, які `summarize_stream` стрімить українською.
+# Status/error texts that `summarize_stream` streams in Ukrainian.
 _SUMMARY_SSE_KEYS = (
     'knowledge.research.err.query_empty',
     'knowledge.research.err.no_api_key',
@@ -122,7 +122,7 @@ _SUMMARY_SSE_KEYS = (
 
 @research_bp.route('/api/research/summary', methods=['POST'])
 def summary():
-    """SSE: структурований звіт по бренду (map-reduce, дешева модель)."""
+    """SSE: structured report on a brand (map-reduce, cheap model)."""
     data = request.get_json(silent=True) or {}
     q, display = _resolve_query(data)
     if not q:

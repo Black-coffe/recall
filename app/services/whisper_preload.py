@@ -1,24 +1,24 @@
 """Background warm-up of the default Whisper model at boot.
 
-Пост-хвильова знахідка 03.07.2026: `/api/transcribe` не тримає жодної
-попередньо завантаженої whisper-моделі — вона вантажиться ліниво,
-всередині самого HTTP-запиту (`WhisperManager.load_model()`, викликається
-з `transcribe_with_progress()`). Перший запит після рестарту (або після
-зміни моделі) висить 30-60с+ на "Loading model...", поки триває
-завантаження ваг з диска/HF-кешу в RAM/VRAM. Клієнт з розумним HTTP-
-таймаутом обриває з'єднання і природно ретраїть — а це і є типове
-джерело дублів (див. anti-dup guard у `app/blueprints/transcription.py`,
+Post-wave finding 03.07.2026: `/api/transcribe` does not hold any
+pre-loaded whisper model — it is loaded lazily,
+inside the HTTP request itself (`WhisperManager.load_model()`, called
+from `transcribe_with_progress()`). The first request after a restart (or after
+a model change) hangs for 30-60s+ on "Loading model...", while
+the weights load from disk/HF cache into RAM/VRAM. A client with a sensible HTTP
+timeout drops the connection and naturally retries — and that is the typical
+source of duplicates (see the anti-dup guard in `app/blueprints/transcription.py`,
 `transcribe()`).
 
-Фікс: гріємо модель у фоновому daemon-потоці одразу після старту додатку
-(паралельно з бутом Flask/blueprint'ів) — до моменту першого реального
-запиту модель уже резидентна в кеші `WhisperManager`. Якщо GPU відсутній,
-модель не скачана або прогрів упав з винятком — просто WARNING у лог,
-додаток лишається придатним до роботи (`/api/transcribe` завантажить
-модель по старому лінивому шляху).
+Fix: warm up the model in a background daemon thread right after the app starts
+(in parallel with the boot of Flask/blueprints) — by the time of the first real
+request the model is already resident in the `WhisperManager` cache. If there is no GPU,
+the model is not downloaded or the warm-up failed with an exception — just a WARNING in the log,
+the app stays usable (`/api/transcribe` will load
+the model the old lazy way).
 
-Гейтиться `RECALL_PRELOAD_WHISPER` (дефолт '1' — увімкнено); '0'/'false'/
-'no' — вимкнути.
+Gated by `RECALL_PRELOAD_WHISPER` (default '1' — enabled); '0'/'false'/
+'no' — disable.
 """
 from __future__ import annotations
 
@@ -33,22 +33,22 @@ from app.core import settings as _settings
 
 logger = logging.getLogger(__name__)
 
-# Модель за замовчуванням для прогріву. Немає єдиного backend-конфіга для
-# "дефолтної" whisper-моделі (config.py WHISPER_MODELS — лише каталог
-# usage-довідки для UI) — фактичний дефолт живе у фронтенді
+# Default model for warm-up. There is no single backend config for the
+# "default" whisper model (config.py WHISPER_MODELS is only a catalog of
+# usage hints for the UI) — the actual default lives in the frontend
 # (static/js/recall/views/{upload,record,audio,settings}.js: `const
-# DEFAULT_MODEL = 'large-v3-turbo'`) і повторений тут же у
-# `config.py TELEGRAM_WHISPER_MODEL`. Дзеркалимо те саме значення, з
-# можливістю перевизначити через env якщо хтось поставить інший дефолт.
+# DEFAULT_MODEL = 'large-v3-turbo'`) and is repeated here in
+# `config.py TELEGRAM_WHISPER_MODEL`. We mirror the same value, with
+# the option to override via env if someone sets a different default.
 DEFAULT_PRELOAD_MODEL = 'large-v3-turbo'
 
 
 def preload_enabled() -> bool:
-    """config-registry-fix-r3-01: читання переведено на `settings.env_bool`
-    (реєстр — єдине джерело парсингу). Це задокументоване перевертання
-    поведінки на сміттєвих значеннях: старий парсер (`not in ('0','false','no')`)
-    трактував будь-яке нерозпізнане значення (напр. 'ага') як True (увімкнено);
-    `env_bool` трактує як False (truthy-набір: '1'/'true'/'yes'/'on')."""
+    """config-registry-fix-r3-01: reading moved to `settings.env_bool`
+    (the registry is the single source of parsing). This is a documented flip of
+    behaviour on garbage values: the old parser (`not in ('0','false','no')`)
+    treated any unrecognized value (e.g. 'ага') as True (enabled);
+    `env_bool` treats it as False (truthy set: '1'/'true'/'yes'/'on')."""
     return _settings.env_bool('RECALL_PRELOAD_WHISPER')
 
 
@@ -58,35 +58,35 @@ def resolve_preload_model() -> str:
 
 def _warm_up(whisper_manager, model_name: str) -> None:
     t0 = time.time()
-    logger.info("Whisper preload: завантажую модель %s у фоні...", model_name)
+    logger.info("Whisper preload: loading model %s in the background...", model_name)
     try:
         whisper_manager.load_model(model_name)
         logger.info(
-            "Whisper preload: модель %s готова за %.1fs",
+            "Whisper preload: model %s ready in %.1fs",
             model_name, time.time() - t0,
         )
     except Exception as e:
-        # Нема GPU / модель не скачана / OOM — не критично, /api/transcribe
-        # просто завантажить модель по старому лінивому шляху як раніше.
-        logger.warning("Whisper preload: не вдалося прогріти %s: %s", model_name, e, exc_info=True)
+        # No GPU / model not downloaded / OOM — not critical, /api/transcribe
+        # will simply load the model the old lazy way as before.
+        logger.warning("Whisper preload: failed to warm up %s: %s", model_name, e, exc_info=True)
 
 
 def start_background_preload(
     whisper_manager,
     model_name: Optional[str] = None,
 ) -> Optional[threading.Thread]:
-    """Запускає daemon-потік, що прогріває `model_name` (дефолт — env/
-    :data:`DEFAULT_PRELOAD_MODEL`). Не блокує виклик.
+    """Starts a daemon thread that warms up `model_name` (default — env/
+    :data:`DEFAULT_PRELOAD_MODEL`). Does not block the call.
 
-    Повертає ``None`` (нічого не стартує) якщо:
-    - ``whisper_manager`` не створений (falsy);
-    - ``RECALL_PRELOAD_WHISPER=0`` (вимкнено).
+    Returns ``None`` (nothing starts) if:
+    - ``whisper_manager`` is not created (falsy);
+    - ``RECALL_PRELOAD_WHISPER=0`` (disabled).
     """
     if not whisper_manager:
-        logger.debug("Whisper preload: пропущено — whisper_manager не створений")
+        logger.debug("Whisper preload: skipped — whisper_manager is not created")
         return None
     if not preload_enabled():
-        logger.info("Whisper preload: вимкнено (RECALL_PRELOAD_WHISPER=0)")
+        logger.info("Whisper preload: disabled (RECALL_PRELOAD_WHISPER=0)")
         return None
 
     resolved_model = model_name or resolve_preload_model()
@@ -99,20 +99,20 @@ def start_background_preload(
 
 
 def start_tracked_preload(whisper_manager, робота: dict) -> Optional[threading.Thread]:
-    """Запускає прогрів і водночас веде `робота['whisper']` через увесь
-    цикл станів (`loading` → `ready`|`failed`|`disabled`) — раніше цей код
-    жив інлайном у `app.py:613-658` (config-registry-fix-r3-01).
+    """Starts the warm-up and at the same time drives `робота['whisper']` through the whole
+    state cycle (`loading` → `ready`|`failed`|`disabled`) — this code used to
+    live inline in `app.py:613-658` (config-registry-fix-r3-01).
 
-    Порядок станів той самий, що був у app.py: `'loading'` виставляється ДО
-    старту фонового потоку прогріву, `'ready'`/`'failed'` — лише після
-    `.join()` за критерієм членства в кеші моделей (`_m in
-    whisper_manager._models`, знахідка 8 попереднього раунду — НЕ
-    `current_model_name`, бо це "останній використаний" покажчик, який
-    рухає будь-яка паралельна транскрипція з іншою моделлю).
+    The order of states is the same as it was in app.py: `'loading'` is set BEFORE
+    the background warm-up thread starts, `'ready'`/`'failed'` — only after
+    `.join()` by the model-cache membership criterion (`_m in
+    whisper_manager._models`, finding 8 of the previous round — NOT
+    `current_model_name`, because that is a "last used" pointer that is
+    moved by any parallel transcription with a different model).
 
-    Повертає потік-спостерігач (`.join()` на ньому чекає завершення і
-    прогріву, і оновлення робота) або ``None``, якщо прогрів не
-    запускався (вимкнено / немає менеджера / виняток на старті).
+    Returns the watcher thread (`.join()` on it waits for both the warm-up
+    and the робота update to finish) or ``None`` if the warm-up
+    was not started (disabled / no manager / exception at start).
     """
     try:
         if not preload_enabled() or not whisper_manager:
@@ -140,10 +140,10 @@ def start_tracked_preload(whisper_manager, робота: dict) -> Optional[threa
         watcher.start()
         return watcher
     except Exception as e:
-        # T7.4: не голий except — логуємо перед тим, як звести робота до
-        # 'failed'; /api/transcribe все одно довантажить модель лінивo.
+        # T7.4: not a bare except — log before reducing робота to
+        # 'failed'; /api/transcribe will still load the model lazily.
         logger.warning(
-            "Whisper preload: не вдалося запустити відстеження прогріву: %s", e, exc_info=True,
+            "Whisper preload: failed to start tracking the warm-up: %s", e, exc_info=True,
         )
         робота['whisper'] = {'preload': 'failed', 'model': None}
         return None

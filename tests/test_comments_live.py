@@ -1,10 +1,10 @@
-"""Шар коментарів, Волна 4: живий дзвінок.
+"""Comments layer, Wave 4: live call.
 
-Три речі, які тут ламаються окремо:
-  1. рядковий ключ цілі — сесія запису це `rec_<hex>`, а не число;
-  2. переїзд на транскрипт після транскрибування (інакше все, надиктоване по
-     ходу дзвінка, лишається на id, якого не видно з жодного екрана);
-  3. подача коментарів у копілот як пріоритетного сигналу оператора.
+Three things that break separately here:
+  1. the string target key — a recording session is `rec_<hex>`, not a number;
+  2. moving to the transcript after transcription (otherwise everything dictated
+     during the call stays on an id not visible from any screen);
+  3. feeding comments to the copilot as the operator's priority signal.
 """
 import sqlite3
 
@@ -34,7 +34,7 @@ def _add_tx(path, name="Дзвінок", file_path=None):
     return tid
 
 
-# ------------------------------------------------- v39: рядковий ключ цілі
+# ------------------------------------------------- v39: string target key
 
 def test_v39_adds_target_key(db):
     conn = sqlite3.connect(db)
@@ -68,8 +68,8 @@ def test_session_comments_are_listed_by_string_key(db):
 
 
 def test_session_comments_sort_by_moment_not_typing_time(db):
-    """Під час дзвінка коментарі читаються за ходом розмови. Другий вписали
-    пізніше, але він стосується ранішого моменту — і має стояти першим."""
+    """During a call comments are read in the order of the conversation. The second was entered
+    later, but it concerns an earlier moment — and must stand first."""
     comments.create(db, "recording_session", SID, "пізній момент",
                     source="live", anchor_time=600)
     comments.create(db, "recording_session", SID, "ранній момент",
@@ -88,7 +88,7 @@ def test_counts_work_for_string_keys(db):
 
 def test_numeric_target_rejects_garbage_key(db):
     tid = _add_tx(db)
-    comments.create(db, "transcription", tid, "ок")     # число — приймається
+    comments.create(db, "transcription", tid, "ок")     # a number — accepted
     with pytest.raises(comments.CommentError):
         comments.create(db, "transcription", "rec_abc", "не число")
 
@@ -99,8 +99,8 @@ def test_empty_session_key_rejected(db):
 
 
 def test_string_and_numeric_targets_do_not_collide(db):
-    """target_id рядкових цілей тримає 0 — він не має ловитись як картка #0
-    і не має змішуватись із числовими цілями."""
+    """The target_id of string targets holds 0 — it must not be caught as card #0
+    and must not mix with numeric targets."""
     tid = _add_tx(db)
     comments.create(db, "recording_session", SID, "сесія", source="live")
     comments.create(db, "transcription", tid, "транскрипт")
@@ -108,7 +108,7 @@ def test_string_and_numeric_targets_do_not_collide(db):
     assert len(comments.list_for(db, "recording_session", SID)) == 1
 
 
-# ----------------------------------------------------- переїзд на транскрипт
+# ----------------------------------------------------- move to the transcript
 
 def test_retarget_moves_session_comments_with_anchor(db):
     tid = _add_tx(db)
@@ -138,8 +138,8 @@ def test_retarget_is_safe_when_nothing_to_move(db):
 
 
 def test_retarget_rebuilds_graph_on_new_target(db):
-    """Після переїзду згадки з коментарів мусять зʼявитись у графі нової цілі —
-    поки коментар висів на сесії, якоря не було й звʼязок був неможливий."""
+    """After the move, mentions from the comments must appear in the new target's graph —
+    while the comment hung on the session there was no anchor and a link was impossible."""
     tid = _add_tx(db)
     conn = sqlite3.connect(db)
     conn.execute("INSERT INTO entities (type, canonical_name, normalized_name) "
@@ -158,8 +158,8 @@ def test_retarget_rebuilds_graph_on_new_target(db):
 
 
 def test_session_resolves_to_transcript_through_media_card(db):
-    """Поки транскрипта немає — якоря немає (це нормальний стан під час
-    дзвінка). Щойно він зʼявився — ланцюг сесія → картка → транскрипт замикається."""
+    """While there is no transcript there is no anchor (a normal state during
+    a call). As soon as it appears, the chain session → card → transcript closes."""
     assert comments.resolve_transcription(db, "recording_session", SID) is None
     conn = sqlite3.connect(db)
     conn.execute("INSERT INTO audio_downloads (youtube_url, youtube_id, title, "
@@ -171,7 +171,7 @@ def test_session_resolves_to_transcript_through_media_card(db):
     assert comments.resolve_transcription(db, "recording_session", SID) == tid
 
 
-# ------------------------------------------------ подача в копілот (worker)
+# ------------------------------------------------ feeding the copilot (worker)
 
 class _WS:
     def __init__(self, sid):
@@ -180,7 +180,7 @@ class _WS:
 
 def _worker(db_path):
     from app.services.copilot.worker import CopilotWorker
-    w = CopilotWorker.__new__(CopilotWorker)      # без запуску потоків/LLM
+    w = CopilotWorker.__new__(CopilotWorker)      # without starting threads/LLM
     w._db_path = db_path
     return w
 
@@ -196,15 +196,15 @@ def test_operator_comments_enter_copilot_window(db):
 
 
 def test_operator_comment_ids_cannot_clash_with_archive_chunks(db):
-    """У вікні копілота вже живуть чанки архіву (додатні id) і чанки коментарів
-    із retrieval (відʼємні, з іншої таблиці). Третій простір мусить бути своїм,
-    інакше evidence_chunk_ids інсайту вказує невідомо на що."""
+    """The copilot window already holds archive chunks (positive ids) and comment chunks
+    from retrieval (negative, from another table). The third space must be its own,
+    otherwise the insight's evidence_chunk_ids point to who knows what."""
     from app.services.copilot.worker import CopilotWorker
     c = comments.create(db, "recording_session", SID, "текст", source="live")
     got = _worker(db)._operator_comments(_WS(SID))
     assert got[0]["chunk_id"] == CopilotWorker._OPERATOR_CHUNK_BASE - c["id"]
     assert got[0]["chunk_id"] < -1_000_000
-    assert got[0]["chunk_id"] != -c["id"]        # не простір retrieval
+    assert got[0]["chunk_id"] != -c["id"]        # not the retrieval space
 
 
 def test_operator_comments_are_capped_to_the_latest(db):
@@ -214,11 +214,11 @@ def test_operator_comments_are_capped_to_the_latest(db):
                         source="live", anchor_time=float(i))
     got = _worker(db)._operator_comments(_WS(SID))
     assert len(got) == CopilotWorker._OPERATOR_COMMENTS
-    assert got[-1]["text"] == "коментар 7"       # саме ОСТАННІ
+    assert got[-1]["text"] == "коментар 7"       # exactly the LATEST ones
 
 
 def test_operator_comments_degrade_quietly(db):
-    """Копілот не має падати ні без БД, ні на старій схемі без таблиці."""
+    """The copilot must not fail either without a DB or on an old schema without the table."""
     w = _worker(db)
     assert w._operator_comments(_WS(None)) == []
     w._db_path = None
@@ -232,8 +232,8 @@ def test_operator_comments_degrade_quietly(db):
 
 
 def test_dispatcher_labels_operator_comment_distinctly(db):
-    """Без явної мітки 7B прочитала б репліку оператора як ще один старий
-    фрагмент архіву — тобто найточніший сигнал у вікні втратив би вагу."""
+    """Without an explicit mark the 7B would read the operator's line as one more old
+    archive fragment — i.e. the most precise signal in the window would lose weight."""
     from app.services.copilot.dispatcher import _fmt_chunks
     txt = _fmt_chunks([
         {"chunk_id": -1000000005, "source_type": "comment", "live_operator": True,
@@ -246,19 +246,19 @@ def test_dispatcher_labels_operator_comment_distinctly(db):
 
 
 def test_dispatcher_format_unchanged_without_comments():
-    """Регресія: вікно без коментарів має форматуватись побайтово як раніше."""
+    """Regression: a window without comments must be formatted byte for byte as before."""
     from app.services.copilot.dispatcher import _fmt_chunks
     assert _fmt_chunks([{"chunk_id": 7, "source_name": "Зустріч",
                          "meeting_date": "2026-01-01", "text": "текст"}]) \
         == "[chunk_id=7] (Зустріч, 2026-01-01) текст"
 
 
-# ------------------------------------------ регресії за код-рев'ю (merge)
+# ------------------------------------------ regressions from the code review (merge)
 
 def test_pinned_live_comments_are_not_the_first_dropped(db):
-    """Знайдено рев'ю: `list_for` віддає закріплені ПЕРШИМИ, а зріз «останні N»
-    відрізав саме їх — тобто з вікна копілота випадало рівно те, що оператор
-    свідомо підняв."""
+    """Found by the review: `list_for` returns pinned ones FIRST, and the "latest N" slice
+    cut off exactly them — i.e. exactly what the operator deliberately raised
+    fell out of the copilot window."""
     from app.services.copilot.worker import CopilotWorker
     comments.create(db, "recording_session", SID, "закріплене", source="live",
                     anchor_time=1.0, pinned=True)
@@ -269,20 +269,20 @@ def test_pinned_live_comments_are_not_the_first_dropped(db):
     texts = [c["text"] for c in got]
     assert len(got) == CopilotWorker._OPERATOR_COMMENTS
     assert "закріплене" in texts
-    assert texts[-1] == "звичайне 5"        # і найсвіжіші теж на місці
+    assert texts[-1] == "звичайне 5"        # and the newest ones are in place too
 
 
 def test_live_comments_are_flagged_as_operator_input(db):
-    """Прапорець відрізняє живу репліку цього дзвінка від архівного коментаря,
-    що приїхав із RAG — інакше диспетчер підписує обидва однаково."""
+    """The flag tells a live line of this call from an archive comment
+    that arrived from RAG — otherwise the dispatcher labels both the same."""
     comments.create(db, "recording_session", SID, "текст", source="live")
     assert _worker(db)._operator_comments(_WS(SID))[0]["live_operator"] is True
 
 
 def test_dispatcher_does_not_call_archive_comment_an_operator_remark():
-    """Знайдено рев'ю: архівні коментарі теж мають source_type='comment' (їх
-    віддає RAG), і без розрізнення торішнє уточнення до ЧУЖОГО проєкту
-    підписувалось як «оператор щойно сказав», ще й без джерела й дати."""
+    """Found by the review: archive comments also have source_type='comment' (RAG
+    returns them), and without telling them apart last year's clarification on ANOTHER project
+    was labelled as "the operator just said", with no source or date."""
     from app.services.copilot.dispatcher import _fmt_chunks
     txt = _fmt_chunks([
         {"chunk_id": -5, "source_type": "comment", "target_label": "Стара зустріч",
@@ -293,5 +293,5 @@ def test_dispatcher_does_not_call_archive_comment_an_operator_remark():
     assert "КОМЕНТАР ВЛАСНИКА до «Стара зустріч», 2026-01-01" in txt
     assert "торішнє уточнення" in txt
     assert "(КОМЕНТАР ОПЕРАТОРА, 01:05) щойно вписано" in txt
-    # Архівний коментар НЕ має видаватись за репліку оператора.
+    # An archive comment must NOT pass for an operator's line.
     assert "КОМЕНТАР ОПЕРАТОРА) торішнє" not in txt

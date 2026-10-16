@@ -1,132 +1,132 @@
-"""SQLite міграції з версіонуванням схеми.
+"""SQLite migrations with schema versioning.
 
-Поточні версії:
-  v1 — Базові таблиці transcriptions + audio_downloads
-  v2 — Індекси на created_at, source_type, language, youtube_id, title
-  v3 — FTS5 virtual table + триггери для transcriptions
-  v4 — polished_text/polished_at/polished_model колонки (Claude polish)
-  v5 — source_type у audio_downloads + recording_* колонки (Phase 9.6)
-  v6 — speakers + transcription_speaker_map (Phase 10 diarization)
-  v7 — embedding BLOB у transcription_speaker_map (Phase 10.6 voice fingerprinting)
-  v8 — summary_json + summary_at + summary_model (Phase 12.5 Claude summarize)
-  v9 — translations_json (Phase 12.11 multi-lang Claude translation cache)
-  v10 — segment_bookmarks + saved_searches (Phase 12.12)
-  v11 — topics_json (Phase 12.19 Claude topic auto-tags)
-  v12 — sentiment_json (Phase 12.25 per-speaker sentiment analysis)
-  v13 — Meeting Memory: entities + entity_aliases + meeting_entities +
-        action_items + enriched_* колонки (Phase 13 — наскрізний RAG-архів)
-  v14 — chunks (+embedding BLOB) + chunks_fts + embedded_* колонки
-        (Phase 13B — локальні embeddings на 3090 + гібридний пошук)
-  v15 — categories + transcriptions.category_id (Phase 14 — напрямки/розділи
-        для чистого RAG: фонд/особисте/AI/... фільтруються наскрізно)
-  v16 — document_* колонки на transcriptions (Phase 16A — підвантаження
-        документів PDF/DOCX/MD: source_type='document', оригінал у file_path)
-  v17 — chunks.page/section + transcriptions.structure_json (Phase 16B —
-        провенанс сторінка/слайд для RAG-цитат; PDF/PPTX блоки)
-  v18 — tg_* колонки на transcriptions + tg_monitored_chats (Phase 17 —
-        ingestion з реального Telegram-акаунта: source_type='telegram',
-        провенанс чат/відправник/лінк, дедуп по (chat_id,message_id))
-  v19 — copilot_sessions + copilot_topics + copilot_events (Phase 19 — живий
-        ко-пілот дзвінка: налаштування сесії на старті (вектор/режим/важливість/
-        бюджет/лише-локально), топік-память з центроїдами, історія інсайтів/
-        тригерів для перегляду й експорту)
-  v20 — categories.name_norm (casefold-нормалізований ключ унікальності): SQLite
-        COLLATE NOCASE згортає лише ASCII, тож кирилиця («Фонд» vs «фонд») дублі
-        проходили. name_norm = name.strip().casefold() з UNIQUE-індексом гарантує
-        регістронезалежну унікальність для будь-якого алфавіту (Phase 14.1)
-  v22 — recording_video_tracks (нова таблиця) + audio_downloads.has_video +
-        audio_downloads.primary_video_path (Phase 22 — захоплення відео екрану:
-        per-monitor треки, прив'язані до запису; ідемпотентний upsert)
-  v23 — recording_video_tracks.region_x/y/w/h (Phase 22 region capture —
-        монітор-локальні пікселі захопленого регіону; NULL для full-monitor)
-  v24 — video_keyframes (нова таблиця: кадри сцени + OCR-текст) +
-        transcriptions.video_analysis_at/video_keyframes_count (Phase 23B-A —
-        video understanding: keyframe OCR → searchable RAG chunks, speaker='екран')
-  v26 — jobs (нова таблиця, T2.1 — REMEDIATION_PLAN Волна 1): персистентність
-        JobQueue. Раніше стан фонових задач (YouTube download, транскрипція,
-        backfill enrichment, import-folder, recording finalize) жив лише в
-        dict у пам'яті — рестарт/крах процесу губив прогрес мовчки. Таблиця —
-        джерело істини на диску; на старті app.py queued/running job'и з
-        попереднього запуску позначаються 'crashed' (аналог recording
+Current versions:
+  v1 - Base tables transcriptions + audio_downloads
+  v2 - Indexes on created_at, source_type, language, youtube_id, title
+  v3 - FTS5 virtual table + triggers for transcriptions
+  v4 - polished_text/polished_at/polished_model columns (Claude polish)
+  v5 - source_type in audio_downloads + recording_* columns (Phase 9.6)
+  v6 - speakers + transcription_speaker_map (Phase 10 diarization)
+  v7 - embedding BLOB in transcription_speaker_map (Phase 10.6 voice fingerprinting)
+  v8 - summary_json + summary_at + summary_model (Phase 12.5 Claude summarize)
+  v9 - translations_json (Phase 12.11 multi-lang Claude translation cache)
+  v10 - segment_bookmarks + saved_searches (Phase 12.12)
+  v11 - topics_json (Phase 12.19 Claude topic auto-tags)
+  v12 - sentiment_json (Phase 12.25 per-speaker sentiment analysis)
+  v13 - Meeting Memory: entities + entity_aliases + meeting_entities +
+        action_items + enriched_* columns (Phase 13 - end-to-end RAG archive)
+  v14 - chunks (+embedding BLOB) + chunks_fts + embedded_* columns
+        (Phase 13B - local embeddings on the 3090 + hybrid search)
+  v15 - categories + transcriptions.category_id (Phase 14 - directions/sections
+        for clean RAG: fund/personal/AI/... are filtered end to end)
+  v16 - document_* columns on transcriptions (Phase 16A - document
+        upload PDF/DOCX/MD: source_type='document', the original in file_path)
+  v17 - chunks.page/section + transcriptions.structure_json (Phase 16B -
+        page/slide provenance for RAG citations; PDF/PPTX blocks)
+  v18 - tg_* columns on transcriptions + tg_monitored_chats (Phase 17 -
+        ingestion from a real Telegram account: source_type='telegram',
+        chat/sender/link provenance, dedup by (chat_id,message_id))
+  v19 - copilot_sessions + copilot_topics + copilot_events (Phase 19 - the live
+        call copilot: session settings at start (vector/mode/importance/
+        budget/local-only), topic memory with centroids, history of insights/
+        triggers for viewing and export)
+  v20 - categories.name_norm (casefold-normalized uniqueness key): SQLite
+        COLLATE NOCASE folds only ASCII, so Cyrillic ("Фонд" vs "фонд") duplicates
+        got through. name_norm = name.strip().casefold() with a UNIQUE index guarantees
+        case-insensitive uniqueness for any alphabet (Phase 14.1)
+  v22 - recording_video_tracks (new table) + audio_downloads.has_video +
+        audio_downloads.primary_video_path (Phase 22 - screen video capture:
+        per-monitor tracks tied to a recording; idempotent upsert)
+  v23 - recording_video_tracks.region_x/y/w/h (Phase 22 region capture -
+        monitor-local pixels of the captured region; NULL for full-monitor)
+  v24 - video_keyframes (new table: scene frames + OCR text) +
+        transcriptions.video_analysis_at/video_keyframes_count (Phase 23B-A -
+        video understanding: keyframe OCR -> searchable RAG chunks, speaker='екран')
+  v26 - jobs (new table, T2.1 - REMEDIATION_PLAN Wave 1): JobQueue
+        persistence. Previously the state of background tasks (YouTube download, transcription,
+        backfill enrichment, import-folder, recording finalize) lived only in
+        an in-memory dict - a process restart/crash lost progress silently. The table is
+        the source of truth on disk; at app.py start, queued/running jobs from the
+        previous run are marked 'crashed' (analogous to recording
         SessionStore.recover_orphaned).
 
-  v27 — soft-delete + speaker un-merge snapshot (T4.6, REMEDIATION_PLAN
-        Волна 2, Варіант A): transcriptions.deleted_at / audio_downloads.
-        deleted_at (epoch-секунди, NULL = живий запис) — одиничний DELETE
-        більше не стирає рядок одразу (і файл audio_downloads — теж НЕ
-        одразу), а лише ховає його з усіх read-шляхів (список/пошук/RAG/
-        лічильники/дашборд); POST .../restore повертає. Bulk-delete
-        лишається фізичним (без undo) — свідоме звуження. Таблиця
-        speaker_merges зберігає before-снапшот кожного merge_speakers
-        (видалені speakers-рядки + попередній transcription_speaker_map
-        мапінг + entities.speaker_id, які FK ON DELETE SET NULL обнулив) —
-        POST /api/speakers/unmerge/<merge_id> відновлює. Обидва механізми
-        мають grace-період (RECALL_SOFTDELETE_GRACE_DAYS, дефолт 7 днів) —
-        app.services.retention.purge_soft_deleted() фізично прибирає
-        прострочене (файл + рядок / снапшот) на старті app.py.
+  v27 - soft-delete + speaker un-merge snapshot (T4.6, REMEDIATION_PLAN
+        Wave 2, Option A): transcriptions.deleted_at / audio_downloads.
+        deleted_at (epoch seconds, NULL = live record) - a single DELETE
+        no longer erases the row at once (and the audio_downloads file is NOT
+        removed at once either), it only hides it from all read paths (list/search/RAG/
+        counters/dashboard); POST .../restore brings it back. Bulk-delete
+        stays physical (no undo) - a deliberate narrowing. The table
+        speaker_merges keeps a before-snapshot of every merge_speakers
+        (deleted speakers rows + the previous transcription_speaker_map
+        mapping + entities.speaker_id, which FK ON DELETE SET NULL zeroed) -
+        POST /api/speakers/unmerge/<merge_id> restores it. Both mechanisms
+        have a grace period (RECALL_SOFTDELETE_GRACE_DAYS, default 7 days) -
+        app.services.retention.purge_soft_deleted() physically removes
+        the expired (file + row / snapshot) at app.py start.
 
-  v28 — transcriptions.embedding_version (T6.8): структурна idempotency
-        re-embed при зміні логіки чанкінгу.
+  v28 - transcriptions.embedding_version (T6.8): structural idempotency of
+        re-embed when the chunking logic changes.
 
-  v29 — action_items: due_date / due_precision / stale_at / dup_of (Трек 1;
-        план і замір — у локальних docs/plans/, поза репозиторієм: містять
-        конкретику особистого архіву). Дедлайни зберігались лише як сира
-        фраза («завтра», «четвер», «Q3 2026» — 426 різних значень), тож
-        питання «що треба зробити цього тижня» було непридатне до запиту.
-        due_date — обчислена ISO-дата відносно дати зустрічі, due_precision —
-        чесність замість фальшивої точності («якнайшвидше» не вдає дату).
-        Сира фраза в due НЕ переписується: у видачі показуємо обидві, щоб
-        помилка парсера була видима. stale_at/dup_of — для offline-проходів
-        app.services.commitments (нічого не видаляють).
+  v29 - action_items: due_date / due_precision / stale_at / dup_of (Track 1;
+        the plan and measurement are in the local docs/plans/, outside the repository: they contain
+        specifics of the personal archive). Deadlines were stored only as a raw
+        phrase ("завтра", "четвер", "Q3 2026" - 426 distinct values), so the
+        question "what has to be done this week" could not be queried.
+        due_date is a computed ISO date relative to the meeting date, due_precision is
+        honesty instead of false precision ("якнайшвидше" does not pretend to be a date).
+        The raw phrase in due is NOT rewritten: the output shows both, so that
+        a parser mistake is visible. stale_at/dup_of are for the offline passes of
+        app.services.commitments (they delete nothing).
 
-  v30 — TG: meeting_date = день повідомлення замість дати інжесту (Волна 0).
-  v31 — TG: tg_reply_to / tg_sender_id / tg_grouped_id / tg_edit_date (Волна 4).
+  v30 - TG: meeting_date = the message day instead of the ingest date (Wave 0).
+  v31 - TG: tg_reply_to / tg_sender_id / tg_grouped_id / tg_edit_date (Wave 4).
 
-  v32 — tg_threads + transcriptions.tg_thread_id/tg_thread_src (Волна 4.5):
-        одиниця сенсу в переписці — НИТКА всередині чату, а не чат і не окреме
-        повідомлення. Чат — це не тема: у фонд-чатах одночасно йдуть кілька
-        проєктів, тож категорія, успадкована від чату, приписує кожному
-        повідомленню один напрямок незалежно від змісту. Нитка живе окремою
-        таблицею, бо схема chunks забороняє чанк поверх кількох записів
+  v32 - tg_threads + transcriptions.tg_thread_id/tg_thread_src (Wave 4.5):
+        the unit of meaning in a conversation is a THREAD inside a chat, not the chat and not a single
+        message. A chat is not a topic: in fund chats several projects run at once,
+        so a category inherited from the chat assigns every message
+        one direction regardless of content. The thread lives in its own
+        table, because the chunks schema forbids a chunk over several records
         (transcription_id NOT NULL + UNIQUE(transcription_id, chunk_index)),
-        а записи-повідомлення лишаються як були — дедуп, лінки і провенанс
-        не ламаються.
-  v43 — chunks.context_prefix + chunks_fts по (context_prefix, text) (Волна B):
-        контекстний заголовок чанка (тип, назва/чат, дата, спікер/автор,
-        напрямок|нитка|сторінка + рядок сводки одиниці сенсу) бере участь у
-        векторі та BM25, але НЕ потрапляє в цитати — `chunks.text` лишається
-        голим текстом.
-  v45 — двошарова таксономія (спека directions-projects-tags, ADR-023 §B):
-        `categories.parent_id` (NULL = напрямок, інакше — проєкт усередині
-        напрямку; рівно два рівні, перевірка в app-коді `app/services/
-        categories.py`, CHECK у схемі немає) + `tags`/`record_tags`/
-        `tg_chat_tags` (контрольований словник тегів, кріпиться ЛИШЕ до
-        transcriptions) + `transcriptions.suggested_tags_json` (підказки
-        Claude, ще не прийняті — істина живе в `record_tags`).
-        Тільки DDL: жодного переносу даних, `name_norm` не перераховується.
-  v46 — embedding_epochs (спека directions-projects-tags, історія 17): БД
-        памʼятає, яким ФОРМАТОМ контекстного префікса побудовано кожну епоху
-        (`model`, `version`) ембедингів. Номер епохи — акт конфігурації
-        (`EMBED_VERSION` у `.env`, ADR-016), тож сам по собі він не відрізняє
-        «формат змінився» від «усе гаразд»: під номером, який у БД уже є,
-        новий префікс ліг би поруч зі старими, а `reembed.stale_ids` їх ніколи
-        б не побачив (пара збігається). Бекфіл стемплює все, що існувало ДО
-        v46, форматом 1 — код оголошує свій `embeddings.PREFIX_FORMAT` і
-        ВІДМОВЛЯЄТЬСЯ писати чанки в епоху, побудовану іншим форматом
-        (ADR-017: вектор ніколи не змішує епохи). Тільки DDL + один бекфіл.
-  v47 — унікальність назви вузла — серед БРАТІВ, а не по всій таблиці (спека
-        directions-projects-tags, хвиля 6, ADR-023 §E «замінено 2026-09-22»):
-        «Маркетинг» може жити і під «Фонд Робота», і під «Фріланс», а
-        напрямок «Маркетинг» — поруч із чужим однойменним проєктом. Перша
-        НЕаддитивна міграція спеки: inline `name TEXT NOT NULL UNIQUE COLLATE
-        NOCASE` (v15) не знімається ALTER'ом, тож таблиця перебудовується
-        (CREATE new → копія з тими самими id → DROP → RENAME). Глобальний
-        UNIQUE-індекс `idx_categories_name_norm` (v20) помирає разом зі старою
-        таблицею; замість нього — `idx_categories_parent_name` UNIQUE на
-        `(COALESCE(parent_id, 0), name_norm)`. `slug UNIQUE` лишається.
+        while the message records stay as they were - dedup, links and provenance
+        do not break.
+  v43 - chunks.context_prefix + chunks_fts over (context_prefix, text) (Wave B):
+        the chunk context header (type, title/chat, date, speaker/author,
+        direction|thread|page + a summary line of the unit of meaning) takes part in
+        the vector and BM25, but does NOT end up in citations - `chunks.text` stays
+        bare text.
+  v45 - two-layer taxonomy (spec directions-projects-tags, ADR-023 section B):
+        `categories.parent_id` (NULL = direction, otherwise a project inside a
+        direction; exactly two levels, checked in app code `app/services/
+        categories.py`, there is no CHECK in the schema) + `tags`/`record_tags`/
+        `tg_chat_tags` (a controlled tag vocabulary, attached ONLY to
+        transcriptions) + `transcriptions.suggested_tags_json` (Claude hints,
+        not yet accepted - the truth lives in `record_tags`).
+        DDL only: no data transfer, `name_norm` is not recomputed.
+  v46 - embedding_epochs (spec directions-projects-tags, story 17): the DB
+        remembers by which context-prefix FORMAT each epoch
+        (`model`, `version`) of embeddings was built. The epoch number is an act of configuration
+        (`EMBED_VERSION` in `.env`, ADR-016), so by itself it does not distinguish
+        "the format changed" from "all is well": under a number that already exists in the DB,
+        a new prefix would lie next to the old ones, and `reembed.stale_ids` would never
+        see them (the pair matches). The backfill stamps everything that existed BEFORE
+        v46 with format 1 - the code declares its `embeddings.PREFIX_FORMAT` and
+        REFUSES to write chunks into an epoch built with a different format
+        (ADR-017: a vector never mixes epochs). DDL only + one backfill.
+  v47 - node name uniqueness is among SIBLINGS, not across the whole table (spec
+        directions-projects-tags, wave 6, ADR-023 section E "replaced 2026-09-22"):
+        "Маркетинг" can live both under "Фонд Робота" and under "Фріланс", and
+        the direction "Маркетинг" sits next to a foreign project of the same name. The first
+        NON-additive migration of the spec: the inline `name TEXT NOT NULL UNIQUE COLLATE
+        NOCASE` (v15) cannot be dropped by ALTER, so the table is rebuilt
+        (CREATE new -> copy with the same ids -> DROP -> RENAME). The global
+        UNIQUE index `idx_categories_name_norm` (v20) dies along with the old
+        table; instead there is `idx_categories_parent_name` UNIQUE on
+        `(COALESCE(parent_id, 0), name_norm)`. `slug UNIQUE` stays.
 
-Запуск: init_database(db_path) на старті app.
-Idempotent — кожна міграція робить INSERT OR IGNORE у schema_versions.
+Run: init_database(db_path) at app start.
+Idempotent - every migration does INSERT OR IGNORE into schema_versions.
 """
 import logging
 import sqlite3
@@ -135,14 +135,14 @@ logger = logging.getLogger(__name__)
 
 
 def init_database(db_path: str):
-    """Створює БД (якщо немає) і застосовує всі pending міграції."""
+    """Creates the DB (if absent) and applies all pending migrations."""
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    # WAL — кращ. конкурентність
+    # WAL - better concurrency
     c.execute('PRAGMA journal_mode=WAL')
 
-    # Таблиця версій схеми
+    # Schema versions table
     c.execute('''CREATE TABLE IF NOT EXISTS schema_versions
                  (
                      version INTEGER PRIMARY KEY,
@@ -154,7 +154,7 @@ def init_database(db_path: str):
     row = c.fetchone()
     current_version = row[0] if row[0] is not None else 0
 
-    # === v1: Базові таблиці ===
+    # === v1: Base tables ===
     if current_version < 1:
         c.execute('''CREATE TABLE IF NOT EXISTS transcriptions
                      (
@@ -197,9 +197,9 @@ def init_database(db_path: str):
                          tags TEXT
                      )''')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (1, 'Initial schema: transcriptions + audio_downloads')")
-        logger.info("Міграція v1: Базові таблиці створено")
+        logger.info("Migration v1: Base tables created")
 
-    # === v2: Індекси ===
+    # === v2: Indexes ===
     if current_version < 2:
         c.execute('CREATE INDEX IF NOT EXISTS idx_audio_youtube_id ON audio_downloads(youtube_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_audio_created_at ON audio_downloads(created_at DESC)')
@@ -208,7 +208,7 @@ def init_database(db_path: str):
         c.execute('CREATE INDEX IF NOT EXISTS idx_transcriptions_source_type ON transcriptions(source_type)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_transcriptions_language ON transcriptions(language)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (2, 'Added indexes on transcriptions and audio_downloads')")
-        logger.info("Міграція v2: Індекси створено")
+        logger.info("Migration v2: Indexes created")
 
     # === v3: FTS5 ===
     if current_version < 3:
@@ -245,7 +245,7 @@ def init_database(db_path: str):
         ''')
         c.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (3, 'FTS5 full-text index for transcriptions')")
-        logger.info("Міграція v3: FTS5 індекс створено")
+        logger.info("Migration v3: FTS5 index created")
 
     # === v4: Claude polish columns ===
     if current_version < 4:
@@ -258,18 +258,18 @@ def init_database(db_path: str):
         if 'polished_model' not in cols:
             c.execute('ALTER TABLE transcriptions ADD COLUMN polished_model TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (4, 'polished_text + polished_at + polished_model for Claude postprocessing')")
-        logger.info("Міграція v4: колонки polished_* додані")
+        logger.info("Migration v4: polished_* columns added")
 
-    # === v5: source_type + recording columns у audio_downloads (Phase 9.6) ===
-    # Розширюємо існуючу таблицю audio_downloads замість створення нової
-    # таблиці recordings — UI і запити вже працюють по audio_downloads,
-    # дублювання логіки не потрібне. Записи (Phase 9) будуть мати
-    # source_type='recording', YouTube-завантаження — 'youtube' (default).
+    # === v5: source_type + recording columns in audio_downloads (Phase 9.6) ===
+    # We extend the existing audio_downloads table instead of creating a new
+    # recordings table - the UI and queries already work over audio_downloads,
+    # duplicating the logic is not needed. Recordings (Phase 9) will have
+    # source_type='recording', YouTube downloads - 'youtube' (default).
     if current_version < 5:
         c.execute("PRAGMA table_info(audio_downloads)")
         cols = {row[1] for row in c.fetchall()}
         if 'source_type' not in cols:
-            # DEFAULT 'youtube' автоматично присвоюється старим рядкам
+            # DEFAULT 'youtube' is automatically assigned to old rows
             c.execute("ALTER TABLE audio_downloads ADD COLUMN source_type TEXT NOT NULL DEFAULT 'youtube'")
         if 'recording_session_id' not in cols:
             c.execute('ALTER TABLE audio_downloads ADD COLUMN recording_session_id TEXT')
@@ -280,20 +280,20 @@ def init_database(db_path: str):
         c.execute('CREATE INDEX IF NOT EXISTS idx_audio_source_type ON audio_downloads(source_type)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_audio_recording_session_id ON audio_downloads(recording_session_id)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (5, 'source_type + recording_* columns in audio_downloads')")
-        logger.info("Міграція v5: source_type + recording_* колонки додані")
+        logger.info("Migration v5: source_type + recording_* columns added")
 
     # === v6: Speakers + transcription_speaker_map (Phase 10 diarization) ===
-    # speakers — глобальна таблиця "знайомих" спікерів. При перейменуванні в одному
-    # transcript-і ім'я підставляється в speakers (по UNIQUE name) і використовується
-    # як autocomplete-підказка в наступних transcript-ах.
+    # speakers - a global table of "known" speakers. When renamed in one
+    # transcript, the name is put into speakers (by UNIQUE name) and used
+    # as an autocomplete hint in subsequent transcripts.
     #
-    # transcription_speaker_map — per-transcript mapping raw_label ("SPEAKER_00",
-    # "self", "SPEAKER_UNKNOWN") → speaker_id. NULL speaker_id = "ще не названо",
-    # frontend показує "Спікер N" по числовій частині raw_label.
+    # transcription_speaker_map - per-transcript mapping raw_label ("SPEAKER_00",
+    # "self", "SPEAKER_UNKNOWN") -> speaker_id. NULL speaker_id = "not named yet",
+    # the frontend shows "Спікер N" by the numeric part of raw_label.
     #
-    # Сід-рядок "Ви" (is_self=1) — для авто-маршрутизації mic-стріму у recording-ах.
-    # FK enforcement не обов'язковий (інші таблиці теж без PRAGMA foreign_keys=ON);
-    # cascade-delete виконується явно у app-коді при видаленні transcription/speaker.
+    # Seed row "Ви" (is_self=1) - for auto-routing the mic stream in recordings.
+    # FK enforcement is not mandatory (other tables are also without PRAGMA foreign_keys=ON);
+    # cascade-delete is performed explicitly in app code when deleting a transcription/speaker.
     if current_version < 6:
         c.execute("PRAGMA table_info(speakers)")
         if not c.fetchall():
@@ -320,35 +320,35 @@ def init_database(db_path: str):
         c.execute('CREATE INDEX IF NOT EXISTS idx_speakers_name ON speakers(name COLLATE NOCASE)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_speakers_usage ON speakers(usage_count DESC)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_tspeaker_map_speaker ON transcription_speaker_map(speaker_id)')
-        # Seed "Ви" — для is_self=1 (mic-стрім recording-ів). Не оновлюємо якщо вже є.
+        # Seed "Ви" - for is_self=1 (the mic stream of recordings). Not updated if already present.
         c.execute("INSERT OR IGNORE INTO speakers (name, is_self) VALUES ('Ви', 1)")
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (6, 'speakers + transcription_speaker_map for diarization')")
-        logger.info("Міграція v6: speakers + transcription_speaker_map створено")
+        logger.info("Migration v6: speakers + transcription_speaker_map created")
 
-    # === v7: embedding у transcription_speaker_map (Phase 10.6) ===
-    # Voice fingerprinting: при діарізації pyannote повертає embedding per
-    # SPEAKER_NN cluster (192-256 floats залежно від моделі). Зберігаємо
-    # raw bytes у map для подальшого:
-    # 1. Auto-match: при наступному transcribe порівнюємо embeddings нових
-    #    SPEAKER_NN з усіма speakers.embedding через cosine similarity.
-    #    Match >0.85 → auto-link до існуючого speaker_id.
-    # 2. PATCH speakers: при ручному іменуванні беремо embedding з map і
-    #    усереднюємо у speakers.embedding (running average).
+    # === v7: embedding in transcription_speaker_map (Phase 10.6) ===
+    # Voice fingerprinting: during diarization pyannote returns an embedding per
+    # SPEAKER_NN cluster (192-256 floats depending on the model). We store
+    # raw bytes in the map for further:
+    # 1. Auto-match: on the next transcribe we compare the embeddings of new
+    #    SPEAKER_NN with all speakers.embedding via cosine similarity.
+    #    Match >0.85 -> auto-link to an existing speaker_id.
+    # 2. PATCH speakers: on manual naming we take the embedding from the map and
+    #    average it into speakers.embedding (running average).
     #
-    # speakers.embedding вже додано у v6.
+    # speakers.embedding was already added in v6.
     if current_version < 7:
         c.execute("PRAGMA table_info(transcription_speaker_map)")
         cols = {row[1] for row in c.fetchall()}
         if 'embedding' not in cols:
             c.execute('ALTER TABLE transcription_speaker_map ADD COLUMN embedding BLOB')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (7, 'embedding BLOB у transcription_speaker_map for voice fingerprinting')")
-        logger.info("Міграція v7: embedding колонка додана у transcription_speaker_map")
+        logger.info("Migration v7: embedding column added to transcription_speaker_map")
 
     # === v8: Summary + key points + action items (Phase 12.5) ===
     if current_version < 8:
         c.execute("PRAGMA table_info(transcriptions)")
         cols = {row[1] for row in c.fetchall()}
-        if cols:  # таблиця існує
+        if cols:  # the table exists
             if 'summary_json' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN summary_json TEXT')
             if 'summary_at' not in cols:
@@ -356,7 +356,7 @@ def init_database(db_path: str):
             if 'summary_model' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN summary_model TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (8, 'summary_json + summary_at + summary_model for Claude summarize')")
-        logger.info("Міграція v8: summary_* колонки додані")
+        logger.info("Migration v8: summary_* columns added")
 
     # === v9: Translations cache (Phase 12.11) ===
     if current_version < 9:
@@ -365,7 +365,7 @@ def init_database(db_path: str):
         if cols and 'translations_json' not in cols:
             c.execute('ALTER TABLE transcriptions ADD COLUMN translations_json TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (9, 'translations_json for multi-lang Claude translation cache')")
-        logger.info("Міграція v9: translations_json колонка додана")
+        logger.info("Migration v9: translations_json column added")
 
     # === v10: Bookmarks + saved searches (Phase 12.12) ===
     if current_version < 10:
@@ -393,7 +393,7 @@ def init_database(db_path: str):
                 use_count INTEGER NOT NULL DEFAULT 0
             )''')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (10, 'segment_bookmarks + saved_searches')")
-        logger.info("Міграція v10: bookmarks + saved_searches створено")
+        logger.info("Migration v10: bookmarks + saved_searches created")
 
     # === v11: Topic auto-tags (Phase 12.19) ===
     if current_version < 11:
@@ -402,7 +402,7 @@ def init_database(db_path: str):
         if cols and 'topics_json' not in cols:
             c.execute('ALTER TABLE transcriptions ADD COLUMN topics_json TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (11, 'topics_json for Claude topic auto-tags')")
-        logger.info("Міграція v11: topics_json колонка додана")
+        logger.info("Migration v11: topics_json column added")
 
     # === v12: Sentiment analysis (Phase 12.25) ===
     if current_version < 12:
@@ -411,24 +411,24 @@ def init_database(db_path: str):
         if cols and 'sentiment_json' not in cols:
             c.execute('ALTER TABLE transcriptions ADD COLUMN sentiment_json TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (12, 'sentiment_json per-speaker sentiment')")
-        logger.info("Міграція v12: sentiment_json колонка додана")
+        logger.info("Migration v12: sentiment_json column added")
 
-    # === v13: Meeting Memory — наскрізний шар сутностей + action items (Phase 13) ===
-    # Перетворює Whisper з "архіву окремих транскриптів" на RAG-систему пам'яті:
-    # люди / проєкти / організації стають first-class сутностями, спільними для
-    # ВСІХ мітингів (з аліасами для дедуплікації варіантів написання —
-    # Acmecorp / Акме / Acmez → одна сутність). Дозволяє наскрізні запити:
-    # "усі мітинги про проєкт X", "усі задачі на Андрія", "де згадували Y".
+    # === v13: Meeting Memory - end-to-end entities layer + action items (Phase 13) ===
+    # Turns Whisper from an "archive of separate transcripts" into a RAG memory system:
+    # people / projects / organizations become first-class entities shared across
+    # ALL meetings (with aliases to deduplicate spelling variants -
+    # Acmecorp / Акме / Acmez -> one entity). Enables end-to-end queries:
+    # "all meetings about project X", "all tasks for Andrii", "where Y was mentioned".
     #
-    # Чому нормалізовані таблиці, а не JSON-колонки (як topics_json):
-    # topics_json — вільний текст у межах ОДНОГО транскрипту, не злити між
-    # мітингами. Для cross-meeting пошуку потрібен граф сутностей = JOIN-и.
+    # Why normalized tables and not JSON columns (like topics_json):
+    # topics_json is free text within ONE transcript, cannot be merged across
+    # meetings. Cross-meeting search needs an entity graph = JOINs.
     #
-    # enriched_* на transcriptions — маркер ідемпотентності: backfill і авто-job
-    # пропускають уже збагачені (enriched_at IS NOT NULL), а зміна
-    # enrichment_version дозволяє форсувати re-run при оновленні промптів.
+    # enriched_* on transcriptions - an idempotency marker: backfill and the auto-job
+    # skip the already enriched (enriched_at IS NOT NULL), and changing
+    # enrichment_version lets one force a re-run when prompts are updated.
     if current_version < 13:
-        # --- entities: канонічні люди/проєкти/організації/теми ---
+        # --- entities: canonical people/projects/organizations/topics ---
         c.execute("PRAGMA table_info(entities)")
         if not c.fetchall():
             c.execute('''CREATE TABLE entities (
@@ -451,7 +451,7 @@ def init_database(db_path: str):
             c.execute('CREATE INDEX idx_entities_norm ON entities(normalized_name)')
             c.execute('CREATE INDEX idx_entities_mentions ON entities(mention_count DESC)')
 
-        # --- entity_aliases: варіанти написання → одна сутність ---
+        # --- entity_aliases: spelling variants -> one entity ---
         c.execute("PRAGMA table_info(entity_aliases)")
         if not c.fetchall():
             c.execute('''CREATE TABLE entity_aliases (
@@ -463,7 +463,7 @@ def init_database(db_path: str):
             )''')
             c.execute('CREATE INDEX idx_aliases_entity ON entity_aliases(entity_id)')
 
-        # --- meeting_entities: яка сутність у якому мітингу + вага ---
+        # --- meeting_entities: which entity in which meeting + weight ---
         c.execute("PRAGMA table_info(meeting_entities)")
         if not c.fetchall():
             c.execute('''CREATE TABLE meeting_entities (
@@ -478,7 +478,7 @@ def init_database(db_path: str):
             )''')
             c.execute('CREATE INDEX idx_me_entity ON meeting_entities(entity_id)')
 
-        # --- action_items: задачі/домовленості, лінкуються на власника-сутність ---
+        # --- action_items: tasks/agreements, linked to the owner entity ---
         c.execute("PRAGMA table_info(action_items)")
         if not c.fetchall():
             c.execute('''CREATE TABLE action_items (
@@ -497,7 +497,7 @@ def init_database(db_path: str):
             c.execute('CREATE INDEX idx_action_owner ON action_items(owner_entity_id)')
             c.execute('CREATE INDEX idx_action_status ON action_items(status)')
 
-        # --- enriched_* маркери на transcriptions (ідемпотентність) ---
+        # --- enriched_* markers on transcriptions (idempotency) ---
         c.execute("PRAGMA table_info(transcriptions)")
         cols = {row[1] for row in c.fetchall()}
         if cols:
@@ -508,23 +508,23 @@ def init_database(db_path: str):
             if 'enrichment_version' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN enrichment_version INTEGER')
             if 'meeting_date' not in cols:
-                # дата власне мітингу (для імпорту meeting_archive — з імені файлу/контенту);
-                # для нативних транскрипцій = created_at, заповнюється при enrich.
+                # the date of the meeting itself (for meeting_archive import - from the file name/content);
+                # for native transcriptions = created_at, filled in at enrich.
                 c.execute('ALTER TABLE transcriptions ADD COLUMN meeting_date TEXT')
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (13, 'Meeting Memory: entities + aliases + meeting_entities + action_items + enriched_* markers')")
-        logger.info("Міграція v13: Meeting Memory (entities/action_items/enriched_*) створено")
+        logger.info("Migration v13: Meeting Memory (entities/action_items/enriched_*) created")
 
-    # === v14: Chunks + локальні embeddings + chunk-level FTS5 (Phase 13B) ===
-    # Семантичний (векторний) RAG-шар. Транскрипт ріжеться на чанки (вікна по
-    # ходах спікера з перекриттям), кожен чанк отримує локальний embedding
-    # (multilingual-e5-large на RTX 3090, float32 BLOB). Пошук — гібрид:
-    #   vector cosine (семантика) + chunks_fts BM25 (ключові слова) → RRF-злиття.
-    # Чанк-рівень (а не транскрипт-рівень) потрібен для цитат: дата+спікер+таймкод.
+    # === v14: Chunks + local embeddings + chunk-level FTS5 (Phase 13B) ===
+    # A semantic (vector) RAG layer. A transcript is cut into chunks (windows by
+    # speaker turns with overlap), each chunk gets a local embedding
+    # (multilingual-e5-large on the RTX 3090, float32 BLOB). Search is a hybrid:
+    #   vector cosine (semantics) + chunks_fts BM25 (keywords) -> RRF merge.
+    # The chunk level (not the transcript level) is needed for citations: date+speaker+timecode.
     #
-    # embedded_* на transcriptions — окремий від enriched_* маркер ідемпотентності:
-    # embeddings рахуються ЛОКАЛЬНО (без Claude), тож можуть бути навіть без
-    # ANTHROPIC_API_KEY; skip-логіка незалежна від card-enrichment.
+    # embedded_* on transcriptions - an idempotency marker separate from enriched_*:
+    # embeddings are computed LOCALLY (without Claude), so they may exist even without
+    # ANTHROPIC_API_KEY; the skip logic is independent of card-enrichment.
     if current_version < 14:
         c.execute("PRAGMA table_info(chunks)")
         if not c.fetchall():
@@ -544,9 +544,9 @@ def init_database(db_path: str):
             )''')
             c.execute('CREATE INDEX idx_chunks_tx ON chunks(transcription_id)')
 
-        # chunk-level FTS5 (external content) + тригери авто-синку (як transcriptions_fts)
+        # chunk-level FTS5 (external content) + auto-sync triggers (like transcriptions_fts)
         c.execute("PRAGMA table_info(chunks_fts)")
-        # FTS5 — virtual table; PRAGMA table_info повертає її колонки якщо існує
+        # FTS5 is a virtual table; PRAGMA table_info returns its columns if it exists
         has_chunks_fts = bool(c.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
         ).fetchone())
@@ -585,15 +585,15 @@ def init_database(db_path: str):
                 c.execute('ALTER TABLE transcriptions ADD COLUMN chunk_count INTEGER')
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (14, 'chunks + chunks_fts + embedded_* for local embeddings hybrid search')")
-        logger.info("Міграція v14: chunks + chunks_fts + embedded_* створено")
+        logger.info("Migration v14: chunks + chunks_fts + embedded_* created")
 
-    # === v15: Categories / напрямки (Phase 14) ===
-    # Вимір "напрямок" на кожному транскрипті (Фонд / Особисте / AI / ...).
-    # Мета: чистий RAG — пошук/відповіді/граф можна обмежити одним розділом,
-    # щоб не змішувати робоче, особисте і скачані YouTube ("солянка").
-    # Один напрямок на запис (category_id), керований список (таблиця categories).
-    # FK не інлайнимо в ALTER (як решта схеми) — цілісність у app-коді: при
-    # видаленні категорії спершу обнуляємо transcriptions.category_id.
+    # === v15: Categories / directions (Phase 14) ===
+    # The "direction" dimension on every transcript (Fund / Personal / AI / ...).
+    # Goal: clean RAG - search/answers/graph can be limited to one section,
+    # so as not to mix work, personal and downloaded YouTube ("hodgepodge").
+    # One direction per record (category_id), a managed list (the categories table).
+    # We do not inline the FK in ALTER (like the rest of the schema) - integrity is in app code: when
+    # a category is deleted we first null transcriptions.category_id.
     if current_version < 15:
         c.execute("PRAGMA table_info(categories)")
         if not c.fetchall():
@@ -623,9 +623,9 @@ def init_database(db_path: str):
             c.execute('ALTER TABLE transcriptions ADD COLUMN category_id INTEGER')
             c.execute('CREATE INDEX IF NOT EXISTS idx_transcriptions_category ON transcriptions(category_id)')
 
-        # bulk-assign: meeting_archive → Фонд Робота (рішення користувача).
-        # Лише якщо таблиця transcriptions існує (cols непорожній) — інакше UPDATE
-        # падає «no such table» на БД без transcriptions (як у решті блоку — if cols).
+        # bulk-assign: meeting_archive -> «Фонд Робота» (user decision).
+        # Only if the transcriptions table exists (cols non-empty) - otherwise UPDATE
+        # fails with "no such table" on a DB without transcriptions (as in the rest of the block - if cols).
         if cols:
             fund = c.execute("SELECT id FROM categories WHERE slug = 'work'").fetchone()
             if fund:
@@ -635,24 +635,24 @@ def init_database(db_path: str):
                     (fund[0],))
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (15, 'categories + transcriptions.category_id (Phase 14 напрямки)')")
-        logger.info("Міграція v15: categories + category_id створено")
+        logger.info("Migration v15: categories + category_id created")
 
     # === v16: Document ingestion (Phase 16A) ===
-    # Документи (PDF / DOCX / Markdown / …) переіспользують ТУ САМУ таблицю
-    # transcriptions з source_type='document'. Як тільки розібраний текст лежить
-    # у transcript_text — увесь нижній стек (chunks + embeddings + chunks_fts +
-    # enrichment + граф сутностей + напрямки + RAG-чат + Історія) працює без змін.
-    # Тут лише додаткові метадані документа (тип, к-сть сторінок, хеш для дедупу).
-    # file_path переіспользуємо під шлях до збереженого ОРИГІНАЛУ файлу.
+    # Documents (PDF / DOCX / Markdown / ...) reuse THE SAME transcriptions
+    # table with source_type='document'. Once the parsed text lies
+    # in transcript_text - the whole lower stack (chunks + embeddings + chunks_fts +
+    # enrichment + entity graph + directions + RAG chat + History) works unchanged.
+    # Here only the additional document metadata (type, page count, hash for dedup).
+    # file_path is reused for the path to the saved ORIGINAL file.
     #
-    # Чанк-провенанс (стор. N / лист) додамо у 16B — для plain-text чанкінгу 16A
-    # (_chunk_from_text) додаткові колонки не потрібні.
+    # Chunk provenance (p. N / sheet) will be added in 16B - for the plain-text chunking of 16A
+    # (_chunk_from_text) extra columns are not needed.
     if current_version < 16:
         c.execute("PRAGMA table_info(transcriptions)")
         cols = {row[1] for row in c.fetchall()}
         if cols:
             if 'doc_type' not in cols:
-                # 'pdf' | 'docx' | 'md' | 'txt' | ... (розширення-джерело)
+                # 'pdf' | 'docx' | 'md' | 'txt' | ... (source extension)
                 c.execute('ALTER TABLE transcriptions ADD COLUMN doc_type TEXT')
             if 'original_filename' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN original_filename TEXT')
@@ -661,7 +661,7 @@ def init_database(db_path: str):
             if 'byte_size' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN byte_size INTEGER')
             if 'content_hash' not in cols:
-                # sha256 розібраного тексту — для дедупу повторних завантажень (16E)
+                # sha256 of the parsed text - for dedup of repeated uploads (16E)
                 c.execute('ALTER TABLE transcriptions ADD COLUMN content_hash TEXT')
             if 'parsed_at' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN parsed_at TIMESTAMP')
@@ -669,17 +669,17 @@ def init_database(db_path: str):
                 c.execute('ALTER TABLE transcriptions ADD COLUMN parser_version INTEGER')
             c.execute('CREATE INDEX IF NOT EXISTS idx_transcriptions_content_hash ON transcriptions(content_hash)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (16, 'document_* columns on transcriptions (Phase 16A document ingestion)')")
-        logger.info("Міграція v16: document_* колонки додані")
+        logger.info("Migration v16: document_* columns added")
 
-    # === v17: Провенанс документів — сторінка/слайд для цитат (Phase 16B) ===
-    # PDF/PPTX розбираються на блоки (сторінка/слайд). Щоб RAG-цитати вказували
-    # «стор. 3 / слайд 5», чанки отримують page+section. structure_json на
-    # transcriptions персистить блоки {text,page,section} — щоб при re-embed
-    # (зміна моделі/чанкінгу) провенанс відновлювався без повторного парсингу.
+    # === v17: Document provenance - page/slide for citations (Phase 16B) ===
+    # PDF/PPTX are parsed into blocks (page/slide). So that RAG citations point to
+    # "p. 3 / slide 5", chunks get page+section. structure_json on
+    # transcriptions persists the blocks {text,page,section} - so that on re-embed
+    # (model/chunking change) provenance is restored without re-parsing.
     #
-    # Аудіо-транскрипти й текстові документи (md/txt/docx) структури не мають →
-    # structure_json IS NULL → чанкер падає на стару поведінку (segments/text),
-    # а chunks.page/section лишаються NULL. Жодної регресії для аудіо.
+    # Audio transcripts and text documents (md/txt/docx) have no structure ->
+    # structure_json IS NULL -> the chunker falls back to the old behavior (segments/text),
+    # and chunks.page/section stay NULL. No regression for audio.
     if current_version < 17:
         c.execute("PRAGMA table_info(chunks)")
         chunk_cols = {row[1] for row in c.fetchall()}
@@ -693,24 +693,24 @@ def init_database(db_path: str):
         if tcols and 'structure_json' not in tcols:
             c.execute('ALTER TABLE transcriptions ADD COLUMN structure_json TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (17, 'chunks.page/section + transcriptions.structure_json (Phase 16B document provenance)')")
-        logger.info("Міграція v17: provenance колонки (chunks.page/section + structure_json) додані")
+        logger.info("Migration v17: provenance columns (chunks.page/section + structure_json) added")
 
     # === v18: Telegram ingestion (Phase 17) ===
-    # Слухання реального TG-АКАУНТА (MTProto/Telethon). Кожне повідомлення
-    # моніторених чатів стає записом у transcriptions з source_type='telegram':
-    # текст — напряму, голос/аудіо/відео — через faster-whisper, фото — OCR,
-    # документи — document_parser. Як тільки текст у transcript_text — весь
-    # нижній стек (chunks+embeddings+enrichment+граф+напрямки+RAG) працює без змін.
+    # Listening to a real TG ACCOUNT (MTProto/Telethon). Every message
+    # of the monitored chats becomes a record in transcriptions with source_type='telegram':
+    # text - directly, voice/audio/video - via faster-whisper, photos - OCR,
+    # documents - document_parser. Once the text is in transcript_text - the whole
+    # lower stack (chunks+embeddings+enrichment+graph+directions+RAG) works unchanged.
     #
-    # tg_* колонки — провенанс повідомлення (звідки/від кого/коли/лінк), щоб RAG
-    # міг цитувати «чат X, від Y, 2026-05-29». Дедуп: UNIQUE(tg_chat_id,
-    # tg_message_id) — захист від подвійного інжесту, коли real-time і backfill
-    # перетинаються по одному повідомленню.
+    # tg_* columns - message provenance (where from/from whom/when/link), so RAG
+    # can cite "chat X, from Y, 2026-05-29". Dedup: UNIQUE(tg_chat_id,
+    # tg_message_id) - protection from double ingest when real-time and backfill
+    # overlap on one message.
     #
-    # tg_monitored_chats — які чати слухати (керується з UI галочками). enabled=0
-    # → слухач ігнорує. category_id → у який напрямок Recall класти записи з цього
-    # чату (фонд-чати → «Фонд Робота» автоматично). last_message_id — курсор
-    # для backfill/resume (звідки догружати історію).
+    # tg_monitored_chats - which chats to listen to (managed from the UI by checkboxes). enabled=0
+    # -> the listener ignores. category_id -> which direction Recall puts records from this
+    # chat into (fund chats -> "Фонд Робота" automatically). last_message_id is the cursor
+    # for backfill/resume (from where to load the history).
     if current_version < 18:
         c.execute("PRAGMA table_info(transcriptions)")
         cols = {row[1] for row in c.fetchall()}
@@ -727,8 +727,8 @@ def init_database(db_path: str):
                 c.execute('ALTER TABLE transcriptions ADD COLUMN tg_date TEXT')
             if 'tg_link' not in cols:
                 c.execute('ALTER TABLE transcriptions ADD COLUMN tg_link TEXT')
-            # Дедуп TG-повідомлень. Partial index — лише по TG-записах (де
-            # tg_message_id NOT NULL), щоб NULL'и інших source_type не конфліктували.
+            # Dedup of TG messages. Partial index - only over TG records (where
+            # tg_message_id NOT NULL), so that NULLs of other source_types do not conflict.
             c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_tg_msg
                          ON transcriptions(tg_chat_id, tg_message_id)
                          WHERE tg_message_id IS NOT NULL''')
@@ -749,21 +749,21 @@ def init_database(db_path: str):
             c.execute('CREATE INDEX idx_tg_monitored_enabled ON tg_monitored_chats(enabled)')
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (18, 'Telegram ingestion: tg_* provenance + tg_monitored_chats (Phase 17)')")
-        logger.info("Міграція v18: Telegram (tg_* колонки + tg_monitored_chats) створено")
+        logger.info("Migration v18: Telegram (tg_* columns + tg_monitored_chats) created")
 
-    # === v19: Co-pilot — живий ко-пілот дзвінка (Phase 19) ===
-    # Каркас сесії живого ко-пілота. На старті запису оператор задає вектор
-    # (category), режим (light/medium/hard), важливість (low/medium/high),
-    # бюджет і тумблер «лише локально» → рядок у copilot_sessions з повним
-    # знімком налаштувань (config_json — резолв матриці режим×важливість).
+    # === v19: Co-pilot - the live call copilot (Phase 19) ===
+    # Skeleton of a live copilot session. At recording start the operator sets the vector
+    # (category), mode (light/medium/hard), importance (low/medium/high),
+    # the budget and the "local only" toggle -> a row in copilot_sessions with a full
+    # settings snapshot (config_json - the resolved mode x importance matrix).
     #
-    # copilot_topics — топік-память сесії (центроїд e5 + закешований RAG-контекст
-    # теми), щоб повернення до старої теми перевантажувало старий контекст, а не
-    # шукало заново (Крок 2-3).
-    # copilot_events — історична доріжка всього, що робив ко-пілот (зміни тем,
-    # retrieval, локальні/перевірені інсайти, ескалації, дії оператора, токени),
-    # з прив'язкою до таймкоду запису (ts_offset_sec) — для перегляду й експорту
-    # (Крок 7-8). На Кроці 1 таблиці лише створюються; наповнення — далі.
+    # copilot_topics - the topic memory of the session (an e5 centroid + the cached RAG context
+    # of the topic), so that returning to an old topic reloads the old context instead of
+    # searching anew (Step 2-3).
+    # copilot_events - a historical track of everything the copilot did (topic changes,
+    # retrieval, local/verified insights, escalations, operator actions, tokens),
+    # tied to the recording timecode (ts_offset_sec) - for viewing and export
+    # (Step 7-8). At Step 1 the tables are only created; filling comes later.
     if current_version < 19:
         c.execute("PRAGMA table_info(copilot_sessions)")
         if not c.fetchall():
@@ -829,40 +829,40 @@ def init_database(db_path: str):
             c.execute('CREATE INDEX idx_copilot_events_session ON copilot_events(copilot_session_id)')
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (19, 'Co-pilot: copilot_sessions + copilot_topics + copilot_events (Phase 19 живий ко-пілот)')")
-        logger.info("Міграція v19: Co-pilot (copilot_sessions/topics/events) створено")
+        logger.info("Migration v19: Co-pilot (copilot_sessions/topics/events) created")
 
-    # === v20: categories.name_norm — casefold-ключ унікальності (кирилиця теж) ===
-    # SQLite COLLATE NOCASE згортає тільки ASCII a-z → «Фонд» і «фонд» проходили як
-    # різні. name_norm = casefold(name) + UNIQUE-індекс закриває дірку наскрізь.
+    # === v20: categories.name_norm - a casefold uniqueness key (Cyrillic too) ===
+    # SQLite COLLATE NOCASE folds only ASCII a-z -> "Фонд" and "фонд" passed as
+    # different. name_norm = casefold(name) + a UNIQUE index closes the hole end to end.
     if current_version < 20:
         c.execute("PRAGMA table_info(categories)")
         cols = {row[1] for row in c.fetchall()}
         if cols and 'name_norm' not in cols:
             c.execute('ALTER TABLE categories ADD COLUMN name_norm TEXT')
-            # backfill з наявних назв
+            # backfill from existing names
             for cid, name in c.execute("SELECT id, name FROM categories").fetchall():
                 c.execute("UPDATE categories SET name_norm = ? WHERE id = ?",
                           ((name or '').strip().casefold(), cid))
-            # UNIQUE-індекс. Якщо у користувача вже є casefold-дублі — не валимо
-            # міграцію (індекс лишається звичайним; унікальність тримає app-код).
+            # UNIQUE index. If the user already has casefold duplicates - we do not fail
+            # the migration (the index stays a plain one; uniqueness is held by app code).
             try:
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_name_norm "
                           "ON categories(name_norm)")
             except sqlite3.IntegrityError:
-                logger.warning("Міграція v20: є casefold-дублі напрямків — "
-                               "ставлю звичайний індекс, унікальність контролює app-код")
+                logger.warning("Migration v20: there are casefold duplicates of directions - "
+                               "using a plain index, uniqueness is enforced by app code")
                 c.execute("CREATE INDEX IF NOT EXISTS idx_categories_name_norm "
                           "ON categories(name_norm)")
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (20, 'categories.name_norm casefold-ключ унікальності (Phase 14.1 кирилиця-дублі)')")
-        logger.info("Міграція v20: categories.name_norm створено")
+        logger.info("Migration v20: categories.name_norm created")
 
-    # === v21: власна category_id у audio_downloads (recording UX) ===
-    # Раніше напрямок аудіо бібліотека брала ТІЛЬКИ з привʼязаного транскрипту
-    # (JOIN transcriptions по file_path). Нетранскрибований запис → напрямок
-    # None → не ловиться фільтром по напрямку, хоча юзер задав напрямок при
-    # записі. Даємо recording-рядку власну category_id (з copilot/recording-
-    # сесії), а бібліотека робить COALESCE(transcript-категорія, власна).
+    # === v21: own category_id in audio_downloads (recording UX) ===
+    # Previously the audio library took the direction ONLY from the linked transcript
+    # (JOIN transcriptions by file_path). An untranscribed recording -> direction
+    # None -> not caught by the direction filter, although the user set a direction when
+    # recording. We give the recording row its own category_id (from the copilot/recording
+    # session), and the library does COALESCE(transcript category, own).
     if current_version < 21:
         c.execute("PRAGMA table_info(audio_downloads)")
         cols = {row[1] for row in c.fetchall()}
@@ -870,8 +870,8 @@ def init_database(db_path: str):
             c.execute('ALTER TABLE audio_downloads ADD COLUMN category_id INTEGER')
             c.execute('CREATE INDEX IF NOT EXISTS idx_audio_category_id '
                       'ON audio_downloads(category_id)')
-            # Backfill існуючих записів: для source_type='recording' беремо
-            # категорію з copilot_sessions по recording_session_id.
+            # Backfill of existing records: for source_type='recording' we take
+            # the category from copilot_sessions by recording_session_id.
             try:
                 c.execute('''
                     UPDATE audio_downloads
@@ -885,10 +885,10 @@ def init_database(db_path: str):
                        AND category_id IS NULL
                 ''')
             except sqlite3.OperationalError:
-                # copilot_sessions може не існувати у дуже старій БД — не валимо
+                # copilot_sessions may not exist in a very old DB - we do not fail
                 pass
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (21, 'audio_downloads.category_id — власний напрямок запису (recording UX)')")
-        logger.info("Міграція v21: audio_downloads.category_id створено + backfill")
+        logger.info("Migration v21: audio_downloads.category_id created + backfill")
 
     # === v22: Screen video capture (Phase 22) ===
     if current_version < 22:
@@ -921,7 +921,7 @@ def init_database(db_path: str):
         if 'primary_video_path' not in cols:
             c.execute('ALTER TABLE audio_downloads ADD COLUMN primary_video_path TEXT')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (22, 'recording_video_tracks + has_video/primary_video_path (Phase 22 screen video)')")
-        logger.info("Міграція v22: recording_video_tracks + video колонки")
+        logger.info("Migration v22: recording_video_tracks + video columns")
 
     # === v23: region columns on recording_video_tracks (Phase 22 region capture) ===
     if current_version < 23:
@@ -931,15 +931,15 @@ def init_database(db_path: str):
             if col not in cols:
                 c.execute(f'ALTER TABLE recording_video_tracks ADD COLUMN {col} INTEGER')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (23, 'recording_video_tracks region_x/y/w/h (Phase 22 region capture)')")
-        logger.info("Міграція v23: region columns на recording_video_tracks")
+        logger.info("Migration v23: region columns on recording_video_tracks")
 
     # === v24: Video understanding — keyframe OCR → RAG chunks (Phase 23B-A) ===
-    # video_keyframes зберігає кожен відібраний кадр (scene-detection або
-    # рівномірний fallback): timestamp у відео, шлях до jpg, OCR-текст, score.
-    # Чанки з text != '' вставляються в chunks із speaker='екран' і section у
-    # форматі 'екран MM:SS' → гібридний (vector+FTS) пошук охоплює і екранний текст.
-    # transcriptions.video_analysis_at / video_keyframes_count — маркер ідемпотентності
-    # (аналог embedded_at / enriched_at для audio-шару).
+    # video_keyframes stores every selected frame (scene-detection or
+    # uniform fallback): timestamp in the video, jpg path, OCR text, score.
+    # Chunks with text != '' are inserted into chunks with speaker='екран' and section in
+    # the format 'екран MM:SS' -> hybrid (vector+FTS) search covers the on-screen text too.
+    # transcriptions.video_analysis_at / video_keyframes_count - an idempotency marker
+    # (analogous to embedded_at / enriched_at for the audio layer).
     if current_version < 24:
         # --- video_keyframes ---
         c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='video_keyframes'")
@@ -967,17 +967,17 @@ def init_database(db_path: str):
                 c.execute('ALTER TABLE transcriptions ADD COLUMN video_keyframes_count INTEGER DEFAULT 0')
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (24, 'video_keyframes + transcriptions.video_analysis_at/video_keyframes_count (Phase 23B-A video OCR→RAG)')")
-        logger.info("Міграція v24: video_keyframes + video_analysis_at/video_keyframes_count створено")
+        logger.info("Migration v24: video_keyframes + video_analysis_at/video_keyframes_count created")
 
-    # === v25: vision-опис кадрів (Phase 23B) ===
-    # video_keyframes.vision_text — короткий опис «що показано на екрані» від
-    # VL-моделі (локальна Qwen2.5-VL через Ollama, $0, або Claude vision).
-    # Іде в RAG-чанк (speaker='екран') поряд з OCR → шукабельно навіть для кадрів
-    # без тексту на екрані (фото/діаграми). vision_model/vision_at — провенанс.
+    # === v25: vision description of frames (Phase 23B) ===
+    # video_keyframes.vision_text - a short description of "what is shown on screen" from a
+    # VL model (local Qwen2.5-VL via Ollama, $0, or Claude vision).
+    # Goes into the RAG chunk (speaker='екран') next to OCR -> searchable even for frames
+    # without on-screen text (photos/diagrams). vision_model/vision_at - provenance.
     if current_version < 25:
         c.execute("PRAGMA table_info(video_keyframes)")
         vcols = {row[1] for row in c.fetchall()}
-        if vcols:  # таблиця існує (створена у v24)
+        if vcols:  # the table exists (created in v24)
             if 'vision_text' not in vcols:
                 c.execute('ALTER TABLE video_keyframes ADD COLUMN vision_text TEXT')
             if 'vision_model' not in vcols:
@@ -985,27 +985,27 @@ def init_database(db_path: str):
             if 'vision_at' not in vcols:
                 c.execute('ALTER TABLE video_keyframes ADD COLUMN vision_at TIMESTAMP')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (25, 'video_keyframes vision_text/vision_model/vision_at (Phase 23B keyframe vision descriptions)')")
-        logger.info("Міграція v25: vision колонки на video_keyframes")
+        logger.info("Migration v25: vision columns on video_keyframes")
 
-    # === v26: jobs — персистентність JobQueue (T2.1, REMEDIATION_PLAN Волна 1) ===
-    # JobQueue досі тримала стан лише в пам'яті (dict) — рестарт/крах процесу
-    # губив прогрес довгих задач (YouTube download, транскрипція, backfill
-    # enrichment, import-folder, recording finalize) мовчки, без жодного сліду
-    # для користувача. Таблиця jobs — джерело істини на диску; dict у JobQueue
-    # лишається "гарячим" кешем поверх неї (читання /api/jobs не ходить у
-    # SQLite на кожен запит). На старті app.py всі рядки зі state IN
-    # ('queued','running') позначаються 'crashed' (аналог recording
-    # SessionStore.recover_orphaned) — job більше не зникає без пояснення.
+    # === v26: jobs - JobQueue persistence (T2.1, REMEDIATION_PLAN Wave 1) ===
+    # JobQueue used to keep state only in memory (a dict) - a process restart/crash
+    # lost the progress of long tasks (YouTube download, transcription, backfill
+    # enrichment, import-folder, recording finalize) silently, with no trace
+    # for the user. The jobs table is the source of truth on disk; the dict in JobQueue
+    # stays a "hot" cache on top of it (reading /api/jobs does not go to
+    # SQLite on every request). At app.py start all rows with state IN
+    # ('queued','running') are marked 'crashed' (analogous to recording
+    # SessionStore.recover_orphaned) - a job no longer vanishes without explanation.
     #
-    # DDL + version-insert — в одній явній транзакції (BEGIN/COMMIT), щоб
-    # краш процесу посеред міграції не лишав напів-стан (таблиця створена,
-    # але версія в schema_versions не записана → повторний старт спробував
-    # би створити її знову; CREATE TABLE IF NOT EXISTS і так ідемпотентний,
-    # але атомарність тут — явна страховка, а не покладання лише на це).
-    # Якщо conn вже в транзакції (типовий шлях — свіжа БД, де v1..v25 щойно
-    # накопичили незакомічені INSERT'и) — не намагаємось відкрити вкладену
-    # транзакцію, а просто беремо участь у вже відкритій (закомітиться разом
-    # з рештою міграцій у фінальному conn.commit() нижче).
+    # DDL + version-insert - in one explicit transaction (BEGIN/COMMIT), so that
+    # a process crash in the middle of the migration does not leave a half-state (table created,
+    # but the version not recorded in schema_versions -> a repeated start would try
+    # to create it again; CREATE TABLE IF NOT EXISTS is idempotent anyway,
+    # but atomicity here is an explicit safeguard, not a reliance on that alone).
+    # If conn is already in a transaction (the typical path - a fresh DB, where v1..v25 just
+    # accumulated uncommitted INSERTs) - we do not try to open a nested
+    # transaction, but simply take part in the one already open (it will commit together
+    # with the rest of the migrations in the final conn.commit() below).
     if current_version < 26:
         began_here = not conn.in_transaction
         if began_here:
@@ -1031,28 +1031,28 @@ def init_database(db_path: str):
             if began_here:
                 conn.rollback()
             raise
-        logger.info("Міграція v26: таблиця jobs створена (персистентність JobQueue)")
+        logger.info("Migration v26: jobs table created (JobQueue persistence)")
 
-    # === v27: soft-delete + speaker un-merge snapshot (T4.6, Волна 2) ===
-    # transcriptions.deleted_at / audio_downloads.deleted_at (epoch-секунди,
-    # REAL; NULL = живий запис) — одиничний DELETE ставить позначку замість
-    # фізичного видалення (аудіо-файл теж НЕ стирається одразу — головний
-    # P0 з аудиту: часто єдина копія). Усі read-шляхи (список/пошук/FTS/
-    # vector-retrieval/лічильники/RAG/дашборд) додатково фільтрують
-    # `deleted_at IS NULL` в app-коді (див. transcription.py/audio_library.py/
-    # retrieval.py/memory.py/...). Bulk-delete лишається фізичним — свідомий
-    # вибір Варіанту A (undo лише для одиничних).
+    # === v27: soft-delete + speaker un-merge snapshot (T4.6, Wave 2) ===
+    # transcriptions.deleted_at / audio_downloads.deleted_at (epoch seconds,
+    # REAL; NULL = live record) - a single DELETE sets a mark instead of
+    # physical deletion (the audio file is NOT erased at once either - the main
+    # P0 from the audit: often the only copy). All read paths (list/search/FTS/
+    # vector-retrieval/counters/RAG/dashboard) additionally filter
+    # `deleted_at IS NULL` in app code (see transcription.py/audio_library.py/
+    # retrieval.py/memory.py/...). Bulk-delete stays physical - a deliberate
+    # choice of Option A (undo only for single deletes).
     #
-    # speaker_merges — before-снапшот merge_speakers (Phase 12.8) для
-    # unmerge: видалені speakers-рядки (embedding/usage_count/color),
-    # попередній transcription_speaker_map мапінг (які raw_label вказували
-    # на які speaker_id ДО релінку) і entities.speaker_id, що FK
-    # ON DELETE SET NULL обнулив при видаленні merge_ids зі speakers.
-    # merged_speaker_ids — JSON-список для швидкого фільтра/діагностики;
-    # before_json — повний снапшот для відновлення (embedding у base64).
-    # restored_at — NULL поки не відновлено; purge прибирає снапшот по
-    # merged_at (незалежно від restored_at — можливість undo завжди має
-    # межу в часі, сам merge при цьому не відкочується).
+    # speaker_merges - a before-snapshot of merge_speakers (Phase 12.8) for
+    # unmerge: deleted speakers rows (embedding/usage_count/color),
+    # the previous transcription_speaker_map mapping (which raw_labels pointed
+    # to which speaker_id BEFORE the relink) and entities.speaker_id, which FK
+    # ON DELETE SET NULL zeroed when merge_ids were deleted from speakers.
+    # merged_speaker_ids - a JSON list for a quick filter/diagnostics;
+    # before_json - the full snapshot for restoring (embedding in base64).
+    # restored_at - NULL until restored; purge removes the snapshot by
+    # merged_at (regardless of restored_at - the possibility of undo always
+    # has a time limit, while the merge itself is not rolled back).
     if current_version < 27:
         began_here = not conn.in_transaction
         if began_here:
@@ -1092,18 +1092,18 @@ def init_database(db_path: str):
             if began_here:
                 conn.rollback()
             raise
-        logger.info("Міграція v27: deleted_at (transcriptions/audio_downloads) + speaker_merges створено")
+        logger.info("Migration v27: deleted_at (transcriptions/audio_downloads) + speaker_merges created")
 
-    # === v28: transcriptions.embedding_version — структурна idempotency (T6.8) ===
-    # Дотепер chunk_and_embed_transcription звіряв ЛИШЕ embedding_model — зміна
-    # ЛОГІКИ чанкінгу (без зміни назви моделі, напр. T6.5) не детектувалась як
-    # "потрібен re-embed". Додаємо nullable-колонку поряд з embedding_model:
-    # NULL (наявні записи до цієї міграції) трактувалось як "сумісно з поточною
-    # EMBED_VERSION" — щоб міграція не форсила масовий re-embed заднім числом.
-    # ⚠️ 14.08.2026 (T6.5, EMBED_VERSION=2): семантику NULL змінено на "стара
-    # нарізка → потрібен re-embed" — саме тоді, коли нарізка справді змінилась.
-    # Джерело істини — embeddings.chunk_and_embed_transcription і дзеркальна
-    # умова в enrichment.list_unenriched_ids; тут лише історія колонки.
+    # === v28: transcriptions.embedding_version - structural idempotency (T6.8) ===
+    # Until now chunk_and_embed_transcription compared ONLY embedding_model - a change
+    # of the chunking LOGIC (without a model name change, e.g. T6.5) was not detected as
+    # "re-embed needed". We add a nullable column next to embedding_model:
+    # NULL (existing records before this migration) was treated as "compatible with the current
+    # EMBED_VERSION" - so that the migration does not force a mass re-embed retroactively.
+    # WARNING 14.08.2026 (T6.5, EMBED_VERSION=2): the NULL semantics were changed to "old
+    # slicing -> re-embed needed" - exactly when the slicing really changed.
+    # The source of truth is embeddings.chunk_and_embed_transcription and the mirror
+    # condition in enrichment.list_unenriched_ids; here only the history of the column.
     if current_version < 28:
         c.execute("PRAGMA table_info(transcriptions)")
         cols = {row[1] for row in c.fetchall()}
@@ -1113,12 +1113,12 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(28, 'transcriptions.embedding_version — структурна idempotency для "
                   "re-embed при зміні логіки чанкінгу (T6.8)')")
-        logger.info("Міграція v28: transcriptions.embedding_version створено")
+        logger.info("Migration v28: transcriptions.embedding_version created")
 
-    # === v29: action_items — нормалізований дедлайн + stale/dup (Трек 1) ======
-    # Сира фраза лишається в due (не переписуємо!), поряд зʼявляються обчислені
-    # поля. NULL due_date = «дата не виводиться» (напр. «до наступної зустрічі») —
-    # це НЕ помилка, а окремий клас, видимий через due_precision.
+    # === v29: action_items - normalized deadline + stale/dup (Track 1) ======
+    # The raw phrase stays in due (we do not rewrite it!), computed fields appear
+    # next to it. NULL due_date = "the date is not derivable" (e.g. "до наступної зустрічі") -
+    # this is NOT an error but a separate class, visible through due_precision.
     if current_version < 29:
         c.execute("PRAGMA table_info(action_items)")
         acols = {row[1] for row in c.fetchall()}
@@ -1137,19 +1137,19 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(29, 'action_items.due_date/due_precision/stale_at/dup_of — "
                   "нормалізовані дедлайни + offline stale/dedup (Трек 1)')")
-        logger.info("Міграція v29: action_items due_date/due_precision/stale_at/dup_of створено")
+        logger.info("Migration v29: action_items due_date/due_precision/stale_at/dup_of created")
 
-    # === v30: TG — дата події з tg_date (Волна 0 роадмапу Telegram) ===========
-    # _persist ніколи не писав meeting_date, а весь стек нижче датує запис через
-    # COALESCE(meeting_date, substr(created_at,1,10)) — тобто МОМЕНТОМ ІНЖЕСТУ.
-    # На живих даних: meeting_date порожній у 3142 з 3360 TG-записів, а всі 218
-    # заповнених (їх ставила card-фаза з created_at) теж хибні — напр. tx=328
-    # має 2026-05-29 при повідомленні від 2026-02-10. Ламало дві речі одразу:
-    # recency-буст у retrieval.py (стара переписка виглядала свіжою) і якір
-    # commitments.parse_due (сира фраза «до пʼятниці» розгорталась відносно дня
-    # завантаження). Ремонт без втрат — tg_date заповнений у ВСІХ TG-записів.
-    # 'localtime': tg_date у UTC, а потрібен день розмови (див. _meeting_date).
-    # Йде ДО будь-якої догонки історії: інакше вона лише множила б розбіжність.
+    # === v30: TG - event date from tg_date (Wave 0 of the Telegram roadmap) ===========
+    # _persist never wrote meeting_date, and the whole stack below dates a record via
+    # COALESCE(meeting_date, substr(created_at,1,10)) - i.e. by the MOMENT OF INGEST.
+    # On live data: meeting_date is empty in 3142 of 3360 TG records, and all 218
+    # filled ones (set by the card phase from created_at) are wrong too - e.g. tx=328
+    # has 2026-05-29 for a message from 2026-02-10. It broke two things at once:
+    # the recency boost in retrieval.py (old correspondence looked fresh) and the anchor of
+    # commitments.parse_due (the raw phrase "до пʼятниці" was expanded relative to the upload day).
+    # Lossless repair - tg_date is filled for ALL TG records.
+    # 'localtime': tg_date is in UTC, but the day of the conversation is needed (see _meeting_date).
+    # Goes BEFORE any history catch-up: otherwise it would only multiply the discrepancy.
     if current_version < 30:
         c.execute("PRAGMA table_info(transcriptions)")
         tcols = {row[1] for row in c.fetchall()}
@@ -1159,23 +1159,23 @@ def init_database(db_path: str):
                 "WHERE source_type = 'telegram' AND tg_date IS NOT NULL "
                 "AND (meeting_date IS NULL OR meeting_date <> date(tg_date, 'localtime'))"
             )
-            logger.info("Міграція v30: дату події виправлено у %d TG-записах", c.rowcount)
+            logger.info("Migration v30: event date fixed in %d TG records", c.rowcount)
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(30, 'TG: meeting_date = день повідомлення (tg_date) замість дати "
                   "інжесту — recency-буст і якір parse_due (Волна 0)')")
 
-    # === v31: TG — сигнали, які Telegram уже дає, а ми викидали (Волна 4) ======
-    # tg_reply_to — ТОЧНА нитка розмови від самого Telegram. Без неї «на що це
-    # відповідь» доводиться вгадувати: у чаті з паралельними темами склейка за
-    # вікном часу зшиває незвʼязане, і саме тому пошук на «коли зустріч з
-    # губернатором» віддавав 7 запитань без жодної відповіді — відповідь була
-    # наступним повідомленням треда, спільних слів із запитом нема.
-    # tg_sender_id — стабільний ключ автора (tg_sender це відображуване імʼя,
-    # яке людина міняє). tg_grouped_id — альбом (кілька медіа = одне повідомлення
-    # для людини). tg_edit_date — правку видно лише через неї.
-    # Колонки forward-only: чим пізніше зʼявляться, тим менше повідомлень їх
-    # отримає, тому міграція йде ДО решти Волни 4.
+    # === v31: TG - signals Telegram already gives and we threw away (Wave 4) ======
+    # tg_reply_to - the EXACT conversation thread from Telegram itself. Without it "what is this
+    # a reply to" has to be guessed: in a chat with parallel topics, gluing by a
+    # time window stitches the unrelated, and that is why a search for
+    # «коли зустріч з губернатором» returned 7 questions without a single answer - the answer was
+    # the next message of the thread, with no shared words with the query.
+    # tg_sender_id - a stable author key (tg_sender is a display name
+    # that a person changes). tg_grouped_id - an album (several media = one message
+    # to a person). tg_edit_date - an edit is visible only through it.
+    # The columns are forward-only: the later they appear, the fewer messages will
+    # get them, so the migration goes BEFORE the rest of Wave 4.
     if current_version < 31:
         c.execute("PRAGMA table_info(transcriptions)")
         tcols = {row[1] for row in c.fetchall()}
@@ -1184,7 +1184,7 @@ def init_database(db_path: str):
                               ("tg_grouped_id", "INTEGER"), ("tg_edit_date", "TEXT")):
                 if col not in tcols:
                     c.execute(f"ALTER TABLE transcriptions ADD COLUMN {col} {decl}")
-            # Пошук «покажи весь тред» іде від батька до дітей.
+            # The "show the whole thread" lookup goes from parent to children.
             c.execute("CREATE INDEX IF NOT EXISTS idx_tx_tg_reply "
                       "ON transcriptions(tg_chat_id, tg_reply_to) "
                       "WHERE tg_reply_to IS NOT NULL")
@@ -1192,42 +1192,42 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(31, 'TG: tg_reply_to/tg_sender_id/tg_grouped_id/tg_edit_date — "
                   "нитка розмови, стабільний автор, альбоми, правки (Волна 4)')")
-        logger.info("Міграція v31: TG-сигнали (reply_to/sender_id/grouped_id/edit_date) створено")
+        logger.info("Migration v31: TG signals (reply_to/sender_id/grouped_id/edit_date) created")
 
-    # === v32: нитки розмови всередині чату (Волна 4.5) ========================
-    # Проблема, яку лікуємо: у чаті повідомлень — це 955 незвʼязаних записів,
-    # і «Ок» фізично не несе контексту. Живий провал: на «коли зустріч з
-    # губернатором» пошук віддав 7 слотів із 8, і всі сім — питання без жодної
-    # відповіді (відповідь була наступним повідомленням треда, спільних слів із
-    # запитом нема → не знаходить ні вектор, ні FTS).
+    # === v32: conversation threads inside a chat (Wave 4.5) ========================
+    # The problem we are treating: in a chat of messages these are 955 unconnected records,
+    # and "Ок" physically carries no context. A live failure: for
+    # «коли зустріч з губернатором» search returned 7 slots out of 8, and all seven were questions with no
+    # answer (the answer was the next message of the thread, no shared words with
+    # the query -> neither the vector nor FTS finds it).
     #
-    # Чому нитка, а не чат: у «Main Team Chat» одночасно йдуть Acmecorp,
-    # Nova Dance, юридичні питання й LP-апдейти, але категорію дає чат цілком
-    # (_resolve_category читає tg_monitored_chats.category_id). Заміряно: у 4
-    # фонд-чатах повідомлень, усі з одним напрямком, при тому що всередині
-    # Ковальчука згадується 23 рази — і в жодному іншому чаті. Система знала ДЕ
-    # сказано і не знала ПРО ЩО.
+    # Why a thread and not a chat: in "Main Team Chat" Acmecorp,
+    # Nova Dance, legal questions and LP updates run at once, but the category is given by the whole chat
+    # (_resolve_category reads tg_monitored_chats.category_id). Measured: in 4
+    # fund chats messages, all with one direction, while inside
+    # «Ковальчука» is mentioned 23 times - and in no other chat. The system knew WHERE
+    # it was said and did not know WHAT ABOUT.
     #
-    # centroid — центроїд e5-векторів повідомлень нитки. Тримаємо його НЕ як
-    # вирішувач, а як ранжувальник кандидатів: замір на живому архіві показав,
-    # що сирий косинус між повідомленнями одного чату не відрізняє продовження
-    # теми від випадкової пари (reply-пари 0.828 проти випадкових 0.827,
-    # розділення +0.02σ). Короткій репліці нема чого вкладати в тему — «ні»
-    # не про предмет, а про регістр мовлення. Рішення ухвалює локальна LLM
-    # (див. app/services/tg_threads.py), центроїд лише звужує їй вибір.
+    # centroid - the centroid of the thread messages' e5 vectors. We keep it NOT as a
+    # decider but as a candidate ranker: a measurement on the live archive showed
+    # that the raw cosine between messages of one chat does not distinguish a continuation
+    # of a topic from a random pair (reply pairs 0.828 vs random 0.827,
+    # separation +0.02 sigma). A short reply has nothing to embed into a topic - "no"
+    # is not about the subject but about the speech register. The decision is made by the local LLM
+    # (see app/services/tg_threads.py), the centroid only narrows its choice.
     #
-    # tg_thread_src зберігає, ЧИМ ухвалено рішення — без цього неможливо ні
-    # відрізнити точну нитку від здогадки, ні перерахувати лише здогадки при
-    # зміні промпта. Значення навмисно НЕ зливаються в одне «авто»:
-    #   reply  — з tg_reply_to, це знання самого Telegram (помилки бути не може);
-    #   llm    — модель віднесла до теми з кількох повідомлень;
-    #   single — повідомлення самотнє: або модель так вирішила, або воно було
-    #            єдиним у сплеску (групувати не було з чим);
-    #   pending— попереднє рішення на живому інжесті (моделі ще не питали);
-    #            resettle_pending перерозкладе, коли сплеск договорить;
-    #   burst  — ДЕГРАДАЦІЯ: моделі не було, пачка лишилась однією ниткою;
-    #   orphan — ДЕГРАДАЦІЯ: модель промовчала про це повідомлення.
-    # Останні два — саме те, що треба вміти знайти й перерахувати потім.
+    # tg_thread_src stores HOW the decision was made - without it one can neither
+    # tell an exact thread from a guess, nor recompute only the guesses when
+    # the prompt changes. The values are deliberately NOT merged into one "auto":
+    #   reply  - from tg_reply_to, this is knowledge of Telegram itself (cannot be wrong);
+    #   llm    - the model assigned it to a topic out of several messages;
+    #   single - the message is alone: either the model decided so, or it was
+    #            the only one in the burst (nothing to group with);
+    #   pending- a preliminary decision on live ingest (the model has not been asked yet);
+    #            resettle_pending will re-lay it when the burst finishes talking;
+    #   burst  - DEGRADATION: there was no model, the batch stayed one thread;
+    #   orphan - DEGRADATION: the model stayed silent about this message.
+    # The last two are exactly what one must be able to find and recompute later.
     if current_version < 32:
         c.execute("PRAGMA table_info(tg_threads)")
         if not c.fetchall():
@@ -1245,7 +1245,7 @@ def init_database(db_path: str):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 closed_at TIMESTAMP
             )''')
-            # Пошук відкритих ниток чату при віднесенні нового сплеску.
+            # Lookup of a chat's open threads when assigning a new burst.
             c.execute('CREATE INDEX idx_tg_threads_chat ON tg_threads(chat_id, status, last_date)')
 
         c.execute("PRAGMA table_info(transcriptions)")
@@ -1254,7 +1254,7 @@ def init_database(db_path: str):
             for col, decl in (("tg_thread_id", "INTEGER"), ("tg_thread_src", "TEXT")):
                 if col not in tcols:
                     c.execute(f"ALTER TABLE transcriptions ADD COLUMN {col} {decl}")
-            # Зшивання сусідів нитки при видачі йде від нитки до повідомлень.
+            # Stitching a thread's neighbours on output goes from the thread to its messages.
             c.execute("CREATE INDEX IF NOT EXISTS idx_tx_tg_thread "
                       "ON transcriptions(tg_thread_id, tg_date) "
                       "WHERE tg_thread_id IS NOT NULL")
@@ -1262,27 +1262,27 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(32, 'tg_threads + transcriptions.tg_thread_id/tg_thread_src — "
                   "нитка розмови як одиниця сенсу в переписці (Волна 4.5)')")
-        logger.info("Міграція v32: tg_threads + tg_thread_id створено")
+        logger.info("Migration v32: tg_threads + tg_thread_id created")
 
-    # === v33: живий профіль чату (Волна 4.5.2) ===============================
-    # Формулювання власника: «кожне нове повідомлення не має бути унікальним —
-    # воно має доповнювати контекст своєї групи, постійно розширювати його».
+    # === v33: live chat profile (Wave 4.5.2) ===============================
+    # The owner's wording: "every new message should not be unique -
+    # it should supplement the context of its group, constantly expand it".
     #
-    # ЩО ЗМІНИЛОСЬ ПІСЛЯ v32. У початковому задумі профіль мав вгадувати теми з
-    # сирого потоку повідомлень. Тепер теми — це відкриті нитки, тобто вже
-    # порахований факт, а не здогадка моделі. Тому в профілі лишається рівно
-    # те, що НЕ виводиться з ниток і є властивістю саме чату: хто тут і чим
-    # займається, що висить без відповіді, до чого дійшли.
+    # WHAT CHANGED AFTER v32. In the original design the profile had to guess topics from
+    # the raw stream of messages. Now topics are open threads, i.e. an already
+    # computed fact, not a model guess. So the profile keeps exactly
+    # what is NOT derived from threads and is a property of the chat itself: who is here and what
+    # they do, what hangs unanswered, what was agreed.
     #
-    # Тверді числа (скільки написав, коли зʼявився, коли писав востаннє)
-    # рахує SQL і НЕ довіряє їх моделі: це факт, а вигадане число в профілі
-    # людини гірше за його відсутність. Модель отримує їх готовими і пише лише
-    # опис ролі й звід.
+    # Hard numbers (how much was written, when someone appeared, when they last wrote)
+    # are computed by SQL and the model is NOT trusted with them: that is a fact, and an invented number in a
+    # person's profile is worse than its absence. The model receives them ready-made and writes only
+    # the role description and the digest.
     #
-    # messages_seen / last_message_date — водяний знак: профіль оновлюється за
-    # порогом (N нових повідомлень або раз на добу), НІКОЛИ не на кожне
-    # повідомлення. Інакше це рівно ті 3142 платні виклики, від яких Волна 0
-    # поставила гард — тільки тепер локальні, але так само безглузді.
+    # messages_seen / last_message_date - a watermark: the profile is updated by
+    # a threshold (N new messages or once a day), NEVER on every
+    # message. Otherwise it is exactly those 3142 paid calls that Wave 0
+    # put a guard against - only now local, but just as pointless.
     if current_version < 33:
         c.execute("PRAGMA table_info(tg_chat_context)")
         if not c.fetchall():
@@ -1302,22 +1302,22 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(33, 'tg_chat_context — живий профіль чату поверх ниток: учасники, "
                   "відкриті питання, рішення; оновлення за порогом (Волна 4.5.2)')")
-        logger.info("Міграція v33: tg_chat_context створено")
+        logger.info("Migration v33: tg_chat_context created")
 
-    # === v34: провенанс звʼязків графа (Волна 4.5.3) =========================
-    # Telegram — переважна більшість архіву і при цьому майже відсутній у графі сутностей: 154
-    # записи з 3951. Через це зріз по проєкту, list_stale_topics і понедільний
-    # звід сліпі до основної маси архіву.
+    # === v34: provenance of graph links (Wave 4.5.3) =========================
+    # Telegram is the vast majority of the archive and yet almost absent from the entity graph: 154
+    # records out of 3951. Because of this the project slice, list_stale_topics and the Monday
+    # digest are blind to the bulk of the archive.
     #
-    # Лікуємо БЕЗ моделі. Граф уже знає сутностей із дзвінків і документів,
-    # тож TG треба не збагачувати заново (7B на живих даних наплодила б дублів
-    # «Акме/Acmecorp/акмекорп» у графі, де дублі й так невирішена проблема), а
-    # звʼязати з тим, що вже відоме.
+    # We treat it WITHOUT a model. The graph already knows entities from calls and documents,
+    # so TG should not be enriched anew (a 7B on live data would breed duplicates
+    # "Акме/Acmecorp/акмекорп" in a graph where duplicates are already an unsolved problem), but
+    # linked to what is already known.
     #
-    # source розрізняє, ЧИМ поставлено звʼязок: NULL — успадковані звʼязки від
-    # Claude-збагачення, 'thread_match' — знайдені звірянням тексту нитки з
-    # графом. Без цього неможливо ні перерахувати лише автоматичні, ні
-    # відрізнити витяг моделі від збігу рядків, а це різні за надійністю речі.
+    # source distinguishes HOW the link was set: NULL - links inherited from
+    # Claude enrichment, 'thread_match' - found by matching the thread text against
+    # the graph. Without it one can neither recompute only the automatic ones nor
+    # tell a model extraction from a string match, and these differ in reliability.
     if current_version < 34:
         c.execute("PRAGMA table_info(meeting_entities)")
         cols = {row[1] for row in c.fetchall()}
@@ -1328,32 +1328,32 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(34, 'meeting_entities.source — провенанс звʼязку графа; TG "
                   "звʼязується з наявними сутностями по нитках (Волна 4.5.3)')")
-        logger.info("Міграція v34: meeting_entities.source створено")
+        logger.info("Migration v34: meeting_entities.source created")
 
-    # === v35: зобовʼязання з переписки (Волна 5.1) ===========================
-    # Волна 0 заборонила Claude-картку на telegram: картка на однорядковику
-    # «Ок» марна, а на живих даних ще й платна. Але задачі в переписці РЕАЛЬНО
-    # роздаються — просто не в одному повідомленні, а в нитці. Тепер, коли
-    # нитка є (v32), одиницею збагачення стає вона, і гард знімається не
-    # цілком, а вибірково: спершу локальний триаж, потім Claude лише по
-    # відібраному.
+    # === v35: commitments from correspondence (Wave 5.1) ===========================
+    # Wave 0 forbade a Claude card on telegram: a card on a one-liner
+    # "Ок" is useless, and over records also paid. But tasks in correspondence ARE
+    # really handed out - just not in one message but in a thread. Now that
+    # the thread exists (v32), it becomes the unit of enrichment, and the guard is lifted not
+    # entirely but selectively: first a local triage, then Claude only on
+    # what was selected.
     #
-    # ЧОМУ ТРИАЖ МОДЕЛЛЮ, А НЕ РЕГЕКСОМ. План волни говорив «маркери обіцянки +
-    # топ-8 відправників + довжина». Замір по 545 нитках: список маркерів
-    # («треба», «надішлю», «чекаю», …) спрацьовує на частина ниток — це не фільтр.
-    # На пілоті з ниток регекс і 7B розійшлись у 13 випадках з 40, і в
-    # переважній більшості мав рацію не регекс: «треба» в «треба визнати» —
-    # не зобовʼязання, а «Давай я зараз уточню» — зобовʼязання без жодного
-    # маркера. Триаж локальний ($0, ~4 с на нитку), тож ціна помилки — час.
+    # WHY TRIAGE BY MODEL, NOT BY REGEX. The wave plan said "promise markers +
+    # top-8 senders + length". A measurement over threads: the marker list
+    # ("треба", "надішлю", "чекаю", ...) fires on a share of the threads - that is not a filter.
+    # On a pilot of 40 threads the regex and the 7B diverged in 13 of 40 cases, and in
+    # the vast majority it was not the regex that was right: "треба" in "треба визнати" is
+    # not a commitment, while "Давай я зараз уточню" is a commitment without any
+    # marker. Triage is local ($0, ~4 s per thread), so the cost of a mistake is time.
     #
-    # triage_msgs — водяний знак: нитка, яка виросла після вердикту, буде
-    # переоцінена; нитка, що не змінилась, не витрачає ні модель, ні Claude.
+    # triage_msgs - a watermark: a thread that grew after the verdict will be
+    # reassessed; a thread that did not change spends neither the model nor Claude.
     #
-    # action_items.source розрізняє походження задачі: NULL — успадковані
-    # (Claude-картка дзвінка/документа), 'tg_thread' — витягнуті з нитки
-    # переписки. Без цього повторний прогін або стирав би чужі рядки, або
-    # плодив дублі; крім того, у зводі видно, чи задача прозвучала голосом на
-    # дзвінку, чи лишилась текстом у чаті.
+    # action_items.source distinguishes the origin of a task: NULL - inherited
+    # (a Claude card of a call/document), 'tg_thread' - extracted from a correspondence
+    # thread. Without it a rerun would either erase foreign rows or
+    # breed duplicates; besides, the digest shows whether a task was spoken aloud on
+    # a call or stayed as text in a chat.
     if current_version < 35:
         c.execute("PRAGMA table_info(tg_threads)")
         tcols = {row[1] for row in c.fetchall()}
@@ -1363,8 +1363,8 @@ def init_database(db_path: str):
                               ("tasks_at", "TIMESTAMP"), ("tasks_model", "TEXT")):
                 if col not in tcols:
                     c.execute(f"ALTER TABLE tg_threads ADD COLUMN {col} {decl}")
-            # Вибірка «кого ще не триажили» і «кого триаж позначив» — обидві
-            # часті (проходи йдуть пачками), обидві по цих двох колонках.
+            # The queries "who has not been triaged yet" and "whom triage marked" - both
+            # frequent (passes go in batches), both on these two columns.
             c.execute("CREATE INDEX IF NOT EXISTS idx_tg_threads_triage "
                       "ON tg_threads(triage, tasks_at)")
 
@@ -1379,13 +1379,13 @@ def init_database(db_path: str):
                   "(35, 'tg_threads.triage/tasks_at + action_items.source — "
                   "зобовʼязання з переписки: локальний триаж нитки, Claude лише "
                   "по відібраному (Волна 5.1)')")
-        logger.info("Міграція v35: триаж ниток + action_items.source створено")
+        logger.info("Migration v35: thread triage + action_items.source created")
 
     if current_version < 36:
-        # Чому задача опинилась у stale. Досі причина була одна (вік), тож
-        # колонки не було; тепер їх дві — вік і «тема замовкла», і без
-        # провенансу масове зняття неможливо ні пояснити, ні відкотити
-        # вибірково. Наявні рядки — усі від `mark_stale`, тобто 'age'.
+        # Why a task ended up in stale. Until now there was one reason (age), so
+        # there was no column; now there are two - age and "the topic went quiet", and without
+        # provenance a mass un-marking can be neither explained nor rolled back
+        # selectively. Existing rows are all from `mark_stale`, i.e. 'age'.
         c.execute("PRAGMA table_info(action_items)")
         acols = {row[1] for row in c.fetchall()}
         if acols and "stale_reason" not in acols:
@@ -1397,37 +1397,37 @@ def init_database(db_path: str):
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(36, 'action_items.stale_reason — чому задачу знято: age | no_trace')")
-        logger.info("Міграція v36: action_items.stale_reason створено")
+        logger.info("Migration v36: action_items.stale_reason created")
 
-    # === v37: шар коментарів (Comments Layer) ================================
-    # Коментар власника на будь-якій картці архіву: уточнення, виправлення,
-    # акцент. Іде в той самий пошук, що й транскрипт, але з БІЛЬШОЮ вагою —
-    # це не сира стенограма, а свідомо написане речення про те, що насправді
-    # мається на увазі.
+    # === v37: comments layer (Comments Layer) ================================
+    # The owner's comment on any archive card: a clarification, a correction,
+    # an emphasis. It goes into the same search as the transcript, but with a HIGHER weight -
+    # it is not a raw verbatim but a deliberately written sentence about what is
+    # actually meant.
     #
-    # ЧОМУ ОКРЕМИЙ ІНДЕКС, А НЕ РЯДКИ В `chunks`. Дві причини, і перша —
-    # блокуюча: `chunks.transcription_id` NOT NULL з FK. Коментар на файлі
-    # Медіатеки, який ще не транскрибовано, у `chunks` фізично не покласти, а
-    # знімати NOT NULL — це перебудова гарячої таблиці на 100k+ рядків, під
-    # якою висить FTS5 external-content з content_rowid='id' і три тригери.
-    # Друга причина лишалась би чинною, навіть якби перша зникла: окремий
-    # індекс робить пріоритет коментарів ОДНІЄЮ явною ручкою замість
-    # коефіцієнта, розмазаного по спільному пайплайну, і дозволяє звузити
-    # запит до коментарів (або виключити їх) без фільтра по всій таблиці.
-    # Плюс переіндексація коментарів (їх тисячі, не сотні тисяч) не чіпає
-    # chunks_fts — масовий re-embed по chunks уже одного разу клав пошук
-    # з 9с до 64с (див. memory/eval-verdict-flips-with-k).
+    # WHY A SEPARATE INDEX, NOT ROWS IN `chunks`. Two reasons, and the first is
+    # blocking: `chunks.transcription_id` is NOT NULL with an FK. A comment on a Media
+    # library file that is not transcribed yet cannot physically be put into `chunks`, and
+    # dropping NOT NULL is a rebuild of a hot table of 100k+ rows, under
+    # which hangs an FTS5 external-content with content_rowid='id' and three triggers.
+    # The second reason would remain valid even if the first vanished: a separate
+    # index makes the comments priority ONE explicit knob instead of
+    # a coefficient smeared over the shared pipeline, and lets one narrow
+    # a query to comments (or exclude them) without a filter over the whole table.
+    # Plus reindexing comments (thousands, not hundreds of thousands) does not touch
+    # chunks_fts - a mass re-embed over chunks once already took search
+    # from 9s to 64s (see memory/eval-verdict-flips-with-k).
     #
-    # ЦІЛЬ ПОЛІМОРФНА. (target_type, target_id) замість FK на одну таблицю:
-    # коментувати треба і транскрипт, і файл медіатеки, і задачу, і сутність,
-    # і сесію запису. Реєстр допустимих типів живе в сервісному шарі
-    # (app/services/comments.py TARGETS), не в БД — рівно як
-    # meeting_entities.source і action_items.source у цій же схемі.
+    # THE TARGET IS POLYMORPHIC. (target_type, target_id) instead of an FK to one table:
+    # one must comment on a transcript, a media library file, a task, an entity
+    # and a recording session. The registry of allowed types lives in the service layer
+    # (app/services/comments.py TARGETS), not in the DB - exactly like
+    # meeting_entities.source and action_items.source in this same schema.
     #
-    # kind НЕ ДЕКОРАТИВНИЙ. Він задає вагу в ранжуванні і те, чи підшивати
-    # коментар до видачі, коли він сам не збігся із запитом: 'correction'
-    # («насправді сума 12k, а не 20k») критичний саме там, де спільних слів
-    # із питанням немає. weight — ручний override; NULL означає «взяти з kind».
+    # kind is NOT DECORATIVE. It sets the weight in ranking and whether to attach a
+    # comment to the output when it did not itself match the query: 'correction'
+    # ("насправді сума 12k, а не 20k") is critical precisely where there are no shared words
+    # with the question. weight is a manual override; NULL means "take from kind".
     if current_version < 37:
         c.execute("PRAGMA table_info(comments)")
         if not c.fetchall():
@@ -1452,13 +1452,13 @@ def init_database(db_path: str):
                 embedding_model   TEXT,
                 embedding_version INTEGER
             )''')
-            # Головний доступ — «усі живі коментарі цієї картки»: список картки,
-            # лічильник у видачі, автопідшивка в RAG. deleted_at у ключі, щоб
-            # soft-deleted не читались з диска взагалі.
+            # The main access is "all live comments of this card": the card list,
+            # the counter in the output, auto-attaching in RAG. deleted_at is in the key so that
+            # soft-deleted ones are not read from disk at all.
             c.execute('CREATE INDEX idx_comments_target '
                       'ON comments(target_type, target_id, deleted_at)')
             c.execute('CREATE INDEX idx_comments_created ON comments(created_at DESC)')
-            # «Кого ще не проіндексовано» — гарячий запит індексера/бекфілу.
+            # "Who has not been indexed yet" - the hot query of the indexer/backfill.
             c.execute('CREATE INDEX idx_comments_pending ON comments(embedded_at)')
 
         c.execute("PRAGMA table_info(comment_chunks)")
@@ -1476,10 +1476,10 @@ def init_database(db_path: str):
             )''')
             c.execute('CREATE INDEX idx_comment_chunks_cid ON comment_chunks(comment_id)')
 
-        # FTS5 external-content + три тригери — дослівне дзеркало chunks_fts
-        # (v14). Форма та сама навмисно: лексичний шлях коментарів має
-        # поводитись рівно як лексичний шлях транскриптів, інакше гібрид
-        # порівнював би різнокаліброві сигнали.
+        # FTS5 external-content + three triggers - a verbatim mirror of chunks_fts
+        # (v14). The same form deliberately: the lexical path of comments must
+        # behave exactly like the lexical path of transcripts, otherwise the hybrid
+        # would compare signals of different calibration.
         has_cc_fts = bool(c.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comment_chunks_fts'"
         ).fetchone())
@@ -1513,28 +1513,28 @@ def init_database(db_path: str):
                   "(37, 'comments + comment_chunks + comment_chunks_fts — шар "
                   "коментарів власника: власний вектор/FTS-індекс, поліморфна ціль, "
                   "kind задає вагу в ранжуванні')")
-        logger.info("Міграція v37: шар коментарів (comments/comment_chunks/FTS) створено")
+        logger.info("Migration v37: comments layer (comments/comment_chunks/FTS) created")
 
-    # === v38: провенанс похідних від коментаря (Волна 3) =====================
-    # Коментар не лише шукається — він народжує звʼязки. Дві похідні:
+    # === v38: provenance of comment derivatives (Wave 3) =====================
+    # A comment is not only searched - it gives birth to links. Two derivatives:
     #
-    # 1. ЗВʼЯЗКИ З ГРАФОМ. Пишуться в meeting_entities з source='comment' —
-    #    новою колонки не треба, source (v34) уже є. Але провенанс тут не
-    #    формальність: згадка в коментарі означає «названо в репліці ПРО
-    #    зустріч», а не «названо НА зустрічі». Без мітки зріз за людиною тихо
-    #    змішав би два різні твердження (урок derived-claims-need-second-source).
+    # 1. GRAPH LINKS. Written to meeting_entities with source='comment' -
+    #    no new column needed, source (v34) already exists. But provenance here is not
+    #    a formality: a mention in a comment means "named in a remark ABOUT
+    #    the meeting", not "named AT the meeting". Without the label the person slice would quietly
+    #    mix two different claims (lesson derived-claims-need-second-source).
     #
-    # 2. ЗАДАЧІ. Ось тут колонки бракує. action_items.source='comment' сказало
-    #    б лише «з якогось коментаря», а на одному транскрипті їх може бути
-    #    десять. Без comment_id повторний розбір мусив би або стирати задачі,
-    #    витягнуті з СУСІДНІХ коментарів, або плодити дублі — обидва варіанти
-    #    погані, і обидва мовчазні. comment_id дає точну ідемпотентність:
-    #    переписуємо рівно свої рядки.
+    # 2. TASKS. Here a column is lacking. action_items.source='comment' would say
+    #    only "from some comment", and one transcript can have ten of them.
+    #    Without comment_id a re-parse would have to either erase tasks
+    #    extracted from NEIGHBOURING comments, or breed duplicates - both options are
+    #    bad, and both silent. comment_id gives exact idempotency:
+    #    we rewrite exactly our own rows.
     #
-    # analyzed_at/analyzed_model на comments — маркер «Claude уже розбирав».
-    # Розбір платний і запускається кнопкою, тож інтерфейс мусить розрізняти
-    # «ще не розбирали» і «розібрали, задач не знайшлось»: без маркера друге
-    # виглядає як перше, і власник платить за той самий коментар двічі.
+    # analyzed_at/analyzed_model on comments - a "Claude already parsed this" marker.
+    # The parse is paid and launched by a button, so the interface must tell
+    # "not parsed yet" from "parsed, no tasks found": without the marker the second
+    # looks like the first, and the owner pays for the same comment twice.
     if current_version < 38:
         c.execute("PRAGMA table_info(action_items)")
         acols = {row[1] for row in c.fetchall()}
@@ -1553,28 +1553,28 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(38, 'action_items.comment_id + comments.analyzed_* — провенанс "
                   "похідних від коментаря: граф (source=comment) і задачі (Волна 3)')")
-        logger.info("Міграція v38: провенанс похідних від коментаря створено")
+        logger.info("Migration v38: provenance of comment-derived rows created")
 
-    # === v39: рядковий ключ цілі коментаря (Волна 4) =========================
-    # Прорахунок v37: `comments.target_id INTEGER` мовчки припускав, що кожна
-    # картка адресується числом. Сесія запису — ні: її id це `rec_<hex16>`
-    # (`RecordingService._make_session_id`), і саме вона потрібна тоді, коли
-    # коментар найцінніший — під час дзвінка, коли транскрипту ще не існує.
+    # === v39: string key of the comment target (Wave 4) =========================
+    # A miscalculation of v37: `comments.target_id INTEGER` silently assumed that every
+    # card is addressed by a number. A recording session is not: its id is `rec_<hex16>`
+    # (`RecordingService._make_session_id`), and it is needed precisely when
+    # a comment is most valuable - during a call, when the transcript does not exist yet.
     #
-    # Чому не запхати рядок у ту саму колонку. SQLite дозволив би: INTEGER-
-    # affinity лишає нечислові рядки текстом. Але тоді одна колонка тримала б
-    # два типи, кожен `int(target_id)` у сервісі став би міною, а запит
-    # `WHERE target_id = 42` міг би зловити рядок «42». Окрема колонка робить
-    # відмінність явною: тип цілі диктує, яким ключем вона адресується
-    # (`comments.TARGETS`), і сервіс перемикається один раз у `_target_clause`.
+    # Why not stuff the string into the same column. SQLite would allow it: INTEGER
+    # affinity leaves non-numeric strings as text. But then one column would hold
+    # two types, every `int(target_id)` in the service would become a mine, and the query
+    # `WHERE target_id = 42` could catch the row "42". A separate column makes
+    # the difference explicit: the target type dictates by which key it is addressed
+    # (`comments.TARGETS`), and the service switches once in `_target_clause`.
     #
-    # `target_id` у рядкових цілей тримає 0 (`comments.STR_TARGET_ID`): колонка
-    # створена в v37 як NOT NULL, а знімати обмеження довелось би перебудовою
-    # таблиці, на яку посилається FK з `comment_chunks`. Нуль безпечний —
-    # AUTOINCREMENT починає з 1, тож id=0 не належить жодному рядку.
+    # `target_id` for string targets holds 0 (`comments.STR_TARGET_ID`): the column was
+    # created in v37 as NOT NULL, and dropping the constraint would require rebuilding
+    # a table referenced by an FK from `comment_chunks`. Zero is safe -
+    # AUTOINCREMENT starts from 1, so id=0 belongs to no row.
     #
-    # Індекс дзеркалить idx_comments_target — вибірка та сама («усі живі
-    # коментарі цієї картки»), лише ключ інший.
+    # The index mirrors idx_comments_target - the same selection ("all live
+    # comments of this card"), only the key differs.
     if current_version < 39:
         c.execute("PRAGMA table_info(comments)")
         ccols = {row[1] for row in c.fetchall()}
@@ -1586,18 +1586,18 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(39, 'comments.target_key — рядковий ключ цілі (сесія запису "
                   "rec_<hex>): коментар під час дзвінка, коли транскрипту ще немає')")
-        logger.info("Міграція v39: comments.target_key створено")
+        logger.info("Migration v39: comments.target_key created")
 
-    # === v40: transcriptions.duplicate_of — дублі аудіо/YouTube =============
-    # Той самий дзвінок, завантажений двічі (перезалив файлу, відео-повтор,
-    # повторна транскрипція запису), давав два повноцінні записи з однаковим
-    # текстом — і обидва лізли у видачу RAG, з'їдаючи слоти per-meeting cap
-    # тим самим вмістом.
+    # === v40: transcriptions.duplicate_of - audio/YouTube duplicates =============
+    # The same call uploaded twice (a file re-upload, a video repeat,
+    # a repeated transcription of a recording) produced two full records with identical
+    # text - and both climbed into the RAG output, eating the slots of the per-meeting cap
+    # with the same content.
     #
-    # Запис НЕ видаляється і не отримує deleted_at: дубль лишається в
-    # Бібліотеці (у нього можуть бути свої коментарі, файл, задачі), але
-    # позначений `duplicate_of` → id оригіналу (найменший id групи) і
-    # виключений з пошуку нарівні з soft-deleted.
+    # The record is NOT deleted and does not get deleted_at: the duplicate stays in
+    # the Library (it may have its own comments, file, tasks), but it is
+    # marked `duplicate_of` -> the id of the original (the smallest id of the group) and
+    # excluded from search on a par with soft-deleted.
     if current_version < 40:
         c.execute("PRAGMA table_info(transcriptions)")
         tcols = {row[1] for row in c.fetchall()}
@@ -1610,21 +1610,21 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(40, 'transcriptions.duplicate_of — дублі аудіо/YouTube: запис "
                   "лишається, але не індексується і не бере участі в пошуку')")
-        logger.info("Міграція v40: transcriptions.duplicate_of створено")
+        logger.info("Migration v40: transcriptions.duplicate_of created")
 
-    # === v41: ask_log — лог питань до архіву з оцінкою власника ==============
-    # Golden-set наповнювався з `logs/mcp_calls.log` — а це лише MCP-канал,
-    # лише текст питання (обрізаний до 600 символів) і жодного сигналу про
-    # якість відповіді. Тут лежить сам факт відповіді: що спитали, яким
-    # каналом (`ui`/`mcp`), у якому скоупі, які джерела процитовано, скільки
-    # коштувало і — головне — 👍/👎 власника. `evals/build_golden.py
-    # --from-ask-log` мінить звідси кандидатів, 👎 першими.
+    # === v41: ask_log - a log of questions to the archive with the owner's rating ==============
+    # The golden set used to be filled from `logs/mcp_calls.log` - but that is only the MCP channel,
+    # only the question text (truncated to 600 characters) and no signal about the
+    # quality of the answer. Here lies the fact of the answer itself: what was asked, through which
+    # channel (`ui`/`mcp`), in which scope, which sources were cited, how much it
+    # cost and - the main thing - the owner's thumbs up/down. `evals/build_golden.py
+    # --from-ask-log` mines candidates from here, thumbs down first.
     #
-    # Пишуться ЛИШЕ успішні відповіді (збій Claude рядка не створює): у
-    # golden-set не потрібні питання, на які система впала з мережевої
-    # причини. `rating`/`note`/`rated_at` — NULL до оцінки; `cost_usd` NULL,
-    # якщо модель поза таблицею тарифів (краще порожньо, ніж ціна не тієї
-    # моделі — та сама помилка, що лікував T6.2 у pricing.py).
+    # ONLY successful answers are written (a Claude failure creates no row): the
+    # golden set does not need questions the system failed on for a network
+    # reason. `rating`/`note`/`rated_at` are NULL until rated; `cost_usd` is NULL
+    # if the model is outside the tariff table (better empty than the price of the wrong
+    # model - the same mistake T6.2 fixed in pricing.py).
     if current_version < 41:
         c.execute('''CREATE TABLE IF NOT EXISTS ask_log
                      (
@@ -1651,18 +1651,18 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(41, 'ask_log — лог питань UI+MCP з відповіддю, джерелами, токенами, "
                   "вартістю і оцінкою власника (сировина для golden-set)')")
-        logger.info("Міграція v41: ask_log створено")
+        logger.info("Migration v41: ask_log created")
 
-    # === v42: провенанс сводки TG-нитки (Волна B, app/services/summaries.py) ==
-    # `tg_threads.summary` (з v32) уже існувала, але її ніхто не писав і не
-    # читав — сводка нитки не була "одиницею сенсу зі сводкою" нарівні з
-    # дзвінком/документом. Колонки тут — той самий провенанс, що вже є для
-    # триажу/витягу задач (triage_at/triage_model/triage_msgs): коли, якою
-    # моделлю, і головне — `summary_source_ids_json` = id САМЕ ТИХ повідомлень
-    # (`transcriptions.id`), що потрапили в промпт, бо превʼю-стеля (як у
-    # tg_tasks) означає, що не всі повідомлення нитки туди влізли.
-    # `summary_msgs` — водяний знак: нитка, що підросла, потребує нової сводки,
-    # але сама не пересводиться на кожне повідомлення.
+    # === v42: provenance of the TG thread summary (Wave B, app/services/summaries.py) ==
+    # `tg_threads.summary` (from v32) already existed, but nobody wrote or read it -
+    # the thread summary was not a "unit of meaning with a summary" on a par with
+    # a call/document. The columns here are the same provenance that already exists for
+    # triage/task extraction (triage_at/triage_model/triage_msgs): when, by which
+    # model, and most importantly - `summary_source_ids_json` = the ids of EXACTLY those messages
+    # (`transcriptions.id`) that made it into the prompt, since a preview ceiling (as in
+    # tg_tasks) means not all thread messages fit there.
+    # `summary_msgs` is a watermark: a thread that grew needs a new summary,
+    # but is not re-summarized on every message.
     if current_version < 42:
         c.execute("PRAGMA table_info(tg_threads)")
         tcols = {row[1] for row in c.fetchall()}
@@ -1677,28 +1677,28 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(42, 'tg_threads.summary_source_ids_json/summary_at/summary_model/"
                   "summary_msgs — провенанс сводки нитки (Волна B)')")
-        logger.info("Міграція v42: провенанс tg_threads.summary створено")
+        logger.info("Migration v42: tg_threads.summary provenance created")
 
-    # === v43: chunks.context_prefix + chunks_fts по (context_prefix, text) ====
-    # Волна B, історія 05. Чанк був самодостатнім лише для людини, яка вже знає,
-    # звідки він: у вектор і в BM25 йшов голий текст репліки, тож «що по
-    # Acmecorp у вересні» не знаходило повідомлення, де назва чату є, а в самій
-    # репліці — ні. `context_prefix` — один-два рядки з ПОЛІВ БД (тип, назва/чат,
-    # дата, спікер/автор, напрямок | нитка | сторінка) + рядок сводки одиниці
-    # сенсу (`summaries.unit_summary_line`). Пише його `embeddings.
-    # build_context_prefix` при ембедингу.
+    # === v43: chunks.context_prefix + chunks_fts over (context_prefix, text) ====
+    # Wave B, story 05. A chunk was self-sufficient only for a person who already knows
+    # where it comes from: the bare text of the reply went into the vector and BM25, so "what about
+    # Acmecorp in September" did not find a message where the chat name is present but the reply
+    # itself has none. `context_prefix` is one or two lines from DB FIELDS (type, title/chat,
+    # date, speaker/author, direction | thread | page) + a summary line of the unit of
+    # meaning (`summaries.unit_summary_line`). It is written by `embeddings.
+    # build_context_prefix` at embedding time.
     #
-    # Префікс бере участь у пошуку і НЕ бере — у цитатах: `chunks.text`
-    # лишається голим текстом, а retrieval/rag/експорт читають саме `text`
-    # (списки колонок там явні, без SELECT *).
+    # The prefix takes part in search and does NOT take part in citations: `chunks.text`
+    # stays bare text, and retrieval/rag/export read exactly `text`
+    # (the column lists there are explicit, no SELECT *).
     #
-    # chunks_fts — external content (`content='chunks'`), тож колонки FTS
-    # зіставляються з колонками chunks ПО ІМЕНІ: додати колонку в індекс можна
-    # лише перестворенням віртуальної таблиці + `rebuild`. Тригери переписані
-    # обидва поля. Нерозмічений `MATCH` (retrieval, commitments, archive_grep)
-    # шукає по ВСІХ колонках — окремої правки споживачам не потрібно.
-    # Ідемпотентність: перебудова робиться, лише якщо в chunks_fts ще немає
-    # колонки context_prefix (а не лише за номером версії).
+    # chunks_fts is external content (`content='chunks'`), so the FTS columns
+    # are matched to the chunks columns BY NAME: a column can be added to the index
+    # only by recreating the virtual table + `rebuild`. Both triggers are rewritten for
+    # both fields. An unqualified `MATCH` (retrieval, commitments, archive_grep)
+    # searches ALL columns - no separate edit to the consumers is needed.
+    # Idempotency: the rebuild is done only if chunks_fts still has no
+    # context_prefix column (not just by the version number).
     if current_version < 43:
         c.execute("PRAGMA table_info(chunks)")
         chunk_cols = {row[1] for row in c.fetchall()}
@@ -1739,29 +1739,29 @@ def init_database(db_path: str):
                         VALUES (new.id, new.context_prefix, new.text);
                     END
                 ''')
-                # Наявні рядки (у більшості — з NULL-префіксом) мають лишитись
-                # знаходженими за своїм текстом: rebuild перечитує content-таблицю.
+                # Existing rows (mostly with a NULL prefix) must remain
+                # findable by their text: rebuild rereads the content table.
                 c.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(43, 'chunks.context_prefix + chunks_fts по (context_prefix, text) — "
                   "контекстний заголовок чанка у вектор і BM25 (Волна B)')")
-        logger.info("Міграція v43: chunks.context_prefix + перебудова chunks_fts")
+        logger.info("Migration v43: chunks.context_prefix + chunks_fts rebuild")
 
-    # === v44: transcriptions.title/description + ці колонки в transcriptions_fts ===
-    # Спека editable-title-description, історія 01. `source_name` лишається
-    # провенансом (ім'я файлу, заголовок YouTube, превʼю TG-повідомлення) і
-    # НЕ перезаписується: власна назва живе окремою колонкою `title`, тож
-    # TG-re-persist, який оновлює `source_name`, не стирає ручне перейменування.
+    # === v44: transcriptions.title/description + these columns in transcriptions_fts ===
+    # Spec editable-title-description, story 01. `source_name` stays
+    # provenance (file name, YouTube title, TG message preview) and is
+    # NOT overwritten: the own title lives in a separate `title` column, so a
+    # TG re-persist that updates `source_name` does not erase a manual rename.
     #
-    # transcriptions_fts — external content (`content='transcriptions'`), тож
-    # колонки індексу зіставляються з колонками таблиці ПО ІМЕНІ: додати
-    # колонку можна лише перестворенням віртуальної таблиці + `rebuild`
-    # (той самий патерн, що у v43 для chunks_fts). Порядок колонок збережено:
-    # `transcript_text` лишається нульовою, бо `snippet(transcriptions_fts, 0, …)`
-    # у `GET /api/history` адресує її номером.
-    # Ідемпотентність: перебудова робиться, лише якщо у FTS ще немає колонки
-    # `title` (а не лише за номером версії).
+    # transcriptions_fts is external content (`content='transcriptions'`), so the
+    # index columns are matched to the table columns BY NAME: a column can be added
+    # only by recreating the virtual table + `rebuild`
+    # (the same pattern as v43 for chunks_fts). The column order is kept:
+    # `transcript_text` stays zeroth, because `snippet(transcriptions_fts, 0, ...)`
+    # in `GET /api/history` addresses it by number.
+    # Idempotency: the rebuild is done only if the FTS still has no
+    # `title` column (not just by the version number).
     if current_version < 44:
         c.execute("PRAGMA table_info(transcriptions)")
         tx_cols = {row[1] for row in c.fetchall()}
@@ -1817,34 +1817,34 @@ def init_database(db_path: str):
                                 new.youtube_title, new.title, new.description);
                     END
                 ''')
-                # Наявні рядки (у всіх title/description = NULL) мають лишитись
-                # знаходженими за source_name/текстом: rebuild перечитує таблицю.
+                # Existing rows (all with title/description = NULL) must remain
+                # findable by source_name/text: rebuild rereads the table.
                 c.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
 
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
-                  "(44, 'transcriptions.title/description + перебудова transcriptions_fts — "
+                  "(44, 'transcriptions.title/description + transcriptions_fts rebuild — "
                   "власна назва й опис запису, редаговані після збереження')")
-        logger.info("Міграція v44: transcriptions.title/description + перебудова transcriptions_fts")
+        logger.info("Migration v44: transcriptions.title/description + transcriptions_fts rebuild")
 
-    # === v45: дерево напрямків (parent_id) + словник тегів ===================
-    # Спека directions-projects-tags, історія 01 (трасер), ADR-023 §B.
+    # === v45: direction tree (parent_id) + tag vocabulary ===================
+    # Spec directions-projects-tags, story 01 (tracer), ADR-023 section B.
     #
-    # `categories.parent_id` — другий (і останній) рівень тієї самої таблиці:
-    # NULL = напрямок, не-NULL = проєкт усередині напрямку. CHECK у схемі
-    # НЕМАЄ свідомо: «рівно два рівні» перевіряє app-код
-    # (`app/services/categories.py`), бо SQLite не вміє змінювати CHECK без
-    # перестворення таблиці, а майбутній третій рівень (якщо власник колись
-    # його попросить) не має впиратись у міграцію-переливання.
+    # `categories.parent_id` is the second (and last) level of the same table:
+    # NULL = direction, non-NULL = a project inside a direction. There is deliberately NO CHECK
+    # in the schema: "exactly two levels" is checked by app code
+    # (`app/services/categories.py`), because SQLite cannot change a CHECK without
+    # recreating the table, and a future third level (if the owner ever
+    # asks for it) must not run into a copy-over migration.
     #
-    # Теги кріпляться ЛИШЕ до `transcriptions` (ADR §B): аудіо в Медіатеці
-    # показує теги свого транскрипту тим самим COALESCE-шляхом, що й напрямок.
-    # `record_tags.source` ('manual'|'claude'|'chat') потрібен для
-    # відвʼязування: зняття тега з TG-чату прибирає лише рядки source='chat',
-    # ручний тег лишається. Підказки Claude живуть окремо
-    # (`suggested_tags_json`) — фільтри читають тільки `record_tags`.
+    # Tags attach ONLY to `transcriptions` (ADR section B): audio in the Media library
+    # shows the tags of its transcript by the same COALESCE path as the direction.
+    # `record_tags.source` ('manual'|'claude'|'chat') is needed for
+    # detaching: removing a tag from a TG chat removes only rows with source='chat',
+    # a manual tag stays. Claude hints live separately
+    # (`suggested_tags_json`) - filters read only `record_tags`.
     #
-    # Міграція аддитивна: жодного переносу даних, `name_norm` наявних напрямків
-    # НЕ перераховується (ключ `categories.norm_name` збігається зі старим).
+    # The migration is additive: no data transfer, `name_norm` of existing directions
+    # is NOT recomputed (the `categories.norm_name` key matches the old one).
     if current_version < 45:
         c.execute("PRAGMA table_info(categories)")
         cat_cols = {row[1] for row in c.fetchall()}
@@ -1891,19 +1891,19 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(45, 'categories.parent_id (напрямок → проєкт) + tags/record_tags/"
                   "tg_chat_tags + transcriptions.suggested_tags_json (ADR-023)')")
-        logger.info("Міграція v45: categories.parent_id + словник тегів створено")
+        logger.info("Migration v45: categories.parent_id + tag dictionary created")
 
-    # === v46: embedding_epochs — формат префікса кожної епохи =================
-    # Спека directions-projects-tags, історія 17 (ADR-023 §D, ADR-017).
+    # === v46: embedding_epochs - the prefix format of each epoch =================
+    # Spec directions-projects-tags, story 17 (ADR-023 section D, ADR-017).
     #
-    # Рядок таблиці = «епоха (модель, версія) побудована форматом префікса N».
-    # Бекфіл ставить формат 1 усьому, що вже є в `transcriptions`: будь-яка
-    # пара, що існувала ДО цієї міграції, побудована префіксом попередньої
-    # спеки. Рядки з `embedding_version IS NULL` (ембеджено ще до v28) у
-    # таблицю не потрапляють — `INSERT OR IGNORE` мовчки пропускає їх на
-    # `NOT NULL`, а поточна пара коду NULL-версії не має ніколи.
+    # A table row = "the epoch (model, version) was built with prefix format N".
+    # The backfill sets format 1 for everything already in `transcriptions`: any
+    # pair that existed BEFORE this migration was built with the prefix of the previous
+    # spec. Rows with `embedding_version IS NULL` (embedded before v28) do not
+    # get into the table - `INSERT OR IGNORE` silently skips them on
+    # `NOT NULL`, and the code's current pair never has a NULL version.
     #
-    # Тільки DDL + цей бекфіл: даних не переносимо, чанків не чіпаємо.
+    # DDL only + this backfill: no data is transferred, chunks are not touched.
     if current_version < 46:
         c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_epochs'")
         if not c.fetchone():
@@ -1915,8 +1915,8 @@ def init_database(db_path: str):
                 PRIMARY KEY (model, version)
             )''')
 
-        # `transcriptions` може ще не існувати (штучна БД у тестах міграцій,
-        # де схему піднімають з проміжної версії) — тоді бекфілити нема з чого.
+        # `transcriptions` may not exist yet (an artificial DB in migration tests,
+        # where the schema is raised from an intermediate version) - then there is nothing to backfill.
         c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transcriptions'")
         if c.fetchone():
             c.execute("INSERT OR IGNORE INTO embedding_epochs (model, version, prefix_format) "
@@ -1926,43 +1926,43 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(46, 'embedding_epochs: формат контекстного префікса кожної епохи "
                   "(наявні пари = формат 1, ADR-023 §D)')")
-        logger.info("Міграція v46: embedding_epochs створено")
+        logger.info("Migration v46: embedding_epochs created")
 
-    # === v47: унікальність назви вузла — серед БРАТІВ ========================
-    # Спека directions-projects-tags, хвиля 6 (ADR-023 §E, датована заміна).
+    # === v47: node name uniqueness - among SIBLINGS ========================
+    # Spec directions-projects-tags, wave 6 (ADR-023 section E, a dated replacement).
     #
-    # До v47 назва вузла була унікальна по ВСІЙ таблиці (inline `UNIQUE COLLATE
-    # NOCASE` на `name` з v15 + UNIQUE-індекс на `name_norm` з v20), тож
-    # «Маркетинг» не міг одночасно жити під «Фонд Робота» і під «Фріланс» —
-    # а саме так розкладений живий архів. Тепер унікальність — серед братів:
-    # напрямки між собою, проєкти одного батька між собою; напрямок і чужий
-    # проєкт можуть збігатись.
+    # Before v47 a node name was unique across the WHOLE table (inline `UNIQUE COLLATE
+    # NOCASE` on `name` from v15 + a UNIQUE index on `name_norm` from v20), so
+    # "Маркетинг" could not live at once under "Фонд Робота" and under "Фріланс" -
+    # yet this is exactly how the live archive is laid out. Now uniqueness is among siblings:
+    # directions among themselves, projects of one parent among themselves; a direction and a foreign
+    # project may coincide.
     #
-    # Inline UNIQUE не знімається ALTER'ом — це перша НЕаддитивна міграція
-    # спеки, тобто перебудова таблиці. Дві пастки, через які тут усе саме так:
-    #   1. **FK.** `tg_monitored_chats.category_id` має `FOREIGN KEY … ON DELETE
-    #      SET NULL` (v18). З увімкненими foreign_keys `DROP TABLE categories`
-    #      спрацьовує як DELETE усіх рядків і МОВЧКИ зануляє напрямок кожного
-    #      моніторенного чату. Тому `PRAGMA foreign_keys=OFF` ДО транзакції
-    #      (PRAGMA всередині транзакції — no-op), попереднє значення
-    #      повертається після, а `PRAGMA foreign_key_check` доводить, що нічого
-    #      не повисло.
-    #      **Гард ЗАХИСНИЙ, а не несучий (виміряно 22.09.2026, хвиля 7):** на
-    #      шляху, яким міграція реально йде, FK уже вимкнені — `init_database`
-    #      відкриває сирий `sqlite3.connect` (`:139`), а там `PRAGMA
-    #      foreign_keys` за замовчуванням 0. `foreign_keys=ON` вмикає
-    #      `app/db/connection.py:40`, тобто ІНШЕ зʼєднання — не це. Тримаємо на
-    #      випадок виклику `init_database` на зʼєднанні з увімкненими FK
-    #      (пастка доведена `test_v47_drop_table_with_fk_on_would_null_chat_category`
-    #      на зібраному руками FK-ON зʼєднанні; ADR-023 §E, абзац хвилі 7).
-    #   2. **Унікальність, яка може не датись.** Як і у v20: якщо в живій БД уже
-    #      є два брати з однаковим `name_norm`, міграція не валиться — індекс
-    #      лишається звичайним, а унікальність тримає app-код
-    #      (`categories._assert_free_sibling_name`, перевірка в Python ДО запису).
+    # An inline UNIQUE cannot be dropped by ALTER - this is the first NON-additive migration
+    # of the spec, i.e. a table rebuild. Two traps, because of which everything here is as it is:
+    #   1. **FK.** `tg_monitored_chats.category_id` has `FOREIGN KEY ... ON DELETE
+    #      SET NULL` (v18). With foreign_keys enabled `DROP TABLE categories`
+    #      acts as a DELETE of all rows and SILENTLY nulls the direction of every
+    #      monitored chat. Hence `PRAGMA foreign_keys=OFF` BEFORE the transaction
+    #      (a PRAGMA inside a transaction is a no-op), the previous value
+    #      is restored afterwards, and `PRAGMA foreign_key_check` proves that nothing
+    #      is left dangling.
+    #      **The guard is DEFENSIVE, not load-bearing (measured 22.09.2026, wave 7):** on
+    #      the path the migration actually takes FKs are already off - `init_database`
+    #      opens a raw `sqlite3.connect` (`:139`), and there `PRAGMA
+    #      foreign_keys` is 0 by default. `foreign_keys=ON` is turned on by
+    #      `app/db/connection.py:40`, i.e. a DIFFERENT connection - not this one. We keep it for
+    #      the case of calling `init_database` on a connection with FKs enabled
+    #      (the trap is proven by `test_v47_drop_table_with_fk_on_would_null_chat_category`
+    #      on a hand-built FK-ON connection; ADR-023 section E, the wave 7 paragraph).
+    #   2. **Uniqueness that may not be achievable.** As in v20: if the live DB already
+    #      has two siblings with the same `name_norm`, the migration does not fail -
+    #      the index stays a plain one, and uniqueness is held by app code
+    #      (`categories._assert_free_sibling_name`, a check in Python BEFORE the write).
     #
-    # Ідемпотентність — за ФАКТОМ схеми, не лише за номером версії: є
-    # `idx_categories_parent_name` і немає жодного глобального UNIQUE на
-    # `name`/`name_norm` → перебудова не потрібна.
+    # Idempotency is by the FACT of the schema, not just by the version number: if there is
+    # `idx_categories_parent_name` and no global UNIQUE on
+    # `name`/`name_norm` -> no rebuild is needed.
     if current_version < 47:
         c.execute("PRAGMA table_info(categories)")
         cat_info = c.fetchall()
@@ -1976,16 +1976,16 @@ def init_database(db_path: str):
                 unique_indexes.append((idx[1], idx_cols))
             has_sibling_index = any(n == 'idx_categories_parent_name'
                                     for n, _ in unique_indexes)
-            # Глобальна унікальність = UNIQUE рівно по одній колонці name/name_norm.
-            # Індекс братів у це не потрапляє: його перша колонка — вираз
-            # COALESCE(...), і PRAGMA index_info віддає для неї None.
+            # Global uniqueness = UNIQUE on exactly one column name/name_norm.
+            # The siblings index does not fall under this: its first column is the expression
+            # COALESCE(...), and PRAGMA index_info returns None for it.
             global_unique = [n for n, cols in unique_indexes
                              if cols in (['name'], ['name_norm'])]
 
             if global_unique or not has_sibling_index:
-                conn.commit()             # PRAGMA не діє всередині транзакції
-                # Захисний (див. пастку 1 вище): на шляху init_database FK і так
-                # вимкнені, prev_fk тут 0 — гард на випадок FK-ON зʼєднання.
+                conn.commit()             # PRAGMA has no effect inside a transaction
+                # Defensive (see trap 1 above): on the init_database path FKs are already
+                # off, prev_fk is 0 here - the guard is for the case of an FK-ON connection.
                 prev_fk = c.execute("PRAGMA foreign_keys").fetchone()[0]
                 c.execute("PRAGMA foreign_keys=OFF")
                 try:
@@ -2001,7 +2001,7 @@ def init_database(db_path: str):
                         if dflt is not None:
                             piece += f" DEFAULT {dflt}"
                         if cname == 'slug':
-                            piece += " UNIQUE"    # єдина унікальність, що лишається
+                            piece += " UNIQUE"    # the only uniqueness that remains
                         defs.append(piece)
                     cols_sql = ", ".join(col_names)
 
@@ -2020,16 +2020,16 @@ def init_database(db_path: str):
                                   "idx_categories_parent_name "
                                   "ON categories(COALESCE(parent_id, 0), name_norm)")
                     except sqlite3.IntegrityError:
-                        logger.warning("Міграція v47: є брати з однаковим name_norm — "
-                                       "ставлю звичайний індекс, унікальність "
-                                       "контролює app-код")
+                        logger.warning("Migration v47: there are siblings with the same name_norm - "
+                                       "using a plain index, uniqueness "
+                                       "is enforced by app code")
                         c.execute("CREATE INDEX IF NOT EXISTS idx_categories_parent_name "
                                   "ON categories(COALESCE(parent_id, 0), name_norm)")
                     conn.commit()
                     broken = c.execute("PRAGMA foreign_key_check").fetchall()
                     if broken:
-                        logger.warning("Міграція v47: foreign_key_check не порожній "
-                                       "(%s записів) — перевірте посилання на categories",
+                        logger.warning("Migration v47: foreign_key_check is not empty "
+                                       "(%s rows) - check the references to categories",
                                        len(broken))
                 finally:
                     c.execute(f"PRAGMA foreign_keys={'ON' if prev_fk else 'OFF'}")
@@ -2037,14 +2037,14 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(47, 'categories: унікальність назви серед братів "
                   "(idx_categories_parent_name) замість глобальної (ADR-023 §E)')")
-        logger.info("Міграція v47: унікальність назви вузла — серед братів")
+        logger.info("Migration v47: node name uniqueness - among siblings")
 
-    # === v48: візуальна стрічка відео (spec video-visual-timeline) ============
-    # Аддитивно: відрізок кадру (end_sec), тип, повтор за змістом, оцінка зміни,
-    # рамки слів OCR (для зафарбовування секретів на льоту), час у самому відео.
-    # Зображення кадрів більше НЕ зберігаються — `image_path` лишається для старих
-    # рядків Phase 23 і NULL для нових. `transcriptions.video_analysis_params` —
-    # версія алгоритму + параметри: інші → перерахунок.
+    # === v48: visual video timeline (spec video-visual-timeline) ============
+    # Additive: the frame span (end_sec), type, repeat by content, change score,
+    # OCR word boxes (for painting over secrets on the fly), time within the video itself.
+    # Frame images are NO LONGER stored - `image_path` stays for old
+    # Phase 23 rows and is NULL for new ones. `transcriptions.video_analysis_params` is
+    # the algorithm version + parameters: different ones -> recomputation.
     if current_version < 48:
         c.execute("PRAGMA table_info(video_keyframes)")
         vk_cols = {r[1] for r in c.fetchall()}
@@ -2061,13 +2061,13 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(48, 'video_keyframes: відрізок, тип, повтор, рамки OCR; "
                   "transcriptions.video_analysis_params')")
-        logger.info("Міграція v48: візуальна стрічка відео")
+        logger.info("Migration v48: visual video timeline")
 
-    # === v49: screen_secrets — сирі секрети з екрана ==========================
-    # Паролі/токени з OCR кадрів. У video_keyframes і chunks лежить лише маска
-    # «[🔒 секрет]»; сирі значення — тут, і читає їх ЛИШЕ локальний скрипт
-    # `python -m app.services.screen_secrets reveal` (TTY + підтвердження, у файл).
-    # Жоден HTTP-ендпоінт і жодна MCP-тулза цю таблицю не читають.
+    # === v49: screen_secrets - raw secrets from the screen ==========================
+    # Passwords/tokens from frame OCR. In video_keyframes and chunks only the mask
+    # "[🔒 секрет]" lies; the raw values are here, and are read ONLY by the local script
+    # `python -m app.services.screen_secrets reveal` (TTY + confirmation, into a file).
+    # No HTTP endpoint and no MCP tool reads this table.
     if current_version < 49:
         c.execute('''CREATE TABLE IF NOT EXISTS screen_secrets (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2080,11 +2080,11 @@ def init_database(db_path: str):
         c.execute('CREATE INDEX IF NOT EXISTS idx_screen_secrets_kf ON screen_secrets(keyframe_id)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(49, 'screen_secrets: сирі секрети з кадрів, лише для локального reveal')")
-        logger.info("Міграція v49: screen_secrets")
+        logger.info("Migration v49: screen_secrets")
 
-    # === v50: pipe_runs — історія труб за розкладом (K4) =======================
-    # Кожен запуск труби (`app/services/pipes.py`) — рядок: розклад/догін/ручний,
-    # чим відрендерено (claude|plain), вартість, помилка. Аддитивно.
+    # === v50: pipe_runs - history of scheduled pipes (K4) =======================
+    # Every pipe run (`app/services/pipes.py`) is a row: schedule/catch-up/manual,
+    # what it was rendered with (claude|plain), cost, error. Additive.
     if current_version < 50:
         c.execute('''CREATE TABLE IF NOT EXISTS pipe_runs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2101,11 +2101,11 @@ def init_database(db_path: str):
         c.execute('CREATE INDEX IF NOT EXISTS idx_pipe_runs_pipe ON pipe_runs(pipe, started_at)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(50, 'pipe_runs: історія труб за розкладом (K4)')")
-        logger.info("Міграція v50: pipe_runs")
+        logger.info("Migration v50: pipe_runs")
 
-    # === v51: журнал змін статусу/терміну задач (K5 k5-task-buttons) ==========
-    # Хто і коли закрив / переніс задачу — з кнопок брифінгу (bot) і з /tasks (web).
-    # `undo_of` — подія-скасування посилається на скасовану.
+    # === v51: log of task status/deadline changes (K5 k5-task-buttons) ==========
+    # Who closed / postponed a task and when - from the briefing buttons (bot) and from /tasks (web).
+    # `undo_of` - an undo event references the undone one.
     if current_version < 51:
         c.execute('''CREATE TABLE IF NOT EXISTS action_item_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2125,7 +2125,7 @@ def init_database(db_path: str):
                   'ON action_item_events(item_id, id)')
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(51, 'action_item_events: журнал змін статусу задач (K5)')")
-        logger.info("Міграція v51: action_item_events")
+        logger.info("Migration v51: action_item_events")
 
     conn.commit()
     conn.close()

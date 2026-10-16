@@ -1,8 +1,8 @@
-"""Клієнтський шар перекладу: паритет словників uk/en, скан ключів, вибір мови.
+"""Client-side translation layer: uk/en dictionary parity, key scan, language choice.
 
-Словники `static/js/recall/i18n/*.js` вантажаться через node з фейковим
-`window.Recall` (без браузера). Тест сам підхоплює нові файли словників і нові
-виклики `R.t('…')` у `static/js/recall/**` — правок не потребує.
+The dictionaries `static/js/recall/i18n/*.js` are loaded via node with a fake
+`window.Recall` (without a browser). The test itself picks up new dictionary files and new
+`R.t('…')` calls in `static/js/recall/**` — needs no edits.
 """
 import json
 import re

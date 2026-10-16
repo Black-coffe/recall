@@ -1,4 +1,4 @@
-"""Каталог серверних текстів: область telegram (брифінг, кнопки бота, помилки панелі)."""
+"""Catalog of server texts: the telegram area (brief, bot buttons, panel errors)."""
 MESSAGES: dict = {
     "telegram.brief.title.weekly_digest": {
         "uk": "🗓 Звід тижня",

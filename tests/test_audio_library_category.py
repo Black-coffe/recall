@@ -1,8 +1,8 @@
-"""Тести напрямку (category) в Аудіотеці — COALESCE(транскрипт-напрямок, власний).
+"""Tests of the direction (category) in the Audio Library - COALESCE(transcript direction, own).
 
-Phase 21 (recording UX): нетранскрибований запис має показуватись з власним
-напрямком (audio_downloads.category_id) і ловитись фільтром по напрямку ще до
-транскрипції. Коли транскрипт зʼявляється — його напрямок має пріоритет.
+Phase 21 (recording UX): an untranscribed recording must be shown with its own
+direction (audio_downloads.category_id) and be caught by the direction filter even before
+transcription. When a transcript appears - its direction takes priority.
 """
 from __future__ import annotations
 
@@ -67,8 +67,8 @@ def test_untranscribed_recording_shows_own_category(client):
 
     data = _downloads(cl)
     row = next(d for d in data['downloads'] if d['title'] == 'Запис A')
-    assert row['category_id'] == cid           # власний напрямок видно
-    assert row['transcription_id'] is None      # транскрипту ще нема
+    assert row['category_id'] == cid           # the own direction is visible
+    assert row['transcription_id'] is None      # there is no transcript yet
 
 
 def test_filter_by_direction_catches_untranscribed_recording(client):
@@ -80,7 +80,7 @@ def test_filter_by_direction_catches_untranscribed_recording(client):
 
     data = _downloads(cl, category_id=cid)
     titles = [d['title'] for d in data['downloads']]
-    assert titles == ['Запис A']               # фільтр по напрямку ловить нетранскрибований
+    assert titles == ['Запис A']               # the direction filter catches the untranscribed one
 
 
 def test_transcript_category_wins_over_own(client):
@@ -92,10 +92,10 @@ def test_transcript_category_wins_over_own(client):
 
     data = _downloads(cl)
     row = next(d for d in data['downloads'] if d['title'] == 'Запис A')
-    assert row['category_id'] == trans          # транскрипт-напрямок має пріоритет
+    assert row['category_id'] == trans          # the transcript direction takes priority
     assert row['transcription_id'] is not None
 
-    # і фільтр по транскрипт-напрямку теж ловить
+    # and the transcript-direction filter catches it too
     assert [d['title'] for d in _downloads(cl, category_id=trans)['downloads']] == ['Запис A']
-    # а по власному (вже перекритому) — ні
+    # and the own one (already overridden) does not
     assert _downloads(cl, category_id=own)['downloads'] == []

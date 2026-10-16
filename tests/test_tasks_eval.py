@@ -1,21 +1,21 @@
-"""Поглиблені тести evals/tasks_eval.py (eval-gate-03, ремонт eval-gate-06) —
-due_accuracy/owner_accuracy на реалістичному наборі (кирилиця в різному
-регістрі, аліас власника, due_raw=None), пороги --gate, порожній labeled,
-дедуп build_tasks_golden --merge, і ремонтні критерії раунду 1 рев'ю:
-неcтверджена правда не рахується (знахідка 9), стейл-рядки виключаються
-(знахідка 11), нечитний JSONL дає exit 2 в ОБОХ CLI (знахідка 3/D3), дублі
-id не згортаються мовчки (знахідка 16), `parse_due(meeting_date=None)` не
-підставляє сьогодні мовчки (знахідка 17), first-name fallback лінкера
-віддзеркалений (знахідка 25), `source='comment'` виключений постійно (D14).
+"""In-depth tests of evals/tasks_eval.py (eval-gate-03, repair eval-gate-06):
+due_accuracy/owner_accuracy on a realistic set (Cyrillic in different
+case, owner alias, due_raw=None), the --gate thresholds, an empty labeled set,
+build_tasks_golden --merge dedup, and the repair criteria of review round 1:
+unasserted truth is not counted (finding 9), stale rows are excluded
+(finding 11), an unreadable JSONL gives exit 2 in BOTH CLIs (finding 3/D3), duplicate
+ids are not silently collapsed (finding 16), `parse_due(meeting_date=None)` does not
+silently substitute today (finding 17), the linker first-name fallback is
+mirrored (finding 25), `source='comment'` is excluded permanently (D14).
 
-Синтетична SQLite (мінімальні таблиці transcriptions/action_items/entities/
-entity_aliases), commitments.parse_due — реальний виклик (чиста функція,
-не торкається БД/мережі). Смок-тести цих же CLI вже є в test_build_golden.py
-(eval-gate-02) — тут глибша перевірка саме математики accuracy.
+Synthetic SQLite (minimal tables transcriptions/action_items/entities/
+entity_aliases), commitments.parse_due is a real call (a pure function,
+touches no DB/network). Smoke tests of the same CLIs already exist in test_build_golden.py
+(eval-gate-02); here is a deeper check of the accuracy math itself.
 
-`evals.golden_io.read_jsonl` — спільний читач історії 05 (D13); якщо він ще
-не приземлився на диск, увесь цей файл падає на імпорті (ImportError) — це
-очікувано під час паралельної хвилі, не помилка цього файлу.
+`evals.golden_io.read_jsonl` is the shared reader of story 05 (D13); if it has not
+landed on disk yet, this whole file fails on import (ImportError); that is
+expected during a parallel wave, not an error of this file.
 """
 import json
 import os
@@ -28,7 +28,7 @@ from evals.graph_links import open_readonly
 
 
 # ============================================================
-# Фікстури
+# Fixtures
 # ============================================================
 
 def _make_db(path: str) -> None:
@@ -58,8 +58,8 @@ def _tasks_golden_jsonl(tmp_path, items, name="tasks.local.jsonl"):
 
 
 # ============================================================
-# 6 пунктів із відомою правдою: кирилиця в різному регістрі, аліас
-# власника, due_raw=None, а також свідомі промахи due/owner.
+# 6 items with known truth: Cyrillic in different case, owner
+# alias, due_raw=None, as well as deliberate due/owner misses.
 # ============================================================
 
 def _seed_six_items_db(db_path: str):
@@ -87,41 +87,41 @@ def _seed_six_items_db(db_path: str):
 
 def _six_items():
     """due_accuracy = 3/5 (A,C,E ok; B,D wrong); owner_accuracy = 4/5
-    (A,B,C,D ok; E wrong) — рахунок нижче в асертах, не тут. `task` у кожному
-    пункті збігається зі значенням у фікстурі БД — жоден не стейл."""
+    (A,B,C,D ok; E wrong); the count is below in the asserts, not here. `task` in each
+    item matches the value in the DB fixture, so none is stale."""
     return [
-        {  # A: кирилиця точний регістр, дедлайн збігається
+        {  # A: Cyrillic exact case, the deadline matches
             "id": "task-A", "action_item_id": 10, "transcription_id": 100, "task": "задача A",
             "owner_name_raw": "Андрій", "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": "Андрій", "due_date": "2026-06-05", "due_precision": "day"},
             "status": "labeled",
         },
-        {  # B: кирилиця ІНШИЙ регістр (owner ok), дедлайн НЕ збігається (owner ok, due fail)
+        {  # B: Cyrillic DIFFERENT case (owner ok), the deadline does NOT match (owner ok, due fail)
             "id": "task-B", "action_item_id": 11, "transcription_id": 100, "task": "задача B",
             "owner_name_raw": "Андрій", "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": "АНДРІЙ", "due_date": "2026-01-01", "due_precision": "day"},
             "status": "labeled",
         },
-        {  # C: due_raw=None (обидва None -> ok), власник через латинський аліас у ІНШОМУ регістрі
+        {  # C: due_raw=None (both None -> ok), owner via a Latin alias in a DIFFERENT case
             "id": "task-C", "action_item_id": 12, "transcription_id": 100, "task": "задача C",
             "owner_name_raw": None, "due_raw": None, "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": "ANDREW", "due_date": None, "due_precision": None},
             "status": "labeled",
         },
-        {  # D: власник не звʼязаний (owner_entity_id=NULL) і truth теж None -> owner ok;
-           # дедлайн НЕ збігається -> due fail; truth не дефолтний (due_date заповнено) -> стверджено
+        {  # D: the owner is not linked (owner_entity_id=NULL) and truth is None too -> owner ok;
+           # the deadline does NOT match -> due fail; truth is not the default (due_date is filled) -> asserted
             "id": "task-D", "action_item_id": 13, "transcription_id": 100, "task": "задача D",
             "owner_name_raw": None, "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": None, "due_date": "2099-01-01", "due_precision": "day"},
             "status": "labeled",
         },
-        {  # E: дедлайн збігається, власник НЕ збігається (truth — стороння людина)
+        {  # E: the deadline matches, the owner does NOT match (truth is an outside person)
             "id": "task-E", "action_item_id": 14, "transcription_id": 100, "task": "задача E",
             "owner_name_raw": "Андрій", "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": "Хтось Інший", "due_date": "2026-06-05", "due_precision": "day"},
             "status": "labeled",
         },
-        {  # F: unlabeled -> не входить у accuracy
+        {  # F: unlabeled -> not part of accuracy
             "id": "task-F", "action_item_id": 15, "transcription_id": 100, "task": "задача F (unlabeled)",
             "owner_name_raw": "Андрій", "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
             "source": None, "truth": {"owner": None, "due_date": None, "due_precision": None},
@@ -140,8 +140,8 @@ def test_due_and_owner_accuracy_across_six_items(db):
         conn.close()
 
     assert result["n_total"] == 6
-    assert result["n_labeled"] == 5  # task-F (unlabeled) виключена
-    assert result["n_scored"] == 5   # усі 5 стверджені і свіжі
+    assert result["n_labeled"] == 5  # task-F (unlabeled) excluded
+    assert result["n_scored"] == 5   # all 5 asserted and fresh
     assert result["due_accuracy"] == 0.6   # A,C,E ok; B,D fail -> 3/5
     assert result["owner_accuracy"] == 0.8  # A,B,C,D ok; E fail -> 4/5
     miss_ids = {m["id"] for m in result["misses"]}
@@ -149,8 +149,8 @@ def test_due_and_owner_accuracy_across_six_items(db):
 
 
 def test_gate_threshold_boundary_pass_at_exact_and_fail_just_above(tmp_path, db):
-    """--min-*-acc рівно на порахованому значенні -> PASS (>=); на волосок
-    вище -> FAIL. Порахований набір: due=0.6, owner=0.8."""
+    """--min-*-acc exactly at the computed value -> PASS (>=); a hair
+    above -> FAIL. The computed set: due=0.6, owner=0.8."""
     _seed_six_items_db(db)
     golden = _tasks_golden_jsonl(tmp_path, _six_items())
 
@@ -172,19 +172,19 @@ def test_tasks_eval_empty_labeled_exits_2(tmp_path, db):
 
 
 # ============================================================
-# Знахідка 9 / D7: неcтверджена правда не рахується за влучання
+# Finding 9 / D7: unasserted truth does not count as a hit
 # ============================================================
 
 def test_unfilled_truth_after_status_flip_is_not_a_hit(db):
-    """Пункт, чий `truth` лишився дефолтним блоком будівника, а `status`
-    просто перемкнули на `labeled` — не зараховується. `None == None` не є
-    влучанням."""
+    """An item whose `truth` stayed the builder default block and whose `status`
+    was simply switched to `labeled` is not counted. `None == None` is not a
+    hit."""
     _seed_six_items_db(db)
     item = {
         "id": "task-flip", "action_item_id": 10, "transcription_id": 100, "task": "задача A",
         "owner_name_raw": "Андрій", "due_raw": "2026-06-05", "meeting_date": "2026-06-01",
         "source": None, "truth": {"owner": None, "due_date": None, "due_precision": None},
-        "status": "labeled",  # перемкнули статус, truth не чіпали
+        "status": "labeled",  # the status was switched, truth was not touched
     }
     conn = open_readonly(db)
     try:
@@ -200,8 +200,8 @@ def test_unfilled_truth_after_status_flip_is_not_a_hit(db):
 
 
 def test_unfilled_truth_file_does_not_pass_gate(tmp_path, db):
-    """Той самий сценарій через CLI: файл, якому лише перемкнули `status`,
-    не проходить `--gate` (і не видає тиху високу точність)."""
+    """The same scenario via the CLI: a file where only `status` was switched
+    does not pass `--gate` (and does not report a quiet high accuracy)."""
     _seed_six_items_db(db)
     items = [{
         "id": f"task-flip-{i}", "action_item_id": aid, "transcription_id": 100, "task": task,
@@ -212,11 +212,11 @@ def test_unfilled_truth_file_does_not_pass_gate(tmp_path, db):
     golden = _tasks_golden_jsonl(tmp_path, items)
 
     rc = tasks_eval.main(["--golden", golden, "--db", db, "--gate"])
-    assert rc == 2  # нема на чому рахувати, не 0 (PASS) і не тиха 100%
+    assert rc == 2  # nothing to count: not 0 (PASS) and not a quiet 100%
 
 
 # ============================================================
-# Знахідка 11 / D7: стейл-пункти (реінджест перестворив action_items)
+# Finding 11 / D7: stale items (re-ingest recreated action_items)
 # ============================================================
 
 def test_stale_row_missing_is_excluded_not_scored(db):
@@ -241,8 +241,8 @@ def test_stale_row_missing_is_excluded_not_scored(db):
 
 
 def test_stale_task_text_changed_is_excluded_not_scored(db):
-    """`action_item_id` існує, але його `task` більше не той, під який
-    писалась правда — реінджест перестворив рядок (знахідка 11)."""
+    """`action_item_id` exists, but its `task` is no longer the one the truth
+    was written for: re-ingest recreated the row (finding 11)."""
     _seed_six_items_db(db)
     item = {
         "id": "task-reingest", "action_item_id": 10, "transcription_id": 100,
@@ -263,9 +263,9 @@ def test_stale_task_text_changed_is_excluded_not_scored(db):
 
 
 def test_stale_snapshot_mismatch_is_excluded_not_scored(db):
-    """`db_snapshot` пункту не збігається з тим, проти якого рахує
-    `tasks_eval` (D7) — виключається, навіть якщо рядок і текст задачі досі
-    збігаються."""
+    """The item `db_snapshot` does not match the one `tasks_eval` counts against
+    (D7): it is excluded even if the row and the task text still
+    match."""
     _seed_six_items_db(db)
     item = {
         "id": "task-old-snap", "action_item_id": 10, "transcription_id": 100, "task": "задача A",
@@ -286,8 +286,8 @@ def test_stale_snapshot_mismatch_is_excluded_not_scored(db):
 
 
 def test_matching_snapshot_is_scored_normally(db):
-    """Той самий знімок (`db_snapshot`, записаний `build_tasks_golden`,
-    збігається з поточним `--db`) — не виключається."""
+    """The same snapshot (`db_snapshot`, recorded by `build_tasks_golden`,
+    matches the current `--db`) is not excluded."""
     _seed_six_items_db(db)
     snap = {"path": os.path.basename(db), "size": os.path.getsize(db)}
     item = {
@@ -308,13 +308,13 @@ def test_matching_snapshot_is_scored_normally(db):
 
 
 # ============================================================
-# Знахідка 17: parse_due(meeting_date=None) не підставляє сьогодні мовчки
+# Finding 17: parse_due(meeting_date=None) does not silently substitute today
 # ============================================================
 
 def test_due_raw_without_anchor_date_is_excluded_from_due_accuracy(db):
-    """`meeting_date=None` з непорожньою `due_raw` — не кличемо `parse_due`
-    (він би мовчки підставив `date.today()`); due не рахується, owner —
-    рахується (незалежний від якоря)."""
+    """`meeting_date=None` with a non-empty `due_raw`: we do not call `parse_due`
+    (it would silently substitute `date.today()`); due is not counted, owner is
+    counted (independent of the anchor)."""
     _seed_six_items_db(db)
     item = {
         "id": "task-no-anchor", "action_item_id": 10, "transcription_id": 100, "task": "задача A",
@@ -337,9 +337,9 @@ def test_due_raw_without_anchor_date_is_excluded_from_due_accuracy(db):
 
 
 def test_due_raw_empty_without_anchor_date_is_still_scored(db):
-    """`due_raw` порожня — `parse_due` повертає `(None, None)` РАНІШЕ, ніж
-    торкається якоря (навіть `None`), тож викликати безпечно; рахується
-    нормально, якщо `truth.due_date` теж `None`."""
+    """`due_raw` is empty: `parse_due` returns `(None, None)` BEFORE it
+    touches the anchor (even `None`), so calling it is safe; it is counted
+    normally if `truth.due_date` is `None` too."""
     _seed_six_items_db(db)
     item = {
         "id": "task-empty-due-no-anchor", "action_item_id": 10, "transcription_id": 100, "task": "задача A",
@@ -359,14 +359,14 @@ def test_due_raw_empty_without_anchor_date_is_still_scored(db):
 
 
 # ============================================================
-# Знахідка 25: first-name fallback лінкера (`link_owners`) віддзеркалений
+# Finding 25: the linker first-name fallback (`link_owners`) is mirrored
 # ============================================================
 
 def test_owner_match_mirrors_linker_first_name_fallback(db):
-    """`link_owners` лінкує «Юля Гончар» на однослівну сутність «Юля» (перший
-    токен). Якщо труна `truth.owner` записана повним імʼям («Юля Гончар»),
-    а зʼязана сутність — однослівна «Юля», це має рахуватись влучанням, не
-    промахом (продакшн вважає цю лінку правильною)."""
+    """`link_owners` links «Юля Гончар» to the single-word entity «Юля» (the first
+    token). If `truth.owner` is written as the full name («Юля Гончар»),
+    and the linked entity is the single-word «Юля», this must count as a hit, not
+    a miss (production considers this link correct)."""
     conn_setup = sqlite3.connect(db)
     conn_setup.execute("INSERT INTO transcriptions (id, source_type, meeting_date, created_at) "
                         "VALUES (200, 'file', '2026-06-01', '2026-06-01T10:00:00')")
@@ -393,9 +393,9 @@ def test_owner_match_mirrors_linker_first_name_fallback(db):
 
 
 def test_owner_match_first_name_fallback_direction_only(db):
-    """Фолбек діє лише в напрямку «truth багатослівне → сутність однослівна»
-    — не навпаки і не між двома різними однослівними іменами (без цього
-    перевірка стала б занадто поблажливою)."""
+    """The fallback works only in the direction "truth is multi-word -> entity is single-word"
+    - not the other way round and not between two different single-word names (without this
+    the check would become too lenient)."""
     conn_setup = sqlite3.connect(db)
     conn_setup.execute("INSERT INTO transcriptions (id, source_type, meeting_date, created_at) "
                         "VALUES (200, 'file', '2026-06-01', '2026-06-01T10:00:00')")
@@ -417,13 +417,13 @@ def test_owner_match_first_name_fallback_direction_only(db):
     finally:
         conn.close()
 
-    # truth однослівне ("петро"), сутність багатослівна ("петро іванов") —
-    # НЕ той напрямок фолбеку лінкера, промах лишається промахом.
+    # truth is single-word ("петро"), the entity is multi-word ("петро іванов"):
+    # NOT the linker fallback direction, a miss stays a miss.
     assert result["owner_accuracy"] == 0.0
 
 
 # ============================================================
-# Знахідка 3 / D3: нечитний JSONL -> exit 2 у ОБОХ CLI, не exit 1/трейсбек
+# Finding 3 / D3: an unreadable JSONL -> exit 2 in BOTH CLIs, not exit 1/traceback
 # ============================================================
 
 def test_tasks_eval_malformed_jsonl_exits_2_not_1(tmp_path, db):
@@ -446,22 +446,22 @@ def test_build_tasks_golden_malformed_out_with_merge_exits_2(tmp_path, db):
 
 
 # ============================================================
-# Знахідка 16: дублі id не згортаються мовчки
+# Finding 16: duplicate ids are not silently collapsed
 # ============================================================
 
 def test_tasks_eval_duplicate_ids_exit_2(tmp_path, db):
     _seed_six_items_db(db)
     items = _six_items()[:2]
-    items[1]["id"] = items[0]["id"]  # штучний дубль
+    items[1]["id"] = items[0]["id"]  # artificial duplicate
     golden = _tasks_golden_jsonl(tmp_path, items)
     rc = tasks_eval.main(["--golden", golden, "--db", db])
     assert rc == 2
 
 
 def test_next_index_skips_gap_after_manual_deletion():
-    """Ручне видалення `task-0002` з файлу не змушує наступний `--merge`
-    видати `task-0003` повторно — `len(existing)+1` (стара логіка) саме так
-    і зробив би (знахідка 16)."""
+    """Manually deleting `task-0002` from the file does not make the next `--merge`
+    issue `task-0003` again; `len(existing)+1` (the old logic) would do exactly that
+    (finding 16)."""
     existing = [{"id": "task-0001"}, {"id": "task-0003"}]
     assert build_tasks_golden._next_index(existing) == 4
 
@@ -471,7 +471,7 @@ def test_next_index_empty_existing_starts_at_one():
 
 
 # ============================================================
-# build_tasks_golden --merge — без дублів id/action_item_id, з провенансом
+# build_tasks_golden --merge: without duplicate id/action_item_id, with provenance
 # ============================================================
 
 def test_build_tasks_golden_merge_twice_yields_no_duplicate_ids(tmp_path, db):
@@ -490,7 +490,7 @@ def test_build_tasks_golden_merge_twice_yields_no_duplicate_ids(tmp_path, db):
     assert len(ids2) == len(set(ids2))
     ids_field2 = [it["id"] for it in items2]
     assert len(ids_field2) == len(set(ids_field2))
-    assert len(items2) == len(items1)  # той самий детермінований набір, нового нема
+    assert len(items2) == len(items1)  # the same deterministic set, nothing new
 
 
 def test_build_tasks_golden_writes_db_snapshot_provenance(tmp_path, db):
@@ -505,7 +505,7 @@ def test_build_tasks_golden_writes_db_snapshot_provenance(tmp_path, db):
 
 
 # ============================================================
-# D14: source='comment' виключено з вибірки постійно
+# D14: source='comment' is permanently excluded from the sample
 # ============================================================
 
 def test_sample_action_items_excludes_comment_source(db):

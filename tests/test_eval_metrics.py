@@ -1,9 +1,9 @@
-"""Юніт-тести детермінованої математики evals/metrics.py (REMEDIATION_PLAN
-Волна 3, T6.1) — синтетичні дані, БЕЗ реального Claude API чи GPU/embeddings.
+"""Unit tests of the deterministic math in evals/metrics.py (REMEDIATION_PLAN
+Wave 3, T6.1): synthetic data, WITHOUT a real Claude API or GPU/embeddings.
 
-Перевіряє тільки recall@k / citation-rate обчислення над готовими списками
-чанків і рядками-відповідями — не саму retrieval/RAG-логіку (та вже покрита
-tests/test_retrieval.py) і не мережеві виклики (evals/run_eval.py).
+Checks only the recall@k / citation-rate computation over ready-made lists
+of chunks and answer strings; not the retrieval/RAG logic itself (already covered by
+tests/test_retrieval.py) nor network calls (evals/run_eval.py).
 """
 from evals import metrics
 
@@ -47,7 +47,7 @@ def test_recall_at_k_none_when_no_expected():
 
 
 def test_recall_at_k_duplicate_expected_not_double_counted():
-    # {1,1,2} як set -> {1,2}; retrieved має обидва -> recall=1.0, не 1.5
+    # {1,1,2} as a set -> {1,2}; retrieved has both -> recall=1.0, not 1.5
     assert metrics.recall_at_k([1, 1, 2], [1, 2]) == 1.0
 
 
@@ -71,7 +71,7 @@ def test_source_name_hit_none_when_no_criteria():
 
 
 def test_source_name_hit_handles_missing_source_name():
-    chunks = [{"transcription_id": 1}]  # без source_name
+    chunks = [{"transcription_id": 1}]  # without source_name
     assert metrics.source_name_hit(["x"], chunks) is False
 
 
@@ -98,7 +98,7 @@ def test_citations_in_range_true_when_all_within_found():
 
 
 def test_citations_in_range_false_when_out_of_bounds():
-    # Модель зацитувала [5], а фрагментів надано лише 3 -> "галюцинована" цитата.
+    # The model cited [5], but only 3 fragments were provided -> a "hallucinated" citation.
     assert metrics.citations_in_range("Дивись [5].", found=3) is False
 
 
@@ -170,8 +170,8 @@ def test_aggregate_basic_means():
 
 
 def test_aggregate_skips_none_values_not_zero():
-    # Один запис без recall-критерію (None) НЕ повинен тягнути середнє до 0 —
-    # він просто виключається зі знаменника.
+    # One record without a recall criterion (None) must NOT pull the mean to 0:
+    # it is simply excluded from the denominator.
     results = [
         {"recall_at_k": 1.0, "source_name_hit": None, "has_citation": None, "citations_valid": None},
         {"recall_at_k": None, "source_name_hit": None, "has_citation": None, "citations_valid": None},

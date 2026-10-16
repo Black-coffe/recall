@@ -1,18 +1,18 @@
 """SQLite FTS5 helpers (Phase 4.2).
 
-Чисті функції без залежностей від Flask/БД.
+Pure functions with no dependency on Flask/DB.
 """
 import re
 
 
 def sanitize_fts_query(query: str) -> str:
-    """Перетворює вільний текст у безпечний FTS5 MATCH-вираз.
+    """Turns free text into a safe FTS5 MATCH expression.
 
-    Кожне слово огортаємо у лапки (FTS5 phrase syntax) — це:
-    - екранує всі спецсимволи FTS5 (* " : тощо);
-    - перетворює запит на AND по словах (звична поведінка для пошуку).
+    Each word is wrapped in quotes (FTS5 phrase syntax) — this:
+    - escapes all FTS5 special characters (* " : etc.);
+    - turns the query into an AND over the words (the usual search behaviour).
 
-    Повертає '' якщо немає валідних слів — caller повинен пропустити FTS-пошук.
+    Returns '' if there are no valid words — the caller must skip the FTS search.
     """
     if not query:
         return ''

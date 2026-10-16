@@ -1,24 +1,24 @@
-"""Phase 12.26 (Big Bet): live transcribe під час recording.
+"""Phase 12.26 (Big Bet): live transcribe during recording.
 
-Background thread що періодично читає PCM tail з активної recording-сесії,
-транскрибує через faster-whisper (small model для скорості) і публікує
-сегменти через SSE-broker.
+A background thread that periodically reads the PCM tail of an active recording session,
+transcribes it through faster-whisper (the small model for speed) and publishes
+the segments through the SSE broker.
 
-Архітектура:
-- Один worker per active session (запускається з RecordingService.start).
+Architecture:
+- One worker per active session (started from RecordingService.start).
 - Internal loop: every INTERVAL seconds → diff PCM bytes since last pass →
-  wrap raw PCM як WAV у RAM → WhisperManager.transcribe → emit 'live_segment'.
+  wrap raw PCM as WAV in RAM → WhisperManager.transcribe → emit 'live_segment'.
 - Stop trigger: worker.stop_event set on RecordingService.stop.
-- Memory: накопичується preview-segments у self.segments — post-recording
-  можна підглянути через get_preview(sid), але повний транскрипт робиться
-  через звичайний transcribe pipeline (точна та з diariz).
+- Memory: preview segments accumulate in self.segments — after the recording
+  they can be peeked at via get_preview(sid), but the full transcript is made
+  through the regular transcribe pipeline (accurate and with diarization).
 
 Limitations (intentional MVP):
-- Без diariz — швидко (small model, без pyannote).
-- Mic-only stream (system audio ignore'ится для simplicity).
-- Boundary words можуть "змиватись" — не використовуємо overlap window.
-- Не зберігається у DB. Після stop UI повинен викликати звичайний
-  transcribe для повного транскрипту з diariz.
+- No diarization — fast (small model, no pyannote).
+- Mic-only stream (system audio is ignored for simplicity).
+- Boundary words may get "smeared" — we do not use an overlap window.
+- Not stored in the DB. After stop the UI must call the regular
+  transcribe for the full transcript with diarization.
 """
 from __future__ import annotations
 
@@ -35,30 +35,30 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
-# Period між transcribe passes. Більше — менше CPU, гірше latency.
-# 8s — sweet spot: на 'small' model це ~1s обробки → user бачить нові слова
-# через 8-9s.
+# Period between transcribe passes. Longer — less CPU, worse latency.
+# 8s — the sweet spot: on the 'small' model this is ~1s of processing → the user sees new words
+# after 8-9s.
 DEFAULT_INTERVAL = 8.0
 
-# Min PCM diff щоб transcribe — pad-проти transcribe пустоти на старті.
+# Min PCM diff to transcribe — a guard against transcribing emptiness at the start.
 MIN_BYTES_FOR_PASS = 16000 * 2 * 2  # ~2s @ 16kHz mono int16
 
 
 @dataclass
 class _StreamState:
-    """Phase 12.27: один worker thread per (session, stream).
+    """Phase 12.27: one worker thread per (session, stream).
 
-    `speaker_label` додається до кожного emit-нутого segment'а:
-    - 'self'  для mic stream (= seeded "Ви")
-    - 'other' для system loopback (інший speaker або система)
-    Frontend resolves це через SpeakersUI.resolve(speaker_label).
+    `speaker_label` is added to every emitted segment:
+    - 'self'  for the mic stream (= seeded "Ви")
+    - 'other' for system loopback (another speaker or the system)
+    Frontend resolves this through SpeakersUI.resolve(speaker_label).
 
-    `language` — ISO-код мови для Whisper decoder; ``None`` = auto-detect
-    (per-chunk). Передається з UI через /api/recording/start.
+    `language` — the ISO code of the language for the Whisper decoder; ``None`` = auto-detect
+    (per chunk). Passed from the UI through /api/recording/start.
     """
     session_id: str
-    stream_name: str  # 'mic' або 'system'
-    speaker_label: str  # 'self' або 'other'
+    stream_name: str  # 'mic' or 'system'
+    speaker_label: str  # 'self' or 'other'
     pcm_path: str
     sample_rate: int
     channels: int
@@ -71,17 +71,17 @@ class _StreamState:
 
 
 class LiveTranscribeWorker:
-    """Сервіс що крутить worker'ів. Один на активну сесію.
+    """A service that runs workers. One per active session.
 
     Args:
-        whisper_manager: instance of :class:`WhisperManager` (з faster-whisper backend).
-        broker: SSEBroker для publish 'live_segment' events.
-        model_name: модель Whisper для live (default 'small' — баланс
-            швидкість/якість).
-        interval: seconds між transcribe passes.
-        db_path: БД графа для словника імен (K1); ``None`` → бойова
-            ``Config.BASE_DIR / Config.DATABASE``, читається лише з увімкненим
-            ``RECALL_VOCAB_MODE``.
+        whisper_manager: an instance of :class:`WhisperManager` (with the faster-whisper backend).
+        broker: SSEBroker for publishing 'live_segment' events.
+        model_name: the Whisper model for live (default 'small' — a balance of
+            speed/quality).
+        interval: seconds between transcribe passes.
+        db_path: the graph DB for the name dictionary (K1); ``None`` → the live
+            ``Config.BASE_DIR / Config.DATABASE``, read only when
+            ``RECALL_VOCAB_MODE`` is enabled.
     """
 
     def __init__(
@@ -97,14 +97,14 @@ class LiveTranscribeWorker:
         self._model_name = model_name
         self._interval = interval
         self._db_path = db_path
-        # Key = "session_id:stream_name" — кожен stream має свій worker thread
+        # Key = "session_id:stream_name" — every stream has its own worker thread
         self._streams: dict[str, _StreamState] = {}
         self._lock = threading.RLock()
-        # Story 06: монотонний лічильник додавання сегментів, спільний для
-        # ВСІХ доріжок сесії (session_id -> останній виданий номер). Кожна
-        # доріжка транскрибується своїм thread'ом у своєму темпі, тому 'start'
-        # не годиться як курсор опитування — system-сегмент з меншим 'start'
-        # може бути доданий ПІЗНІШЕ за вже відданий mic-сегмент.
+        # Story 06: a monotonic segment-append counter shared by
+        # ALL tracks of a session (session_id -> the last issued number). Each
+        # track is transcribed by its own thread at its own pace, so 'start'
+        # does not work as a polling cursor — a system segment with a smaller 'start'
+        # may be added LATER than an already returned mic segment.
         self._next_seq: dict[str, int] = {}
 
     @staticmethod
@@ -112,7 +112,7 @@ class LiveTranscribeWorker:
         return f"{session_id}:{stream_name}"
 
     def _decode_options(self) -> dict:
-        """Опції декодування живого шляху (K1). Прапори вимкнені → ``{}`` без БД."""
+        """Decoding options of the live path (K1). Flags off → ``{}`` without the DB."""
         from app.services import vocabulary
         db_path = self._db_path
         if db_path is None and vocabulary.mode() != 'off':
@@ -121,11 +121,11 @@ class LiveTranscribeWorker:
         return vocabulary.decode_options_for('live', db_path)
 
     def _alloc_seq(self, session_id: str) -> int:
-        """Виділити наступний номер додавання (Story 06).
+        """Allocate the next append number (Story 06).
 
-        Серіалізовано через ``self._lock`` — той самий лок, що і stream-стан —
-        тому порядок видачі = порядок фактичного append'у в ``get_preview``,
-        незалежно від того, який stream (mic/system) його отримав.
+        Serialized through ``self._lock`` — the same lock as the stream state —
+        so the issue order = the order of the actual append in ``get_preview``,
+        regardless of which stream (mic/system) received it.
         """
         with self._lock:
             seq = self._next_seq.get(session_id, 0) + 1
@@ -141,13 +141,13 @@ class LiveTranscribeWorker:
         stream_name: str = 'mic',
         language: Optional[str] = None,
     ) -> None:
-        """Запустити live-transcribe для одного stream'а сесії. Idempotent.
+        """Start live-transcribe for one stream of a session. Idempotent.
 
-        Phase 12.27: stream_name визначає speaker_label у emit-нутих
+        Phase 12.27: stream_name determines the speaker_label in the emitted
         segments — 'mic' → 'self', 'system' → 'other'.
 
-        ``language`` — ISO-код для Whisper decoder ('uk', 'ru', 'en', ...).
-        ``None`` або ``'auto'`` → faster-whisper auto-detect per chunk.
+        ``language`` — the ISO code for the Whisper decoder ('uk', 'ru', 'en', ...).
+        ``None`` or ``'auto'`` → faster-whisper auto-detect per chunk.
         """
         speaker_label = 'self' if stream_name == 'mic' else 'other'
         if not language or language == 'auto':
@@ -179,7 +179,7 @@ class LiveTranscribeWorker:
             )
 
     def stop(self, session_id: str, wait: bool = False) -> Optional[list[dict]]:
-        """Зупинити всі stream-worker'и сесії. Повертає aggregated segments."""
+        """Stop all stream workers of a session. Returns aggregated segments."""
         all_segments: list[dict] = []
         threads = []
         with self._lock:
@@ -199,12 +199,12 @@ class LiveTranscribeWorker:
         return all_segments
 
     def get_preview(self, session_id: str, order_by: str = 'start') -> list[dict]:
-        """Snapshot всіх preview-segments сесії (з усіх streams).
+        """A snapshot of all preview segments of a session (from all streams).
 
-        ``order_by='start'`` (default) — хронологічний порядок, як і раніше
-        (використовує UI/copilot). ``order_by='seq'`` — порядок фактичного
-        додавання (Story 06): потрібен інкрементальному курсору, бо 'start'
-        системної доріжки може бути МЕНШИЙ за вже відданий mic-сегмент.
+        ``order_by='start'`` (default) — chronological order, as before
+        (used by the UI/copilot). ``order_by='seq'`` — the order of the actual
+        append (Story 06): needed by the incremental cursor, because the 'start'
+        of the system track may be SMALLER than an already returned mic segment.
         """
         with self._lock:
             segments = []
@@ -242,7 +242,7 @@ class LiveTranscribeWorker:
         try:
             current_size = os.path.getsize(state.pcm_path)
         except FileNotFoundError:
-            return  # PCM ще не створений
+            return  # the PCM is not created yet
         diff = current_size - state.last_byte_offset
         if diff < MIN_BYTES_FOR_PASS:
             return
@@ -254,8 +254,8 @@ class LiveTranscribeWorker:
         if not pcm_bytes:
             return
 
-        # Wrap raw int16 PCM як WAV у тимчасовий файл. ModernWhisperManager
-        # потребує файлу на диску (читає duration через ffprobe), не буфер.
+        # Wrap raw int16 PCM as WAV in a temporary file. ModernWhisperManager
+        # needs a file on disk (it reads the duration through ffprobe), not a buffer.
         import tempfile
         wav_buf = self._wrap_pcm_as_wav(pcm_bytes, state.sample_rate, state.channels)
         if wav_buf is None:
@@ -264,8 +264,8 @@ class LiveTranscribeWorker:
             tf.write(wav_buf.getvalue())
             tmp_path = tf.name
         try:
-            # state.language=None → 'auto'; whisper_manager мапить 'auto'/falsy
-            # у faster-whisper auto-detect (whisper_manager_new.py:83,145,200).
+            # state.language=None → 'auto'; whisper_manager maps 'auto'/falsy
+            # to faster-whisper auto-detect (whisper_manager_new.py:83,145,200).
             result = self._wm.transcribe_with_progress(
                 audio_path=tmp_path,
                 model_name=self._model_name,
@@ -282,13 +282,13 @@ class LiveTranscribeWorker:
             logger.warning("[live] transcribe error: %s", result['error'])
             return
 
-        # Зсунути offset на наступний pass
+        # Shift the offset to the next pass
         bytes_consumed = diff
         # Time offset: total bytes / (rate * channels * 2 bytes/sample)
         time_offset = state.last_byte_offset / (state.sample_rate * state.channels * 2)
         state.last_byte_offset = current_size
 
-        # Append + emit segments з speaker_label
+        # Append + emit segments with speaker_label
         new_segments = []
         for seg in (result.get('segments') or []):
             absolute_start = time_offset + float(seg.get('start', 0))
@@ -321,11 +321,11 @@ class LiveTranscribeWorker:
 
     @staticmethod
     def _wrap_pcm_as_wav(pcm_bytes: bytes, rate: int, channels: int) -> Optional[io.BytesIO]:
-        """Wrap raw int16 little-endian PCM як WAV у in-memory BytesIO."""
+        """Wrap raw int16 little-endian PCM as WAV in an in-memory BytesIO."""
         if not pcm_bytes:
             return None
-        # Sample width = 2 (int16). Чек на парність — якщо tail обірвався
-        # посередині sample, відрізаємо.
+        # Sample width = 2 (int16). An evenness check — if the tail was cut off
+        # in the middle of a sample, we trim it.
         if len(pcm_bytes) % 2 == 1:
             pcm_bytes = pcm_bytes[:-1]
         if channels > 1 and len(pcm_bytes) % (channels * 2) != 0:

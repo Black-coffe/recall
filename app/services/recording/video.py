@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from app.utils.proc import NO_WINDOW
-except ImportError:  # demo-CLI знизу запускають файлом, а не через `-m`
+except ImportError:  # the demo CLI below is run as a file, not via `-m`
     NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ _FFMPEG_PROGRESS_RE = re.compile(
     r"frame=\s*(\d+).*?fps=\s*([\d.]+)",
     re.IGNORECASE,
 )
-# drop= відсутній у прогрес-рядку деяких ffmpeg-білдів (зокрема нашого gyan.dev)
-# — парсимо окремо, дефолт 0, інакше весь рядок не матчиться і fps лишається '?'.
+# drop= is absent from the progress line of some ffmpeg builds (including our gyan.dev one)
+# — parsed separately, default 0, otherwise the whole line does not match and fps stays '?'.
 _FFMPEG_DROP_RE = re.compile(r"drop=\s*(\d+)", re.IGNORECASE)
 
 

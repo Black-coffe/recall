@@ -1,29 +1,29 @@
-"""T5.1 + T5.2 (REMEDIATION_PLAN Волна 3): тести на app/blueprints/settings_api.py.
+"""T5.1 + T5.2 (REMEDIATION_PLAN Wave 3): tests for app/blueprints/settings_api.py.
 
-Перевіряє критерії приймання:
-  - Збереження ключа пише ТІЛЬКИ ANTHROPIC_API_KEY у .env (жоден інший
-    рядок/довільна env-змінна НЕ дописується — це не generic
-    "запиши будь-яку env-змінну" ендпоінт).
-  - Статус-ендпоінт ніколи не повертає сам ключ (лише {"configured": bool}).
-  - Валідація формату відкидає явний мусор (не "sk-ant-...", пробіли,
-    переноси рядків — injection у .env).
-  - Copilot-тумблер пише COPILOT_ENABLED, чесно каже restart_required, коли
-    рантайм (state.copilot_service) розходиться із запитаним станом.
+Checks the acceptance criteria:
+  - Saving the key writes ONLY ANTHROPIC_API_KEY to .env (no other
+    line/arbitrary env variable is appended — this is not a generic
+    "write any env variable" endpoint).
+  - The status endpoint never returns the key itself (only {"configured": bool}).
+  - Format validation rejects obvious garbage (not "sk-ant-...", spaces,
+    line breaks — injection into .env).
+  - The copilot toggle writes COPILOT_ENABLED, honestly says restart_required when
+    the runtime (state.copilot_service) differs from the requested state.
 
-Навмисно НЕ імпортує app.py (важкий Whisper-імпорт, назавжди дописує реальні
-секрети з кореневого .env у os.environ — див. tests/test_auth_gate.py docstring
-для того самого паттерна). Мінімальний Flask-застосунок лише з
-settings_bp + root_path=tmp_path, щоб .env писався у тимчасову директорію,
-а не в реальний .env проєкту.
+Deliberately does NOT import app.py (a heavy Whisper import, permanently appends real
+secrets from the root .env to os.environ — see the tests/test_auth_gate.py docstring
+for the same pattern). A minimal Flask application with only
+settings_bp + root_path=tmp_path, so that .env is written to a temporary directory
+and not to the project's real .env.
 
-Copilot-toggle тести ЯВНО monkeypatch'ать ``app.state.copilot_service``
-(замість покладатись на його дефолт ``None``) — у повному прогоні pytest
-``tests/test_endpoints_smoke.py`` (алфавітно раніше) імпортує справжній
-``app.py``, який МОЖЕ реально підняти ``CopilotService`` в те саме
-``app.state``-синглтон-модуль → без explicit monkeypatch ці тести стають
-залежними від порядку виконання інших файлів.
+The copilot-toggle tests EXPLICITLY monkeypatch ``app.state.copilot_service``
+(instead of relying on its default ``None``) — in a full pytest run
+``tests/test_endpoints_smoke.py`` (alphabetically earlier) imports the real
+``app.py``, which MAY actually bring up ``CopilotService`` in the same
+``app.state`` singleton module → without an explicit monkeypatch these tests become
+dependent on the execution order of other files.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_settings_api.py -v
 """
 from __future__ import annotations
@@ -80,8 +80,8 @@ class TestSaveAnthropicKey:
         assert env_file.exists()
         content = env_file.read_text(encoding="utf-8")
         lines = [l for l in content.splitlines() if l.strip()]
-        # Рівно один рядок, і це саме ANTHROPIC_API_KEY — нічого зайвого
-        # не дописано (перевірка "не generic env-writer").
+        # Exactly one line, and it is precisely ANTHROPIC_API_KEY — nothing extra
+        # appended (the "not a generic env writer" check).
         assert len(lines) == 1
         assert lines[0].startswith("ANTHROPIC_API_KEY=")
         assert VALID_KEY in content
@@ -92,9 +92,9 @@ class TestSaveAnthropicKey:
         assert os.environ.get("ANTHROPIC_API_KEY") == VALID_KEY
 
     def test_save_does_not_let_caller_pick_arbitrary_env_name(self, client, monkeypatch, tmp_path):
-        """Body не має параметра `key`/`name` — ендпоінт жорстко прибитий
-        до ANTHROPIC_API_KEY. Навіть якщо клієнт спробує підсунути інше ім'я
-        поля, воно просто ігнорується (api_key все одно валідний рядок)."""
+        """The body has no `key`/`name` parameter — the endpoint is hard-pinned
+        to ANTHROPIC_API_KEY. Even if a client tries to slip in another field
+        name, it is simply ignored (api_key is still a valid string)."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("SOME_OTHER_SECRET", raising=False)
         r = client.post(
@@ -151,10 +151,10 @@ class TestTestConnection:
 
 class TestCopilotToggle:
     def test_toggle_on_writes_env_and_reports_restart_required_when_off_live(self, client, monkeypatch, tmp_path):
-        # Явно фіксуємо рантайм-стан (замість покладатись на дефолт None —
-        # у повному прогоні pytest інший модуль (test_endpoints_smoke.py) міг
-        # уже імпортувати app.py і реально підняти CopilotService у той самий
-        # app.state-синглтон, роблячи тест залежним від порядку файлів).
+        # Explicitly fix the runtime state (instead of relying on the default None —
+        # in a full pytest run another module (test_endpoints_smoke.py) may
+        # have already imported app.py and actually brought up CopilotService in the same
+        # app.state singleton, making the test dependent on file order).
         from app import state as recall_state
         monkeypatch.setattr(recall_state, "copilot_service", None)
         r = client.post("/api/settings/copilot/toggle", json={"enabled": True})
@@ -177,9 +177,9 @@ class TestCopilotToggle:
         assert data["restart_required"] is False  # off requested, off live — matches
 
     def test_toggle_on_matches_when_service_already_live(self, client, monkeypatch):
-        """Дзеркальний випадок: рантайм УЖЕ підняв copilot_service (напр. після
-        попереднього рестарту з COPILOT_ENABLED=1) — запит enabled=True не
-        вимагає рестарту, бо вже узгоджено з фактичним станом."""
+        """The mirror case: the runtime ALREADY brought up copilot_service (e.g. after
+        a previous restart with COPILOT_ENABLED=1) — a request enabled=True does not
+        require a restart, because it is already consistent with the actual state."""
         from app import state as recall_state
         monkeypatch.setattr(recall_state, "copilot_service", object())
         r = client.post("/api/settings/copilot/toggle", json={"enabled": True})

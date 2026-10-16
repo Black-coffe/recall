@@ -1,18 +1,18 @@
-"""Фільтр приватного перед ботом труб (K4, story 02).
+"""Private-data filter before the pipes bot (K4, story 02).
 
-Бот — канал, яким зміст архіву йде третій стороні (Bot API не наскрізно
-шифрований), тому труба проходить два кроки, обидва без моделі:
+The bot is a channel through which archive content goes to a third party (the Bot API is not end-to-end
+encrypted), so a pipe goes through two steps, both without a model:
 
-1. ``filter_data`` — ДО рендеру (і Claude, і простого списку): пункти з
-   приватних напрямків (``RECALL_PRIVATE_CATEGORIES`` з нащадками) і пункти зі
-   стоп-словом з ``private.txt`` викидаються. Стоп-лист НЕ свій — спільне ядро
-   ``app/services/privacy.py`` (той самий, що для MCP).
-2. ``scrub_text`` — ПІСЛЯ рендеру: IBAN, картки, телефони, email і суми з
-   валютою → ``•••``; стоп-слова перевіряються вдруге — що пережило, те
-   блокує відправку.
+1. ``filter_data`` — BEFORE render (both Claude and the plain list): items from
+   private directions (``RECALL_PRIVATE_CATEGORIES`` with descendants) and items with a
+   stop word from ``private.txt`` are dropped. The stop list is NOT its own — the shared core
+   ``app/services/privacy.py`` (the same one as for MCP).
+2. ``scrub_text`` — AFTER render: IBAN, cards, phones, email and amounts with a
+   currency → ``•••``; stop words are checked a second time — whatever survived
+   blocks sending.
 
-Fail closed: напрямок не перевірився (збій БД) → пункт із джерелом прихований.
-Пункт без джерела (теми зі зводу) перевіряється лише стоп-словами.
+Fail closed: a direction was not verified (DB failure) → an item with a source is hidden.
+An item without a source (digest topics) is checked against stop words only.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import logging
 import re
 from typing import Any, Optional
 
+from app.core.i18n import server_lang, tr_n
 from app.db.connection import get_db_connection
 from app.services import privacy
 from app.services.privacy import PrivacyError
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 MASK = "•••"
 
-# Архів змішує українську й російську: валюти й множники в обох мовах.
+# The archive mixes Ukrainian and Russian: currencies and multipliers in both languages.
 _CURRENCY = (r"(?:грн\.?|грив\w*|₴|UAH|USD|EUR|RUB|дол\.?|долар\w*|доллар\w*|бакс\w*|"
              r"євро|евро|руб\.?|рубл\w*|\$|€)")
 _AMOUNT = r"(?:\d{1,3}(?:[  ,]\d{3})+|\d+)(?:[.,]\d+)?"
@@ -36,17 +37,17 @@ _MULT = (r"(?:\s?(?:k|к|тис\.?|тисяч\w*|тыс\.?|тысяч\w*|млн\
          r"млрд\.?|m))?")
 
 _MASKS = (
-    # IBAN: UA + 27 знаків, допускаємо пробіли групами.
+    # IBAN: UA + 27 characters, spaces in groups are allowed.
     re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b"),
     # Email.
     re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
-    # Картка: 16 цифр, групами через пробіл/дефіс або підряд.
+    # Card: 16 digits, in groups separated by space/hyphen or contiguous.
     re.compile(r"(?<!\d)(?:\d{4}[ -]?){3}\d{4}(?!\d)"),
-    # Телефон: міжнародний +… або український 0XX XXX XX XX.
+    # Phone: international +… or Ukrainian 0XX XXX XX XX.
     re.compile(r"\+\d[\d\s()\-]{8,}\d"),
     re.compile(r"(?<![\d-])0\d{2}[ -]?\d{3}[ -]?\d{2}[ -]?\d{2}(?![\d-])"),
     re.compile(r"\(0\d{2}\)\s?\d{3}[ -]?\d{2}[ -]?\d{2}(?!\d)"),
-    # Сума: валюта перед числом ($5k, €300) або після (12 000 грн, 5к USD).
+    # Amount: currency before the number ($5k, €300) or after (12 000 UAH, 5k USD).
     re.compile(rf"[$€₴]\s?{_AMOUNT}{_MULT}", re.IGNORECASE),
     re.compile(rf"(?<![\d\w]){_AMOUNT}{_MULT}\s?{_CURRENCY}(?!\w)", re.IGNORECASE),
 )
@@ -71,7 +72,7 @@ def _source_tid(item: Any, task_tids: dict[int, int]) -> Optional[int]:
 
 
 def _task_tids(db_path: str, data: dict) -> dict[int, int]:
-    """id задачі → запис, для пунктів без transcription_id (забуті обіцянки)."""
+    """task id → recording, for items without transcription_id (dropped commitments)."""
     ids = {int(it["id"]) for res in data.values() if isinstance(res, dict)
            for v in res.values() if isinstance(v, list)
            for it in v if isinstance(it, dict) and "task" in it
@@ -83,16 +84,16 @@ def _task_tids(db_path: str, data: dict) -> dict[int, int]:
             q = ",".join("?" * len(ids))
             return {r[0]: r[1] for r in conn.execute(
                 f"SELECT id, transcription_id FROM action_items WHERE id IN ({q})", sorted(ids))}
-    except Exception as e:  # noqa: BLE001 — збій = джерело невідоме, нижче ховаємо
-        logger.warning("pipes_privacy: джерело задач не визначено (%s) — приховую", e)
+    except Exception as e:  # noqa: BLE001 — failure = source unknown, hidden below
+        logger.warning("pipes_privacy: task source not determined (%s) — hiding", e)
         raise PrivacyError(str(e)) from e
 
 
 def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
-    """→ (дані без приватних пунктів, скільки приховано).
+    """→ (data without private items, how many were hidden).
 
-    ``PrivacyError`` зі ``stop_words`` (нечитабельний private.txt) летить
-    назовні — труба тоді не шле нічого."""
+    ``PrivacyError`` from ``stop_words`` (an unreadable private.txt) propagates
+    out — the pipe then sends nothing."""
     words = privacy.stop_words()
     lists = [it for res in data.values() if isinstance(res, dict)
              for v in res.values() if isinstance(v, list) for it in v]
@@ -130,36 +131,30 @@ def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
         out[tool] = {k: ([it for it in v if keep(it)] if isinstance(v, list) else v)
                      for k, v in res.items()}
     if not category_ok:
-        logger.warning("pipes_privacy: напрямки не перевірено — пункти з джерелом приховано")
+        logger.warning("pipes_privacy: directions not verified — items with a source hidden")
     return out, hidden
 
 
 def mask(text: str) -> str:
-    """IBAN, картки, телефони, email і суми з валютою → ``•••``."""
+    """IBAN, cards, phones, email and amounts with a currency → ``•••``."""
     for rx in _MASKS:
         text = rx.sub(MASK, text)
     return text
 
 
 def leaked_words(text: str, words: Optional[list[str]] = None) -> list[str]:
-    """Стоп-слова, що є в тексті. ``words`` не передано → ``private.txt`` (``PrivacyError`` назовні)."""
+    """Stop words present in the text. ``words`` not passed → ``private.txt`` (``PrivacyError`` propagates out)."""
     low = text.casefold()
     return [w for w in (privacy.stop_words() if words is None else words) if w in low]
 
 
 def scrub_text(text: str) -> tuple[str, list[str]]:
-    """→ (текст із масками, стоп-слова, що пережили рендер).
+    """→ (text with masks, stop words that survived render).
 
-    Непорожній список = відправку скасувати. ``PrivacyError`` летить назовні."""
+    A non-empty list = cancel sending. ``PrivacyError`` propagates out."""
     text = mask(text)
     return text, leaked_words(text)
 
 
 def hidden_line(n: int) -> str:
-    if n % 10 == 1 and n % 100 != 11:
-        word = "пункт приховано"
-    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
-        word = "пункти приховано"
-    else:
-        word = "пунктів приховано"
-    return f"🔒 {n} {word}, дивись у Recall"
+    return tr_n("telegram.brief.hidden", n, lang=server_lang())

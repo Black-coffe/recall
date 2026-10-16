@@ -1,10 +1,10 @@
-"""Власна назва й опис запису: міграція v44 + `record_meta` + `PATCH /api/history/<id>`.
+"""Own title and description of a record: migration v44 + `record_meta` + `PATCH /api/history/<id>`.
 
-Спека `editable-title-description`, історія 01 (трасер). Зріз перевіряється
-наскрізь: міграція на тимчасовій БД → сервіс → HTTP через `test_client`
-окремого Flask-застосунку з `transcription_bp`. Бойовий `whisper_history.db`
-не відкривається; фікстури — кириличні, бо саме на кирилиці цей проєкт уже
-ловив баги порівняння (`plan-dictated-sql-ignored-own-memory`).
+Spec `editable-title-description`, story 01 (tracer). The slice is checked
+end to end: migration on a temporary DB -> service -> HTTP through the `test_client`
+of a separate Flask app with `transcription_bp`. The live `whisper_history.db`
+is not opened; fixtures are Cyrillic, because it is on Cyrillic that this project
+has already caught comparison bugs (`plan-dictated-sql-ignored-own-memory`).
 """
 import sqlite3
 
@@ -16,8 +16,8 @@ from app.db.connection import get_db_connection
 from app.db.migrations import init_database
 from app.services import record_meta, reembed
 
-#: справжній планувальник, знятий ДО автоюз-мока — фікстура `real_scheduler`
-#: повертає саме його.
+#: the real scheduler, captured BEFORE the autouse mock; the `real_scheduler` fixture
+#: returns exactly it.
 _REAL_SCHEDULE = reembed.schedule_record_reembed
 
 
@@ -30,12 +30,12 @@ def db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def no_real_reembed(monkeypatch):
-    """Жоден тест цього файлу не ставить справжню задачу в `job_queue`.
+    """No test of this file puts a real task into `job_queue`.
 
-    Під повним набором сусідній `test_endpoints_smoke` привʼязує живий
-    `JobQueue` до `app.state` і не відвʼязує, тож PATCH на тимчасовій БД без
-    цього мока переембеджував би чанки бойових записів із тими самими id.
-    Хто хоче справжній планувальник — бере фікстуру `real_scheduler`.
+    In the full suite the neighbouring `test_endpoints_smoke` binds a live
+    `JobQueue` to `app.state` and does not unbind it, so a PATCH on a temporary DB without
+    this mock would re-embed the chunks of live records with the same ids.
+    Whoever wants the real scheduler takes the `real_scheduler` fixture.
     """
     from app.services import reembed
 
@@ -47,7 +47,7 @@ def no_real_reembed(monkeypatch):
 
 @pytest.fixture
 def real_scheduler(monkeypatch, no_real_reembed):
-    """Повернути справжній `schedule_record_reembed` (для тесту шляху БД)."""
+    """Return the real `schedule_record_reembed` (for the DB path test)."""
     from app.services import reembed
 
     monkeypatch.setattr(reembed, "schedule_record_reembed", _REAL_SCHEDULE)
@@ -95,7 +95,7 @@ def _fts_ids(db, query):
 
 
 # ============================================================
-# Міграція v44
+# Migration v44
 # ============================================================
 
 def test_migration_is_idempotent(db):
@@ -131,12 +131,12 @@ def test_fts_still_finds_old_rows_by_source_name(db):
 
 
 def test_upgrade_of_populated_db_keeps_index(tmp_path):
-    """Апгрейд БД із наявними рядками: rebuild не губить старий індекс."""
+    """Upgrade of a DB with existing rows: the rebuild does not lose the old index."""
     path = str(tmp_path / "old.db")
     init_database(path)
-    # Відкочуємо FTS до стану «до v44» (без title/description) і знімаємо
-    # версію, щоб повторна init_database пройшла шлях апгрейду, а не чистого
-    # створення. Колонки в transcriptions лишаються — їх PRAGMA-гард пропустить.
+    # Roll FTS back to the state "before v44" (without title/description) and drop
+    # the version so that the repeated init_database takes the upgrade path, not a clean
+    # create. The columns in transcriptions stay: the PRAGMA guard skips them.
     conn = sqlite3.connect(path)
     conn.execute("DELETE FROM schema_versions WHERE version >= 44")
     for trig in ("transcriptions_ai", "transcriptions_ad", "transcriptions_au"):
@@ -166,13 +166,13 @@ def test_upgrade_of_populated_db_keeps_index(tmp_path):
     assert _fts_ids(path, "логістику") == [tid]
     assert _row(path, tid)["title"] is None
 
-    # Тригери після перебудови живі: новий запис індексується за назвою.
+    # Triggers are alive after the rebuild: a new record is indexed by its title.
     fresh = _add(path, text="інше", title="Нарада щодо Гуцульщини")
     assert _fts_ids(path, "Гуцульщини") == [fresh]
 
 
 # ============================================================
-# Сервіс record_meta
+# The record_meta service
 # ============================================================
 
 def test_normalize_title_strips():
@@ -245,7 +245,7 @@ def test_update_meta_missing_and_deleted(db):
 
 
 def test_after_meta_update_delegates_to_scheduler(no_real_reembed, db):
-    """`changed=True` → планувальник кличеться з тим самим шляхом БД."""
+    """`changed=True` -> the scheduler is called with the same DB path."""
     assert record_meta.after_meta_update(1, changed=True, db_path=db) is None
     assert no_real_reembed == [(1, {"db_path": db})]
 
@@ -270,7 +270,7 @@ def test_patch_sets_title_and_keeps_source_name(client, db):
 
 
 def test_patch_reembeds_request_db_not_live_one(client, db, real_scheduler, monkeypatch):
-    """Задача в черзі несе шлях БД ЗАПИТУ (знахідка 2 раунду 2)."""
+    """The queued task carries the DB path of the REQUEST (finding 2 of round 2)."""
     from app import state
     from app.services import embeddings
 
@@ -371,11 +371,11 @@ def test_patch_errors_leak_no_paths_or_stack(client, db):
 
 
 # ============================================================
-# Експорт без жодної назви
+# Export without any title
 # ============================================================
 
 def test_export_without_any_name_has_no_none(client):
-    """Payload без `title`/`source_name`/`id` → нейтральний фолбек, не «Запис #None»."""
+    """Payload without `title`/`source_name`/`id` -> a neutral fallback, not "Запис #None"."""
     resp = client.post("/api/export/md", json={"text": "Обговорили кошторис"})
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
@@ -393,7 +393,7 @@ def test_export_still_prefers_title(client):
 
 
 # ============================================================
-# GET-видача
+# GET output
 # ============================================================
 
 def test_history_list_exposes_meta(client, db):
@@ -438,11 +438,11 @@ def test_search_finds_record_by_description_only_word(client, db):
 
 
 # ============================================================
-# Інваріант: чужий UPDATE source_name не чіпає назву
+# Invariant: a foreign UPDATE of source_name does not touch the title
 # ============================================================
 
 def test_source_name_repersist_keeps_title(client, db):
-    """Імітація TG re-persist: UPDATE source_name не змінює title/display_name."""
+    """Simulation of a TG re-persist: UPDATE of source_name does not change title/display_name."""
     tid = _add(db, source_name="Старе превʼю", title="Нарада з Іваном")
     conn = sqlite3.connect(db)
     conn.execute("UPDATE transcriptions SET source_name = ? WHERE id = ?",

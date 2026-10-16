@@ -1,14 +1,14 @@
-"""Юніт-тести YouTube pytubefix backend (app/services/youtube_pytubefix.py) — T7.5.
+"""Unit tests for the YouTube pytubefix backend (app/services/youtube_pytubefix.py) - T7.5.
 
-Офлайн, БЕЗ мережі: pytubefix.YouTube і subprocess (ffmpeg) підмінюються
-фейками (модуль спроєктований з DI саме для цього — callbacks
-download_progress_set/add_log/get_db_conn інжектяться параметрами). Покриває:
-  - _classify_error: технічне повідомлення pytubefix → людське повідомлення.
-  - quality → bitrate: наскрізний шлях від параметра quality до реального
-    аргументу '-ab' в команді ffmpeg (мок-стрім, мок-subprocess).
-  - Успішний прохід download_youtube_audio (save_to_library True/False).
-  - Помилка на етапі YouTube(...) → error-статус з класифікованим текстом.
-  - Обрізка (trim_params) — trim_audio_file мокнуто.
+Offline, NO network: pytubefix.YouTube and subprocess (ffmpeg) are replaced
+with fakes (the module is designed with DI exactly for this - the callbacks
+download_progress_set/add_log/get_db_conn are injected as parameters). Covers:
+  - _classify_error: technical pytubefix message → human-readable message.
+  - quality → bitrate: end-to-end path from the quality parameter to the real
+    '-ab' argument in the ffmpeg command (mock stream, mock subprocess).
+  - Successful download_youtube_audio run (save_to_library True/False).
+  - Failure at the YouTube(...) stage → error status with the classified text.
+  - Trim (trim_params) - trim_audio_file is mocked.
 """
 from __future__ import annotations
 
@@ -42,13 +42,13 @@ def test_classify_error(raw, expected):
 
 
 def test_classify_error_priority_sign_in_before_unavailable():
-    # повідомлення, що містить і "sign in" і "unavailable" — sign-in перевіряється першим
+    # a message containing both "sign in" and "unavailable" - sign-in is checked first
     msg = "Sign in to confirm — video may be unavailable otherwise"
     assert yp._classify_error(msg) == "YouTube вимагає авторизації"
 
 
 # ============================================================
-# Fakes для pytubefix / ffmpeg / DB
+# Fakes for pytubefix / ffmpeg / DB
 # ============================================================
 
 class FakeStream:
@@ -56,8 +56,8 @@ class FakeStream:
         self.mime_type = mime_type
         self.abr = abr
         self.filesize = filesize
-        # SABR-потоки качаються лише через ServerAbrStream і потребують сесійного
-        # PO-token — код їх свідомо оминає, тож фейк мусить нести цей прапор.
+        # SABR streams can only be downloaded through ServerAbrStream and need a session
+        # PO-token - the code deliberately skips them, so the fake must carry this flag.
         self.is_sabr = is_sabr
         self.downloaded = False
 
@@ -90,14 +90,14 @@ class FakeStreamsQuery:
 
 
 class FakeYouTube:
-    """Замінює pytubefix.YouTube — жодного мережевого виклику."""
+    """Replaces pytubefix.YouTube - no network calls at all."""
     last_kwargs = None
 
     def __init__(self, url, client=None, on_progress_callback=None,
                  on_complete_callback=None, **kwargs):
-        # ``client`` і ``**kwargs`` обовʼязкові: open_youtube перебирає клієнтів
-        # pytubefix, і фейк без цього параметра «падає» на кожному з них, а виклик
-        # виглядає як мережева помилка, а не як дрейф сигнатури фейка.
+        # ``client`` and ``**kwargs`` are mandatory: open_youtube iterates over the pytubefix
+        # clients, and a fake without this parameter "fails" on each of them, and the call
+        # looks like a network error rather than a drift of the fake's signature.
         FakeYouTube.last_kwargs = dict(url=url, client=client)
         self.title = "Test Video"
         self.author = "Test Author"
@@ -119,14 +119,14 @@ class FakeYouTubeRaises:
 
 
 def _fake_ffmpeg_run_factory(captured_cmds, captured_kwargs=None):
-    """subprocess.run замінник: НЕ запускає реальний ffmpeg — просто «конвертує»,
-    записуючи фейковий вміст у вихідний mp3-шлях (останній аргумент команди), і
-    записує саму команду для подальшої перевірки '-ab' бітрейту.
+    """subprocess.run substitute: does NOT run the real ffmpeg - it just "converts",
+    writing fake content to the output mp3 path (the last command argument), and
+    records the command itself for the later '-ab' bitrate check.
 
-    ``**kwargs`` тут обовʼязковий: без нього нові іменовані параметри виклику
-    (creationflags) дали б TypeError, який ковтає try/except у конвертації —
-    падало б далеко від причини. Тому kwargs не просто ковтаємо, а віддаємо
-    назад для перевірки."""
+    ``**kwargs`` is mandatory here: without it, new keyword arguments of the call
+    (creationflags) would raise a TypeError that the try/except in the conversion swallows -
+    it would fail far from the cause. So kwargs are not just swallowed but handed
+    back for checking."""
     def _fake_run(cmd, capture_output=True, text=True, encoding=None, errors=None,
                   timeout=None, **kwargs):
         captured_cmds.append(cmd)
@@ -158,16 +158,16 @@ def callbacks():
 
 
 def _noop_get_db_conn():
-    raise AssertionError("get_db_conn НЕ мав викликатись при save_to_library=False")
+    raise AssertionError("get_db_conn must NOT be called with save_to_library=False")
 
 
 # ============================================================
-# quality → bitrate (наскрізний шлях, мок-стрім + мок-ffmpeg)
+# quality → bitrate (end-to-end path, mock stream + mock ffmpeg)
 # ============================================================
 
 @pytest.mark.parametrize("quality,expected_bitrate", [
     ("best", "320"), ("high", "256"), ("medium", "192"), ("low", "128"),
-    ("unknown-quality", "192"),  # немає в _QUALITY_BITRATE → дефолт '192'
+    ("unknown-quality", "192"),  # not in _QUALITY_BITRATE → default '192'
 ])
 def test_download_quality_maps_to_ffmpeg_bitrate(monkeypatch, tmp_path: Path, callbacks, quality, expected_bitrate):
     progress_updates, logs, dl_set, add_log = callbacks
@@ -190,9 +190,9 @@ def test_download_quality_maps_to_ffmpeg_bitrate(monkeypatch, tmp_path: Path, ca
     ab_index = cmd.index("-ab")
     assert cmd[ab_index + 1] == f"{expected_bitrate}k"
 
-    # На Windows ffmpeg мусить стартувати без власного консольного вікна: під
-    # pythonw.exe (бойовий запуск app.py) дитина без прапорця блимає чорним
-    # вікном. Прапорець губиться мовчки — тому пінимо його тестом.
+    # On Windows ffmpeg must start without its own console window: under
+    # pythonw.exe (the production app.py launch) a child without the flag flashes a black
+    # window. The flag gets lost silently - so we pin it with a test.
     assert captured_kwargs[0].get("creationflags") == NO_WINDOW
 
     final = progress_updates[-1]
@@ -202,7 +202,7 @@ def test_download_quality_maps_to_ffmpeg_bitrate(monkeypatch, tmp_path: Path, ca
 
 
 # ============================================================
-# Успішний прохід — без бібліотеки
+# Successful run - without the library
 # ============================================================
 
 def test_download_success_without_library_reports_completed(monkeypatch, tmp_path: Path, callbacks):
@@ -222,14 +222,14 @@ def test_download_success_without_library_reports_completed(monkeypatch, tmp_pat
     assert final["status"] == "completed"
     assert final["info"]["title"] == "Test Video"
     assert final["info"]["video_id"] == "abc123XYZ"
-    assert "database_id" not in final  # без save_to_library — БД не чіпаємо
+    assert "database_id" not in final  # without save_to_library - the DB is not touched
     complete_logs = [l for l in logs if l["stage"] == "complete"]
     assert complete_logs and complete_logs[-1]["status"] == "completed"
 
 
 def test_download_stream_selection_picks_highest_abr_audio_only(monkeypatch, tmp_path: Path, callbacks):
-    """audio_stream = streams.filter(only_audio=True).order_by('abr').desc().first() —
-    перевіряємо, що саме ЦЕЙ ланцюжок викликається (а не якийсь інший добір)."""
+    """audio_stream = streams.filter(only_audio=True).order_by('abr').desc().first() -
+    check that exactly THIS chain is called (and not some other selection)."""
     progress_updates, logs, dl_set, add_log = callbacks
     calls = {"filter": 0, "order_by": None, "desc": 0}
 
@@ -264,7 +264,7 @@ def test_download_stream_selection_picks_highest_abr_audio_only(monkeypatch, tmp
 
 
 # ============================================================
-# Помилка на етапі YouTube(...)
+# Failure at the YouTube(...) stage
 # ============================================================
 
 @pytest.mark.parametrize("raw_error,expected_user_msg", [
@@ -285,7 +285,7 @@ def test_download_error_reports_classified_message(monkeypatch, tmp_path: Path, 
 
 
 # ============================================================
-# save_to_library=True — реальна тимчасова SQLite БД
+# save_to_library=True - a real temporary SQLite DB
 # ============================================================
 
 @pytest.fixture()
@@ -327,8 +327,8 @@ def test_download_saves_new_row_to_library(monkeypatch, tmp_path: Path, callback
 
 
 def test_download_revives_soft_deleted_row_instead_of_duplicate_insert(monkeypatch, tmp_path: Path, callbacks, db_path):
-    """T4.6: youtube_id УНІКАЛЬНИЙ — повторне завантаження раніше soft-deleted
-    відео має «оживити» той самий рядок, а не впасти на UNIQUE constraint."""
+    """T4.6: youtube_id is UNIQUE - re-downloading a previously soft-deleted
+    video must "revive" the same row, not fail on the UNIQUE constraint."""
     progress_updates, logs, dl_set, add_log = callbacks
     with get_db_connection(db_path) as conn:
         conn.execute(
@@ -356,18 +356,18 @@ def test_download_revives_soft_deleted_row_instead_of_duplicate_insert(monkeypat
     )
 
     final = progress_updates[-1]
-    assert final["database_id"] == old_id  # той самий рядок, не новий INSERT
+    assert final["database_id"] == old_id  # the same row, not a new INSERT
 
     with get_db_connection(db_path) as conn:
         rows = conn.execute("SELECT COUNT(*) AS n FROM audio_downloads WHERE youtube_id='abc123XYZ'").fetchone()
-        assert rows["n"] == 1  # не задубльовано
+        assert rows["n"] == 1  # not duplicated
         row = conn.execute("SELECT title, deleted_at FROM audio_downloads WHERE id=?", (old_id,)).fetchone()
-        assert row["title"] == "Test Video"  # оновлено свіжими даними
-        assert row["deleted_at"] is None  # «оживлено»
+        assert row["title"] == "Test Video"  # updated with fresh data
+        assert row["deleted_at"] is None  # "revived"
 
 
 # ============================================================
-# Обрізка (trim_params)
+# Trim (trim_params)
 # ============================================================
 
 def test_download_with_trim_uses_trimmed_file_and_removes_original(monkeypatch, tmp_path: Path, callbacks):
@@ -415,20 +415,20 @@ def test_download_trim_failure_falls_back_to_full_file(monkeypatch, tmp_path: Pa
 
     final = progress_updates[-1]
     assert final["status"] == "completed"
-    assert not final["file_path"].endswith("_trimmed.mp3")  # fallback на повний файл
+    assert not final["file_path"].endswith("_trimmed.mp3")  # fallback to the full file
     trim_warns = [l for l in logs if l["stage"] == "trim" and l["status"] == "warning"]
     assert trim_warns
 
 
-# --- open_youtube: перебір клієнтів -----------------------------------------
+# --- open_youtube: client iteration -----------------------------------------
 #
-# YouTube віддає videoDetails частини роликів лише клієнтам із PO-token
-# (WEB-сімейство), а дефолтному ANDROID_VR кидає BotDetection. Перебір існує
-# саме заради цього — тести стежать, щоб він не виродився в один клієнт.
+# YouTube serves videoDetails of some videos only to clients with a PO-token
+# (the WEB family), and raises BotDetection for the default ANDROID_VR. The iteration exists
+# exactly for this - the tests make sure it does not degenerate into a single client.
 
 
 class _ClientAwareFakeYouTube:
-    """Фейк, що «відкривається» лише для дозволених клієнтів."""
+    """A fake that "opens" only for the allowed clients."""
 
     def __init__(self, ok_clients):
         self.ok_clients = set(ok_clients)
@@ -449,7 +449,7 @@ def test_open_youtube_falls_back_to_next_client(monkeypatch):
     yt = yp.open_youtube("https://youtube.com/watch?v=abc123XYZ")
 
     assert yt.title == "Test Video"
-    assert fake.tried[0] == yp.YOUTUBE_CLIENTS[0]  # дефолтний пробуємо першим
+    assert fake.tried[0] == yp.YOUTUBE_CLIENTS[0]  # the default is tried first
     assert fake.tried[-1] == "WEB"
 
 
@@ -460,7 +460,7 @@ def test_open_youtube_raises_last_error_when_no_client_works(monkeypatch):
     with pytest.raises(RuntimeError):
         yp.open_youtube("https://youtube.com/watch?v=abc123XYZ")
 
-    assert fake.tried == list(yp.YOUTUBE_CLIENTS)  # перебрані всі, жоден не мовчки
+    assert fake.tried == list(yp.YOUTUBE_CLIENTS)  # all were tried, none silently
 
 
 def test_classify_error_names_bot_detection():
@@ -470,7 +470,7 @@ def test_classify_error_names_bot_detection():
 
 
 def test_download_skips_sabr_stream_in_favour_of_plain_url(monkeypatch, tmp_path: Path, callbacks):
-    """SABR-потік не качається без сесійного PO-token — беремо звичайний, хай і гірший."""
+    """A SABR stream cannot be downloaded without a session PO-token - take an ordinary one, even a worse one."""
     progress_updates, logs, dl_set, add_log = callbacks
     sabr = FakeStream(mime_type="audio/webm", abr="160kbps", is_sabr=True)
     plain = FakeStream(mime_type="audio/mp4", abr="128kbps", is_sabr=False)
@@ -496,7 +496,7 @@ def test_download_skips_sabr_stream_in_favour_of_plain_url(monkeypatch, tmp_path
 
 
 def test_download_falls_back_to_ytdlp_when_pytubefix_fails(monkeypatch, tmp_path: Path, callbacks):
-    """YouTube ріже частину відео без PO-token — тоді качає yt-dlp, а не «помилка»."""
+    """YouTube cuts off part of the videos without a PO-token - then yt-dlp downloads, not an "error"."""
     progress_updates, logs, dl_set, add_log = callbacks
 
     class _FailingStream(FakeStream):
@@ -536,7 +536,7 @@ def test_download_falls_back_to_ytdlp_when_pytubefix_fails(monkeypatch, tmp_path
 
 
 def test_download_reports_error_when_ytdlp_also_fails(monkeypatch, tmp_path: Path, callbacks):
-    """Фолбек не має ховати провал: якщо впали обидва — це помилка, а не тиша."""
+    """The fallback must not hide a failure: if both failed - it is an error, not silence."""
     progress_updates, logs, dl_set, add_log = callbacks
 
     class _FailingStream(FakeStream):
@@ -549,7 +549,7 @@ def test_download_reports_error_when_ytdlp_also_fails(monkeypatch, tmp_path: Pat
             self.streams = FakeStreamsQuery(_FailingStream())
 
     def boom(*a, **k):
-        raise RuntimeError("yt-dlp завершився без файлу")
+        raise RuntimeError("yt-dlp finished without a file")
 
     monkeypatch.setattr("pytubefix.YouTube", _FailingYouTube)
     monkeypatch.setattr(yp, "download_audio_via_ytdlp", boom)
@@ -563,3 +563,11 @@ def test_download_reports_error_when_ytdlp_also_fails(monkeypatch, tmp_path: Pat
     )
 
     assert progress_updates[-1]["status"] == "error"
+
+
+def test_classify_error_bot_detection_in_english(monkeypatch):
+    """The bot-detection text is served from the svc_media catalog and follows the UI language."""
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    msg = "This request was detected as a bot. DO NOT OPEN AN ISSUE!"
+    assert yp._classify_error(msg) == "YouTube blocked the request as automated (bot detection)"
+    assert yp._classify_error("") == "Video download failed"

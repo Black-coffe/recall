@@ -1,4 +1,4 @@
-"""Phase 12.12: Bookmarks (стар на сегменти) + saved searches.
+"""Phase 12.12: Bookmarks (a star on segments) + saved searches.
 
 Endpoints:
 - GET    /api/transcription/<id>/bookmarks
@@ -8,7 +8,7 @@ Endpoints:
 - GET    /api/saved-searches
 - POST   /api/saved-searches                 {name, query: {search?, source_type?, language?, speaker_id?}}
 - DELETE /api/saved-searches/<id>
-- POST   /api/saved-searches/<id>/use        — інкремент use_count
+- POST   /api/saved-searches/<id>/use        - increments use_count
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def create_bookmark(transcription_id):
                 (transcription_id, seg_idx, seg_start, note),
             )
         except Exception as e:
-            # UNIQUE conflict — bookmark вже є; просто оновлюємо note якщо передано
+            # UNIQUE conflict - the bookmark already exists; just update the note if given
             existing = conn.execute(
                 'SELECT id FROM segment_bookmarks WHERE transcription_id = ? AND segment_index = ?',
                 (transcription_id, seg_idx),
@@ -176,8 +176,8 @@ def delete_saved_search(search_id):
 
 @bookmarks_bp.route('/api/saved-searches/<int:search_id>/use', methods=['POST'])
 def touch_saved_search(search_id):
-    """Інкрементує use_count + оновлює last_used_at. Викликається фронтендом
-    коли користувач клікає на saved search."""
+    """Increments use_count + updates last_used_at. Called by the frontend
+    when the user clicks a saved search."""
     with _get_db() as conn:
         c = conn.cursor()
         c.execute(

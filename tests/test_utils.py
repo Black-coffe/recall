@@ -1,4 +1,4 @@
-"""Тесты для app.utils.* (Phase 5.1 split)."""
+"""Tests for app.utils.* (Phase 5.1 split)."""
 from app.utils.youtube_id import extract_youtube_id
 from app.utils.files import (
     allowed_file,
@@ -104,7 +104,15 @@ class TestFormatSrtTimestamp:
         assert format_srt_timestamp(3725.123) == "01:02:05,123"
 
     def test_uses_comma_decimal(self):
-        """SRT використовує кому, не крапку, для мс."""
+        """SRT uses a comma, not a dot, for ms."""
         result = format_srt_timestamp(1.5)
         assert "," in result
         assert "." not in result
+
+
+# ===== svc_boot catalog (progress lines of app/utils/audio.py) =====
+
+def test_audio_progress_lines_render_in_en_and_uk():
+    from app.core.i18n import tr
+    assert tr("svc_boot.audio.trim.cutting", lang="en", start="1.0", end="2.0") == "Trimming audio: 1.0s - 2.0s"
+    assert tr("svc_boot.audio.trim.cutting", lang="uk", start="1.0", end="2.0") == "Обрізка аудіо: 1.0с - 2.0с"

@@ -1,16 +1,16 @@
-"""Одноразова міграція: прибрати хибні tg_link в особистих чатах (test-log-isolation-02).
+"""One-time migration: remove false tg_link values in personal chats (test-log-isolation-02).
 
-**Проблема:** до фіксу `_chat_link` у `telegram_listener.py` посилання для
-особистого чату (`tg_chat_id > 0`) будувалось як `https://t.me/<username>/<msg_id>`
-з юзернейма співрозмовника. Такий формат означає пост у публічній групі/каналі
-(core.telegram.org/api/links) — для особистого листування посилання на конкретне
-повідомлення не існує в принципі. У бойовій БД так позначено записів
-(приклад: chat 250264900 → https://t.me/adamharber/515482 — насправді відкриває
-профіль людини, номер повідомлення нічого не означає).
+**Problem:** before the `_chat_link` fix in `telegram_listener.py`, the link for a
+personal chat (`tg_chat_id > 0`) was built as `https://t.me/<username>/<msg_id>`
+from the counterpart's username. That format denotes a post in a public group/channel
+(core.telegram.org/api/links); a link to a specific message does not exist
+for private conversations at all. In the live DB records were marked this way
+(example: chat 250264900 → https://t.me/adamharber/515482 actually opens
+the person's profile, the message number means nothing).
 
-**Що робить прохід:** очищає лише поле `tg_link` для рядків з `tg_chat_id > 0` —
-рядки не видаляються, `tg_link` для супергруп/каналів (`tg_chat_id < 0`) не
-чіпається. Ідемпотентно: другий прогін завжди бачить 0 кандидатів.
+**What the pass does:** clears only the `tg_link` field for rows with `tg_chat_id > 0`;
+rows are not deleted, `tg_link` for supergroups/channels (`tg_chat_id < 0`) is not
+touched. Idempotent: a second run always sees 0 candidates.
 
 CLI:
     python -m app.services.telegram_link_repair clear-bogus-links --dry-run
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def clear_bogus_private_links(db_path: str, *, dry_run: bool = False) -> dict:
-    """Прибрати хибні `tg_link` у особистих чатах (`tg_chat_id > 0`)."""
+    """Remove false `tg_link` values in personal chats (`tg_chat_id > 0`)."""
     sql = (
         "SELECT id FROM transcriptions "
         "WHERE tg_chat_id > 0 AND tg_link IS NOT NULL AND tg_link <> ''"
@@ -67,21 +67,21 @@ def main(argv: Optional[list] = None) -> int:
 
     p = argparse.ArgumentParser(
         prog="telegram_link_repair",
-        description="Прибрати хибні tg_link, вигадані для особистих чатів.")
+        description="Remove false tg_link values invented for personal chats.")
     p.add_argument("--db", default=default_db)
-    # --dry-run приймається і до, і після підкоманди. argparse-пастка: якщо
-    # обидва мають однаковий dest, _SubParsersAction переписує batьківський
-    # namespace своїм — дефолт False з підпарсера затирає True, виставлений
-    # до підкоманди. Тому в top-level флаг йде в окремий dest, а фінальне
-    # значення — OR обох; порядок слів на результат не впливає.
+    # --dry-run is accepted both before and after the subcommand. argparse trap: if
+    # both have the same dest, _SubParsersAction overwrites the parent
+    # namespace with its own; the subparser's default False clobbers the True set
+    # before the subcommand. So the top-level flag gets its own dest, and the final
+    # value is the OR of both; word order does not affect the result.
     p.add_argument("--dry-run", dest="dry_run_pre", action="store_true",
-                   help="Нічого не писати в БД")
+                   help="Write nothing to the DB")
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--dry-run", action="store_true", help="Нічого не писати в БД")
+    common.add_argument("--dry-run", action="store_true", help="Write nothing to the DB")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("clear-bogus-links", parents=[common],
-                   help="tg_link → NULL для tg_chat_id > 0")
+                   help="tg_link → NULL for tg_chat_id > 0")
 
     args = p.parse_args(argv)
     args.dry_run = args.dry_run or args.dry_run_pre

@@ -1232,8 +1232,8 @@ class TestRegionCapture(unittest.TestCase):
         # Import the REAL module directly, bypassing the fake in sys.modules.
         import importlib, importlib.util
         from pathlib import Path
-        # Шлях рахуємо від самого файлу тесту, а не хардкодимо: корінь проєкту
-        # уже раз переїжджав (Whisper → Recall) і цей рядок мовчки помер.
+        # The path is computed from the test file itself, not hardcoded: the project root
+        # has already moved once (Whisper → Recall) and that line died silently.
         probe_path = (Path(__file__).resolve().parent
                       / "app" / "services" / "recording" / "video_probe.py")
         spec = importlib.util.spec_from_file_location(

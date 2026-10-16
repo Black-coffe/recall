@@ -1,45 +1,45 @@
-"""Шар коментарів (Comments Layer) — дані, індекс, граф, живий дзвінок.
+"""Comments Layer: data, index, graph, live call.
 
-Коментар — це речення, яке власник написав ПРО запис, а не сказав У записі.
-Він уточнює, виправляє або акцентує те, що в сирій стенограмі сказано погано,
-неповно чи просто неправильно. Тому в пошуку він важить БІЛЬШЕ за транскрипт,
-а не нарівні з ним.
+A comment is a sentence the owner wrote ABOUT a recording, not something said IN the recording.
+It clarifies, corrects or emphasizes what the raw transcript says badly,
+incompletely or simply wrongly. That is why in search it weighs MORE than the transcript,
+not the same as it.
 
-П'ять речей, які цей модуль тримає:
+Five things this module holds:
 
-1. **CRUD із поліморфною ціллю.** Коментувати можна не лише транскрипт: файл
-   Медіатеки без тексту, задачу, сутність, сесію запису. Реєстр допустимих
-   цілей (`TARGETS`) живе тут, а не в БД — так само, як `action_items.source`
-   і `meeting_entities.source` валідуються в коді. Ціль адресується числом
-   або рядком (сесія запису — `rec_<hex>`), і це вирішує саме реєстр.
+1. **CRUD with a polymorphic target.** Not only a transcript can be commented: a Media
+   Library file without text, a task, an entity, a recording session. The registry of allowed
+   targets (`TARGETS`) lives here, not in the DB, the same way `action_items.source`
+   and `meeting_entities.source` are validated in code. A target is addressed by a number
+   or a string (a recording session is `rec_<hex>`), and the registry decides which.
 
-2. **Власний індекс.** `comment_chunks` + `comment_chunks_fts` (міграція v37)
-   — дзеркало `chunks`/`chunks_fts` за формою, окреме за таблицею. Чому не
-   спільна таблиця — довга причина записана в самій міграції; коротка: у
-   `chunks.transcription_id` NOT NULL, а коментар на нетранскрибованому файлі
-   транскрипту не має.
+2. **Own index.** `comment_chunks` + `comment_chunks_fts` (migration v37)
+   mirror `chunks`/`chunks_fts` in shape but are a separate table. Why not a
+   shared table: the long reason is written in the migration itself; the short one: in
+   `chunks.transcription_id` is NOT NULL, while a comment on an untranscribed file
+   has no transcript.
 
-3. **Вага.** `kind` → множник у ранжуванні (Волна 2) і ознака «підшивати
-   навіть без збігу». `weight` — ручний override; NULL означає «взяти з kind».
+3. **Weight.** `kind` → a ranking multiplier (Wave 2) and a "pin
+   even without a match" flag. `weight` is a manual override; NULL means "take from kind".
 
-4. **Похідні.** Локальні звʼязки з графом (`link_entities`, безкоштовно, на
-   інжесті) і розбір через Claude на вимогу (`analyze` — задачі й сутності,
-   ніколи не автоматично).
+4. **Derivatives.** Local links to the graph (`link_entities`, free, at
+   ingest) and an on-demand Claude analysis (`analyze` — tasks and entities,
+   never automatic).
 
-5. **Живий дзвінок.** Коментар пишеться на сесію запису, поки транскрипту ще
-   немає, і переїжджає на нього після транскрибування (`retarget`) зі
-   збереженням `anchor_time`.
+5. **Live call.** A comment is written to a recording session while the transcript does not
+   exist yet, and moves onto it after transcription (`retarget`), keeping
+   `anchor_time`.
 
-Деградація. Без моделі ембедингів (`embeddings.is_available()` = False)
-коментар усе одно створюється, лягає у FTS (тригери) і показується на картці —
-просто без вектора, до наступного `reindex`. Мовчазної втрати немає:
-`embedded_at` лишається NULL, і бекфіл бачить роботу.
+Degradation. Without an embedding model (`embeddings.is_available()` = False)
+a comment is still created, lands in FTS (triggers) and shows on the card,
+just without a vector, until the next `reindex`. There is no silent loss:
+`embedded_at` stays NULL, and the backfill sees the work.
 
-CLI (офлайн, ідемпотентні):
+CLI (offline, idempotent):
 
     python -m app.services.comments reindex [--force] [--dry-run] [--limit N]
     python -m app.services.comments relink [--dry-run]
-    python -m app.services.comments analyze <id> [--force]     # платно
+    python -m app.services.comments analyze <id> [--force]     # paid
     python -m app.services.comments stats
 """
 from __future__ import annotations
@@ -50,6 +50,7 @@ from typing import Optional
 
 import numpy as np
 
+from app.core.i18n import tr
 from app.db.connection import get_db_connection
 from app.services import embeddings, record_meta
 
@@ -58,18 +59,18 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Реєстр цілей і типів
+# Registry of targets and kinds
 # ============================================================
 
-#: Що можна коментувати: target_type → (таблиця, колонка id, вид ключа).
-#: Валідація тут, а не FK у БД: FK на одну таблицю неможливий для
-#: поліморфної цілі, а тримати вісім nullable-колонок замість пари
-#: (type, id) — гірше в усьому, крім формальної цілісності.
+#: What can be commented: target_type → (table, id column, key kind).
+#: Validation is here, not an FK in the DB: an FK to one table is impossible for a
+#: polymorphic target, and keeping eight nullable columns instead of a (type, id)
+#: pair is worse in everything except formal integrity.
 #:
-#: Вид ключа ("int" | "str") — не дрібниця, а те, чим адресується картка.
-#: Сесія запису має рядковий id (`rec_<hex16>`), і саме вона потрібна тоді,
-#: коли коментар найцінніший: під час дзвінка транскрипту ще не існує. Рядкові
-#: цілі живуть у `target_key`, числові — у `target_id` (міграція v39).
+#: The key kind ("int" | "str") is not a detail but what a card is addressed by.
+#: A recording session has a string id (`rec_<hex16>`), and it is needed exactly
+#: when a comment is most valuable: during a call the transcript does not exist yet. String
+#: targets live in `target_key`, numeric ones in `target_id` (migration v39).
 TARGETS: dict[str, tuple[Optional[str], Optional[str], str]] = {
     "transcription": ("transcriptions", "id", "int"),
     "audio_download": ("audio_downloads", "id", "int"),
@@ -78,113 +79,113 @@ TARGETS: dict[str, tuple[Optional[str], Optional[str], str]] = {
     "speaker": ("speakers", "id", "int"),
     "category": ("categories", "id", "int"),
     "tg_thread": ("tg_threads", "id", "int"),
-    # Сесія запису: рядковий ключ, власної таблиці немає (живе в манифесті на
-    # диску), тож існування не перевіряємо — інакше коментар під час дзвінка
-    # створити було б неможливо. Після транскрибування коментарі сесії
-    # перецепляються на транскрипт (`retarget`, Волна 4).
+    # Recording session: string key, no table of its own (it lives in the manifest on
+    # disk), so we do not check existence, otherwise creating a comment
+    # during a call would be impossible. After transcription the session's comments
+    # are re-attached to the transcript (`retarget`, Wave 4).
     "recording_session": (None, None, "str"),
 }
 
 
 def key_kind(target_type: str) -> str:
-    """Яким ключем адресується цей тип цілі: 'int' або 'str'."""
+    """Which key this target type is addressed by: 'int' or 'str'."""
     entry = TARGETS.get(target_type)
     return entry[2] if entry else "int"
 
 
-#: Що лежить у `target_id`, коли картка адресується рядком. Колонка створена
-#: у v37 як `NOT NULL`, а знімати обмеження заради цього довелось би
-#: перебудовою таблиці, на яку посилається FK з `comment_chunks` — надто
-#: багато ризику заради косметики. Нуль безпечний: AUTOINCREMENT у SQLite
-#: починає з 1, тож id=0 не належить жодному рядку жодної таблиці.
+#: What goes in `target_id` when a card is addressed by a string. The column was created
+#: in v37 as `NOT NULL`, and dropping the constraint would require
+#: rebuilding the table that `comment_chunks` references by FK — too much
+#: risk for cosmetics. Zero is safe: AUTOINCREMENT in SQLite
+#: starts at 1, so id=0 belongs to no row of any table.
 STR_TARGET_ID = 0
 
 
 def _norm_target(target_type: str, target_id) -> tuple[int, Optional[str]]:
-    """(target_id, target_key) під вид ключа цього типу цілі."""
+    """(target_id, target_key) for the key kind of this target type."""
     if key_kind(target_type) == "str":
         key = str(target_id).strip()
         if not key:
-            raise CommentError("порожній ключ цілі")
+            raise CommentError(tr("svc_pipes.comments.err.empty_key"))
         return STR_TARGET_ID, key
     try:
         return int(target_id), None
     except (TypeError, ValueError):
-        raise CommentError(f"ціль {target_type} адресується числом, отримано {target_id!r}")
+        raise CommentError(tr("svc_pipes.comments.err.target_numeric_got", target_type=target_type, target_id=target_id))
 
 
 def _target_clause(target_type: str, target_id) -> tuple[str, list]:
-    """WHERE-фрагмент «це та сама картка» — один перемикач на весь модуль."""
+    """WHERE fragment for "this same card" — one switch for the whole module."""
     tid, tkey = _norm_target(target_type, target_id)
     if tkey is not None:
         return " AND target_type = ? AND target_key = ?", [target_type, tkey]
     return " AND target_type = ? AND target_id = ?", [target_type, tid]
 
-#: kind → вага в ранжуванні. Не декоративний список: саме він вирішує, чи
-#: коментар переважить сирий транскрипт при рівній релевантності.
+#: kind → ranking weight. Not a decorative list: it decides whether a
+#: comment outweighs the raw transcript at equal relevance.
 KIND_WEIGHTS: dict[str, float] = {
-    "correction": 1.0,   # виправляє сказане в записі
-    "decision": 0.8,     # підсумок / ухвалене рішення
-    "note": 0.6,         # звичайна замітка (дефолт)
-    "context": 0.5,      # передісторія, тло
-    "question": 0.4,     # відкрите питання до себе
+    "correction": 1.0,   # corrects what was said in the recording
+    "decision": 0.8,     # summary / decision made
+    "note": 0.6,         # ordinary note (default)
+    "context": 0.5,      # background, backstory
+    "question": 0.4,     # open question to self
 }
 DEFAULT_KIND = "note"
 
-#: Типи, які підшиваються до видачі, навіть якщо самі не збіглися із запитом
-#: (Волна 2). Виправлення критичне саме там, де спільних слів із питанням
-#: немає: «Іван більше не в проєкті» не збігається з «хто відповідає за X».
+#: Kinds that are attached to results even if they did not match the query themselves
+#: (Wave 2). A correction is critical exactly where there are no words shared with the question:
+#: "Ivan is no longer on the project" does not match "who is responsible for X".
 ATTACH_KINDS = frozenset({"correction"})
 
-#: Джерела створення — для провенансу у видачі й експорті.
+#: Creation sources, for provenance in results and export.
 SOURCES = frozenset({"ui", "live", "mcp", "import"})
 
 MAX_BODY_CHARS = 20000
 
 
 class CommentError(ValueError):
-    """Некоректний вхід (невідома ціль/тип, порожнє тіло, немає такої картки)."""
+    """Invalid input (unknown target/kind, empty body, no such card)."""
 
 
 def kind_weight(kind: Optional[str], weight: Optional[float] = None) -> float:
-    """Ефективна вага коментаря: ручний override, інакше — за типом."""
+    """Effective comment weight: the manual override, otherwise by kind."""
     if weight is not None:
         return max(0.0, min(1.0, float(weight)))
     return KIND_WEIGHTS.get((kind or DEFAULT_KIND), KIND_WEIGHTS[DEFAULT_KIND])
 
 
 # ============================================================
-# Валідація
+# Validation
 # ============================================================
 
 def _validate(target_type: str, kind: Optional[str], source: Optional[str],
               body: str) -> tuple[str, str]:
     if target_type not in TARGETS:
         raise CommentError(
-            f"невідомий тип цілі: {target_type!r} "
-            f"(відомі: {', '.join(sorted(TARGETS))})")
+            tr("svc_pipes.comments.err.unknown_target",
+            target_type=target_type, known=', '.join(sorted(TARGETS))))
     k = (kind or DEFAULT_KIND).strip().lower()
     if k not in KIND_WEIGHTS:
         raise CommentError(
-            f"невідомий тип коментаря: {kind!r} "
-            f"(відомі: {', '.join(sorted(KIND_WEIGHTS))})")
+            tr("svc_pipes.comments.err.unknown_kind",
+            kind=kind, known=', '.join(sorted(KIND_WEIGHTS))))
     s = (source or "ui").strip().lower()
     if s not in SOURCES:
-        raise CommentError(f"невідоме джерело: {source!r}")
+        raise CommentError(tr("svc_pipes.comments.err.unknown_source", source=source))
     if not (body or "").strip():
-        raise CommentError("порожній коментар")
+        raise CommentError(tr("svc_pipes.comments.err.empty_body"))
     if len(body) > MAX_BODY_CHARS:
-        raise CommentError(f"коментар довший за {MAX_BODY_CHARS} символів")
+        raise CommentError(tr("svc_pipes.comments.err.too_long", max=MAX_BODY_CHARS))
     return k, s
 
 
 def target_exists(db_path: str, target_type: str, target_id: int) -> bool:
-    """Чи існує картка, до якої чіпляють коментар.
+    """Whether the card the comment is attached to exists.
 
-    Перевірка потрібна, бо ціль поліморфна і FK її не тримає: без неї
-    коментар на видалену/неіснуючу картку тихо осів би в БД, знаходився б
-    пошуком і не мав би де показатись. Для типів без окремої таблиці
-    (`recording_session`) перевірити нічого — вважаємо, що існує.
+    The check is needed because the target is polymorphic and no FK holds it: without it
+    a comment on a deleted/nonexistent card would quietly settle in the DB, be found by
+    search and have nowhere to be shown. For types without a table of their own
+    (`recording_session`) there is nothing to check, so we assume it exists.
     """
     entry = TARGETS.get(target_type)
     table, col = (entry[0], entry[1]) if entry else (None, None)
@@ -215,15 +216,15 @@ _ROW_FIELDS = (
 def _to_dict(row) -> dict:
     d = dict(row)
     d["pinned"] = bool(d.get("pinned"))
-    # Один вихідний контракт для обох видів ключа: споживач (фронт, MCP,
-    # експорт) не має знати, у якій колонці лежить адреса картки.
+    # One output contract for both key kinds: the consumer (frontend, MCP,
+    # export) must not know which column holds the card's address.
     key = d.get("target_key")
     d["target_ref"] = key if key is not None else d.get("target_id")
     d["effective_weight"] = kind_weight(d.get("kind"), d.get("weight"))
     d["indexed"] = bool(d.get("embedded_at"))
-    # Розбір платний і запускається кнопкою, тож інтерфейс мусить розрізняти
-    # «ще не розбирали» і «розібрали, задач не знайшлось» — інакше власник
-    # платить за той самий коментар удруге.
+    # The analysis is paid and started by a button, so the interface must tell apart
+    # "not analyzed yet" from "analyzed, no tasks found", otherwise the owner
+    # pays for the same comment twice.
     d["analyzed"] = bool(d.get("analyzed_at"))
     return d
 
@@ -234,14 +235,14 @@ def create(db_path: str, target_type: str, target_id, body: str,
            anchor_chunk_id: Optional[int] = None, author: Optional[str] = None,
            source: str = "ui", parent_id: Optional[int] = None,
            check_target: bool = True) -> dict:
-    """Створити коментар. Індексація НЕ виконується тут — див. `index_comment`
-    (її ставить у чергу блюпринт, щоб POST не чекав на GPU).
+    """Create a comment. Indexing is NOT done here, see `index_comment`
+    (the blueprint queues it so the POST does not wait for the GPU).
 
-    `target_id` — число або рядок залежно від типу цілі (див. `TARGETS`)."""
+    `target_id` is a number or a string depending on the target type (see `TARGETS`)."""
     k, s = _validate(target_type, kind, source, body)
     tid, tkey = _norm_target(target_type, target_id)
     if check_target and tkey is None and not target_exists(db_path, target_type, tid):
-        raise CommentError(f"немає картки {target_type}#{target_id}")
+        raise CommentError(tr("svc_pipes.comments.err.no_card", target_type=target_type, target_id=target_id))
     with get_db_connection(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO comments (target_type, target_id, target_key, body, kind, weight, "
@@ -270,9 +271,9 @@ def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
            kind: Optional[str] = None, pinned: Optional[bool] = None,
            weight: Optional[float] = None,
            anchor_time: Optional[float] = None) -> Optional[dict]:
-    """Правка коментаря. Зміна ТІЛА скидає `embedded_at` — інакше в індексі
-    назавжди лишився б вектор старої редакції, а картка показувала б нову
-    (тиха розбіжність між тим, що видно, і тим, що шукається)."""
+    """Edit a comment. Changing the BODY resets `embedded_at`, otherwise the index
+    would keep the vector of the old revision forever while the card showed the new one
+    (a silent mismatch between what is visible and what is searched)."""
     cur = get(db_path, comment_id)
     if not cur:
         return None
@@ -285,7 +286,7 @@ def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
     if kind is not None:
         k = kind.strip().lower()
         if k not in KIND_WEIGHTS:
-            raise CommentError(f"невідомий тип коментаря: {kind!r}")
+            raise CommentError(tr("svc_pipes.comments.err.unknown_kind_short", kind=kind))
         sets.append("kind = ?"); params.append(k)
     if pinned is not None:
         sets.append("pinned = ?"); params.append(1 if pinned else 0)
@@ -302,35 +303,35 @@ def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
         conn.execute(f"UPDATE comments SET {', '.join(sets)} WHERE id = ?",
                      params + [comment_id])
         if body_changed:
-            # Старі чанки прибираємо одразу, а не при переіндексації: інакше
-            # у вікні між правкою і reindex пошук віддавав би текст, якого
-            # на картці вже немає.
+            # Old chunks are removed immediately, not at reindex: otherwise
+            # in the window between the edit and reindex search would return text that
+            # is no longer on the card.
             conn.execute("DELETE FROM comment_chunks WHERE comment_id = ?", (comment_id,))
         conn.commit()
     return get(db_path, comment_id)
 
 
 def delete(db_path: str, comment_id: int) -> bool:
-    """Soft-delete (як `transcriptions`/`audio_downloads`) + зняття з індексу.
+    """Soft-delete (like `transcriptions`/`audio_downloads`) + removal from the index.
 
-    Чанки стираємо ФІЗИЧНО, хоча сам рядок лишається: soft-delete існує заради
-    «Скасувати» в UI, а не заради того, щоб видалений коментар ще тиждень
-    впливав на відповіді RAG. Відновлення поверне його в чергу індексації.
+    Chunks are erased PHYSICALLY although the row stays: soft-delete exists for the sake of
+    "Undo" in the UI, not so that a deleted comment keeps
+    influencing RAG answers for another week. Restoring puts it back in the indexing queue.
     """
-    # Якір читаємо ДО видалення: після нього `get` уже не побачить рядок, і
-    # перерахувати граф не буде від чого.
+    # The anchor is read BEFORE deletion: afterwards `get` no longer sees the row, and
+    # there would be nothing to recompute the graph from.
     existing = get(db_path, comment_id)
     with get_db_connection(db_path) as conn:
         cur = conn.execute(
             "UPDATE comments SET deleted_at = CURRENT_TIMESTAMP, embedded_at = NULL, "
             "analyzed_at = NULL WHERE id = ? AND deleted_at IS NULL", (comment_id,))
         conn.execute("DELETE FROM comment_chunks WHERE comment_id = ?", (comment_id,))
-        # Задачі, витягнуті Claude саме з ЦЬОГО коментаря, йдуть разом із ним.
-        # Інакше вони лишались би «open» у дашборді й у понеділковому зводі
-        # назавжди, а джерело було б невидиме: власник видалив коментар як
-        # помилковий, а три задачі з нього продовжують вимагати уваги, і
-        # дізнатись, звідки вони, вже нізвідки. Знімаємо і `analyzed_at`, щоб
-        # після відновлення коментар можна було розібрати наново.
+        # Tasks extracted by Claude from THIS comment go away with it.
+        # Otherwise they would stay "open" in the dashboard and in the Monday digest
+        # forever, and the source would be invisible: the owner deleted the comment as
+        # erroneous, yet three tasks from it keep demanding attention, and
+        # there is nowhere left to find out where they came from. We also clear `analyzed_at`, so
+        # that after restore the comment can be analyzed anew.
         conn.execute("DELETE FROM action_items WHERE comment_id = ?", (comment_id,))
         conn.commit()
         ok = cur.rowcount > 0
@@ -352,12 +353,12 @@ def restore(db_path: str, comment_id: int) -> bool:
 
 
 def _refresh_graph(db_path: str, comment: Optional[dict]) -> None:
-    """Перерахувати звʼязки графа для картки цього коментаря.
+    """Recompute the graph links for this comment's card.
 
-    Тут, а не лише в блюпринті: видалений коментар, чиї згадки лишились у
-    графі, — це факт, якого більше ніхто не стверджує, і знайти таке потім
-    неможливо. Гарантія має триматись на рівні сервісу, щоб її не треба було
-    повторювати в кожного виклику (CLI, майбутній MCP, тести).
+    Here, not only in the blueprint: a deleted comment whose mentions stayed in the
+    graph is a fact nobody asserts anymore, and finding such a thing later is
+    impossible. The guarantee must hold at the service level so it need not be
+    repeated at every call site (CLI, future MCP, tests).
     """
     if not comment:
         return
@@ -367,20 +368,20 @@ def _refresh_graph(db_path: str, comment: Optional[dict]) -> None:
         if tid is not None:
             link_entities(db_path, tid)
     except Exception:
-        # Граф — надбудова над коментарем: сам коментар уже видалено/повернуто
-        # коректно, а розбіжність лікує `relink`. Ковтаємо з логом.
-        logger.warning("[comments] граф після зміни #%s не оновлено",
+        # The graph is a layer on top of the comment: the comment itself is already deleted/restored
+        # correctly, and `relink` heals the mismatch. Swallow with a log.
+        logger.warning("[comments] graph not refreshed after change of #%s",
                        comment.get("id"), exc_info=True)
 
 
 def list_for(db_path: str, target_type: str, target_id,
              include_deleted: bool = False) -> list[dict]:
-    """Коментарі однієї картки. Порядок — закріплені зверху, далі за часом:
-    на картці спершу треба бачити те, що власник свідомо підняв.
+    """Comments of one card. Order: pinned first, then by time:
+    on a card one must first see what the owner deliberately raised.
 
-    Для сесії запису (рядковий ключ) сортуємо всередині закріплених за
-    `anchor_time`, коли він є: під час дзвінка коментарі природно читаються
-    за ходом розмови, а не за моментом натискання Enter."""
+    For a recording session (string key) we sort within the pinned ones by
+    `anchor_time` when present: during a call comments read naturally
+    in the order of the conversation, not by the moment Enter was pressed."""
     where, params = _target_clause(target_type, target_id)
     sql = f"SELECT {_ROW_FIELDS} FROM comments WHERE 1=1{where}"
     if not include_deleted:
@@ -393,14 +394,14 @@ def list_for(db_path: str, target_type: str, target_id,
 
 def counts_for(db_path: str, target_type: str,
                target_ids: list) -> dict:
-    """Лічильники для СПИСКУ карток одним запитом.
+    """Counters for a LIST of cards in one query.
 
-    Окрема функція, а не корельований підзапит у кожному списковому SELECT:
-    списків уже чотири (Бібліотека, Медіатека, задачі, сутності), і
-    підзапит довелось би дублювати в кожному, кожен раз ризикуючи розійтись
-    у визначенні «живого» коментаря.
+    A separate function, not a correlated subquery in every list SELECT:
+    there are already four lists (Library, Media Library, tasks, entities), and the
+    subquery would have to be duplicated in each, every time risking divergence
+    in the definition of a "live" comment.
 
-    Returns {target: {"n": скільки всього, "corrections": скільки виправлень}}.
+    Returns {target: {"n": how many in total, "corrections": how many corrections}}.
     """
     raw = list(target_ids or [])
     if not raw:
@@ -410,19 +411,19 @@ def counts_for(db_path: str, target_type: str,
     try:
         ids = [str(i) for i in raw] if is_str else [int(i) for i in raw]
     except (TypeError, ValueError):
-        raise CommentError(f"ціль {target_type} адресується числом")
+        raise CommentError(tr("svc_pipes.comments.err.target_numeric", target_type=target_type))
     out: dict = {}
-    # Ріжемо на пачки: SQLite має ліміт на кількість параметрів (999 у
-    # стандартній збірці), а «вибрати всі N за фільтром» у Бібліотеці
-    # піднімає до 3000 id.
+    # Cut into batches: SQLite has a limit on the number of parameters (999 in the
+    # standard build), and "select all N by filter" in the Library
+    # goes up to 3000 ids.
     CHUNK = 800
     with get_db_connection(db_path) as conn:
         for i in range(0, len(ids), CHUNK):
             part = ids[i:i + CHUNK]
             ph = ",".join("?" * len(part))
-            # Окремо рахуємо ВИПРАВЛЕННЯ: бейдж на картці має третій стан
-            # («у записі щось спростовано»), і без цього числа фронт не може
-            # його показати — а це найважливіше, що картка про себе каже.
+            # CORRECTIONS are counted separately: the badge on a card has a third state
+            # ("something in the recording is refuted"), and without this number the frontend cannot
+            # show it, and it is the most important thing a card says about itself.
             rows = conn.execute(
                 f"SELECT {col} AS ref, COUNT(*) AS n, "
                 f"SUM(CASE WHEN kind = 'correction' THEN 1 ELSE 0 END) AS fixes "
@@ -445,12 +446,12 @@ def _feed_where(kind, target_type, since, search) -> tuple[str, list]:
     if since:
         sql += " AND c.created_at >= ?"; params.append(since)
     if search:
-        # LIKE, а не FTS: сторінка гортає ВЛАСНІ записи, яких сотні, і
-        # підрядок тут чесніший за токенізацію — власник шукає фразу, яку сам
-        # писав, часто з середини слова. Порівняння в Python не завернеш, тож
-        # покладаємось на LIKE з COLLATE NOCASE — для латиниці працює, для
-        # кирилиці лишається регістрозалежним (SQLite LOWER кирилицю не
-        # згортає — той самий обмежувач, що і в решті проєкту).
+        # LIKE, not FTS: the page browses the owner's OWN records, of which there are hundreds, and
+        # a substring is more honest here than tokenization: the owner looks for a phrase they
+        # wrote themselves, often from the middle of a word. A comparison cannot be wrapped in Python, so
+        # we rely on LIKE with COLLATE NOCASE: it works for Latin, for
+        # Cyrillic it stays case-sensitive (SQLite LOWER does not fold
+        # Cyrillic, the same limitation as in the rest of the project).
         sql += " AND c.body LIKE ?"; params.append(f"%{search}%")
     return sql, params
 
@@ -459,16 +460,16 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
                 target_type: Optional[str] = None,
                 since: Optional[str] = None, search: Optional[str] = None,
                 offset: int = 0) -> dict:
-    """Стрічка коментарів для оглядової сторінки: рядки + total + фасети.
+    """Comments feed for the overview page: rows + total + facets.
 
-    Повертає `dict`, а не список: сторінці потрібен і знаменник (скільки всього
-    під фільтром), і розкладка за типами — інакше «5 виправлень» читається як
-    повна картина, хоча це 5 із 200 (та сама пастка, через яку у зводі зʼявився
+    Returns a `dict`, not a list: the page needs both the denominator (how many in total
+    under the filter) and the breakdown by kind, otherwise "5 corrections" reads as
+    the full picture although it is 5 out of 200 (the same trap that made the digest
     `coverage`).
 
-    `target_name` збирається одним LEFT JOIN на транскрипти й картки Медіатеки —
-    решта типів цілей показуються як «тип #id»: тягнути сюди ще пʼять таблиць
-    заради рідких випадків дорожче, ніж воно того варте.
+    `target_name` is assembled with one LEFT JOIN onto transcripts and Media Library cards;
+    other target types are shown as "type #id": pulling five more tables in here
+    for rare cases costs more than it is worth.
     """
     where, params = _feed_where(kind, target_type, since, search)
     sel = ", ".join("c." + f for f in _ROW_FIELDS.split(", "))
@@ -479,19 +480,19 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
            f"AND t.id = c.target_id "
            f"LEFT JOIN audio_downloads a ON c.target_type = 'audio_download' "
            f"AND a.id = c.target_id"
-           # id як тай-брейкер обовʼязковий: `created_at` має роздільність в
-           # одну секунду, а живі коментарі пишуться чергою по кілька за раз —
-           # без нього рівні за часом поверталися б у порядку rowid, тобто
-           # ЗВОРОТНО до заявленого «найновіші зверху».
+           # id as a tie-breaker is mandatory: `created_at` has one-second
+           # resolution, and live comments are written in batches of several at a time:
+           # without it, ties in time would come back in rowid order, i.e. REVERSED
+           # relative to the promised "newest on top".
            f"{where} ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?")
     lim = max(1, min(int(limit), 500))
     with get_db_connection(db_path) as conn:
         rows = conn.execute(sql, params + [lim, max(0, int(offset))]).fetchall()
         total = conn.execute(
             f"SELECT COUNT(*) FROM comments c{where}", params).fetchone()[0]
-        # Фасети рахуємо БЕЗ фільтра за типом — інакше, вибравши «виправлення»,
-        # користувач бачив би лічильники «виправлення 5, решта 0» і не міг би
-        # оцінити, куди перемикатись.
+        # Facets are counted WITHOUT the kind filter, otherwise after picking "corrections"
+        # the user would see counters "corrections 5, rest 0" and could not
+        # judge where to switch.
         fw, fp = _feed_where(None, target_type, since, search)
         by_kind = dict(conn.execute(
             f"SELECT c.kind, COUNT(*) FROM comments c{fw} GROUP BY c.kind", fp).fetchall())
@@ -502,8 +503,8 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
         tx_title = d.pop("tx_title", None)
         audio_title = d.pop("audio_title", None)
         if d["target_type"] == "transcription" and (tx_name is not None or tx_title is not None):
-            # editable-title-description-02: власна назва (title) перебиває
-            # source_name — display_name рахує той самий пріоритет, що й GET.
+            # editable-title-description-02: own title (title) overrides
+            # source_name — display_name applies the same priority as GET.
             name = record_meta.display_name(
                 {"id": d["target_id"], "title": tx_title, "source_name": tx_name}
             )
@@ -517,16 +518,16 @@ def list_recent(db_path: str, limit: int = 50, kind: Optional[str] = None,
 
 def retarget(db_path: str, from_type: str, from_id,
              to_type: str, to_id) -> int:
-    """Перецепити коментарі з однієї картки на іншу.
+    """Re-attach comments from one card to another.
 
-    Потрібно рівно для одного сценарію (Волна 4), але сценарій обовʼязковий:
-    під час дзвінка коментар пишеться до СЕСІЇ ЗАПИСУ (транскрипту ще немає),
-    а після finalize має жити на транскрипті — інакше все, що власник
-    надиктував по ходу дзвінка, лишилось би висіти на id, якого не видно
-    з жодного екрана.
+    Needed for exactly one scenario (Wave 4), but that scenario is mandatory:
+    during a call a comment is written to the RECORDING SESSION (no transcript yet),
+    and after finalize it must live on the transcript, otherwise everything the owner
+    dictated during the call would hang on an id not visible
+    from any screen.
     """
     if to_type not in TARGETS or from_type not in TARGETS:
-        raise CommentError(f"невідомий тип цілі: {to_type!r}")
+        raise CommentError(tr("svc_pipes.comments.err.unknown_target_to", to_type=to_type))
     new_id, new_key = _norm_target(to_type, to_id)
     where, params = _target_clause(from_type, from_id)
     with get_db_connection(db_path) as conn:
@@ -537,27 +538,27 @@ def retarget(db_path: str, from_type: str, from_id,
         conn.commit()
         n = cur.rowcount
     if n:
-        logger.info("[comments] %s#%s → %s#%s: перецеплено %d",
+        logger.info("[comments] %s#%s → %s#%s: re-attached %d",
                     from_type, from_id, to_type, to_id, n)
-        # Нова ціль може мати граф (транскрипт) — старий якір уже не діє.
+        # The new target may have a graph (transcript): the old anchor no longer applies.
         _refresh_graph(db_path, {"id": None, "target_type": to_type,
                                  "target_id": to_id})
     return n
 
 
 # ============================================================
-# Індексер
+# Indexer
 # ============================================================
 
 def _build_comment_chunks(body: str) -> list[dict]:
-    """Порізати тіло коментаря на чанки.
+    """Cut the comment body into chunks.
 
-    Переважна більшість коментарів — один-два абзаци, тобто один чанк, і
-    ділити там нічого. Довгі (вставлена цитата листа, розгорнутий розбір)
-    ріжемо тим самим текстовим чанкером, що й транскрипти
-    (`embeddings._window_text`) — щоб довгий коментар не втрачав хвіст і
-    щоб форма чанка збігалася з формою чанків транскрипту, які він
-    конкурує витіснити.
+    The vast majority of comments are one or two paragraphs, i.e. one chunk, and
+    there is nothing to split. Long ones (a pasted quote of a letter, a detailed analysis)
+    are cut by the same text chunker as transcripts
+    (`embeddings._window_text`), so a long comment does not lose its tail and
+    so the chunk shape matches the shape of the transcript chunks it
+    competes to displace.
     """
     text = (body or "").strip()
     if not text:
@@ -567,8 +568,8 @@ def _build_comment_chunks(body: str) -> list[dict]:
 
 
 def index_comment(db_path: str, comment_id: int, force: bool = False) -> dict:
-    """Порізати + закодувати + зберегти коментар. Ідемпотентно через
-    `embedded_at` + модель + версію (та сама умова, що й у транскриптів)."""
+    """Cut + encode + save the comment. Idempotent via
+    `embedded_at` + model + version (the same condition as for transcripts)."""
     with get_db_connection(db_path) as conn:
         row = conn.execute(
             "SELECT id, body, embedded_at, embedding_model, embedding_version, "
@@ -589,10 +590,10 @@ def index_comment(db_path: str, comment_id: int, force: bool = False) -> dict:
     if not chunks:
         return {"status": "empty", "comment_id": comment_id}
 
-    # Без моделі коментар лишається у FTS (тригери наповнюють
-    # comment_chunks_fts при INSERT), але БЕЗ вектора і БЕЗ позначки
-    # embedded_at — тобто бекфіл потім знайде його як роботу. Це і є
-    # деградація без тихої втрати: лексичний пошук працює одразу.
+    # Without a model the comment stays in FTS (triggers fill
+    # comment_chunks_fts on INSERT), but WITHOUT a vector and WITHOUT the
+    # embedded_at mark, i.e. the backfill later finds it as work. This is the
+    # degradation without silent loss: lexical search works right away.
     available = embeddings.is_available()
     vecs = embeddings.embed_texts([c["text"] for c in chunks]) if available else None
 
@@ -612,18 +613,18 @@ def index_comment(db_path: str, comment_id: int, force: bool = False) -> dict:
         conn.commit()
 
     status = "embedded" if available else "fts_only"
-    logger.info("[comments] #%s проіндексовано: %d чанк(ів), %s",
+    logger.info("[comments] #%s indexed: %d chunk(s), %s",
                 comment_id, len(chunks), status)
     return {"status": status, "comment_id": comment_id, "chunks": len(chunks)}
 
 
 def pending_ids(db_path: str, limit: Optional[int] = None,
                 force: bool = False) -> list[int]:
-    """Коментарі, які треба (пере)індексувати.
+    """Comments that need (re)indexing.
 
-    Умова ОБОВʼЯЗКОВО дзеркалить skip-логіку `index_comment` — інакше бекфіл
-    вічно віддавав би рядки, які індексер мовчки пропускає, і робота б не
-    закінчувалась (та сама пастка, що описана в `embeddings` для
+    The condition MUST mirror the skip logic of `index_comment`, otherwise the backfill
+    would forever return rows the indexer silently skips, and the work would
+    never finish (the same trap described in `embeddings` for
     `list_unenriched_ids`).
     """
     sql = "SELECT id FROM comments WHERE deleted_at IS NULL"
@@ -642,7 +643,7 @@ def pending_ids(db_path: str, limit: Optional[int] = None,
 
 def reindex(db_path: str, force: bool = False, limit: Optional[int] = None,
             dry_run: bool = False) -> dict:
-    """Бекфіл: проіндексувати все, що чекає. Ідемпотентний."""
+    """Backfill: index everything that is waiting. Idempotent."""
     ids = pending_ids(db_path, limit=limit, force=force)
     if dry_run:
         return {"pending": len(ids), "ids": ids[:50], "dry_run": True}
@@ -673,37 +674,37 @@ def stats(db_path: str) -> dict:
 
 
 # ============================================================
-# Звʼязки з графом (Волна 3, шар А — локальний, безкоштовний)
+# Graph links (Wave 3, layer A — local, free)
 # ============================================================
 
-#: Провенанс звʼязку в `meeting_entities.source`. Мітка не формальна: згадка в
-#: коментарі означає «названо в репліці ПРО зустріч», а не «названо НА
-#: зустрічі». Це різні твердження, і зріз за людиною, який їх змішає, збреше
-#: рівно так, як уже одного разу збрехав звід (memory/derived-claims-need-second-source).
+#: Provenance of a link in `meeting_entities.source`. The label is not a formality: a mention in
+#: a comment means "named in a remark ABOUT the meeting", not "named AT the
+#: meeting". These are different claims, and a slice by person that mixes them will lie
+#: exactly as the digest once lied (memory/derived-claims-need-second-source).
 ENTITY_SOURCE = "comment"
 
 
 def resolve_transcription(db_path: str, target_type: str,
                           target_id: int) -> Optional[int]:
-    """До якого транскрипту прикріпити похідні коментаря (граф, задачі).
+    """Which transcript to attach the comment's derivatives (graph, tasks) to.
 
-    Граф і задачі в Recall транскрипт-центричні: `meeting_entities` і
-    `action_items` обидва тримають `transcription_id NOT NULL`. Тому коментар
-    дає похідні лише там, де транскрипт можна назвати:
+    The graph and tasks in Recall are transcript-centric: `meeting_entities` and
+    `action_items` both hold `transcription_id NOT NULL`. So a comment
+    yields derivatives only where a transcript can be named:
 
-    - `transcription` — сам себе;
-    - `audio_download` — його транскрипт, ЯКЩО він уже є (файл без тексту —
-      головний зріз Медіатеки, і це нормальний стан, а не помилка);
-    - `action_item` — транскрипт, на якому висить задача;
-    - `recording_session` — через картку Медіатеки, яку створив finalize
-      (`audio_downloads.recording_session_id`), і далі її транскрипт. Поки
-      дзвінок іде, ланцюг обривається на першому кроці — і це правильно:
-      транскрипту ще фізично немає.
+    - `transcription` — itself;
+    - `audio_download` — its transcript IF it already exists (a file without text is
+      the main slice of the Media Library, and it is a normal state, not an error);
+    - `action_item` — the transcript the task hangs on;
+    - `recording_session` — via the Media Library card created by finalize
+      (`audio_downloads.recording_session_id`), and then its transcript. While
+      the call is going on the chain breaks at the first step, and that is right:
+      the transcript physically does not exist yet.
 
-    Решта типів (сутність, спікер, напрямок, нитка) якоря не мають —
-    повертаємо None, і шар А для них просто не працює. Прив'язати їх силоміць
-    до «якогось» транскрипту було б гірше за відсутність звʼязку: граф
-    отримав би факт, якого ніхто не стверджував.
+    The remaining types (entity, speaker, direction, thread) have no anchor —
+    we return None, and layer A simply does not work for them. Forcibly attaching them
+    to "some" transcript would be worse than no link: the graph
+    would get a fact nobody asserted.
     """
     if target_type == "transcription":
         return int(target_id)
@@ -731,27 +732,27 @@ def resolve_transcription(db_path: str, target_type: str,
 
 
 def link_entities(db_path: str, transcription_id: int) -> dict:
-    """Перерахувати звʼязки графа, породжені коментарями цього транскрипту.
+    """Recompute the graph links produced by this transcript's comments.
 
-    Рахуємо ВСІ живі коментарі запису за раз, а не один щойно доданий. Причина
-    в ключі: `meeting_entities` має PRIMARY KEY (transcription_id, entity_id) і
-    жодного поля під коментар — тож «прибрати звʼязки цього коментаря»
-    неможливо, не зачепивши сусідні. Повний перерахунок по запису робить
-    операцію ідемпотентною за побудовою і однаково правильною після створення,
-    правки й видалення коментаря.
+    We count ALL live comments of the recording at once, not just the one just added. The reason
+    is the key: `meeting_entities` has PRIMARY KEY (transcription_id, entity_id) and
+    no field for a comment, so "removing this comment's links"
+    is impossible without touching neighbours. A full recompute per recording makes the
+    operation idempotent by construction and equally correct after creating,
+    editing and deleting a comment.
 
-    Чужі звʼязки (Claude-картка `source IS NULL`, TG `source='thread_match'`)
-    не чіпаються — стирається лише власний `source='comment'`.
+    Foreign links (a Claude card `source IS NULL`, TG `source='thread_match'`)
+    are not touched; only our own `source='comment'` is erased.
 
-    Локально і безкоштовно: використовує той самий словник назв і те саме
-    правило «написано як власна назва», що й інжест Telegram
-    (`tg_entities.find_exact_mentions`). Спільне правило тут обовʼязкове —
-    розійшовшись, два шари почали б давати різні звʼязки з однакового тексту.
+    Local and free: it uses the same name dictionary and the same
+    rule "written as a proper name" as Telegram ingest
+    (`tg_entities.find_exact_mentions`). A shared rule is mandatory here:
+    if they diverged, the two layers would start giving different links from the same text.
 
-    Свідомо точний матчер, а не `find_mentions`: замір історії 04 бачив лише
-    точні збіги, і `TG_ENTITIES_MORPH_ENABLED` — прапорець інжесту TG, він не
-    має тихо міняти те, що пише коментарний шар (вимкнути прапорець і зняти
-    вже записані морфо-звʼязки коментарів тут нічим).
+    Deliberately the exact matcher, not `find_mentions`: the measurement of story 04 saw only
+    exact matches, and `TG_ENTITIES_MORPH_ENABLED` is a TG ingest flag; it must
+    not quietly change what the comment layer writes (turning the flag off and removing
+    already written morph links of comments is not possible here).
     """
     from app.services import tg_entities
 
@@ -774,9 +775,9 @@ def link_entities(db_path: str, transcription_id: int) -> dict:
             (ENTITY_SOURCE, transcription_id))
         written = 0
         for eid in hits:
-            # OR IGNORE, а не REPLACE: якщо сутність уже привʼязана до цього
-            # запису Claude-карткою, її звʼязок — сильніше твердження («звучало
-            # на зустрічі»), і перетирати його провенансом коментаря не можна.
+            # OR IGNORE, not REPLACE: if the entity is already attached to this
+            # recording by a Claude card, its link is a stronger claim ("it was said
+            # at the meeting"), and it must not be overwritten with comment provenance.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO meeting_entities "
                 "(transcription_id, entity_id, mention_count, source) "
@@ -789,10 +790,10 @@ def link_entities(db_path: str, transcription_id: int) -> dict:
 
 
 def link_entities_for_comment(db_path: str, comment_id: int) -> dict:
-    """Зручна обгортка для шляху інжесту: знайти якір коментаря і перерахувати.
+    """Convenient wrapper for the ingest path: find the comment's anchor and recompute.
 
-    Свідомо мовчазна на коментарях без якоря — це не збій, а нормальний стан
-    (замітка на сутності або на файлі без транскрипта)."""
+    Deliberately silent for comments without an anchor: that is not a failure but a normal state
+    (a note on an entity or on a file without a transcript)."""
     c = get(db_path, comment_id)
     if not c:
         return {"comment_id": comment_id, "status": "not_found"}
@@ -805,7 +806,7 @@ def link_entities_for_comment(db_path: str, comment_id: int) -> dict:
 
 
 def relink_all(db_path: str, dry_run: bool = False) -> dict:
-    """Прохід по всіх транскриптах, що мають коментарі. Ідемпотентний."""
+    """Pass over all transcripts that have comments. Idempotent."""
     with get_db_connection(db_path) as conn:
         tids = [int(r["target_id"]) for r in conn.execute(
             "SELECT DISTINCT target_id FROM comments WHERE deleted_at IS NULL "
@@ -819,7 +820,7 @@ def relink_all(db_path: str, dry_run: bool = False) -> dict:
 
 
 # ============================================================
-# Розбір коментаря через Claude (Волна 3, шар Б — платний, на вимогу)
+# Analysis of a comment via Claude (Wave 3, layer B — paid, on demand)
 # ============================================================
 
 ACTION_SOURCE = "comment"
@@ -827,7 +828,7 @@ ACTION_SOURCE = "comment"
 
 def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
                       parsed: dict) -> dict:
-    """Записати результат розбору: сутності, звʼязки графа, задачі."""
+    """Write the analysis result: entities, graph links, tasks."""
     from app.services import enrichment, tg_entities
 
     entity_ids: set[int] = set()
@@ -845,9 +846,9 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
                     entity_ids.add(eid)
         conn.commit()
 
-    # Локальний перерахунок ПЕРЕД вставкою знайдених Claude: він стирає всі
-    # `source='comment'` звʼязки запису, тож зворотний порядок з'їв би те, що
-    # ми щойно записали.
+    # Local recompute BEFORE inserting what Claude found: it erases all
+    # `source='comment'` links of the recording, so the reverse order would eat what
+    # we just wrote.
     link_entities(db_path, transcription_id)
 
     with get_db_connection(db_path) as conn:
@@ -858,9 +859,9 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
                 "(transcription_id, entity_id, mention_count, source) "
                 "VALUES (?, ?, 1, ?)", (transcription_id, eid, ENTITY_SOURCE))
 
-        # Свої задачі переписуємо цілком — саме заради цього у v38 зʼявився
-        # comment_id. Без нього повторний розбір або стирав би задачі сусідніх
-        # коментарів того ж запису, або плодив дублі.
+        # Own tasks are rewritten entirely, which is exactly why v38 introduced
+        # comment_id. Without it a repeated analysis would either erase tasks of neighbouring
+        # comments of the same recording or breed duplicates.
         c.execute("DELETE FROM action_items WHERE comment_id = ?", (comment_id,))
         written = 0
         for it in (parsed.get("action_items") or []):
@@ -886,8 +887,8 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
         with get_db_connection(db_path) as conn:
             enrichment._recompute_entity_aggregates(conn.cursor(), entity_ids)
             conn.commit()
-        # Нові сутності мають почати ловитись локальним шаром одразу, а не
-        # через 5 хвилин, коли протухне кеш назв.
+        # New entities must start being caught by the local layer right away, not
+        # in 5 minutes when the name cache expires.
         tg_entities.reset_names_cache()
 
     return {"entities": len(entity_ids), "action_items": written}
@@ -895,16 +896,16 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
 
 def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
             force: bool = False, effort: str = "low") -> dict:
-    """Витягти з коментаря задачі й сутності через Claude.
+    """Extract tasks and entities from the comment via Claude.
 
-    ЗАПУСКАЄТЬСЯ КНОПКОЮ, НЕ АВТОМАТИЧНО. Автоматичний розбір кожного
-    коментаря — це платний виклик на кожну замітку, включно з «ага», і рішення
-    власника (24.07.2026) прямо тримає Claude на тому, що справді того варте.
-    Локальний шар (`link_entities`) працює сам і безкоштовно.
+    STARTED BY A BUTTON, NOT AUTOMATICALLY. Automatic analysis of every
+    comment is a paid call per note, including "uh-huh", and the owner's decision
+    (24.07.2026) keeps Claude on what is really worth it.
+    The local layer (`link_entities`) works on its own and for free.
 
-    Без якоря (`resolve_transcription` → None) виходимо ДО виклику моделі:
-    задачу нема куди покласти (`action_items.transcription_id` NOT NULL), тож
-    платити за витяг, який нікуди не запишеться, немає сенсу.
+    Without an anchor (`resolve_transcription` → None) we exit BEFORE calling the model:
+    there is nowhere to put the task (`action_items.transcription_id` NOT NULL), so
+    paying for an extraction that will be written nowhere makes no sense.
     """
     from app.services import enrichment, text_polishing
 
@@ -921,22 +922,22 @@ def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
     tid = resolve_transcription(db_path, c["target_type"], c["target_ref"])
     if tid is None:
         return {"status": "no_anchor", "comment_id": comment_id,
-                "reason": f"{c['target_type']}#{c['target_id']} без транскрипта"}
+                "reason": tr("svc_pipes.comments.reason.no_transcript", target_type=c['target_type'], target_id=c['target_id'])}
 
     try:
         parsed = text_polishing.extract_comment_items(
             c["body"], comment_date=str(c["created_at"])[:10],
             model=model, effort=effort)
     except Exception as exc:
-        # Мʼяка деградація, як у card-фазі збагачення: коментар лишається на
-        # картці й у пошуку, розбір можна повторити. Логуємо — мовчазний збій
-        # тут читався б як «Claude нічого не знайшов».
-        logger.warning("[comments] розбір #%s не вдався: %s", comment_id, exc)
+        # Soft degradation, as in the card phase of enrichment: the comment stays on
+        # the card and in search, the analysis can be repeated. We log: a silent failure
+        # here would read as "Claude found nothing".
+        logger.warning("[comments] analysis of #%s failed: %s", comment_id, exc)
         return {"status": "retry_needed", "comment_id": comment_id,
                 "error": str(exc)}
 
     counts = _persist_analysis(db_path, comment_id, tid, parsed)
-    logger.info("[comments] #%s розібрано: сутностей=%d, задач=%d (in=%d out=%d)",
+    logger.info("[comments] #%s analyzed: entities=%d, tasks=%d (in=%d out=%d)",
                 comment_id, counts["entities"], counts["action_items"],
                 parsed.get("input_tokens", 0), parsed.get("output_tokens", 0))
     return {
@@ -965,13 +966,13 @@ def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="python -m app.services.comments")
     p.add_argument("command", choices=["reindex", "relink", "analyze", "stats"])
     p.add_argument("id", nargs="?", type=int, default=None,
-                   help="id коментаря (для analyze)")
+                   help="comment id (for analyze)")
     p.add_argument("--db", default=_default_db())
     p.add_argument("--force", action="store_true",
-                   help="переіндексувати/перерозібрати навіть уже оброблені")
+                   help="reindex/reanalyze even those already processed")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--dry-run", action="store_true",
-                   help="лише показати, скільки роботи, нічого не писати")
+                   help="only show how much work there is, write nothing")
     a = p.parse_args(argv)
 
     if a.command == "stats":
@@ -980,8 +981,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
         res = relink_all(a.db, dry_run=a.dry_run)
     elif a.command == "analyze":
         if a.id is None:
-            p.error("analyze потребує id коментаря (розбір платний — "
-                    "масового прогону тут навмисно немає)")
+            p.error("analyze needs a comment id (analysis is paid — "
+                    "a bulk run is deliberately absent here)")
         res = analyze(a.db, a.id, force=a.force)
     else:
         res = reindex(a.db, force=a.force, limit=a.limit, dry_run=a.dry_run)

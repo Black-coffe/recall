@@ -1,26 +1,26 @@
-"""T2.6 (REMEDIATION_PLAN Волна 2): статичний лінт-гейт проти прямого
-write-SQL у telegram_listener.py.
+"""T2.6 (REMEDIATION_PLAN Wave 2): a static lint gate against direct
+write SQL in telegram_listener.py.
 
-Архітектурний інваріант: telegram_listener.py — ОКРЕМИЙ процес (Telethon),
-і має писати у SQLite ЛИШЕ через HTTP-проксі на app.py (/api/telegram/ingest,
-/api/telegram/chats/toggle) — не напряму. app.py лишається єдиним писарем,
-менше шансів на конкурентні `database is locked` навіть із busy_timeout
-(Волна 1, T2.3). Раніше цей інваріант порушувався: `cmd_toggle` робив
-`conn.execute("INSERT INTO tg_monitored_chats ...")` напряму (T2.6 це
-виправляє — див. telegram_listener.py::cmd_toggle, тепер POST на app.py).
+Architectural invariant: telegram_listener.py is a SEPARATE process (Telethon),
+and must write to SQLite ONLY through the HTTP proxy to app.py (/api/telegram/ingest,
+/api/telegram/chats/toggle) — not directly. app.py stays the only writer,
+fewer chances of concurrent `database is locked` even with busy_timeout
+(Wave 1, T2.3). Earlier this invariant was violated: `cmd_toggle` ran
+`conn.execute("INSERT INTO tg_monitored_chats ...")` directly (T2.6 fixes
+this — see telegram_listener.py::cmd_toggle, now a POST to app.py).
 
-Цей тест — не unit-тест конкретної функції, а СТАТИЧНИЙ ГЕЙТ: парсить AST
-telegram_listener.py і падає, якщо десь з'явиться НОВИЙ `.execute(...)`
-з SQL-рядком, що починається на INSERT/UPDATE/DELETE. Читання (SELECT) і
-PRAGMA лишаються дозволеними — вони не пишуть у БД.
+This test is not a unit test of a specific function but a STATIC GATE: it parses the AST of
+telegram_listener.py and fails if a NEW `.execute(...)` appears anywhere
+with an SQL string starting with INSERT/UPDATE/DELETE. Reads (SELECT) and
+PRAGMA stay allowed — they do not write to the DB.
 
-Якщо тест впав після твоєї правки:
-  1. Найімовірніше — переведи запис на HTTP-проксі до app.py (як зроблено
-     для ingest і chats/toggle), а не пиши в БД напряму з цього процесу.
-  2. Якщо прямий запис дійсно виправданий (напр. документована легітимна
-     друга «писар»-роль) — онови ALLOWLIST нижче з коментарем-обґрунтуванням
-     і зафіксуй рішення в docs/REMEDIATION_PLAN.md + memory/ проєкту (Варіант
-     Б з T2.6 explicitly documents dual-writer + retry/busy_timeout).
+If the test failed after your change:
+  1. Most likely — move the write to the HTTP proxy to app.py (as done
+     for ingest and chats/toggle), and do not write to the DB directly from this process.
+  2. If a direct write is really justified (e.g. a documented legitimate
+     second «writer» role) — update ALLOWLIST below with a justifying comment
+     and record the decision in docs/REMEDIATION_PLAN.md + the project's memory/ (Option
+     B from T2.6 explicitly documents dual-writer + retry/busy_timeout).
 """
 from __future__ import annotations
 
@@ -29,23 +29,23 @@ from pathlib import Path
 
 LISTENER_PATH = Path(__file__).resolve().parent.parent / "telegram_listener.py"
 
-# Порожньо навмисно: telegram_listener.py наразі НЕ повинен мати жодного
-# прямого write-SQL. Кожен запис (chat_id, chat, tg_monitored_chats) іде
-# через HTTP на app.py. Якщо колись знадобиться легітимний виняток — додай
-# сюди номер рядка з коментарем чому, а не просто розширюй мовчки.
+# Empty on purpose: telegram_listener.py currently MUST NOT have any
+# direct write SQL. Every write (chat_id, chat, tg_monitored_chats) goes
+# through HTTP to app.py. If a legitimate exception is ever needed — add
+# the line number here with a comment why, and do not just widen it silently.
 ALLOWLIST_LINES: set[int] = set()
 
 _WRITE_KEYWORDS = ("insert", "update", "delete", "replace")
 
 
 def _sql_literal(node: ast.AST) -> str | None:
-    """Витягти константний SQL-рядок з першого аргумента .execute(...), якщо
-    можливо (Constant-рядок або f-string зі статичним префіксом)."""
+    """Extract a constant SQL string from the first argument of .execute(...), if
+    possible (a Constant string or an f-string with a static prefix)."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
-        # f-string: беремо лише константні шматки — достатньо щоб побачити
-        # ключове слово SQL на початку (воно завжди статичне в цьому файлі).
+        # f-string: we take only the constant pieces — enough to see
+        # the SQL keyword at the start (it is always static in this file).
         parts = [v.value for v in node.values
                  if isinstance(v, ast.Constant) and isinstance(v.value, str)]
         return "".join(parts) if parts else None
@@ -76,19 +76,19 @@ def test_telegram_listener_has_no_direct_write_sql():
     source = LISTENER_PATH.read_text(encoding="utf-8")
     hits = _find_direct_writes(source)
     assert not hits, (
-        "telegram_listener.py містить прямий write-SQL (.execute на "
-        "INSERT/UPDATE/DELETE/REPLACE) поза allowlist — порушує інваріант "
-        "«лише app.py пише в БД» (T2.6, REMEDIATION_PLAN Волна 2). "
-        "Перевести запис на HTTP-проксі до app.py (app/blueprints/telegram.py) "
-        "або свідомо додати рядок у ALLOWLIST_LINES з поясненням.\n"
+        "telegram_listener.py contains direct write SQL (.execute on "
+        "INSERT/UPDATE/DELETE/REPLACE) outside the allowlist — violates the invariant "
+        "«only app.py writes to the DB» (T2.6, REMEDIATION_PLAN Wave 2). "
+        "Move the write to the HTTP proxy to app.py (app/blueprints/telegram.py) "
+        "or deliberately add a line to ALLOWLIST_LINES with an explanation.\n"
         + "\n".join(f"  line {ln}: {snippet}" for ln, snippet in hits)
     )
 
 
 def test_guard_detects_direct_write_when_present():
-    """Sanity-check самого гейта: переконатись що детектор дійсно ловить
-    write-SQL, а не завжди повертає порожній список (інакше тест вище —
-    пастка з фальшивим GREEN)."""
+    """Sanity check of the gate itself: make sure the detector really catches
+    write SQL and does not always return an empty list (otherwise the test above is
+    a trap with a false GREEN)."""
     fake_source = (
         "import sqlite3\n"
         "def f(conn):\n"

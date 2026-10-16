@@ -1,40 +1,40 @@
-"""Парсинг документів → чистий текст (+ легка структура) для RAG (Phase 16A).
+"""Document parsing → clean text (+ light structure) for RAG (Phase 16A).
 
-Документ перетворюється на plain-text (markdown-подібний), який кладеться у
-`transcriptions.transcript_text`. Далі ВЕСЬ нижній стек працює без змін:
-чанкінг (embeddings._chunk_from_text), локальні embeddings (e5-large), FTS5,
-Claude-enrichment (summary/сутності/action items), граф, напрямки, RAG-чат.
+A document is turned into plain text (markdown-like) that is stored in
+`transcriptions.transcript_text`. After that the WHOLE lower stack works unchanged:
+chunking (embeddings._chunk_from_text), local embeddings (e5-large), FTS5,
+Claude enrichment (summary/entities/action items), the graph, directions, the RAG chat.
 
-Парсери реєструються по розширенню. Усе локально й безкоштовно:
-  .md / .markdown / .txt — пряме читання (UTF-8, errors=replace)
-  .docx                  — python-docx (вже в deps): параграфи + таблиці → markdown
-  .pdf                   — PyMuPDF (fitz): постранічний витяг тексту (+ блоки сторінок)
-  .pptx                  — python-pptx: текст слайдів + нотатки (+ блоки слайдів)
-  .xlsx                  — openpyxl: аркуші → markdown-таблиці (+ блоки аркушів)
-  .csv                   — вбудований csv: одна таблиця (без залежності)
-  .png/.jpg/.tiff/...    — Tesseract OCR (pytesseract): текст із зображення
-  скан-PDF               — OCR-фолбек постранічно (рендер fitz → tesseract)
+Parsers are registered by extension. Everything is local and free:
+  .md / .markdown / .txt — direct reading (UTF-8, errors=replace)
+  .docx                  — python-docx (already in deps): paragraphs + tables → markdown
+  .pdf                   — PyMuPDF (fitz): per-page text extraction (+ page blocks)
+  .pptx                  — python-pptx: slide text + notes (+ slide blocks)
+  .xlsx                  — openpyxl: sheets → markdown tables (+ sheet blocks)
+  .csv                   — built-in csv: one table (no dependency)
+  .png/.jpg/.tiff/...    — Tesseract OCR (pytesseract): text from an image
+  scanned PDF            — per-page OCR fallback (fitz render → tesseract)
 
-Провенанс (Phase 16B/16C): PDF/PPTX/XLSX/CSV повертають `blocks` =
-[{text, page, section, ...}], де page — номер сторінки/слайда/аркуша. Це дозволяє
-RAG-цитатам вказувати «стор. 3 / слайд 5 / лист «Бюджет»». Формати без структури
-(md/txt/docx) повертають blocks=None.
+Provenance (Phase 16B/16C): PDF/PPTX/XLSX/CSV return `blocks` =
+[{text, page, section, ...}], where page is the page/slide/sheet number. This lets
+RAG citations point to "p. 3 / slide 5 / sheet 'Budget'". Formats without structure
+(md/txt/docx) return blocks=None.
 
-Таблиці (Phase 16C): голий дамп ячейок погано ембедиться. Тому окрім markdown
-(для FTS + структурного вектора) над зразком кожного аркуша Claude генерує
-NL-опис «що в таблиці» (text_polishing.describe_sheets, у documents.py) — він
-домішується у текст блоку → таблиця стає знаходимою семантично. Опис опційний:
-без ANTHROPIC_API_KEY лишаються тільки markdown-таблиці.
+Tables (Phase 16C): a bare cell dump embeds poorly. So besides markdown
+(for FTS + the structural vector), Claude generates over a sample of each sheet an
+NL description of "what is in the table" (text_polishing.describe_sheets, in documents.py) - it is
+mixed into the block text → the table becomes semantically findable. The description is optional:
+without ANTHROPIC_API_KEY only the markdown tables remain.
 
-OCR (Phase 16D): зображення і скан-PDF (без текстового шару) розпізнаються
-Tesseract'ом (pytesseract — обгортка над СИСТЕМНИМ tesseract.exe, БЕЗ torch/
-transformers, тому не чіпає піни — на відміну від surya/docTR). Потребує
-встановленого tesseract + мовних пакетів. ocr_available()=False → зображення
-кидають ParserUnavailable, скан-PDF → needs_ocr, решта парсингу працює.
+OCR (Phase 16D): images and scanned PDFs (without a text layer) are recognized by
+Tesseract (pytesseract is a wrapper over the SYSTEM tesseract.exe, WITHOUT torch/
+transformers, so it does not touch the pins - unlike surya/docTR). Requires an
+installed tesseract + language packs. ocr_available()=False → images
+raise ParserUnavailable, scanned PDFs → needs_ocr, the rest of parsing works.
 
-Lazy guarded imports: модуль імпортується навіть без PyMuPDF/python-pptx/openpyxl/
-pytesseract — ці формати тоді кидають ParserUnavailable, а .md/.txt/.docx/.csv
-працюють завжди (python-docx у базових deps, csv вбудований).
+Lazy guarded imports: the module imports even without PyMuPDF/python-pptx/openpyxl/
+pytesseract - those formats then raise ParserUnavailable, while .md/.txt/.docx/.csv
+always work (python-docx is in the base deps, csv is built in).
 """
 from __future__ import annotations
 
@@ -44,40 +44,41 @@ import os
 import re
 from typing import Callable, Optional
 
+from app.core.i18n import tr
 from app.utils.files import ALLOWED_DOCUMENT_EXTENSIONS
 from app.utils.proc import silence_pytesseract_console_windows
 
 
 logger = logging.getLogger(__name__)
 
-# Бамп при зміні логіки парсингу → re-parse застарілих (16E).
+# Bump when the parsing logic changes → re-parse stale documents (16E).
 PARSER_VERSION = 1
 
-# Якщо у текстовому шарі PDF менше символів на сторінку — ймовірно скан без
-# текстового шару (потрібен OCR, Phase 16D). Помічаємо у meta, але текст
-# все одно повертаємо (раптом є частковий шар).
+# If a PDF text layer has fewer characters per page than this, it is probably a scan without a
+# text layer (OCR needed, Phase 16D). We flag it in meta, but still
+# return the text (there may be a partial layer).
 _PDF_MIN_CHARS_PER_PAGE = 24
 
 # --- OCR (Phase 16D) ---
-# Tesseract через pytesseract — тонка обгортка над системним бінарём, БЕЗ
-# torch/transformers (на відміну від surya/docTR) → не чіпає крихку цепочку
-# пінів. Потребує встановленого tesseract.exe + мовні пакети у PATH.
+# Tesseract via pytesseract - a thin wrapper over the system binary, WITHOUT
+# torch/transformers (unlike surya/docTR) → does not touch the fragile chain of
+# pins. Requires an installed tesseract.exe + language packs in PATH.
 _OCR_LANG = os.environ.get("OCR_LANG", "ukr+rus+eng")
-_OCR_DPI = int(os.environ.get("OCR_DPI", "200"))      # рендер сторінки PDF для OCR
-_OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "50"))  # кап синхронного OCR
+_OCR_DPI = int(os.environ.get("OCR_DPI", "200"))      # PDF page render for OCR
+_OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "50"))  # cap on synchronous OCR
 _ocr_unavailable_reason: Optional[str] = None
 
 
 class DocumentParseError(Exception):
-    """Не вдалося розібрати документ (порожній / биткий / непідтримуваний)."""
+    """Could not parse the document (empty / corrupt / unsupported)."""
 
 
 class NoTextFound(DocumentParseError):
-    """OCR відпрацював, але тексту на зображенні нема (звичайне фото). Не збій розбору."""
+    """OCR ran, but there is no text in the image (an ordinary photo). Not a parse failure."""
 
 
 class ParserUnavailable(DocumentParseError):
-    """Парсер для формату недоступний (напр. PyMuPDF не встановлено для PDF)."""
+    """The parser for the format is unavailable (e.g. PyMuPDF is not installed for PDF)."""
 
 
 def ext_of(filename: str) -> str:
@@ -91,34 +92,34 @@ def is_supported(filename: str) -> bool:
 
 
 def content_hash(text: str) -> str:
-    """sha256 нормалізованого тексту — для дедупу повторних завантажень (16E)."""
+    """sha256 of the normalized text - for dedup of repeated uploads (16E)."""
     return hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
 
 
 def _normalize_text(text: str) -> str:
-    """Уніфікувати переноси рядків і схлопнути >2 порожніх рядки поспіль."""
+    """Unify line breaks and collapse more than 2 consecutive empty lines."""
     if not text:
         return ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+\n", "\n", text)        # трейлінг-пробіли
-    text = re.sub(r"\n{3,}", "\n\n", text)         # ≤1 порожній рядок між блоками
+    text = re.sub(r"[ \t]+\n", "\n", text)        # trailing spaces
+    text = re.sub(r"\n{3,}", "\n\n", text)         # ≤1 empty line between blocks
     return text.strip()
 
 
 # ============================================================
-# OCR (Phase 16D) — graceful, як embeddings.is_available()
+# OCR (Phase 16D) - graceful, like embeddings.is_available()
 # ============================================================
 
 _TESSERACT_DEFAULT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 def _configure_tesseract() -> None:
-    """Знайти tesseract поза PATH і мовні пакети поза Program Files.
+    """Find tesseract outside PATH and language packs outside Program Files.
 
-    winget-інсталяція UB-Mannheim кладе бінар у Program Files, але НЕ в PATH, і
-    несе лише eng/osd; ukr/rus без прав адміністратора туди не докласти. Тому:
-    бінар — ``OCR_TESSERACT_CMD`` або стандартний шлях інсталятора; мовні пакети —
-    ``OCR_TESSDATA_DIR`` або ``%LOCALAPPDATA%\\Recall\\tessdata`` (якщо тека є)."""
+    The UB-Mannheim winget install puts the binary in Program Files, but NOT in PATH, and
+    carries only eng/osd; ukr/rus cannot be added there without admin rights. So:
+    the binary - ``OCR_TESSERACT_CMD`` or the installer's standard path; language packs -
+    ``OCR_TESSDATA_DIR`` or ``%LOCALAPPDATA%\\Recall\\tessdata`` (if the folder exists)."""
     import shutil
     import pytesseract
     cmd = os.environ.get("OCR_TESSERACT_CMD", "")
@@ -133,54 +134,51 @@ def _configure_tesseract() -> None:
 
 
 def ocr_available() -> bool:
-    """Чи доступний OCR: pytesseract імпортується І системний tesseract присутній."""
+    """Whether OCR is available: pytesseract imports AND the system tesseract is present."""
     global _ocr_unavailable_reason
     try:
         import pytesseract  # noqa: F401
         from PIL import Image  # noqa: F401
     except Exception as e:  # pragma: no cover
-        _ocr_unavailable_reason = f"pytesseract/Pillow недоступні: {e}"
+        _ocr_unavailable_reason = tr("svc_media.doc.err.ocr_py_unavailable", error=e)
         return False
     try:
         _configure_tesseract()
     except Exception:
-        logger.debug("налаштування шляхів tesseract не вдалось", exc_info=True)
+        logger.debug("tesseract path setup failed", exc_info=True)
     try:
         import pytesseract
-        # get_tesseract_version() іде повз subprocess_args() самого pytesseract
-        # (там SW_HIDE) — без патчу під pythonw.exe блимає консоль.
+        # get_tesseract_version() bypasses pytesseract's own subprocess_args()
+        # (that is where SW_HIDE is) - without the patch the console flashes under pythonw.exe.
         silence_pytesseract_console_windows()
         pytesseract.get_tesseract_version()
         return True
     except Exception:
-        _ocr_unavailable_reason = (
-            "системний Tesseract не знайдено. Встановіть Tesseract OCR "
-            "(+ мовні пакети ukr/rus/eng) і додайте його у PATH."
-        )
+        _ocr_unavailable_reason = tr("svc_media.doc.err.tesseract_missing")
         return False
 
 
 def ocr_unavailability_reason() -> str:
-    return _ocr_unavailable_reason or "OCR недоступний"
+    return _ocr_unavailable_reason or tr("svc_media.doc.err.ocr_unavailable")
 
 
 def _ocr_image_obj(img) -> str:
-    """OCR одного PIL-зображення (картинка або сторінка-скан PDF). Пробує _OCR_LANG,
-    з фолбеком на дефолтну мову (якщо бракує мовного пакету tesseract кидає
-    TesseractError). Паролі й токени в розпізнаному тексті одразу маскуються
-    (ADR-030): OCR — єдина точка, через яку текст з екрана/скану входить в архів,
-    тож маска тут накриває кожного споживача (Telegram, завантаження з UI)."""
+    """OCR of a single PIL image (a picture or a scanned PDF page). Tries _OCR_LANG,
+    falling back to the default language (if the tesseract language pack is missing it raises
+    TesseractError). Passwords and tokens in the recognized text are masked right away
+    (ADR-030): OCR is the only point through which text from a screen/scan enters the archive,
+    so the mask here covers every consumer (Telegram, UI upload)."""
     import pytesseract
     try:
         text = pytesseract.image_to_string(img, lang=_OCR_LANG)
     except pytesseract.TesseractError:
         try:
-            text = pytesseract.image_to_string(img)  # дефолтна мова (eng)
+            text = pytesseract.image_to_string(img)  # default language (eng)
         except Exception:
-            logger.debug("OCR дефолтною мовою не вдався", exc_info=True)
+            logger.debug("OCR with the default language failed", exc_info=True)
             return ""
     except Exception:
-        logger.debug("OCR не вдався", exc_info=True)
+        logger.debug("OCR failed", exc_info=True)
         return ""
     return _mask_secrets(text)
 
@@ -193,7 +191,7 @@ def _mask_secrets(text: str) -> str:
 
 
 def _ocr_pdf_page(page) -> str:
-    """Відрендерити сторінку PDF у растр і прогнати через OCR."""
+    """Render a PDF page to a raster and run it through OCR."""
     try:
         import io
         from PIL import Image
@@ -201,23 +199,23 @@ def _ocr_pdf_page(page) -> str:
         with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
             return _normalize_text(_ocr_image_obj(img))
     except Exception as e:  # pragma: no cover
-        logger.warning("[ocr] сторінку не розпізнано: %s", e)
+        logger.warning("[ocr] page not recognized: %s", e)
         return ""
 
 
 # ============================================================
-# Парсери по форматах
+# Parsers by format
 # ============================================================
 
 def _parse_text(path: str) -> dict:
-    """.md / .markdown / .txt — пряме читання."""
+    """.md / .markdown / .txt - direct reading."""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         raw = f.read()
     return {"text": _normalize_text(raw), "page_count": None, "meta": {}}
 
 
 def _docx_iter_blocks(doc):
-    """Ітерувати параграфи і таблиці у порядку появи в документі."""
+    """Iterate over paragraphs and tables in the order they appear in the document."""
     from docx.document import Document as _DocxDocument
     from docx.oxml.table import CT_Tbl
     from docx.oxml.text.paragraph import CT_P
@@ -233,7 +231,7 @@ def _docx_iter_blocks(doc):
 
 
 def _docx_heading_level(paragraph) -> Optional[int]:
-    """Рівень заголовка (1..6) якщо стиль 'Heading N' / 'Заголовок N', інакше None."""
+    """Heading level (1..6) if the style is 'Heading N' / 'Заголовок N', otherwise None."""
     try:
         name = (paragraph.style.name or "")
     except Exception:
@@ -259,11 +257,11 @@ def _docx_table_to_markdown(table) -> str:
 
 
 def _parse_docx(path: str) -> dict:
-    """.docx — параграфи (із заголовками) + таблиці → markdown."""
+    """.docx - paragraphs (with headings) + tables → markdown."""
     try:
         import docx  # python-docx
     except ImportError as e:  # pragma: no cover
-        raise ParserUnavailable(f"python-docx недоступний: {e}") from e
+        raise ParserUnavailable(tr("svc_media.doc.err.docx_missing", error=e)) from e
 
     doc = docx.Document(path)
     parts: list[str] = []
@@ -283,16 +281,15 @@ def _parse_docx(path: str) -> dict:
 
 
 def _parse_pdf(path: str) -> dict:
-    """.pdf — постранічний витяг тексту через PyMuPDF (fitz)."""
+    """.pdf - per-page text extraction via PyMuPDF (fitz)."""
     try:
         import fitz  # PyMuPDF
     except ImportError as e:
         raise ParserUnavailable(
-            "PyMuPDF не встановлено — PDF-парсинг недоступний. "
-            "Встановіть: pip install PyMuPDF"
+            tr("svc_media.doc.err.pdf_missing")
         ) from e
 
-    ocr_on = ocr_available()  # Phase 16D: фолбек для сканів без текстового шару
+    ocr_on = ocr_available()  # Phase 16D: fallback for scans without a text layer
     pages: list[str] = []
     blocks: list[dict] = []
     ocr_pages = 0
@@ -300,7 +297,7 @@ def _parse_pdf(path: str) -> dict:
         page_count = doc.page_count
         for i, page in enumerate(doc):
             ptext = _normalize_text(page.get_text("text") or "")
-            # Сторінка майже без тексту + OCR доступний → розпізнаємо растром.
+            # Page with almost no text + OCR available → recognize it as a raster.
             if len(ptext) < _PDF_MIN_CHARS_PER_PAGE and ocr_on and ocr_pages < _OCR_MAX_PAGES:
                 otext = _ocr_pdf_page(page)
                 if len(otext) > len(ptext):
@@ -308,28 +305,27 @@ def _parse_pdf(path: str) -> dict:
                     ocr_pages += 1
             pages.append(ptext)
             if ptext:
-                # Провенанс (Phase 16B): кожна непорожня сторінка — окремий блок.
+                # Provenance (Phase 16B): every non-empty page is a separate block.
                 blocks.append({"text": ptext, "page": i + 1, "section": None})
     text = _normalize_text("\n\n".join(p for p in pages if p))
 
     meta = {}
     if ocr_pages:
         meta["ocr_pages"] = ocr_pages
-    # Скан без текстового шару І OCR недоступний → позначаємо (повідомлення в parse_document).
+    # Scan without a text layer AND OCR unavailable → flag it (the message is in parse_document).
     if page_count and len(text) < _PDF_MIN_CHARS_PER_PAGE * page_count and not ocr_on:
         meta["needs_ocr"] = True
     return {"text": text, "page_count": page_count, "blocks": blocks, "meta": meta}
 
 
 def _parse_pptx(path: str) -> dict:
-    """.pptx — текст слайдів + нотатки доповідача (Phase 16B). page=номер слайда,
-    section=заголовок слайда (для провенансу цитат)."""
+    """.pptx - slide text + speaker notes (Phase 16B). page=slide number,
+    section=slide title (for citation provenance)."""
     try:
         from pptx import Presentation  # python-pptx
     except ImportError as e:
         raise ParserUnavailable(
-            "python-pptx не встановлено — PPTX-парсинг недоступний. "
-            "Встановіть: pip install python-pptx"
+            tr("svc_media.doc.err.pptx_missing")
         ) from e
 
     prs = Presentation(path)
@@ -337,8 +333,8 @@ def _parse_pptx(path: str) -> dict:
     blocks: list[dict] = []
     parts: list[str] = []
     for i, slide in enumerate(slides):
-        # Заголовок шукаємо за shape_id (НЕ за `is`: python-pptx віддає нові
-        # обгортки на кожній ітерації, тож identity-порівняння не спрацьовує).
+        # Look the title up by shape_id (NOT by `is`: python-pptx hands out new
+        # wrappers on every iteration, so an identity comparison does not work).
         title_id = None
         try:
             _ts = slide.shapes.title
@@ -360,7 +356,7 @@ def _parse_pptx(path: str) -> dict:
                 except Exception:
                     pass
             lines.append(txt)
-        # нотатки доповідача
+        # speaker notes
         notes = ""
         try:
             if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
@@ -380,16 +376,16 @@ def _parse_pptx(path: str) -> dict:
 
 
 # ------------------------------------------------------------
-# Таблиці: XLSX / CSV (Phase 16C)
+# Tables: XLSX / CSV (Phase 16C)
 # ------------------------------------------------------------
-# Кап рядків на аркуш для збереженого markdown — щоб гігантський дамп не роздув
-# transcript_text. Опис («що в таблиці») робить Claude (text_polishing.describe_sheets)
-# над зразком — тому повний обсяг для семантики не потрібен.
+# Row cap per sheet for the stored markdown - so a giant dump does not bloat
+# transcript_text. The description ("what is in the table") is made by Claude (text_polishing.describe_sheets)
+# over a sample - so the full volume is not needed for semantics.
 _TABLE_MAX_ROWS = 1000
 
 
 def _md_cell(v) -> str:
-    """Значення ячейки → безпечний markdown-текст (екран pipe, без переносів)."""
+    """Cell value → safe markdown text (pipe escaped, no line breaks)."""
     if v is None:
         return ""
     s = str(v).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
@@ -397,7 +393,7 @@ def _md_cell(v) -> str:
 
 
 def _rows_to_markdown(rows: list[list]) -> tuple[str, int, int]:
-    """rows (перший = заголовок) → markdown-таблиця. Returns (md, n_rows, n_cols)."""
+    """rows (first = header) → markdown table. Returns (md, n_rows, n_cols)."""
     rows = [r for r in rows if r is not None]
     if not rows:
         return "", 0, 0
@@ -416,14 +412,13 @@ def _rows_to_markdown(rows: list[list]) -> tuple[str, int, int]:
 
 
 def _parse_xlsx(path: str) -> dict:
-    """.xlsx — кожен аркуш → markdown-таблиця як окремий блок (page=індекс
-    аркуша, section=назва аркуша). data_only=True → значення формул, не формули."""
+    """.xlsx - each sheet → a markdown table as a separate block (page=sheet
+    index, section=sheet name). data_only=True → formula values, not formulas."""
     try:
         from openpyxl import load_workbook
     except ImportError as e:
         raise ParserUnavailable(
-            "openpyxl не встановлено — XLSX-парсинг недоступний. "
-            "Встановіть: pip install openpyxl"
+            tr("svc_media.doc.err.xlsx_missing")
         ) from e
 
     wb = load_workbook(path, read_only=True, data_only=True)
@@ -460,7 +455,7 @@ def _parse_xlsx(path: str) -> dict:
 
 
 def _parse_csv(path: str) -> dict:
-    """.csv — один блок-таблиця (page=1). Делімітер визначається авто (,/;/таб)."""
+    """.csv - one table block (page=1). The delimiter is detected automatically (,/;/tab)."""
     import csv as _csv
 
     rows: list[list] = []
@@ -491,31 +486,30 @@ def _parse_csv(path: str) -> dict:
 
 
 # ------------------------------------------------------------
-# Зображення: OCR (Phase 16D)
+# Images: OCR (Phase 16D)
 # ------------------------------------------------------------
 _IMAGE_EXTS = ("png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp")
 
 
 def _parse_image(path: str) -> dict:
-    """Зображення → текст через OCR (Tesseract). Без OCR — ParserUnavailable."""
+    """Image → text via OCR (Tesseract). Without OCR - ParserUnavailable."""
     if not ocr_available():
         raise ParserUnavailable(
-            "OCR недоступний — розпізнавання зображень вимкнено. "
-            + ocr_unavailability_reason()
+            tr("svc_media.doc.err.image_ocr_off", reason=ocr_unavailability_reason())
         )
     try:
         from PIL import Image
     except ImportError as e:  # pragma: no cover
-        raise ParserUnavailable(f"Pillow недоступний: {e}") from e
+        raise ParserUnavailable(tr("svc_media.doc.err.pillow_missing", error=e)) from e
     try:
         with Image.open(path) as img:
             text = _normalize_text(_ocr_image_obj(img))
     except Exception as e:
-        raise DocumentParseError(f"Не вдалося відкрити зображення: {e}") from e
+        raise DocumentParseError(tr("svc_media.doc.err.image_open", error=e)) from e
     return {"text": text, "page_count": 1, "blocks": None, "meta": {"ocr": True}}
 
 
-# розширення → парсер
+# extension → parser
 _PARSERS: dict[str, Callable[[str], dict]] = {
     "md": _parse_text,
     "markdown": _parse_text,
@@ -530,22 +524,22 @@ _PARSERS: dict[str, Callable[[str], dict]] = {
 
 
 # ============================================================
-# Публічний API
+# Public API
 # ============================================================
 
 def parse_document(path: str, filename: Optional[str] = None) -> dict:
-    """Розібрати документ → текст + метадані. Тип визначається за розширенням
-    filename (якщо задано) інакше path.
+    """Parse a document → text + metadata. The type is determined by the extension of
+    filename (if given), otherwise path.
 
     Returns {text, doc_type, page_count, byte_size, content_hash, char_count,
              parser_version, meta}.
-    Raises DocumentParseError якщо формат не підтримується, парсер недоступний,
-    або витягнутий текст порожній.
+    Raises DocumentParseError if the format is unsupported, the parser is unavailable,
+    or the extracted text is empty.
     """
     ext = ext_of(filename or path)
     parser = _PARSERS.get(ext)
     if parser is None:
-        raise DocumentParseError(f"Непідтримуваний формат документа: '.{ext}'")
+        raise DocumentParseError(tr("svc_media.doc.err.unsupported_format", ext=ext))
 
     try:
         byte_size = os.path.getsize(path)
@@ -558,12 +552,11 @@ def parse_document(path: str, filename: Optional[str] = None) -> dict:
         meta = result.get("meta") or {}
         if meta.get("needs_ocr"):
             raise DocumentParseError(
-                "У PDF не знайдено текстового шару (схоже на скан), а OCR недоступний. "
-                "Встановіть Tesseract OCR (+ мовні пакети ukr/rus/eng) у PATH."
+                tr("svc_media.doc.err.pdf_no_text_layer")
             )
         if meta.get("ocr"):
-            raise NoTextFound("OCR не знайшов тексту на зображенні.")
-        raise DocumentParseError("Документ порожній або не містить тексту")
+            raise NoTextFound(tr("svc_media.doc.err.ocr_no_text"))
+        raise DocumentParseError(tr("svc_media.doc.err.empty"))
 
     return {
         "text": text,
@@ -573,8 +566,8 @@ def parse_document(path: str, filename: Optional[str] = None) -> dict:
         "content_hash": content_hash(text),
         "char_count": len(text),
         "parser_version": PARSER_VERSION,
-        # Блоки {text, page, section} для провенансу (Phase 16B). None для
-        # форматів без структури (md/txt/docx) → чанкінг падає на текстовий.
+        # {text, page, section} blocks for provenance (Phase 16B). None for
+        # formats without structure (md/txt/docx) → chunking falls back to the text.
         "blocks": result.get("blocks"),
         "meta": result.get("meta") or {},
     }

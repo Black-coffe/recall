@@ -1,38 +1,38 @@
-"""Settings-backed config write endpoints (REMEDIATION_PLAN Волна 3, T5.1 + T5.2).
+"""Settings-backed config write endpoints (REMEDIATION_PLAN Wave 3, T5.1 + T5.2).
 
-Two things a non-technical user must be able to do from Settings без
-редагування ``.env`` руками:
+Two things a non-technical user must be able to do from Settings without
+editing ``.env`` by hand:
 
-  1. **T5.1** — вставити Anthropic API-ключ. Розблоковує polish/enrich/
-     summarize/RAG-чат (усе, що йде через ``app.services.text_polishing`` /
-     ``app.services.rag``, обидва читають ``os.environ["ANTHROPIC_API_KEY"]``).
-  2. **T5.2** — увімкнути/вимкнути Co-pilot. Замінює стару
-     developer-інструкцію «додайте COPILOT_ENABLED=1 у .env і перезапустіть»
-     (``settings.js`` до цієї задачі).
+  1. **T5.1** — paste an Anthropic API key. Unblocks polish/enrich/
+     summarize/RAG chat (everything that goes through ``app.services.text_polishing`` /
+     ``app.services.rag``, both read ``os.environ["ANTHROPIC_API_KEY"]``).
+  2. **T5.2** — turn the Co-pilot on/off. Replaces the old
+     developer instruction "add COPILOT_ENABLED=1 to .env and restart"
+     (``settings.js`` before this task).
 
-Обидва пишуться у ``.env`` через ``python-dotenv``'s ``set_key`` — вона
-чіпає ЛИШЕ названий ключ (решта файлу лишається як є). Це НЕ «записати
-довільну env-змінну»: ендпоінти жорстко прибиті до ДВОХ конкретних імен
-(``ANTHROPIC_API_KEY``, ``COPILOT_ENABLED``) — немає generic
-``{key, value}``-body ендпоінта, яким клієнт міг би переписати будь-що
-(``PYTHONPATH``, ``RECALL_API_KEY``, шлях до БД тощо). Див. ризик-нотатку в
+Both are written to ``.env`` via ``python-dotenv``'s ``set_key`` — it
+touches ONLY the named key (the rest of the file stays as is). This is NOT "write
+an arbitrary env variable": the endpoints are hard-pinned to TWO specific names
+(``ANTHROPIC_API_KEY``, ``COPILOT_ENABLED``) — there is no generic
+``{key, value}`` body endpoint with which a client could overwrite anything
+(``PYTHONPATH``, ``RECALL_API_KEY``, the DB path, etc.). See the risk note in
 REMEDIATION_PLAN T5.1.
 
-**ANTHROPIC_API_KEY застосовується одразу, без рестарту.** Клієнт Claude у
-``text_polishing._get_client()`` будується ліниво з ``os.environ`` при
-першому виклику і мемоізується ЛИШЕ при успіху (немає ключа → RuntimeError,
-``_client`` лишається ``None`` → наступний виклик пробує знову). Тож
-записавши свіжий ключ у ``os.environ`` одразу після збереження, наступний-
-таки polish/enrich viклик підхопить його без рестарту процесу.
+**ANTHROPIC_API_KEY is applied immediately, without a restart.** The Claude client in
+``text_polishing._get_client()`` is built lazily from ``os.environ`` on the
+first call and memoized ONLY on success (no key → RuntimeError,
+``_client`` stays ``None`` → the next call tries again). So
+by writing the fresh key to ``os.environ`` right after saving, the next
+polish/enrich call picks it up without restarting the process.
 
-**COPILOT_ENABLED softly-apply НЕ можна.** ``copilot_service`` створюється
-ОДИН РАЗ при старті застосунку з ``cfg.COPILOT_ENABLED`` (``app.py`` ~808) —
-рантайм-шляху ретроактивно створити/знищити його немає. Тому тумблер тут
-чесно повертає ``restart_required: true`` і НІКОЛИ не бреше, що ввімкнулось
-без перезапуску (REMEDIATION_PLAN T5.2 risk note).
+**COPILOT_ENABLED cannot be softly applied.** ``copilot_service`` is created
+ONCE at application startup from ``cfg.COPILOT_ENABLED`` (``app.py`` ~808) —
+there is no runtime path to retroactively create/destroy it. So the toggle here
+honestly returns ``restart_required: true`` and NEVER lies that it took effect
+without a restart (REMEDIATION_PLAN T5.2 risk note).
 
-Ключ ніколи не логується і не повертається назад клієнту (тільки
-``configured: bool``) — див. ``get_anthropic_key_status``.
+The key is never logged and never returned back to the client (only
+``configured: bool``) — see ``get_anthropic_key_status``.
 """
 from __future__ import annotations
 
@@ -49,26 +49,26 @@ from app.core.i18n import tr, ui_lang_setting
 logger = logging.getLogger(__name__)
 settings_bp = Blueprint('settings_api', __name__)
 
-# sk-ant-api03-... — реальні ключі значно довші, але не прибиваємо цвяхами
-# точний підформат (може змінитись); просто «схоже на ключ Anthropic»,
-# без пробілів/переносів рядків (щоб не можна було injection-ом дописати
-# зайвий рядок у .env через значення).
+# sk-ant-api03-... — real keys are much longer, but we do not nail down
+# the exact subformat (it may change); just "looks like an Anthropic key",
+# without spaces/line breaks (so that an injection cannot append
+# an extra line to .env through the value).
 _KEY_RE = re.compile(r'^sk-ant-[A-Za-z0-9_\-]{8,300}$')
 
 
 def _env_path() -> Path:
-    """Шлях до .env у корені проєкту (app.root_path — там, де app.py)."""
+    """Path to .env in the project root (app.root_path — where app.py is)."""
     return Path(current_app.root_path) / '.env'
 
 
 def _set_env_var(name: str, value: str) -> None:
-    """Записати ОДНУ конкретну env-змінну в .env + оновити os.environ поточного
-    процесу. ``name`` завжди приходить з жорстко прибитого виклику нижче —
-    НІКОЛИ з request-body, щоб цей хелпер не перетворився на generic
-    "напиши будь-яку env-змінну" примітив."""
+    """Write ONE specific env variable to .env + update os.environ of the current
+    process. ``name`` always comes from a hard-pinned call below —
+    NEVER from the request body, so this helper does not turn into a generic
+    "write any env variable" primitive."""
     from dotenv import set_key
     path = _env_path()
-    path.touch(exist_ok=True)  # set_key вимагає існуючого файлу
+    path.touch(exist_ok=True)  # set_key requires an existing file
     set_key(str(path), name, value, quote_mode='always')
     os.environ[name] = value
 
@@ -85,18 +85,18 @@ def _unset_env_var(name: str) -> None:
 
 @settings_bp.route('/api/settings/anthropic-key/status', methods=['GET'])
 def anthropic_key_status():
-    """Чи налаштований ключ. НІКОЛИ не повертає сам ключ — лише bool."""
+    """Whether the key is configured. NEVER returns the key itself — only a bool."""
     from app.services import text_polishing
     return jsonify({'configured': text_polishing.is_available()})
 
 
 @settings_bp.route('/api/settings/anthropic-key', methods=['POST'])
 def save_anthropic_key():
-    """Зберегти ANTHROPIC_API_KEY у .env + застосувати одразу (без рестарту).
+    """Save ANTHROPIC_API_KEY to .env + apply immediately (without a restart).
 
-    Body: {"api_key": "sk-ant-..."}. Валідація — лише формат (щоб відсіяти
-    очевидний мусор/paste-помилку), не перевіряє валідність проти Anthropic
-    API (для цього є /test окремо).
+    Body: {"api_key": "sk-ant-..."}. Validation is format only (to weed out
+    obvious garbage / a paste mistake), it does not check validity against the Anthropic
+    API (there is a separate /test for that).
     """
     data = request.get_json(silent=True) or {}
     raw = data.get('api_key')
@@ -114,26 +114,26 @@ def save_anthropic_key():
     try:
         _set_env_var('ANTHROPIC_API_KEY', key)
     except Exception as e:
-        logger.error("Не вдалось зберегти ANTHROPIC_API_KEY у .env: %s", e)  # NB: помилка, НЕ сам ключ
+        logger.error("Failed to save ANTHROPIC_API_KEY to .env: %s", e)  # NB: the error, NOT the key itself
         return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
 
-    # Скидаємо мемоізований anthropic-клієнт (якщо стара збірка з іншим/
-    # відсутнім ключем уже встигла закешуватись) — щоб наступний polish/
-    # enrich-виклик одразу побудував клієнт зі свіжим ключем, без рестарту.
+    # Reset the memoized anthropic client (if an old build with a different/
+    # missing key has already managed to get cached) — so the next polish/
+    # enrich call immediately builds a client with the fresh key, without a restart.
     from app.services import text_polishing
     text_polishing._client = None
 
-    logger.info("ANTHROPIC_API_KEY оновлено через Settings (довжина=%d, ключ не логується)", len(key))
+    logger.info("ANTHROPIC_API_KEY updated via Settings (length=%d, the key is not logged)", len(key))
     return jsonify({'success': True, 'configured': True})
 
 
 @settings_bp.route('/api/settings/anthropic-key', methods=['DELETE'])
 def clear_anthropic_key():
-    """Прибрати ключ (напр. користувач вирішив не використовувати Claude-фічі)."""
+    """Remove the key (e.g. the user decided not to use Claude features)."""
     try:
         _unset_env_var('ANTHROPIC_API_KEY')
     except Exception as e:
-        logger.error("Не вдалось прибрати ANTHROPIC_API_KEY з .env: %s", e)
+        logger.error("Failed to remove ANTHROPIC_API_KEY from .env: %s", e)
         return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
     from app.services import text_polishing
     text_polishing._client = None
@@ -142,9 +142,9 @@ def clear_anthropic_key():
 
 @settings_bp.route('/api/settings/anthropic-key/test', methods=['POST'])
 def test_anthropic_key():
-    """Легкий тестовий виклик Claude (Haiku, коротке повідомлення) —
-    перевіряє ЗБЕРЕЖЕНИЙ ключ (з os.environ), не приймає ключ у body (щоб не
-    ганяти сирий секрет туди-сюди зайвий раз)."""
+    """A light test call to Claude (Haiku, a short message) —
+    checks the SAVED key (from os.environ), does not accept a key in the body (so as not to
+    shuttle a raw secret back and forth needlessly)."""
     api_key = os.environ.get('ANTHROPIC_API_KEY')
     if not api_key:
         return jsonify({'success': False, 'ok': False, 'error': tr('core.settings.key_not_saved')}), 400
@@ -174,9 +174,9 @@ def test_anthropic_key():
     except anthropic.PermissionDeniedError:
         return jsonify({'success': True, 'ok': False, 'error': tr('core.settings.key_forbidden')})
     except Exception as e:
-        # Мережа/timeout/несподіване — не витягуємо саму помилку SDK у сирому
-        # вигляді (може містити частини запиту), лише коротке повідомлення.
-        logger.warning("test_anthropic_key: помилка з'єднання: %s", e)
+        # Network/timeout/unexpected — we do not pull the SDK error itself out in raw
+        # form (it may contain parts of the request), only a short message.
+        logger.warning("test_anthropic_key: connection error: %s", e)
         return jsonify({'success': True, 'ok': False, 'error': tr('core.settings.anthropic_unreachable')})
 
 
@@ -184,9 +184,9 @@ def test_anthropic_key():
 
 @settings_bp.route('/api/settings/copilot/toggle', methods=['POST'])
 def toggle_copilot():
-    """Записати COPILOT_ENABLED у .env. НЕ змінює поточний рантайм —
-    ``copilot_service`` вже створено (або ні) при старті процесу і не може
-    бути ретроактивно перестворено; відповідь чесно каже restart_required.
+    """Write COPILOT_ENABLED to .env. Does NOT change the current runtime —
+    ``copilot_service`` has already been created (or not) at process start and cannot
+    be retroactively recreated; the response honestly says restart_required.
     """
     data = request.get_json(silent=True) or {}
     enabled = data.get('enabled')
@@ -196,7 +196,7 @@ def toggle_copilot():
     try:
         _set_env_var('COPILOT_ENABLED', '1' if enabled else '0')
     except Exception as e:
-        logger.error("Не вдалось записати COPILOT_ENABLED у .env: %s", e)
+        logger.error("Failed to write COPILOT_ENABLED to .env: %s", e)
         return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
 
     from app import state
@@ -218,7 +218,7 @@ def get_ui_lang():
 
 @settings_bp.route('/api/settings/ui-lang', methods=['POST'])
 def set_ui_lang():
-    """Записати RECALL_UI_LANG (auto|uk|en) у .env; діє одразу (читається з environ на кожен запит)."""
+    """Write RECALL_UI_LANG (auto|uk|en) to .env; takes effect immediately (read from environ on every request)."""
     data = request.get_json(silent=True) or {}
     value = data.get('value')
     if value not in ('auto', 'uk', 'en'):
@@ -226,6 +226,6 @@ def set_ui_lang():
     try:
         _set_env_var('RECALL_UI_LANG', value)
     except Exception as e:
-        logger.error("Не вдалось записати RECALL_UI_LANG у .env: %s", e)
+        logger.error("Failed to write RECALL_UI_LANG to .env: %s", e)
         return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
     return jsonify({'success': True, 'value': value})

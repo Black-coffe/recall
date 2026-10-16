@@ -1,31 +1,31 @@
-"""Local LLM (Ollama) клієнт — диспетчер живого ко-пілота (Phase 19, Крок 0).
+"""Local LLM (Ollama) client — the live co-pilot dispatcher (Phase 19, Step 0).
 
-Тонка обгортка над Ollama HTTP API (за замовч. http://localhost:11434). Ollama —
-ОКРЕМИЙ системний сервіс (як telegram_listener — окремий процес): ми лише
-говоримо з ним по HTTP, а `ollama serve` піднімає користувач/ОС. Модель тягнеться
-один раз вручну: ``ollama pull qwen2.5:14b-instruct-q5_K_M``.
+A thin wrapper over the Ollama HTTP API (by default http://localhost:11434). Ollama is a
+SEPARATE system service (like telegram_listener, a separate process): we only
+talk to it over HTTP, while `ollama serve` is started by the user/OS. The model is pulled
+once by hand: ``ollama pull qwen2.5:14b-instruct-q5_K_M``.
 
-Усе опціональне й деградує. Нема Ollama, не запущений сервіс або не завантажена
-модель → :func:`is_available` повертає False (з людською причиною), і ко-пілот
-м'яко вимикається — запис / STT / RAG працюють як раніше.
+Everything is optional and degrades. No Ollama, the service is not running or the model is not
+loaded → :func:`is_available` returns False (with a human reason), and the co-pilot
+switches off softly — recording / STT / RAG work as before.
 
-БЕЗ нових залежностей: HTTP через стандартний ``urllib``. Anthropic/Telethon
-тягнуть httpx, але ми навмисно не плодимо залежність — простий JSON-POST stdlib
-вистачає і не чіпає крихку цепочку пінів torch/transformers/hf_hub.
+NO new dependencies: HTTP through the standard ``urllib``. Anthropic/Telethon
+pull in httpx, but we deliberately do not breed dependencies — a simple stdlib JSON POST
+is enough and does not touch the fragile chain of torch/transformers/hf_hub pins.
 
-Публічний API:
-- :func:`availability` / :func:`is_available` — пінг ``/api/tags`` + чи є модель.
-- :func:`list_models` — назви завантажених моделей.
-- :func:`generate` — один не-стрімовий виклик ``/api/generate``; повертає сирий
-  Ollama-респонс (``response`` + лічильники токенів/тривалостей для бенчу).
-- :func:`generate_json` — те саме, але з примусовим JSON-виводом (Ollama
-  structured outputs: ``format='json'`` або JSON-схема), парсингом і ретраєм.
-- :func:`warmup` — холостий виклик, щоб модель сіла у VRAM і лишилась
+Public API:
+- :func:`availability` / :func:`is_available` — ping ``/api/tags`` + whether the model is there.
+- :func:`list_models` — names of the loaded models.
+- :func:`generate` — one non-streaming ``/api/generate`` call; returns the raw
+  Ollama response (``response`` + token/duration counters for the bench).
+- :func:`generate_json` — the same, but with forced JSON output (Ollama
+  structured outputs: ``format='json'`` or a JSON schema), parsing and retry.
+- :func:`warmup` — a dry call so the model settles in VRAM and stays
   (``keep_alive``).
 
-Константи читаються з ``os.environ`` напряму (як ``embeddings.EMBED_MODEL``) —
-щоб сервіс лишався standalone-тестованим (bench-скрипт без Flask-контексту).
-Ті самі значення продубльовані у ``config.py`` для discoverability/UI.
+Constants are read from ``os.environ`` directly (like ``embeddings.EMBED_MODEL``) —
+so the service stays standalone-testable (a bench script without a Flask context).
+The same values are duplicated in ``config.py`` for discoverability/UI.
 """
 from __future__ import annotations
 
@@ -38,15 +38,17 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
+from app.core.i18n import tr
+
 logger = logging.getLogger(__name__)
 
-# Крок 9 (GPU-планування): серіалізуємо локальні LLM-виклики — щоб кілька запитів
-# до Ollama не били по GPU одночасно й не голодували whisper. Одна черга на всі
-# генерації процесу (single active recording → конкуренція рідка, але страхуємось).
+# Step 9 (GPU planning): we serialize local LLM calls — so that several requests
+# to Ollama do not hit the GPU at once and starve whisper. One queue for all
+# generations of the process (single active recording → contention is rare, but we hedge).
 _GEN_LOCK = threading.Lock()
 
 
-# --- Конфіг (дзеркало config.py; джерело істини у рантаймі — env, .env вже завантажено) ---
+# --- Config (mirror of config.py; the source of truth at runtime is env, .env is already loaded) ---
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://localhost:11434").rstrip("/")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "qwen2.5:14b-instruct-q5_K_M")
 LOCAL_LLM_KEEPALIVE = os.environ.get("LOCAL_LLM_KEEPALIVE", "30m")
@@ -55,7 +57,7 @@ LOCAL_LLM_TIMEOUT = float(os.environ.get("LOCAL_LLM_TIMEOUT", "60"))
 
 
 class LocalLLMError(RuntimeError):
-    """Помилка виклику локального LLM (мережа / HTTP / невалідний JSON)."""
+    """Local LLM call error (network / HTTP / invalid JSON)."""
 
 
 # ============================================================
@@ -79,41 +81,41 @@ def _post(path: str, payload: dict, timeout: float) -> dict:
 
 
 # ============================================================
-# Доступність
+# Availability
 # ============================================================
 
-_avail_cache: dict = {"ts": 0.0, "ok": False, "reason": "не перевірено"}
-_AVAIL_TTL = 10.0  # короткий кеш — Ollama може стартувати/падати під час сесії
+_avail_cache: dict = {"ts": 0.0, "ok": False, "reason": "not checked"}
+_AVAIL_TTL = 10.0  # short cache — Ollama may start/die during a session
 
-# Список наявних тегів. Кешується з тим самим TTL, щоб resolve_model() не
-# ходив у /api/tags на кожну генерацію.
+# List of available tags. Cached with the same TTL so that resolve_model() does not
+# hit /api/tags on every generation.
 _tags_cache: dict = {"ts": 0.0, "models": []}
 
 
 def _model_present(model: str, available: list[str]) -> bool:
-    """Чи є потрібна модель серед завантажених. Точний збіг або збіг базової
-    назви до ':' (користувач міг витягти трохи інший квант-тег тієї ж моделі)."""
+    """Whether the needed model is among the loaded ones. Exact match or a match of the base
+    name before ':' (the user may have pulled a slightly different quant tag of the same model)."""
     return _match_model(model, available) is not None
 
 
 def _match_model(model: str, available: list[str]) -> Optional[str]:
-    """Яким РЕАЛЬНО наявним тегом обслужити запит на ``model``.
+    """Which ACTUALLY available tag to serve the request for ``model`` with.
 
-    Повертає точний збіг, інакше перший тег тієї ж родини (до ':'), інакше None.
+    Returns an exact match, otherwise the first tag of the same family (before ':'), otherwise None.
 
-    Чому не просто bool: підстановка родини задумана навмисно (інший квант-тег
-    тієї ж моделі — це та сама модель), але доти, доки про неї знала лише
-    перевірка доступності, вона була пасткою. На живій машині
-    LOCAL_LLM_MODEL='qwen2.5:14b-instruct-q5_K_M' не встановлена, а стоять
-    'qwen2.5:7b-instruct' і 'qwen2.5:32b-instruct' — availability() бачила
-    родину і рапортувала OK, після чого generate() йшов точним іменем і ловив
-    HTTP 404. Тобто копілот повідомляв «локальна модель є» і падав у рантаймі:
-    рівно та деградація, яка бреше замість того, щоб чесно вимкнутись."""
+    Why not just a bool: family substitution is intended on purpose (a different quant tag
+    of the same model is the same model), but as long as only the availability
+    check knew about it, it was a trap. On the live machine
+    LOCAL_LLM_MODEL='qwen2.5:14b-instruct-q5_K_M' is not installed, while
+    'qwen2.5:7b-instruct' and 'qwen2.5:32b-instruct' are — availability() saw
+    the family and reported OK, after which generate() went by the exact name and got
+    HTTP 404. I.e. the copilot said "the local model is there" and crashed at runtime:
+    exactly the degradation that lies instead of honestly switching off."""
     if model in available:
         return model
     base = model.split(":")[0]
-    # sorted, а не порядок Ollama: інакше при кількох тегах родини вибір
-    # мовчки змінювався б між запусками разом із порядком видачі /api/tags.
+    # sorted rather than Ollama order: otherwise with several family tags the choice
+    # would silently change between runs together with the /api/tags order.
     for name in sorted(n for n in available if n):
         if name.split(":")[0] == base:
             return name
@@ -125,33 +127,31 @@ def _probe() -> tuple[bool, str]:
         data = _get("/api/tags", timeout=5.0)
     except urllib.error.URLError as e:
         reason = getattr(e, "reason", e)
-        return False, (f"Ollama недоступний на {LOCAL_LLM_URL} ({reason}). "
-                       f"Запустіть `ollama serve` (зазвичай стартує сам після інсталяції).")
-    except Exception as e:  # pragma: no cover — захист від несподіванок
-        return False, f"Ollama помилка: {e}"
+        return False, tr("svc_llm.local.unavailable", url=LOCAL_LLM_URL, reason=reason)
+    except Exception as e:  # pragma: no cover — protection against surprises
+        return False, tr("svc_llm.local.error", error=e)
 
     models = [m.get("name", "") for m in (data.get("models") or [])]
     _tags_cache.update(ts=time.time(), models=models)
     if not models:
-        return False, ("Ollama працює, але моделей нема. Виконайте: "
-                       f"ollama pull {LOCAL_LLM_MODEL}")
+        return False, tr("svc_llm.local.no_models", model=LOCAL_LLM_MODEL)
     effective = _match_model(LOCAL_LLM_MODEL, models)
     if effective:
         if effective != LOCAL_LLM_MODEL:
-            # Не просто попередження: цим тегом реально підуть виклики, тож він
-            # має бути видимий у reason (його показує UI копілота), інакше
-            # «OK (14b)» означало б не ту модель, що працює.
-            logger.warning("[local_llm] тег '%s' не знайдено — беру '%s' з тієї ж "
-                           "родини (доступні: %s)",
+            # Not just a warning: calls will actually go with this tag, so it
+            # must be visible in reason (the copilot UI shows it), otherwise
+            # "OK (14b)" would mean not the model that is running.
+            logger.warning("[local_llm] tag '%s' not found — taking '%s' from the same "
+                           "family (available: %s)",
                            LOCAL_LLM_MODEL, effective, ", ".join(models))
-            return True, f"OK ({effective} — заміна для {LOCAL_LLM_MODEL})"
-        return True, f"OK ({LOCAL_LLM_MODEL})"
-    return False, (f"Модель '{LOCAL_LLM_MODEL}' не знайдена. Доступні: "
-                   f"{', '.join(models)}. Виконайте: ollama pull {LOCAL_LLM_MODEL}")
+            return True, tr("svc_llm.local.ok_substitute", effective=effective, model=LOCAL_LLM_MODEL)
+        return True, tr("svc_llm.local.ok", model=LOCAL_LLM_MODEL)
+    return False, tr("svc_llm.local.model_missing", model=LOCAL_LLM_MODEL,
+                     available=", ".join(models))
 
 
 def availability(force: bool = False) -> tuple[bool, str]:
-    """(ok, reason) з коротким кешем. reason — людська причина для UI/логів."""
+    """(ok, reason) with a short cache. reason is a human reason for the UI/logs."""
     now = time.time()
     if not force and (now - _avail_cache["ts"]) < _AVAIL_TTL:
         return _avail_cache["ok"], _avail_cache["reason"]
@@ -177,12 +177,12 @@ def list_models() -> list[str]:
 
 
 def resolve_model(model: Optional[str] = None) -> str:
-    """Назва тега, яким РЕАЛЬНО піде виклик (з підстановкою родини).
+    """Name of the tag the call will ACTUALLY go with (with family substitution).
 
-    Викидає LocalLLMError із дієвою причиною, якщо нічого не підходить — це
-    краще за HTTP 404 із надр Ollama, по якому не видно, що саме не так.
-    Порожній кеш тегів (Ollama не опитували) — не привід падати: віддаємо як є,
-    хай помилку зʼясує сам виклик."""
+    Raises LocalLLMError with an actionable reason if nothing fits — this is
+    better than an HTTP 404 from the depths of Ollama, from which it is not visible what exactly is wrong.
+    An empty tag cache (Ollama was not polled) is no reason to fail: we return as is,
+    let the call itself find out the error."""
     want = model or LOCAL_LLM_MODEL
     if (time.time() - _tags_cache["ts"]) >= _AVAIL_TTL:
         models = list_models()
@@ -193,14 +193,13 @@ def resolve_model(model: Optional[str] = None) -> str:
         return want
     matched = _match_model(want, available)
     if matched is None:
-        raise LocalLLMError(
-            f"Модель '{want}' не знайдена в Ollama. Доступні: "
-            f"{', '.join(available)}. Виконайте: ollama pull {want}")
+        raise LocalLLMError(tr("svc_llm.local.model_not_in_ollama", model=want,
+                               available=", ".join(available)))
     return matched
 
 
 # ============================================================
-# Генерація
+# Generation
 # ============================================================
 
 def generate(
@@ -216,20 +215,20 @@ def generate(
     model: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> dict:
-    """Один не-стрімовий виклик Ollama ``/api/generate``.
+    """One non-streaming Ollama ``/api/generate`` call.
 
-    Повертає сирий респонс. Корисні поля для бенчу/обліку:
-    ``response`` (текст), ``eval_count`` (вихідні токени),
+    Returns the raw response. Useful fields for the bench/accounting:
+    ``response`` (text), ``eval_count`` (output tokens),
     ``eval_duration`` / ``prompt_eval_duration`` / ``total_duration`` /
-    ``load_duration`` (наносекунди), ``prompt_eval_count`` (вхідні токени).
+    ``load_duration`` (nanoseconds), ``prompt_eval_count`` (input tokens).
 
-    ``format`` — ``'json'`` або JSON-схема (dict) для structured outputs.
-    ``images`` — список base64-рядків (БЕЗ data-URI префікса) для мультимодальних
-    моделей (llava / qwen2.5vl / …); ``model`` тоді має бути VL-моделлю.
+    ``format`` — ``'json'`` or a JSON schema (dict) for structured outputs.
+    ``images`` — a list of base64 strings (WITHOUT the data-URI prefix) for multimodal
+    models (llava / qwen2.5vl / …); ``model`` must then be a VL model.
     """
     payload: dict = {
-        # Не model or LOCAL_LLM_MODEL: підстановка родини має діяти і тут, бо
-        # інакше availability() рапортує OK, а генерація ловить 404.
+        # Not model or LOCAL_LLM_MODEL: family substitution must work here too, because
+        # otherwise availability() reports OK while generation gets a 404.
         "model": resolve_model(model),
         "prompt": prompt,
         "stream": False,
@@ -248,13 +247,13 @@ def generate(
         payload["images"] = images
 
     try:
-        with _GEN_LOCK:  # серіалізація GPU-важких викликів (Крок 9)
+        with _GEN_LOCK:  # serialization of GPU-heavy calls (Step 9)
             return _post("/api/generate", payload, timeout or LOCAL_LLM_TIMEOUT)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace") if hasattr(e, "read") else ""
         raise LocalLLMError(f"Ollama HTTP {e.code}: {body[:300]}") from e
     except urllib.error.URLError as e:
-        raise LocalLLMError(f"Ollama недоступний: {getattr(e, 'reason', e)}") from e
+        raise LocalLLMError(tr("svc_llm.local.unreachable", reason=getattr(e, 'reason', e))) from e
 
 
 def generate_json(
@@ -270,15 +269,15 @@ def generate_json(
     retries: int = 1,
     keep_alive: Optional[str] = None,
 ) -> dict:
-    """Виклик з примусовим JSON-виводом.
+    """A call with forced JSON output.
 
-    ``format`` = передана ``schema`` (Ollama structured outputs) або ``'json'``.
-    Парсить ``response`` як JSON; ретрай ``retries`` разів на невалідний вивід.
+    ``format`` = the passed ``schema`` (Ollama structured outputs) or ``'json'``.
+    Parses ``response`` as JSON; retries ``retries`` times on invalid output.
 
-    Повертає ``{'data': <parsed dict>, 'raw': <сирий Ollama-респонс>}``, щоб
-    caller мав і структуру, і лічильники токенів/тривалостей.
+    Returns ``{'data': <parsed dict>, 'raw': <raw Ollama response>}``, so that the
+    caller has both the structure and the token/duration counters.
 
-    Кидає :class:`LocalLLMError` якщо модель так і не дала валідний JSON.
+    Raises :class:`LocalLLMError` if the model never gave valid JSON.
     """
     fmt: Any = schema if schema is not None else "json"
     last_err: Optional[Exception] = None
@@ -293,28 +292,28 @@ def generate_json(
             return {"data": json.loads(text), "raw": resp}
         except (ValueError, TypeError) as e:
             last_err = e
-            logger.warning("[local_llm] невалідний JSON (спроба %d/%d): %r",
+            logger.warning("[local_llm] invalid JSON (attempt %d/%d): %r",
                            attempt + 1, retries + 1, text[:200])
     raise LocalLLMError(
-        f"Модель не повернула валідний JSON після {retries + 1} спроб: {last_err}"
+        tr("svc_llm.local.bad_json", attempts=retries + 1, error=last_err)
     )
 
 
 def warmup(timeout: float = 180.0) -> bool:
-    """Холостий виклик, щоб модель завантажилась у VRAM і лишилась там
-    (``keep_alive``). Перше завантаження 14B може зайняти десятки секунд —
-    звідси великий timeout. Повертає True якщо прогрів вдався."""
+    """A dry call so the model loads into VRAM and stays there
+    (``keep_alive``). The first load of a 14B can take tens of seconds —
+    hence the large timeout. Returns True if the warmup succeeded."""
     ok, reason = availability(force=True)
     if not ok:
-        logger.info("[local_llm] warmup пропущено: %s", reason)
+        logger.info("[local_llm] warmup skipped: %s", reason)
         return False
     try:
         generate("ping", max_tokens=1, timeout=timeout)
-        # Логуємо ЩО прогріли, а не що просили: при підстановці родини у VRAM
-        # лежить інший тег, і рядок «прогріта 14b» був би неправдою.
-        logger.info("[local_llm] модель %s прогріта (keep_alive=%s)",
+        # We log WHAT was warmed up, not what was asked for: with family substitution another tag
+        # sits in VRAM, and a line "14b warmed up" would be untrue.
+        logger.info("[local_llm] model %s warmed up (keep_alive=%s)",
                     resolve_model(), LOCAL_LLM_KEEPALIVE)
         return True
     except LocalLLMError as e:
-        logger.warning("[local_llm] warmup помилка: %s", e)
+        logger.warning("[local_llm] warmup failure: %s", e)
         return False

@@ -1,28 +1,27 @@
-"""Спека directions-projects-tags, історія 04: осі `tags`/`since`/`until` і дерево
-напрямків у MCP.
+"""Spec directions-projects-tags, story 04: the `tags`/`since`/`until` axes and the tree
+of directions in MCP.
 
-Що саме тут доводиться і чому:
+What exactly is proven here and why:
 
-* **Розкрив напрямку.** `category_id` напрямку мусить захоплювати його проєкти, а
-  `category_id` проєкта — лише себе. Це не косметика видачі, а межа приватності
-  зрізу: «покажи Фонд» зобовʼязане показати Акмекорп, «покажи Акмекорп» — не
-  зобовʼязане показати сусідній проєкт.
-* **Невідомий тег.** Фільтр, якого нема у словнику, дає порожню видачу. Без поля
-  `note` агент прочитає її як «в архіві такого нема» і збреше власнику — тому
-  порожнеча з нерозпізнаним тегом мусить бути підписана.
-* **Проксі не переосмислюють параметри.** `search_archive`/`ask_archive`/`research_*`
-  лише перекладають їх у query/JSON; HTTP-сторона зʼявляється в історіях 02/07,
-  тому тут мокається `_api`/`_sse_collect` — тест ловить саме втрату параметра при
-  переупакуванні.
-* **Докстринги — дослівно з ADR-023 §C.** Очікуваний текст не переписаний у тест
-  руками, а вичитується з самого ADR: інакше «дослівно» протухає першою ж правкою
-  ADR і тест продовжує зеленіти на старому формулюванні.
+* **Direction expansion.** A direction's `category_id` must include its projects, while
+  a project's `category_id` includes only itself. This is not cosmetics of the result but the privacy
+  boundary of the slice: "show Fond" must show Acmecorp, "show Acmecorp" must not
+  show the neighbouring project.
+* **Unknown tag.** A filter that is not in the dictionary gives an empty result. Without the `note`
+  field the agent reads it as "there is no such thing in the archive" and lies to the owner — so
+  an emptiness with an unrecognized tag must be labelled.
+* **Proxies do not reinterpret parameters.** `search_archive`/`ask_archive`/`research_*`
+  only translate them into query/JSON; the HTTP side appears in stories 02/07,
+  so `_api`/`_sse_collect` is mocked here — the test catches exactly the loss of a parameter on
+  repackaging.
+* **Docstrings carry the ADR-023 §C paragraphs in English.** All nine filter tools describe
+  `category_id`/`project`/`tags` with the same three paragraphs, so the agent reads one contract.
 
-Кириличні фікстури — памʼятка `plan-dictated-sql-ignored-own-memory` (SQLite
-`lower()` не згортає кирилицю, тому будь-який регістр ловиться лише через
+Cyrillic fixtures — the note `plan-dictated-sql-ignored-own-memory` (SQLite
+`lower()` does not fold Cyrillic, so any case is caught only through
 `name_norm`).
 
-Офлайн: тимчасова SQLite через `init_database`, без мережі й важких моделей.
+Offline: a temporary SQLite via `init_database`, no network and no heavy models.
 """
 from __future__ import annotations
 
@@ -36,11 +35,9 @@ import mcp_server as m
 from app.db.migrations import init_database
 from app.services import categories
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_ADR = _REPO_ROOT / "docs" / "adr" / "023-directions-projects-tags-taxonomy.md"
 
-# 9 тулзів контракту C6: 8 із наявним `category_id` + `grep_archive`, якому його
-# цією ж історією додали.
+# 9 tools of contract C6: 8 with an existing `category_id` + `grep_archive`, to which it
+# was added by this same story.
 _FILTER_TOOLS = (
     "search_archive", "list_recent", "list_action_items", "ask_archive",
     "research_export", "research_preview", "research_summary", "search_history",
@@ -49,8 +46,8 @@ _FILTER_TOOLS = (
 
 
 def _squash(text: str) -> str:
-    """Порівнюємо без урахування переносів: докстринг загорнутий по 79 колонок,
-    ADR — по своїх, а «дослівно» стосується слів, не місця розриву рядка."""
+    """We compare without regard to line breaks: the docstring is wrapped at 79 columns,
+    the ADR at its own, and "verbatim" concerns words, not the place of a line break."""
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -64,17 +61,17 @@ def db(tmp_path: Path, monkeypatch) -> str:
 
 @pytest.fixture()
 def archive(db):
-    """Дерево «Фонд Робота → (Акмекорп, DOM)» + «Особисте» і 4 записи з тегами.
+    """The tree "Фонд Робота → (Акмекорп, DOM)" + "Особисте" and 4 records with tags.
 
-    Дати навмисно різні й сусідні (10/15/20 вересня), щоб межі `since`/`until`
-    можна було перевірити на включність, а не «приблизно в тому місяці».
+    The dates are deliberately different and adjacent (10/15/20 September), so that the `since`/`until`
+    bounds can be checked for inclusiveness, not "roughly in that month".
     """
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
 
     def _cat(name, parent=None, color=None, icon=None, sort_order=0):
-        """`Фонд Робота` і `Особисте` вже засіяні міграцією — беремо наявні
-        (створення впало б на UNIQUE name_norm)."""
+        """`Фонд Робота` and `Особисте` are already seeded by the migration — we take the existing ones
+        (creating would fail on UNIQUE name_norm)."""
         key = categories.norm_name(name)
         row = conn.execute("SELECT id FROM categories WHERE name_norm = ?", (key,)).fetchone()
         if row:
@@ -135,42 +132,42 @@ def _ids(res) -> set:
 
 
 # ============================================================
-# list_recent: напрямок/проєкт, теги, період
+# list_recent: direction/project, tags, period
 # ============================================================
 
 def test_direction_includes_its_projects(archive):
-    """`category_id` напрямку розкривається в напрямок + усі його проєкти."""
+    """A direction's `category_id` expands into the direction + all its projects."""
     got = _ids(m.list_recent(category_id=archive["cat"]["fond"]))
     assert got == {archive["rec"]["fond"], archive["rec"]["bar"], archive["rec"]["dom"]}
     assert archive["rec"]["personal"] not in got
 
 
 def test_project_includes_only_itself(archive):
-    """`category_id` проєкта не захоплює ні батька, ні сусідній проєкт."""
+    """A project's `category_id` includes neither the parent nor the neighbouring project."""
     assert _ids(m.list_recent(category_id=archive["cat"]["bar"])) == {archive["rec"]["bar"]}
 
 
 def test_tags_are_or(archive):
-    """Кілька тегів — «будь-який із них», не перетин."""
+    """Several tags — "any of them", not an intersection."""
     assert _ids(m.list_recent(tags="AI, інвестори")) == {
         archive["rec"]["fond"], archive["rec"]["bar"], archive["rec"]["dom"]}
 
 
 def test_tag_matches_any_case(archive):
-    """`name_norm` (casefold) — інакше «ІНВЕСТОРИ» не знайшло б «інвестори»."""
+    """`name_norm` (casefold) — otherwise "ІНВЕСТОРИ" would not find "інвестори"."""
     assert _ids(m.list_recent(tags="ІНВЕСТОРИ")) == {
         archive["rec"]["bar"], archive["rec"]["dom"]}
 
 
 def test_tags_and_category_intersect(archive):
-    """Тег разом із напрямком — перетин: «тег AI лише в цьому проєкті»."""
+    """A tag together with a direction — an intersection: "tag AI only in this project"."""
     assert _ids(m.list_recent(tags="AI", category_id=archive["cat"]["dom"])) == {
         archive["rec"]["dom"]}
     assert _ids(m.list_recent(tags="AI", category_id=archive["cat"]["bar"])) == set()
 
 
 def test_since_until_bounds_are_inclusive(archive):
-    """Обидві межі включно — один день як вікно мусить знаходити свій запис."""
+    """Both bounds are inclusive — a one-day window must find its record."""
     assert _ids(m.list_recent(since="2026-09-15", until="2026-09-15")) == {
         archive["rec"]["bar"]}
     assert _ids(m.list_recent(since="2026-09-10", until="2026-09-20")) == {
@@ -179,53 +176,53 @@ def test_since_until_bounds_are_inclusive(archive):
 
 
 def test_invalid_date_is_an_answer_not_an_exception(archive):
-    """Крива дата від агента — поле `error`, а не 500 у stdio-каналі."""
+    """A crooked date from the agent is an `error` field, not a 500 in the stdio channel."""
     res = m.list_recent(since="вчора")
     assert isinstance(res, dict) and "error" in res
 
 
 def test_unknown_tag_returns_empty_with_note(archive):
-    """Порожньо через нерозпізнаний тег мусить бути підписано — інакше агент
-    прочитає це як «такого в архіві нема»."""
+    """An emptiness due to an unrecognized tag must be labelled — otherwise the agent
+    reads it as "there is no such thing in the archive"."""
     res = m.list_recent(tags="Бухгалтерія")
     assert res["items"] == []
-    assert "тег не знайдено" in res["note"] and "Бухгалтерія" in res["note"]
+    assert "tag not found" in res["note"] and "Бухгалтерія" in res["note"]
 
 
 def test_known_tag_has_no_note(archive):
-    """Звичайна видача — той самий конверт, `note` порожній."""
+    """An ordinary result — the same envelope, `note` empty."""
     res = m.list_recent(tags="AI")
     assert isinstance(res, dict) and "items" in res
     assert res["note"] is None
 
 
 # ============================================================
-# list_action_items — ті самі осі через commitments
+# list_action_items — the same axes through commitments
 # ============================================================
 
 def test_action_items_filtered_by_tag(archive):
-    """Задачі фільтруються за тегом ЗАПИСУ, з якого їх витягли."""
+    """Tasks are filtered by the tag of the RECORD they were extracted from."""
     res = m.list_action_items(window="all", tags="AI")
     assert [i["task"] for i in res["items"]] == ["Підготувати бюджет фонду"]
 
 
 def test_action_items_direction_includes_projects(archive):
-    """Напрямок у задачах розкривається так само, як у записах."""
+    """A direction in tasks expands the same way as in records."""
     res = m.list_action_items(window="all", category_id=archive["cat"]["fond"])
     assert {i["task"] for i in res["items"]} == {
         "Підготувати бюджет фонду", "Надіслати терміни раунду"}
 
 
 def test_action_items_window_counter_uses_same_filter(archive):
-    """`window_matched` рахує ТУ САМУ множину, що й видача (інакше «показано 1
-    із 3» при одному наявному)."""
+    """`window_matched` counts THE SAME set as the result (otherwise "shown 1
+    of 3" with one present)."""
     res = m.list_action_items(window="all", tags="AI")
     assert res["coverage"]["window_matched"] == len(res["items"]) == 1
     assert res["coverage"]["truncated"] is False
 
 
 def test_action_items_period(archive):
-    """`since`/`until` — по даті зустрічі запису, не по даті створення задачі."""
+    """`since`/`until` — by the record's meeting date, not by the task creation date."""
     res = m.list_action_items(window="all", since="2026-09-12")
     assert [i["task"] for i in res["items"]] == ["Надіслати терміни раунду"]
 
@@ -233,7 +230,7 @@ def test_action_items_period(archive):
 def test_action_items_unknown_tag_notes(archive):
     res = m.list_action_items(window="all", tags="Бухгалтерія")
     assert res["items"] == []
-    assert "тег не знайдено" in res["note"]
+    assert "tag not found" in res["note"]
 
 
 def test_action_items_invalid_date(archive):
@@ -241,22 +238,22 @@ def test_action_items_invalid_date(archive):
 
 
 def test_action_items_coverage_denominator_matches_tag_filter(archive):
-    """`coverage.total` рахує ТУ САМУ множину, що й `items` (ремонт п.1 раунду
-    3): до цього знаменник ігнорував `tags`, тож `list_action_items(tags="AI")`
-    віддавав відфільтровану видачу поруч з архівним `coverage.total`."""
+    """`coverage.total` counts THE SAME set as `items` (repair item 1 of round
+    3): before that the denominator ignored `tags`, so `list_action_items(tags="AI")`
+    gave a filtered result next to the archive `coverage.total`."""
     res = m.list_action_items(window="all", tags="AI")
     assert res["coverage"]["total"] == len(res["items"]) == 1
 
 
 def test_action_items_coverage_denominator_unchanged_without_filters(archive):
-    """Без `tags`/`since`/`until` знаменник лишається тим самим, що й до
-    історії — усі 3 живі задачі фікстури."""
+    """Without `tags`/`since`/`until` the denominator stays the same as before
+    the story — all 3 live tasks of the fixture."""
     res = m.list_action_items(window="all")
     assert res["coverage"]["total"] == 3
 
 
 # ============================================================
-# grep_archive — фільтр до сканування
+# grep_archive — the filter before the scan
 # ============================================================
 
 def test_grep_scoped_to_direction(archive):
@@ -274,16 +271,16 @@ def test_grep_direction_and_tag_intersect(archive):
 def test_grep_unknown_tag_notes(archive):
     res = m.grep_archive("ВОДОСПАД", tags="Бухгалтерія")
     assert res["matches"] == []
-    assert "тег не знайдено" in res["note"]
+    assert "tag not found" in res["note"]
 
 
 # ============================================================
-# list_categories — дерево, а не плаский список
+# list_categories — a tree, not a flat list
 # ============================================================
 
 def test_list_categories_returns_tree_in_order(archive):
-    """Порядок — напрямок, одразу за ним його проєкти; поля color/icon більше
-    не губляться (стара версія тулза їх не вибирала взагалі)."""
+    """The order is a direction, right after it its projects; the color/icon fields are no longer
+    lost (the old version of the tool did not select them at all)."""
     tree = m.list_categories()
     by_name = {c["name"]: c for c in tree}
     names = [c["name"] for c in tree]
@@ -301,22 +298,22 @@ def test_list_categories_returns_tree_in_order(archive):
 
 
 def test_about_draws_the_tree(archive):
-    """Довідка, з якої агент починає, мусить показувати дерево — плаский перелік
-    назв не давав зрозуміти, який id що захоплює."""
+    """The reference the agent starts from must show the tree — a flat list of
+    names did not make clear which id captures what."""
     text = m.about()
     assert "Фонд Робота (3) → Акмекорп (1), DOM (1)" in text
     assert "Особисте (1)" in text
 
 
 def test_about_still_reports_41_tools(archive):
-    """Таксономія не додає і не прибирає тулзів (C6); 35 → 40 — візуальна стрічка відео (4.10.0),
-    40 → 41 — історія труб `list_pipe_runs` (K4)."""
+    """Taxonomy neither adds nor removes tools (C6); 35 → 40 — the video visual timeline (4.10.0),
+    40 → 41 — the pipe history `list_pipe_runs` (K4)."""
     assert len(m._registered_tool_names()) == 41
-    assert "41 тулзів" in m.about()
+    assert "41 tools" in m.about()
 
 
 # ============================================================
-# Проксі: параметри доїжджають без переосмислення
+# Proxies: parameters arrive without reinterpretation
 # ============================================================
 
 @pytest.fixture()
@@ -400,7 +397,7 @@ def test_search_history_omits_unset_axes(api_calls):
 
 
 # ============================================================
-# research_export — direct-DB, ті самі осі
+# research_export — direct-DB, the same axes
 # ============================================================
 
 def test_research_export_scoped_by_tag(archive):
@@ -411,69 +408,53 @@ def test_research_export_scoped_by_tag(archive):
 
 def test_research_export_unknown_tag_notes(archive):
     md = m.research_export("ВОДОСПАД", tags="Бухгалтерія")
-    assert md.startswith("тег не знайдено: Бухгалтерія")
+    assert md.startswith("tag not found: Бухгалтерія")
 
 
 def test_research_export_invalid_date(archive):
-    assert "Помилка фільтра" in m.research_export("ВОДОСПАД", since="вчора")
+    assert "Filter error" in m.research_export("ВОДОСПАД", since="вчора")
 
 
+# Docstrings — the three ADR §C filter paragraphs, in English
 # ============================================================
-# Докстринги — три абзаци ADR §C дослівно
-# ============================================================
 
-def _adr_paragraphs() -> list[str]:
-    """Блок-цитата під «Текст для docstring … (дослівно)» — джерело істини.
-
-    Тест читає ADR, а не копію тексту в тесті: копія розійшлася б із ADR мовчки,
-    і «дослівно» перетворилось би на «дослівно станом на день написання тесту».
-    """
-    text = _ADR.read_text(encoding="utf-8")
-    head = text.index("Текст для docstring")
-    # Абзац починається з рядка `` `xxx` — ``; решта рядків блок-цитати — його
-    # продовження. Різати вже склеєний текст регуляркою не можна: третій абзац
-    # сам згадує `category_id` і розпався б навпіл.
-    paragraphs: list[str] = []
-    for line in text[head:].splitlines()[1:]:
-        stripped = line.strip()
-        if not stripped.startswith(">"):
-            if paragraphs:
-                break
-            continue
-        body = stripped[1:].strip()
-        if re.match(r"^`(?:category_id|project|tags)` —", body):
-            paragraphs.append(body)
-        elif paragraphs:
-            paragraphs[-1] += " " + body
-    paragraphs = [_squash(p) for p in paragraphs]
-    assert len(paragraphs) == 3, f"ADR §C: очікую 3 абзаци, знайшов {len(paragraphs)}"
-    return paragraphs
-
-
-def test_adr_block_is_parsable():
-    """Якщо ADR переписали так, що блок більше не вичитується — падає ТУТ,
-    а не 9 разів нижче з незрозумілої причини."""
-    paragraphs = _adr_paragraphs()
-    assert paragraphs[0].startswith("`category_id` —")
-    assert paragraphs[1].startswith("`project` —")
-    assert paragraphs[2].startswith("`tags` —")
+#: The English rendering of the ADR-023 §C block. The ADR keeps the original Ukrainian wording
+#: inside its verbatim markers; the tool descriptions are English (code-language rule), so the
+#: contract checked here is: every filter tool carries the same three paragraphs, word for word.
+_FILTER_PARAGRAPHS = (
+    "`category_id` — id of a **direction or project** from `list_categories`; a direction "
+    "automatically includes all its projects, a project only itself. This is the archive's "
+    "hierarchy level.",
+    "`project` — **not** a hierarchy project but a graph-entity name or free text (a person, "
+    "a brand): narrows to records where that name is mentioned. To narrow to a project as a "
+    "section of the archive, pass its id in `category_id`, not its name in `project`.",
+    "`tags` — tag names comma-separated; several = any of them. Combined with `category_id` — "
+    'an intersection ("tag AI only in this direction").',
+)
 
 
 @pytest.mark.parametrize("tool_name", _FILTER_TOOLS)
-def test_tool_docstring_quotes_adr_verbatim(tool_name):
+def test_tool_docstring_carries_filter_paragraphs(tool_name):
     doc = _squash(getattr(m, tool_name).__doc__ or "")
-    for paragraph in _adr_paragraphs():
-        assert paragraph in doc, f"{tool_name}: абзац ADR §C не дослівний"
+    for paragraph in _FILTER_PARAGRAPHS:
+        assert paragraph in doc, f"{tool_name}: an ADR §C filter paragraph is missing or reworded"
+
+
+@pytest.mark.parametrize("tool_name", _FILTER_TOOLS)
+def test_tool_docstring_is_english(tool_name):
+    doc = getattr(m, tool_name).__doc__ or ""
+    stripped = re.sub(r"«[^»]{0,60}»|`[^`]*`", " ", doc)
+    assert not re.search("[Ѐ-ӿ]", stripped), f"{tool_name}: Cyrillic outside quoted spans"
 
 
 # ============================================================
-# v47 (історія 20): текст помилки дати — українською і для агента
+# v47 (story 20): the date error text — for the agent
 # ============================================================
 
 def test_invalid_date_error_text_is_ukrainian_for_the_agent(archive):
-    """`error` читає агент і переказує власнику. Сире `Invalid isoformat
-    string: 'not-a-date'` не каже ні мовою власника, ні що саме очікується —
-    обидва тулзи беруть текст з одного `categories.parse_date`."""
+    """`error` is read by the agent and retold to the owner. The raw `Invalid isoformat
+    string: 'not-a-date'` says neither in the owner's language nor what exactly is expected —
+    both tools take the text from one `categories.parse_date`."""
     for res in (m.list_recent(since="not-a-date"),
                 m.list_action_items(until="not-a-date")):
         error = res["error"]
@@ -482,12 +463,12 @@ def test_invalid_date_error_text_is_ukrainian_for_the_agent(archive):
 
 
 # ============================================================
-# v47 (історія 20): тезки — повний шлях і явна неоднозначність
+# v47 (story 20): namesakes — the full path and explicit ambiguity
 # ============================================================
 
 def test_list_categories_carries_the_canonical_path(archive, db):
-    """Агент бачить те саме, що людина в селекті: «Напрямок → Проєкт». Без
-    `path` однойменні проєкти різних напрямків у видачі не розрізнити."""
+    """The agent sees the same as a person in the select: "Direction → Project". Without
+    `path` projects of the same name in different directions cannot be told apart in the result."""
     conn = sqlite3.connect(db)
     try:
         free = conn.execute("SELECT id FROM categories WHERE name_norm = 'фріланс'"
@@ -504,8 +485,8 @@ def test_list_categories_carries_the_canonical_path(archive, db):
 
 
 def test_ask_archive_turns_409_ambiguous_into_a_note_with_paths(monkeypatch):
-    """409 з `/api/memory/ask` (тіло не-200 `_api` віддає) — не виняток і не
-    мовчазна відповідь по одному з вузлів, а нота з переліком шляхів."""
+    """A 409 from `/api/memory/ask` (the non-200 body `_api` returns) — not an exception and not a
+    silent answer from one of the nodes, but a note listing the paths."""
     both = ["Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
     monkeypatch.setattr(m, "_api", lambda *a, **kw: {
         "success": False, "error": "ambiguous", "code": "ambiguous",
@@ -517,26 +498,26 @@ def test_ask_archive_turns_409_ambiguous_into_a_note_with_paths(monkeypatch):
     assert "path" in res["hint"]
 
 
-# Історія 23: лише `ask_archive` має текстовий вхід `project`; решта восьми
-# приймають `category_id: Optional[int]` — і речення про тезок мусить радити
-# вхід, який тулз справді приймає, а не один спільний шаблон на всі дев'ять.
+# Story 23: only `ask_archive` has a text input `project`; the other eight
+# accept `category_id: Optional[int]` — and the sentence about namesakes must advise the
+# input the tool really accepts, not one shared template for all nine.
 _CATEGORY_ID_TOOLS = tuple(t for t in _FILTER_TOOLS if t != "ask_archive")
 
 
 @pytest.mark.parametrize("tool_name", _CATEGORY_ID_TOOLS)
 def test_tool_docstring_tells_about_the_full_path(tool_name):
-    """Тулзи з `category_id` радять знайти вузол у `list_categories` і
-    передати його `id` — не «повний шлях» (той приймає лише `ask_archive`)."""
+    """Tools with `category_id` advise finding the node in `list_categories` and
+    passing its `id` — not the "full path" (only `ask_archive` accepts that)."""
     doc = _squash(getattr(m, tool_name).__doc__ or "")
     assert "list_categories" in doc, tool_name
     assert "`id`" in doc and "`category_id`" in doc, tool_name
-    assert "передавай повний шлях" not in doc, tool_name
+    assert "pass the full path" not in doc, tool_name
 
 
 def test_ask_archive_docstring_tells_about_the_full_path():
-    """`ask_archive` — єдиний тулз із текстовим `project`, тож саме йому
-    докстринг радить повний шлях «Напрямок → Проєкт»."""
+    """`ask_archive` is the only tool with a text `project`, so it is the one whose
+    docstring advises the full path "Direction → Project"."""
     doc = _squash(m.ask_archive.__doc__ or "")
-    assert "повний шлях «Напрямок → Проєкт»" in doc
+    assert 'the full path "Direction → Project"' in doc
     assert "`project`" in doc
     assert "list_categories" in doc

@@ -1,9 +1,9 @@
-"""Лог питань до архіву (`ask_log`, міграція v41) — історія 04 Хвилі A.
+"""Question log of the archive (`ask_log`, migration v41) -- story 04 of Wave A.
 
-Офлайн: Anthropic-клієнт і `retrieval.search` підмінені фейками, БД —
-тимчасова. Покриває запис рядка з обох шляхів (sync і stream), канал
-`ui`/`mcp`, маршрут оцінки, вартість (невідома модель → NULL) і мінінг
-`--from-ask-log` у `evals/build_golden.py`.
+Offline: the Anthropic client and `retrieval.search` are replaced by fakes, the DB is
+temporary. Covers writing a row from both paths (sync and stream), the channel
+`ui`/`mcp`, the rating route, the cost (unknown model -> NULL) and mining
+`--from-ask-log` in `evals/build_golden.py`.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from evals import build_golden
 
 
 # ============================================================
-# Фейки Claude (той самий контракт, що у tests/test_rag.py)
+# Claude fakes (the same contract as in tests/test_rag.py)
 # ============================================================
 
 class FakeUsage:
@@ -98,7 +98,7 @@ def db(tmp_path):
 
 @pytest.fixture
 def fake_claude(monkeypatch):
-    """`retrieval` + Anthropic-клієнт офлайн; повертає фінальне повідомлення."""
+    """`retrieval` + the Anthropic client offline; returns the final message."""
     final = FakeFinal()
     monkeypatch.setattr(rag.retrieval, "search",
                         lambda db_path, q, **kw: {"chunks": list(CHUNKS), "vector_available": True})
@@ -120,7 +120,7 @@ def _rows(db_path):
 
 
 # ============================================================
-# Запис рядка
+# Writing a row
 # ============================================================
 
 def test_answer_question_writes_one_row_with_all_fields(db, fake_claude):
@@ -183,7 +183,7 @@ def test_empty_search_result_writes_no_row(db, monkeypatch):
 
 
 def test_missing_table_does_not_break_the_answer(fake_claude, tmp_path):
-    """Лог не має права зламати відповідь, за яку вже заплачено."""
+    """The log has no right to break the answer that has already been paid for."""
     bare = str(tmp_path / "no_migrations.db")
     sqlite3.connect(bare).close()
     res = rag.answer_question(bare, "питання")
@@ -192,12 +192,12 @@ def test_missing_table_does_not_break_the_answer(fake_claude, tmp_path):
 
 
 # ============================================================
-# Вартість
+# Cost
 # ============================================================
 
 def test_cost_uses_pricing_table_and_charges_cache_at_tenth(db, fake_claude):
     rag.answer_question(db, "питання")
-    # Haiku 4.5: $1/$5 за MTok, кеш-читання 0.1× input
+    # Haiku 4.5: $1/$5 per MTok, cache read 0.1x input
     expected = (1000 * 1.0 + 500 * 0.1 + 200 * 5.0) / 1_000_000
     assert _rows(db)[0]["cost_usd"] == pytest.approx(expected)
 
@@ -286,7 +286,7 @@ def test_mine_ask_log_puts_thumbs_down_first_and_dedupes(db):
     _seed_ask_log(db, [
         ("питання А", 1, [7], None),
         ("питання Б", -1, [8], "мимо"),
-        ("  ПИТАННЯ А  ", None, [7], None),   # дубль нормалізовано
+        ("  ПИТАННЯ А  ", None, [7], None),   # the duplicate is normalized
         ("питання В", None, [], None),
     ])
     mined = build_golden.mine_ask_log(db)
@@ -301,7 +301,7 @@ def test_build_golden_from_ask_log_adds_unlabeled_items_without_mcp_duplicates(d
     _seed_ask_log(db, [("той самий текст питання", None, [7], None),
                        ("нове питання з UI", -1, [8], None)])
     log = tmp_path / "mcp_calls.log"
-    # той самий текст іншим регістром — дедуп нормалізований, як у mine_queries
+    # the same text in a different case -- the dedup is normalized, as in mine_queries
     log.write_text('10:00:00 →   START ask_archive args={"question": "Той Самий Текст Питання"}\n',
                    encoding="utf-8")
     out = tmp_path / "golden.jsonl"
@@ -311,7 +311,7 @@ def test_build_golden_from_ask_log_adds_unlabeled_items_without_mcp_duplicates(d
     assert rc == 0
     items = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     questions = [it["question"] for it in items]
-    # питання з обох джерел лишилось одне — і це версія з mcp-логу (він перший)
+    # one question from both sources remained -- and it is the version from the mcp log (it is first)
     same = [it for it in items if it["question"].lower() == "той самий текст питання"]
     assert len(same) == 1 and same[0]["source"] == "mcp_log"
     assert "нове питання з UI" in questions
@@ -320,5 +320,5 @@ def test_build_golden_from_ask_log_adds_unlabeled_items_without_mcp_duplicates(d
     it = ask_items[0]
     assert it["status"] == "unlabeled" and it["expected_transcription_ids"] == []
     assert [c["transcription_id"] for c in it["candidates"]] == [8]
-    assert it["slice"] == "tg"          # джерело — telegram-запис #8
+    assert it["slice"] == "tg"          # source -- telegram record #8
     assert len({i["id"] for i in items}) == len(items)

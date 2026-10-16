@@ -1,6 +1,6 @@
-"""Смок-тести `evals/compare.py` (Хвиля B, історія 06) — синтетичні JSON у
-формі `evals.gate --json-out`. Сам гейт тут НЕ запускається: JSON будуються
-руками, як задокументовано у acceptance criteria цієї історії.
+"""Smoke tests of `evals/compare.py` (Wave B, story 06): synthetic JSON in
+the shape of `evals.gate --json-out`. The gate itself is NOT run here: the JSON is built
+by hand, as documented in this story's acceptance criteria.
 """
 import json
 
@@ -10,7 +10,7 @@ from evals import compare
 
 
 # ============================================================
-# хелпери
+# helpers
 # ============================================================
 
 def _golden_jsonl(tmp_path, items, name="golden.jsonl"):
@@ -60,7 +60,7 @@ def _gate_result(tmp_path, *, name, golden, k_list, per_item_by_k, db="snap.db")
 
 
 # ============================================================
-# тести
+# tests
 # ============================================================
 
 def test_compare_deltas_and_both_diff_directions(tmp_path, capsys):
@@ -87,12 +87,12 @@ def test_compare_deltas_and_both_diff_directions(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
 
-    # Обидва напрямки diff, з id і питанням ≤80 символів.
+    # Both diff directions, with id and a question of <=80 characters.
     assert "hit→miss" in out and "miss→hit" in out
     assert "q1" in out and "Андрієм" in out  # hit→miss
     assert "q2" in out and "звіт" in out  # miss→hit
-    # Дельта по обох k (recall 66.7% в обох напрямах, симетрично 0 сумарно
-    # на середньому, але кожен k має власний рядок таблиці).
+    # Delta at both k (recall 66.7% in both directions, symmetrically 0 total
+    # on the mean, but each k has its own table row).
     assert "e5" in out and "qwen3" in out
     assert "k=8" in out.replace(" ", "") or "8" in out
     assert "k=12" in out.replace(" ", "") or "12" in out
@@ -120,10 +120,10 @@ def test_compare_different_item_sets_warns_and_compares_intersection(tmp_path, c
     rc = compare.main([a, b])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "набори різняться" in out
-    assert "q_only_a" in out and "не порівняно" in out
+    assert "the sets differ" in out
+    assert "q_only_a" in out and "not compared" in out
     assert "q_only_b" in out
-    assert "спільних пунктів: 1" in out
+    assert "common items: 1" in out
 
 
 def test_compare_no_common_k_exits_2_without_traceback(tmp_path, capsys):
@@ -139,7 +139,7 @@ def test_compare_no_common_k_exits_2_without_traceback(tmp_path, capsys):
     rc = compare.main([a, b])
     assert rc == 2
     err = capsys.readouterr().err
-    assert "спільного k" in err
+    assert "no common k" in err
     assert "Traceback" not in err
 
 
@@ -155,7 +155,7 @@ def test_compare_unreadable_file_exits_2(tmp_path, capsys):
     rc = compare.main([a, missing])
     assert rc == 2
     err = capsys.readouterr().err
-    assert "не вдалось прочитати" in err
+    assert "could not read" in err
     assert "Traceback" not in err
 
 
@@ -189,7 +189,7 @@ def test_compare_json_out_writes_structured_diff(tmp_path):
 
 
 def test_compare_question_truncated_to_80_chars(tmp_path, capsys):
-    long_question = "Дуже довге питання про архів дзвінків " * 5  # > 80 символів
+    long_question = "Дуже довге питання про архів дзвінків " * 5  # > 80 characters
     golden = _golden_jsonl(tmp_path, [
         {"id": "q1", "question": long_question, "slice": "calls", "status": "labeled",
          "expected_transcription_ids": [1]},

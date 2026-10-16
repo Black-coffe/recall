@@ -1,4 +1,4 @@
-"""Тесты для MetricsRegistry."""
+"""Tests for MetricsRegistry."""
 from app.services.metrics import MetricsRegistry
 
 
@@ -24,7 +24,7 @@ def test_label_escaping():
     m = MetricsRegistry()
     m.inc("test", path='C:\\path\\with"quote')
     out = m.render()
-    # Backslash і кавички мають бути екрановані
+    # Backslash and quotes must be escaped
     assert 'C:\\\\path\\\\with\\"quote' in out
 
 
@@ -45,7 +45,7 @@ def test_gauges_rendered():
 
 
 def test_prometheus_format():
-    """Smoke: вихід має валідні HELP/TYPE заголовки."""
+    """Smoke: the output has valid HELP/TYPE headers."""
     m = MetricsRegistry()
     m.inc("requests_total", method="GET")
     m.observe_duration("latency_seconds", 0.1, route="/foo")

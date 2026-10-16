@@ -1,25 +1,25 @@
-"""Vision-опис кадрів відео (Phase 23B) — «що показано на екрані» → у RAG.
+"""Vision description of video frames (Phase 23B) — "what is shown on screen" → into RAG.
 
-Бекенд-абстракція над двома реалізаціями (вибір через ``VIDEO_VISION_BACKEND``):
+A backend abstraction over two implementations (chosen via ``VIDEO_VISION_BACKEND``):
 
-  * ``local``  — локальна VL-модель через Ollama (за замовч. ``qwen2.5vl:7b``),
-                 $0/офлайн. Перевикористовує :mod:`app.services.local_llm`
-                 (той самий ``_GEN_LOCK``, що серіалізує GPU поряд з whisper).
-  * ``claude`` — Anthropic vision API (за замовч. ``claude-haiku-4-5`` —
-                 найдешевша vision-модель), платно/точніше. Перевикористовує
+  * ``local``  — a local VL model via Ollama (by default ``qwen2.5vl:7b``),
+                 $0/offline. Reuses :mod:`app.services.local_llm`
+                 (the same ``_GEN_LOCK`` that serializes the GPU next to whisper).
+  * ``claude`` — the Anthropic vision API (by default ``claude-haiku-4-5`` —
+                 the cheapest vision model), paid/more accurate. Reuses
                  ``text_polishing._get_client()`` (lazy, ``ANTHROPIC_API_KEY``).
-  * ``off``    — вимкнено.
+  * ``off``    — disabled.
 
-Усе опціональне й деградує (як OCR у Phase 16/23A): нема моделі / ключа / Ollama
-→ :func:`is_available` = False (з людською причиною), :func:`describe_frame`
-повертає ``''``, а кадри + OCR + плеєр працюють як раніше.
+Everything is optional and degrades (like OCR in Phase 16/23A): no model / key / Ollama
+→ :func:`is_available` = False (with a human reason), :func:`describe_frame`
+returns ``''``, and frames + OCR + the player work as before.
 
-БЕЗ нових залежностей: base64 — stdlib; Ollama — через ``local_llm`` (urllib);
-anthropic — lazy-import (вже опц. залежність проекту).
+NO new dependencies: base64 is stdlib; Ollama — via ``local_llm`` (urllib);
+anthropic — lazy import (already an optional dependency of the project).
 
-Константи читаються з ``os.environ`` напряму (як ``local_llm`` / ``embeddings``),
-щоб модуль лишався standalone-тестованим без Flask-контексту. Ті самі значення
-продубльовані у ``config.py`` для discoverability/UI.
+Constants are read from ``os.environ`` directly (like ``local_llm`` / ``embeddings``),
+so the module stays standalone-testable without a Flask context. The same values are
+duplicated in ``config.py`` for discoverability/UI.
 """
 from __future__ import annotations
 
@@ -28,22 +28,24 @@ import logging
 import os
 from typing import Optional
 
+from app.core.i18n import tr
+
 logger = logging.getLogger(__name__)
 
-# --- Конфіг (дзеркало config.py; джерело істини у рантаймі — env) ---
+# --- Config (mirror of config.py; the runtime source of truth is env) ---
 VISION_BACKEND = os.environ.get("VIDEO_VISION_BACKEND", "local").strip().lower()
 VISION_MODEL_LOCAL = os.environ.get("VIDEO_VISION_MODEL_LOCAL", "qwen2.5vl:7b")
 VISION_MODEL_CLAUDE = os.environ.get("VIDEO_VISION_MODEL_CLAUDE", "claude-haiku-4-5")
 VISION_TIMEOUT = float(os.environ.get("VIDEO_VISION_TIMEOUT", "90"))
-# Скільки Ollama тримає VL-модель у VRAM після кадру. Дефолт local_llm — 30 хв, і другі
-# ~5 ГБ поруч із копілотом лишали дзвінок без місця. 60 с, а не 0: кадри йдуть пачкою, і
-# з 0 модель перевантажувалась би на кожному (замір 14.10.2026: 5.5–7.6 с/кадр проти 2.3–2.5).
+# How long Ollama keeps the VL model in VRAM after a frame. local_llm's default is 30 min, and another
+# ~5 GB next to the copilot left the call without room. 60 s, not 0: frames come in a batch, and
+# with 0 the model would reload on each one (measured 14.10.2026: 5.5-7.6 s/frame vs 2.3-2.5).
 VISION_KEEPALIVE = os.environ.get("VIDEO_VISION_KEEPALIVE", "60s")
 
-# Коротка стеля на вихід — опис кадру має бути 1–3 речення, не есе.
+# A short cap on output — a frame description should be 1-3 sentences, not an essay.
 _MAX_TOKENS = 220
 
-# UA-інструкція: опиши ЩО на екрані, без вигаданого тексту.
+# UA instruction: describe WHAT is on screen, with no invented text.
 _PROMPT = (
     "Ти аналізуєш один кадр із запису екрана. Стисло (1–3 речення) опиши, ЩО "
     "показано на екрані: тип контенту (код / діаграма / таблиця / слайд / "
@@ -59,7 +61,7 @@ def _backend(override: Optional[str] = None) -> str:
 
 
 def active_model(backend: Optional[str] = None) -> Optional[str]:
-    """Назва моделі активного бекенда (для запису у video_keyframes.vision_model)."""
+    """Name of the active backend's model (for writing into video_keyframes.vision_model)."""
     b = _backend(backend)
     if b == "claude":
         return VISION_MODEL_CLAUDE
@@ -69,38 +71,38 @@ def active_model(backend: Optional[str] = None) -> Optional[str]:
 
 
 # ============================================================
-# Доступність
+# Availability
 # ============================================================
 
 def availability(backend: Optional[str] = None) -> tuple[bool, str]:
-    """(ok, reason). reason — людська причина для UI/логів. Ніколи не кидає."""
+    """(ok, reason). reason is a human reason for the UI/logs. Never raises."""
     b = _backend(backend)
     if b == "off":
-        return False, "вимкнено (VIDEO_VISION_BACKEND=off)"
+        return False, tr("svc_pipes.vision.off")
 
     if b == "claude":
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            return False, "немає ANTHROPIC_API_KEY (Claude vision вимкнено)"
+            return False, tr("svc_pipes.vision.noKey")
         try:
             import anthropic  # noqa: F401
         except ImportError:
-            return False, "anthropic SDK не встановлено (pip install anthropic)"
+            return False, tr("svc_pipes.vision.noSdk")
         return True, f"OK (Claude vision: {VISION_MODEL_CLAUDE})"
 
     # local
     try:
         from app.services import local_llm
     except Exception:
-        return False, "local_llm недоступний"
+        return False, tr("svc_pipes.vision.localLlmUnavailable")
     ok, reason = local_llm.availability()
     if not ok:
-        return False, reason  # Ollama не запущений / недоступний
+        return False, reason  # Ollama is not running / unavailable
     models = local_llm.list_models()
     base = VISION_MODEL_LOCAL.split(":")[0]
     if VISION_MODEL_LOCAL in models or base in {m.split(":")[0] for m in models}:
-        return True, f"OK (локальна VL: {VISION_MODEL_LOCAL})"
-    return False, (f"VL-модель '{VISION_MODEL_LOCAL}' не знайдена в Ollama. "
-                   f"Виконайте: ollama pull {VISION_MODEL_LOCAL}")
+        return True, tr("svc_pipes.vision.okLocal", model=VISION_MODEL_LOCAL)
+    return False, (tr("svc_pipes.vision.modelMissing",
+                   model=VISION_MODEL_LOCAL))
 
 
 def is_available(backend: Optional[str] = None) -> bool:
@@ -108,11 +110,11 @@ def is_available(backend: Optional[str] = None) -> bool:
 
 
 # ============================================================
-# Опис кадру
+# Frame description
 # ============================================================
 
 def _read_image_b64(image_path: str) -> tuple[str, str]:
-    """(base64-рядок без data-URI, media_type) для зображення на диску."""
+    """(base64 string without data-URI, media_type) for an image on disk."""
     with open(image_path, "rb") as f:
         raw = f.read()
     b64 = base64.b64encode(raw).decode("ascii")
@@ -144,7 +146,7 @@ def _describe_claude(image_path: str, *, timeout: Optional[float]) -> str:
     b64, media_type = _read_image_b64(image_path)
     from app.services import text_polishing
     client = text_polishing._get_client()  # lazy; raises if no ANTHROPIC_API_KEY
-    # Haiku 4.5 — без thinking/effort/temperature: мінімальний vision-виклик.
+    # Haiku 4.5 — without thinking/effort/temperature: a minimal vision call.
     msg = client.with_options(timeout=timeout or VISION_TIMEOUT).messages.create(
         model=VISION_MODEL_CLAUDE,
         max_tokens=_MAX_TOKENS,
@@ -168,9 +170,9 @@ def describe_frame(
     backend: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> str:
-    """Повертає короткий опис «що показано на екрані», або ``''`` за будь-якої
-    помилки / якщо бекенд вимкнено. Best-effort — НІКОЛИ не кидає (один поганий
-    кадр не має валити весь розбір відео)."""
+    """Returns a short description of "what is shown on screen", or ``''`` on any
+    error / if the backend is disabled. Best-effort — NEVER raises (one bad
+    frame must not break the whole video analysis)."""
     b = _backend(backend)
     if b == "off":
         return ""

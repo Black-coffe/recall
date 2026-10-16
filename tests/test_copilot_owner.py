@@ -1,7 +1,7 @@
-"""Один живий власник ко-пілота + явний перенос (parallel-recordings-app-audio-06, C6).
+"""A single live co-pilot owner + explicit move (parallel-recordings-app-audio-06, C6).
 
-Сервіс — на тимчасовій БД (реальні міграції); HTTP — легкий Flask-app з одним
-блюпринтом, `app.state` підмінено (без app.py, без бойової БД).
+The service runs on a temporary DB (real migrations); HTTP — a light Flask app with one
+blueprint, `app.state` is substituted (no app.py, no live DB).
 """
 from __future__ import annotations
 

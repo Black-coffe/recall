@@ -1,9 +1,9 @@
-"""`explain` наскрізь: HTTP → retrieval.search → rag → sources (Історія 05).
+"""`explain` end to end: HTTP -> retrieval.search -> rag -> sources (Story 05).
 
-Перевіряємо не саму форму `why` (це контракт Історії 02, `retrieval.py` не
-наш файл) — перевіряємо, що прапорець доїжджає до `retrieval.search` з
-блупринта і що `why`, який `retrieval.search` поклав у чанк, не губиться на
-шляху до `sources` відповіді `ask` (order_citables / attach_thread_context).
+We check not the shape of `why` itself (that is the Story 02 contract, `retrieval.py` is not
+our file) -- we check that the flag reaches `retrieval.search` from the
+blueprint and that the `why` that `retrieval.search` put into a chunk is not lost on
+the way to the `sources` of the `ask` answer (order_citables / attach_thread_context).
 """
 import sqlite3
 
@@ -24,10 +24,10 @@ def db(tmp_path):
     conn.execute(
         "INSERT INTO transcriptions (id, source_type, source_name, meeting_date, created_at) "
         "VALUES (1, 'recording', 'Зустріч', '2026-05-14', '2026-05-14 10:00:00')")
-    # Закріплений коментар до цього ж запису — без нього `attach_comments`
-    # (rag.answer_question) завжди повертає порожній список і гілка
-    # "приєднаний коментар без `why`", заради якої історія 08, ніколи не
-    # виконується (знахідка рев'ю story 05).
+    # A pinned comment on this same record -- without it `attach_comments`
+    # (rag.answer_question) always returns an empty list and the branch
+    # "attached comment without `why`", for which story 08 was made, is never
+    # executed (review finding of story 05).
     conn.execute(
         "INSERT INTO comments (target_type, target_id, body, kind, pinned) "
         "VALUES ('transcription', 1, 'Насправді домовились на іншу дату', 'correction', 1)")
@@ -45,9 +45,9 @@ def client(db):
 
 
 def _fake_chunk(explain: bool, rerank: bool = False) -> dict:
-    """Мінімальна форма чанка з `why`, як її віддає `retrieval.search`
-    (Історія 02): компактний `why` завжди, `stages` лише при explain=True,
-    `rr` лише коли rerank реально скорував кандидата (Історія 13, Minor 4)."""
+    """A minimal chunk shape with `why`, as `retrieval.search` returns it
+    (Story 02): a compact `why` always, `stages` only with explain=True,
+    `rr` only when rerank really scored the candidate (Story 13, Minor 4)."""
     why = {"src": "transcript", "rrf": 0.5, "rec": 0.0, "by": ["fts"], "top": "rrf"}
     if rerank:
         why["rr"] = 0.9
@@ -80,13 +80,13 @@ def _unit(v):
 
 
 def test_local_fake_why_keys_match_real_retrieval_search(monkeypatch, tmp_path):
-    """Дрейф тест-фейка (памʼятка `graceful-degradation-hides-test-fake-drift`):
-    `_fake_chunk` вище — ручний фейк `retrieval.search`, і він розійшовся зі
-    своїм виробником (`why["capped"]` замість перейменованого історією 09
-    `why["search_capped"]`), поки ЦЕЙ тест не порівнював набори ключів. Тут
-    звіряємо набір ключів `why` фейка з набором ключів справжнього виклику
-    `retrieval.search`, щоб наступне перейменування/додавання ключа в
-    продакшн-коді ловилось автоматично, а не оком."""
+    """Test fake drift (memo `graceful-degradation-hides-test-fake-drift`):
+    `_fake_chunk` above is a hand-made fake of `retrieval.search`, and it diverged from
+    its producer (`why["capped"]` instead of `why["search_capped"]` renamed by story 09)
+    while THIS test did not compare the key sets. Here
+    we compare the key set of the fake's `why` with the key set of the real call
+    of `retrieval.search`, so that the next rename/addition of a key in
+    production code is caught automatically, not by eye."""
     monkeypatch.setattr(embeddings, "EMBED_DIM", 4)
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_query", lambda q: _unit([1.0, 0.0, 0.0, 0.0]))
@@ -102,10 +102,10 @@ def test_local_fake_why_keys_match_real_retrieval_search(monkeypatch, tmp_path):
         "VALUES ('file', 'Дзвінок', 'x', '2026-08-01')")
     tid = cur.lastrowid
     blob = _unit([1.0, 0.0, 0.0, 0.0]).tobytes()
-    # Два чанки — `_apply_rerank` пропускає пул при len(ranked_ids) <= 1, тож
-    # для форми з `rerank=True` (Minor 4) потрібен хоча б один сусід, інакше
-    # `why["rr"]` ніколи не зʼявиться і паритет з фейком перевіряється не на
-    # тій формі, яку заявляє тест.
+    # Two chunks -- `_apply_rerank` skips the pool at len(ranked_ids) <= 1, so
+    # for the `rerank=True` shape (Minor 4) at least one neighbour is needed, otherwise
+    # `why["rr"]` never appears and the parity with the fake is checked not on
+    # the shape the test claims.
     conn.execute(
         "INSERT INTO chunks (transcription_id, chunk_index, start_time, end_time, "
         "speaker, text, embedding) VALUES (?, 0, 0, 10, 'Ви', 'бюджет проєкту', ?)",
@@ -123,9 +123,9 @@ def test_local_fake_why_keys_match_real_retrieval_search(monkeypatch, tmp_path):
         fake_keys = set(_fake_chunk(explain)["why"].keys())
         assert real_keys == fake_keys, (explain, real_keys, fake_keys)
 
-    # Форма з reranker'ом (несе `rr`) — до цього паритет доводився лише на
-    # rerank=False, де `rr` відсутній з обох боків і розбіжність не могла
-    # проявитись (Історія 13, Minor 4).
+    # The shape with the reranker (carries `rr`) -- until now parity was proven only on
+    # rerank=False, where `rr` is absent on both sides and a divergence could not
+    # show up (Story 13, Minor 4).
     def _fake_rerank(query, candidates, text_key="text"):
         return [dict(c, rerank_score=0.9 - i * 0.1) for i, c in enumerate(candidates)]
     monkeypatch.setattr("app.services.retrieval.reranker.rerank", _fake_rerank)
@@ -134,7 +134,7 @@ def test_local_fake_why_keys_match_real_retrieval_search(monkeypatch, tmp_path):
         real = retrieval_real.search(path, "бюджет проєкту", top_k=5, explain=explain,
                                      rerank=True)
         real_keys = set(real["chunks"][0]["why"].keys())
-        assert "rr" in real_keys, "rerank=True мусив додати `rr` до `why`"
+        assert "rr" in real_keys, "rerank=True must have added `rr` to `why`"
         fake_keys = set(_fake_chunk(explain, rerank=True)["why"].keys())
         assert real_keys == fake_keys, (explain, real_keys, fake_keys)
 
@@ -174,9 +174,9 @@ def test_search_explain_unknown_value_is_false(client, monkeypatch, val):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/memory/ask — `why` мусить дожити до `sources` крізь
-# order_citables/attach_thread_context (rag.answer_question), не тільки
-# крізь блупринт.
+# POST /api/memory/ask -- `why` must survive to `sources` through
+# order_citables/attach_thread_context (rag.answer_question), not only
+# through the blueprint.
 # ---------------------------------------------------------------------------
 
 class _Block:
@@ -214,9 +214,9 @@ def test_ask_explain_true_sources_have_stages(client, monkeypatch):
     data = r.get_json()
     assert data["success"] is True
     sources = data["sources"]
-    # Приєднаний `correction`-коментар (fixture `db`) стає sources[0]
-    # (order_citables ставить коментарі першими) — саме та позиція, де
-    # `why` губився до ремонту.
+    # The attached `correction` comment (fixture `db`) becomes sources[0]
+    # (order_citables puts comments first) -- exactly the position where
+    # `why` was lost before the repair.
     assert len(sources) >= 2
     found = [s for s in sources if s.get("source_type") != "comment" or not s.get("attached")]
     assert found and "stages" in found[0]["why"]
@@ -238,12 +238,12 @@ def test_ask_default_sources_no_stages(client, monkeypatch):
 
 
 def test_ask_every_source_has_why_including_attached_comment(client, monkeypatch):
-    """Знахідка рев'ю #1: приєднаний коментар (не крізь `retrieval.search`)
-    стоїть sources[0] і раніше не мав `why` взагалі — перевіряємо УСІ
-    елементи, а не лише перший знайдений. Історія 12 (D2): маркер мусить
-    нести ТОЙ САМИЙ обовʼязковий набір ключів C2, що й знайдений результат
-    (`src`, `rrf`, `rec`, `by`, `top`), інакше `why["rrf"]` ловить `KeyError`
-    на цьому ж елементі рівнем глибше."""
+    """Review finding #1: the attached comment (not through `retrieval.search`)
+    stands at sources[0] and used to have no `why` at all -- we check ALL
+    elements, not only the first found. Story 12 (D2): the marker must
+    carry THE SAME required set of C2 keys as a found result
+    (`src`, `rrf`, `rec`, `by`, `top`), otherwise `why["rrf"]` catches a `KeyError`
+    on this same element one level deeper."""
     captured = {}
     _patch_search(monkeypatch, captured)
     _patch_claude(monkeypatch)
@@ -257,7 +257,7 @@ def test_ask_every_source_has_why_including_attached_comment(client, monkeypatch
         assert "why" in s
         assert set(s["why"]) >= required
     attached = [s for s in sources if s.get("attached")]
-    assert attached, "фікстура мусить давати хоча б один приєднаний коментар"
+    assert attached, "the fixture must give at least one attached comment"
     assert attached[0]["why"].get("src") == "comment"
     assert attached[0]["why"]["rrf"] == 0.0
     assert attached[0]["why"]["rec"] == 0.0
@@ -276,9 +276,9 @@ def test_ask_unknown_explain_is_false(client, monkeypatch, val):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/memory/ask/stream — знахідка рев'ю #3: прапорець там прокидається
-# коректно, але жоден тест цього не доводив (контракт називав три ендпоінти,
-# тест покривав два).
+# POST /api/memory/ask/stream -- review finding #3: the flag is passed through there
+# correctly, but no test proved it (the contract named three endpoints,
+# the test covered two).
 # ---------------------------------------------------------------------------
 
 def _sse_events(raw: str) -> list[tuple[str, dict]]:

@@ -1,25 +1,25 @@
-"""Прапорці запуску дочірніх процесів (Windows).
+"""Child process launch flags (Windows).
 
-Консольний дочірній процес (ffmpeg/ffprobe/explorer) на Windows успадковує
-консоль батька. Якщо у батька консолі НЕМА — а її нема, коли app.py запущено
-через ``pythonw.exe`` — Windows створює для дитини НОВУ консоль: чорне вікно
-блимає й зникає на кожен виклик.
+A console child process (ffmpeg/ffprobe/explorer) on Windows inherits the
+parent's console. If the parent has NO console — and it has none when app.py is started
+via ``pythonw.exe`` — Windows creates a NEW console for the child: a black window
+flashes and disappears on every call.
 
-Під час запису це помітно найбільше: live-транскрипція кожні 8 с на потік
-(мікрофон + системний звук) пише тимчасовий WAV і питає його тривалість через
-``ffprobe`` → вікно блимає кожні кілька секунд усю розмову.
+During recording this is the most noticeable: live transcription every 8 s per stream
+(microphone + system audio) writes a temporary WAV and asks for its duration via
+``ffprobe`` → the window flashes every few seconds through the whole conversation.
 
-``CREATE_NO_WINDOW`` знімає це незалежно від способу запуску (з консолі чи без).
-На POSIX константи нема — підставляємо 0, а ``creationflags=0`` там дозволений.
+``CREATE_NO_WINDOW`` removes this regardless of how it is launched (with or without a console).
+POSIX has no such constant — we substitute 0, and ``creationflags=0`` is allowed there.
 
-Використання::
+Usage::
 
     from app.utils.proc import NO_WINDOW
     subprocess.run(cmd, capture_output=True, creationflags=NO_WINDOW)
 
-Свої виклики закриті цим параметром. Бібліотеки, які запускають ffmpeg/tesseract
-самі й прапорця не передають, латаються функціями ``silence_*`` нижче: підміна
-робиться в атрибутах САМОЇ бібліотеки, глобальний ``subprocess`` не чіпаємо.
+Our own calls are covered by this parameter. Libraries that launch ffmpeg/tesseract
+themselves and do not pass the flag are patched by the ``silence_*`` functions below: the substitution
+is done in the attributes of the library ITSELF, the global ``subprocess`` is not touched.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-#: 0x08000000 на Windows, 0 на решті платформ.
+#: 0x08000000 on Windows, 0 on other platforms.
 NO_WINDOW: int = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 _pydub_patched = False
@@ -38,7 +38,7 @@ _pytesseract_patched = False
 
 
 def _no_window(fn):
-    """Обгортка: дописує creationflags=NO_WINDOW, якщо викликач його не задав."""
+    """Wrapper: appends creationflags=NO_WINDOW if the caller did not set it."""
     @functools.wraps(fn)
     def _wrapper(*args, **kwargs):
         kwargs.setdefault('creationflags', NO_WINDOW)
@@ -47,14 +47,14 @@ def _no_window(fn):
 
 
 def silence_pydub_console_windows() -> None:
-    """Прибрати блимання консолі у ffmpeg/ffprobe, які запускає pydub.
+    """Remove the console flashing of ffmpeg/ffprobe launched by pydub.
 
-    Свої виклики ми закриваємо параметром ``creationflags=NO_WINDOW``, але
-    pydub кличе ffmpeg сам (``AudioSegment.from_file``/``export``,
-    ``utils.mediainfo_json``) і прапорця не передає. Підміняємо ``Popen`` лише
-    у двох модулях pydub — глобальний ``subprocess`` не чіпаємо.
+    We cover our own calls with the ``creationflags=NO_WINDOW`` parameter, but
+    pydub calls ffmpeg itself (``AudioSegment.from_file``/``export``,
+    ``utils.mediainfo_json``) and does not pass the flag. We substitute ``Popen`` only
+    in two pydub modules — the global ``subprocess`` is not touched.
 
-    Ідемпотентна, безпечна для повторного виклику, ніколи не кидає.
+    Idempotent, safe to call repeatedly, never raises.
     """
     global _pydub_patched
     if _pydub_patched or not NO_WINDOW:
@@ -63,7 +63,7 @@ def silence_pydub_console_windows() -> None:
         import pydub.audio_segment as _pas
         import pydub.utils as _pu
     except Exception:
-        logger.debug('pydub не імпортується — патч no-window пропущено', exc_info=True)
+        logger.debug('pydub cannot be imported — no-window patch skipped', exc_info=True)
         return
 
     class _NoWindowPopen(subprocess.Popen):
@@ -72,30 +72,30 @@ def silence_pydub_console_windows() -> None:
             super().__init__(*args, **kwargs)
 
     class _SubprocessProxy:
-        """Проксі на модуль subprocess із підміненим лише Popen."""
+        """Proxy to the subprocess module with only Popen replaced."""
         Popen = _NoWindowPopen
 
         def __getattr__(self, name):
             return getattr(subprocess, name)
 
-    _pas.subprocess = _SubprocessProxy()   # audio_segment робить subprocess.Popen(...)
-    _pu.Popen = _NoWindowPopen             # utils робить `from subprocess import Popen`
+    _pas.subprocess = _SubprocessProxy()   # audio_segment does subprocess.Popen(...)
+    _pu.Popen = _NoWindowPopen             # utils does `from subprocess import Popen`
     _pydub_patched = True
-    logger.debug('pydub: ffmpeg/ffprobe запускаються без консольного вікна')
+    logger.debug('pydub: ffmpeg/ffprobe are launched without a console window')
 
 
 def silence_openai_whisper_console_windows() -> None:
-    """Те саме для openai-whisper (бекенд ``WHISPER_BACKEND=openai``).
+    """Same for openai-whisper (the ``WHISPER_BACKEND=openai`` backend).
 
-    ``whisper/audio.py`` робить ``from subprocess import run`` і кличе ffmpeg
-    на КОЖЕН шматок аудіо (chunked-транскрипція ріже по 5 хв) — без прапорця це
-    вікно на кожен чанк. Дефолтний бекенд ``faster`` сюди не заходить: там PyAV,
-    без дочірніх процесів. Підміняємо лише імʼя ``run`` у модулі whisper.audio.
+    ``whisper/audio.py`` does ``from subprocess import run`` and calls ffmpeg
+    for EVERY audio chunk (chunked transcription cuts every 5 min) — without the flag that is
+    a window per chunk. The default ``faster`` backend does not get here: it uses PyAV,
+    with no child processes. We replace only the ``run`` name in the whisper.audio module.
 
-    Кличеться з ``OpenAIWhisperBackend.__init__`` — там, де whisper реально
-    вантажиться, щоб не тягнути важкий імпорт на старті app.py.
+    Called from ``OpenAIWhisperBackend.__init__`` — where whisper is actually
+    loaded, to avoid pulling the heavy import in at app.py startup.
 
-    Ідемпотентна, ніколи не кидає.
+    Idempotent, never raises.
     """
     global _whisper_patched
     if _whisper_patched or not NO_WINDOW:
@@ -103,24 +103,24 @@ def silence_openai_whisper_console_windows() -> None:
     try:
         import whisper.audio as _wa
     except Exception:
-        logger.debug('whisper.audio не імпортується — патч no-window пропущено',
+        logger.debug('whisper.audio cannot be imported — no-window patch skipped',
                      exc_info=True)
         return
     _wa.run = _no_window(subprocess.run)
     _whisper_patched = True
-    logger.debug('openai-whisper: ffmpeg запускається без консольного вікна')
+    logger.debug('openai-whisper: ffmpeg is launched without a console window')
 
 
 def silence_pytesseract_console_windows() -> None:
-    """Те саме для pytesseract.
+    """Same for pytesseract.
 
-    Основний шлях OCR (``image_to_string``) сам ставить ``SW_HIDE`` через
-    ``subprocess_args()`` — його не чіпаємо. А ось ``get_tesseract_version`` і
-    ``get_languages`` кличуть ``subprocess.run``/``check_output`` голяка, повз
-    той хелпер. Обидві під ``@run_once``, тож це один спалах на процес — але
-    саме на першому інджесті документа, коли користувач дивиться на екран.
+    The main OCR path (``image_to_string``) sets ``SW_HIDE`` itself via
+    ``subprocess_args()`` — we do not touch it. But ``get_tesseract_version`` and
+    ``get_languages`` call ``subprocess.run``/``check_output`` bare, bypassing
+    that helper. Both are under ``@run_once``, so it is one flash per process — but
+    exactly on the first document ingest, when the user is looking at the screen.
 
-    Ідемпотентна, ніколи не кидає.
+    Idempotent, never raises.
     """
     global _pytesseract_patched
     if _pytesseract_patched or not NO_WINDOW:
@@ -128,15 +128,15 @@ def silence_pytesseract_console_windows() -> None:
     try:
         import pytesseract.pytesseract as _pt
     except Exception:
-        logger.debug('pytesseract не імпортується — патч no-window пропущено',
+        logger.debug('pytesseract cannot be imported — no-window patch skipped',
                      exc_info=True)
         return
 
     class _SubprocessProxy:
-        """Проксі на subprocess із підміненими run/check_output.
+        """Proxy to subprocess with only run/check_output replaced.
 
-        Popen НЕ чіпаємо: ``image_to_string`` подає туди власний startupinfo
-        зі SW_HIDE — вікна там і так нема.
+        We do NOT touch Popen: ``image_to_string`` passes its own startupinfo
+        with SW_HIDE there — there is no window there anyway.
         """
         run = staticmethod(_no_window(subprocess.run))
         check_output = staticmethod(_no_window(subprocess.check_output))
@@ -146,7 +146,7 @@ def silence_pytesseract_console_windows() -> None:
 
     _pt.subprocess = _SubprocessProxy()
     _pytesseract_patched = True
-    logger.debug('pytesseract: version/list-langs без консольного вікна')
+    logger.debug('pytesseract: version/list-langs without a console window')
 
 
 __all__ = [

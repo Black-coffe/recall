@@ -4,7 +4,7 @@
 path in every route. Singletons — `from app import state`. Errors — JSON `{success,error}` + 400/401/403/404/409/500/503.
 Other slices: `blueprints-media.md` (transcription, audio_library, youtube, recording), `blueprints-memory.md` (memory, research, telegram).
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 ## system.py (~400) — `/`, `/api/health|ready|models*|system_*|polish/*|metrics`
 - `APP_VERSION = "4.16.0"` (system.py:38; mirror `app/__init__.py:6`) — `version` in health/ready/system_info.
@@ -33,11 +33,11 @@ last-verified: 2026-10-15
 ## i18n in the HTTP layer (english-i18n, 4.16.0)
 All error/status texts in `jsonify` — `tr('<area>.<key>', **vars)` / `tr_n` from `app/core/i18n.py`
 (language = `request_lang()`: the `X-Recall-Lang` header → explicit `RECALL_UI_LANG` → uk). Catalog — `app/core/i18n_catalog/<area>.py`
-(`MESSAGES`, `core|capture|transcript|settings|library|knowledge|telegram`; a duplicate key → `ValueError` at import,
+(`MESSAGES`, `core|capture|transcript|settings|library|knowledge|telegram` + service modules `svc_boot|embed|llm|media|pipes|recording|retrieval|tasks|taxonomy|telegram`, 4.17.0; a duplicate key → `ValueError` at import,
 `i18n_catalog/__init__.py:25-36`). The catch-all 500 (`error_handlers.py:64`) — `tr("core.error.internal")`;
 `GENERIC_MESSAGE` stays a uk constant. The services' SSE (research/rag stream uk strings outside the request context)
-is filtered by `localize_sse(frames, lang, keys)` (`research.py:141`, `memory.py:858`). Texts of service exceptions (`str(e)`) and
-the process journal stay uk. Guard: `tests/test_i18n_coverage.py` (no Cyrillic in `jsonify` of blueprints/`app.py`).
+is filtered by `localize_sse(frames, lang, keys)` (`research.py:141`, `memory.py:858`). Since 4.17.0 internal exception texts, logs and the process journal are English; user-facing
+service texts go through `svc_*` keys and follow the request language. Guard: `tests/test_i18n_coverage.py` (no Cyrillic in `jsonify` of blueprints/`app.py`).
 
 ## comments.py (~260) — `/api/comments/*` (Wave 1/3, `services/comments.py`)
 `GET /meta` (:80), `GET ?target_type&target_id` (:95), `/recent` (:114), `POST /counts` (:128, ≤5000 ids), `POST` (:146 →

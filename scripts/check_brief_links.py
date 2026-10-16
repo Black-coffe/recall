@@ -1,12 +1,12 @@
-"""Карточка docs/defects/brief-link-localhost.md: посилання брифінгу мають відкриватись з телефона.
+"""Defect card docs/defects/brief-link-localhost.md: briefing links must open from a phone.
 
-Використання: check_brief_links.py <pipes_cards.py> — вантажить файл як модуль карток, ставить
-``RECALL_PUBLIC_URL`` (адреса, видима з телефона) і ``RECALL_API_URL=http://127.0.0.1:5050``,
-рендерить брифінг з усіма родинами посилань (задача, «ще N →», забута обіцянка, питання, тема,
-виправлення) і падає (exit 1), якщо хоч одне посилання на Recall веде не на публічну адресу.
+Usage: check_brief_links.py <pipes_cards.py> - loads the file as the cards module, sets
+``RECALL_PUBLIC_URL`` (the address visible from a phone) and ``RECALL_API_URL=http://127.0.0.1:5050``,
+renders a briefing with every link family (task, "N more ->", forgotten promise, question, topic,
+correction) and fails (exit 1) if any link to Recall points anywhere but the public address.
 
-База береться так, як її бере труба: ``link_base()`` модуля; модуль без нього — як труба до K5-03,
-тобто ``RECALL_API_URL``. Посилання на Telegram (``https://t.me/``) — не Recall, не перевіряються.
+The base is taken the way the pipe takes it: the module's ``link_base()``; a module without it behaves like the
+pipe before K5-03, i.e. ``RECALL_API_URL``. Telegram links (``https://t.me/``) are not Recall and are not checked.
 """
 from __future__ import annotations
 
@@ -79,15 +79,15 @@ def main(argv: list[str]) -> int:
         kw = {"db_path": _db(tmp), "today": date(2026, 10, 19), "words": []}
         try:
             text, _ = mod.render("Звід", _data(), **kw)
-        except TypeError:                      # до K5-03 base_url був обовʼязковим
+        except TypeError:                      # before K5-03 base_url was mandatory
             text, _ = mod.render("Звід", _data(), base_url=base, **kw)
     hrefs = re.findall(r'href="([^"]+)"', text)
     bad = [h for h in hrefs if not h.startswith("https://t.me/") and not h.startswith(PUBLIC + "/")]
     if not hrefs:
-        print(f"{target}: у брифінгу нема жодного посилання")
+        print(f"{target}: the briefing has no links at all")
         return 1
     for h in bad:
-        print(f"{target}: посилання не відкриється з телефона — {h}")
+        print(f"{target}: link will not open from a phone - {h}")
     return 1 if bad else 0
 
 

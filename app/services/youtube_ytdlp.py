@@ -1,15 +1,15 @@
-"""Запасний завантажувач аудіо з YouTube (yt-dlp).
+"""Fallback YouTube audio downloader (yt-dlp).
 
-Основний шлях — pytubefix (`youtube_pytubefix.py`), він швидший і перевірений на
-всьому архіві. Але частину роликів YouTube віддає лише клієнтам із валідним
-PO-token: віддає перші ~768 КБ файлу і далі 403 — незалежно від клієнта
-(ANDROID_VR/WEB/MWEB), розміру шматка й свіжості URL. Метадані при цьому
-приходять нормально, тож у UI це виглядало як картка відео плюс «Помилка
-завантаження». yt-dlp такі відео бере повністю й без авторизації.
+The primary path is pytubefix (`youtube_pytubefix.py`): it is faster and proven on
+the whole archive. But YouTube serves some videos only to clients with a valid
+PO-token: it serves the first ~768 KB of the file and then 403s - regardless of the client
+(ANDROID_VR/WEB/MWEB), chunk size or URL freshness. The metadata still
+arrives fine, so in the UI this looked like a video card plus a "Download
+error". yt-dlp downloads such videos in full and without authentication.
 
-Модуль викликається ТІЛЬКИ як фолбек, коли pytubefix уже впав, тому тримаємо
-його вузьким: одне аудіо, без плейлистів, без постпроцесорів (конвертацію в MP3
-робить наш пайплайн далі — і робить її з `creationflags`, щоб не блимало консоллю).
+This module is called ONLY as a fallback, when pytubefix has already failed, so we keep
+it narrow: one audio track, no playlists, no postprocessors (the MP3 conversion
+is done by our pipeline afterwards - with `creationflags`, so the console does not flash).
 """
 from __future__ import annotations
 
@@ -27,12 +27,12 @@ def download_audio_via_ytdlp(
     filename: str,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> str:
-    """Завантажує найкраще аудіо і повертає шлях до файлу.
+    """Download the best audio and return the path to the file.
 
-    `filename` — без розширення: його підставить yt-dlp за фактичним форматом
-    (webm/m4a), як це робив pytubefix.
+    `filename` is without an extension: yt-dlp adds it according to the actual format
+    (webm/m4a), as pytubefix did.
     """
-    import yt_dlp  # lazy: важка залежність, потрібна лише на запасному шляху
+    import yt_dlp  # lazy: heavy dependency, needed only on the fallback path
 
     finished: Dict[str, str] = {}
 
@@ -61,7 +61,7 @@ def download_audio_via_ytdlp(
         file_path = finished.get('path') or ydl.prepare_filename(info)
 
     if not file_path or not os.path.exists(file_path):
-        raise RuntimeError("yt-dlp завершився без файлу")
+        raise RuntimeError("yt-dlp finished without a file")
 
-    logger.info(f"[YouTube] yt-dlp завантажив: {file_path} ({os.path.getsize(file_path)} байт)")
+    logger.info(f"[YouTube] yt-dlp downloaded: {file_path} ({os.path.getsize(file_path)} bytes)")
     return file_path

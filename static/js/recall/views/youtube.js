@@ -24,11 +24,11 @@
     let st = null;        // { url, info, opts, busy }
     let _poll = null;     // download-progress poll timer
     let _models = null;   // cached /api/models result
-    // T5.6: bgJob — фонова транскрипція, запущена ЦИМ view (модульний scope —
-    // переживає render()/destroy() у межах вкладки, скидається лише повним
-    // перезавантаженням сторінки). Поки вона не завершиться (успіх чи помилка),
-    // повторний захід у /youtube показує статус-бейдж замість форми — це і є
-    // guard проти дублю задачі (аудит: повторний клік/захід дублює роботу).
+    // T5.6: bgJob — a background transcription started by THIS view (module scope —
+    // survives render()/destroy() within the tab, reset only by a full
+    // page reload). Until it finishes (success or error),
+    // a repeated visit to /youtube shows a status badge instead of the form — this is the
+    // guard against a duplicate task (audit: a repeated click/visit duplicates the work).
     let bgJob = null;      // { label }
 
     function cleanup() {
@@ -133,8 +133,8 @@
         fetchBtn.addEventListener('click', go);
         urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
 
-        // T5.6: фонова транскрипція з попереднього заходу ще триває — не даємо
-        // почати другу (для того самого чи іншого відео), поки не завершиться.
+        // T5.6: a background transcription from a previous visit is still going — we do not let
+        // a second one start (for the same or another video) until it finishes.
         if (bgJob) {
             urlInput.disabled = true; fetchBtn.disabled = true;
             const body = ctx.mount.querySelector('#rcYtBody');
@@ -363,25 +363,25 @@
     }
 
     // ---- step 3: transcribe (fire-and-forget; result lands in History) ----
-    //   T5.6: раніше тут був `await R.api.transcribe(fd)`, що тримало вкладку
-    //   «заблокованою» на весь час транскрипції (до 20GB файлів) без жодного
-    //   способу дізнатись, що можна спокійно піти — а якщо вкладку закривали,
-    //   користувач не знав, чи задача взагалі збереглась. Сервер виконує
-    //   /api/transcribe синхронно в потоці запиту незалежно від клієнтського
-    //   зʼєднання (той самий факт, на якому будується 504-фолбек у record.js
-    //   save()) — тож розрив зʼєднання НЕ втрачає роботу, тільки видимість.
-    //   Тому тепер: не чекаємо проміс для UI, одразу показуємо статус-бейдж
-    //   «можна закрити вкладку», а `.then()/.catch()` довершують UI, ЛИШЕ якщо
-    //   view ще активний (bgJob — module-scope guard від подвійного запуску).
+    //   T5.6: here there used to be `await R.api.transcribe(fd)`, which kept the tab
+    //   "blocked" for the whole transcription (files up to 20GB) with no
+    //   way to learn that it is fine to leave — and if the tab was closed,
+    //   the user did not know whether the task was saved at all. The server runs
+    //   /api/transcribe synchronously in the request thread regardless of the client
+    //   connection (the same fact the 504 fallback in record.js save() is built on)
+    //   — so a dropped connection does NOT lose the work, only the visibility.
+    //   So now: we do not wait for the promise for the UI, we immediately show the status badge
+    //   «можна закрити вкладку», and `.then()/.catch()` finish the UI ONLY if the
+    //   view is still active (bgJob — a module-scope guard against a double start).
     //
-    //   NOTE: ми свідомо НЕ відкриваємо EventSource на /api/events/<id> для
-    //   live-сегментів. Werkzeug dev-сервер лишає keep-alive зʼєднання в
-    //   зламаному стані після GET-SSE стріму, що стопорить наступний запит на
-    //   отруєному зʼєднанні — а саме /api/history/<id> сторінки транскрипту,
-    //   лишаючи її «висіти» на скелетоні. Live word-streaming — це nice-to-have,
-    //   коректність важливіша. Майбутнє відродження має використати
-    //   fetch+ReadableStream reader з AbortController (див. api.askStream), а
-    //   не EventSource.
+    //   NOTE: we deliberately do NOT open an EventSource on /api/events/<id> for
+    //   live segments. The Werkzeug dev server leaves the keep-alive connection in a
+    //   broken state after a GET-SSE stream, which stalls the next request on the
+    //   poisoned connection — namely the transcript page's /api/history/<id>,
+    //   leaving it "hanging" on the skeleton. Live word-streaming is nice-to-have,
+    //   correctness matters more. A future revival should use a
+    //   fetch+ReadableStream reader with an AbortController (see api.askStream), and
+    //   not EventSource.
     function transcribe(ctx, id) {
         const o = st.opts || {};
         const label = (st.info && st.info.title) || st.url;

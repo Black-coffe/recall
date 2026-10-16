@@ -1,36 +1,36 @@
-"""Словник «важких» імен із графа сутностей для faster-whisper (K1).
+"""A dictionary of "hard" names from the entity graph for faster-whisper (K1).
 
-Whisper калічить імена людей, проєктів і організацій, які часто звучать у
-дзвінках власника («Акмеец» замість Acmecorp). Граф сутностей уже знає ці
-імена, а його аліаси — ще й те, як саме Whisper їх писав. Звідси словник,
-який сам збирається з графа без ручного ведення:
+Whisper mangles the names of people, projects and organizations that sound often in
+the owner's calls («Акмеец» instead of Acmecorp). The entity graph already knows these
+names, and its aliases also know how exactly Whisper wrote them. Hence a dictionary
+that assembles itself from the graph without manual upkeep:
 
-- кандидати — сутності типів ``person``/``project``/``org`` (``topic`` ні);
-- **аліас-помилка** — аліас сутності, який трапляється в тексті її
-  аудіо-транскрипцій (файл, запис, голосові TG; YouTube ні) і не є тим самим
-  імʼям ні за основою (перші 4 літери після ``casefold()`` у Python — SQLite
-  ``LOWER`` кирилицю не згортає), ні за фонетичним ключем поперек мов.
-  Відмінки («Адаму» при «Адам»), переклади й транслітерації uk/ru/en («Гугл»
-  при Google, «Телеграм» при Telegram) помилками не вважаються;
-- ранг — кількість зустрічей × кількість аліасів-помилок × буст (латиниця,
-  складене імʼя), нічия — за зустрічами; сутності без помилок ідуть хвостом;
-- імʼя, яке в аудіо-текстах частіше стоїть з малої літери («фонд», «парк»),
-  — загальновживане слово, відсіюється; складене — якщо таке хоч одне його слово.
+- candidates — entities of types ``person``/``project``/``org`` (not ``topic``);
+- **an error alias** — an alias of an entity that occurs in the text of its
+  audio transcripts (file, recording, TG voice messages; not YouTube) and is not the same
+  name either by stem (the first 4 letters after ``casefold()`` in Python — SQLite
+  ``LOWER`` does not fold Cyrillic) or by a cross-language phonetic key.
+  Cases («Адаму» for «Адам»), translations and transliterations uk/ru/en («Гугл»
+  for Google, «Телеграм» for Telegram) are not considered errors;
+- rank — number of meetings × number of error aliases × boost (Latin script,
+  compound name), a tie is broken by meetings; entities without errors go at the tail;
+- a name that stands lowercase more often in the audio texts («фонд», «парк»)
+  is a common word and is filtered out; a compound one — if even one of its words is such.
 
-Список кешується в процесі з TTL і перебудовується без рестарту. Модуль лише
-ЧИТАЄ граф (``mode=ro``) і не імпортує torch/модель: токени рахує
-``whisper_manager_new`` токенайзером завантаженої моделі й обрізає список
-за межею імені в 223 токени.
+The list is cached in the process with a TTL and rebuilt without a restart. The module only
+READS the graph (``mode=ro``) and does not import torch/the model: tokens are counted
+by ``whisper_manager_new`` with the tokenizer of the loaded model, and it trims the list
+at a name boundary to 223 tokens.
 
-Прапори (реєстр ``app/core/settings.py``, група «Транскрипція»). Дефолти —
-за підсумком заміру K1 (``docs/specs/k1-name-vocabulary/measure/report.md``):
-- ``RECALL_VOCAB_MODE`` = off | hotwords | initial_prompt, дефолт ``hotwords``
-  (імена 15 % → 35 %, +11 % часу — рішення власника понад поріг 10 %);
-- ``WHISPER_MULTILINGUAL`` — визначення мови на кожному вікні до 30 с
-  (не на фразу) на повній транскрипції, файлах і TG, дефолт ``1`` (сліпі пари:
-  7 з 10); жива транскрипція його не отримує, бо вже визначає мову на кожному
-  своєму шматку. Діє лише коли мову не обрано («Авто-визначення»): явна мова
-  («uk») — закон, це вирішує ``whisper_manager_new`` (4.8.1).
+Flags (registry ``app/core/settings.py``, group "Transcription"). Defaults —
+by the outcome of the K1 measurement (``docs/specs/k1-name-vocabulary/measure/report.md``):
+- ``RECALL_VOCAB_MODE`` = off | hotwords | initial_prompt, default ``hotwords``
+  (names 15 % → 35 %, +11 % time — the owner's decision above the 10 % threshold);
+- ``WHISPER_MULTILINGUAL`` — language detection on every window up to 30 s
+  (not per phrase) on full transcription, files and TG, default ``1`` (blind pairs:
+  7 of 10); live transcription does not get it, because it already detects the language on each
+  of its chunks. Works only when no language is chosen ("Auto-detect"): an explicit language
+  («uk») is law, this is decided by ``whisper_manager_new`` (4.8.1).
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ MODES = ("off", "hotwords", "initial_prompt")
 SOURCE_KINDS = ("file", "recording", "telegram", "live", "youtube")
 
 ENTITY_TYPES = ("person", "project", "org")
-#: Кандидатів більше, ніж влізе: обрізає за токенами менеджер (≈50 імен у 223 токени).
+#: There are more candidates than fit: the manager trims by tokens (≈50 names in 223 tokens).
 VOCAB_LIMIT = 60
 CACHE_TTL_S = 3600.0
 STEM_LEN = 4
@@ -66,10 +66,10 @@ _cache_lock = threading.Lock()
 
 
 def mode() -> str:
-    """Режим словника з env; невідоме значення → ``off`` з попередженням."""
+    """The dictionary mode from env; an unknown value → ``off`` with a warning."""
     raw = (os.environ.get(ENV_MODE, DEFAULT_MODE) or "off").strip().lower()
     if raw not in MODES:
-        logger.warning("%s=%r невідомий, словник вимкнено (допустимі: %s)",
+        logger.warning("%s=%r is unknown, vocabulary disabled (allowed: %s)",
                        ENV_MODE, raw, ", ".join(MODES))
         return "off"
     return raw
@@ -88,8 +88,8 @@ def _stems(name: str) -> set[str]:
     return {w.casefold()[:STEM_LEN] for w in _words(name)}
 
 
-# uk + ru кирилиця → латиниця. «г» → g, бо так пишуть англійські імена (Гугл,
-# Гітхаб); англійське h нижче теж зводиться до g, тож «Гарвард» = Harvard.
+# uk + ru Cyrillic → Latin. «г» → g, because English names are written that way («Гугл»,
+# «Гітхаб»); English h below also reduces to g, so «Гарвард» = Harvard.
 _CYR_TO_LAT = {
     "а": "a", "б": "b", "в": "v", "г": "g", "ґ": "g", "д": "d", "е": "e", "є": "ye", "ж": "zh",
     "з": "z", "и": "i", "і": "i", "ї": "yi", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
@@ -97,7 +97,7 @@ _CYR_TO_LAT = {
     "ч": "ch", "ш": "sh", "щ": "shch", "ь": "", "ю": "yu", "я": "ya", "ё": "yo", "ы": "y",
     "э": "e", "ъ": "",
 }
-# Англійська орфографія → один звук (порядок важливий: диграфи до одиночних літер).
+# English orthography → one sound (order matters: digraphs before single letters).
 _PHONETIC_RULES = (
     ("tion", "shn"), ("sh", "S"), ("ch", "C"), ("zh", "Z"), ("kh", "h"), ("ph", "f"),
     ("th", "t"), ("ck", "k"), ("qu", "kv"), ("x", "ks"), ("c", "k"), ("q", "k"),
@@ -106,22 +106,22 @@ _PHONETIC_RULES = (
 _NON_LATIN_RE = re.compile(r"[^a-zA-Z]")
 _VOWELS_RE = re.compile(r"[aeiouy]")
 _REPEAT_RE = re.compile(r"(.)\1+")
-#: Скільки приголосних може дописати закінчення або суфікс
+#: How many consonants an ending or a suffix can append
 #: («Клод» → «Клодом»: kld → kldm; «Гугл» → «гугловський»: gl → glvsk).
 _ENDING_SLACK = 3
-#: Префіксне порівняння окремих слів — лише з ключем від 3 приголосних:
-#: коротший (gl, dm) збігся б префіксом із чим завгодно.
+#: Prefix comparison of individual words — only with a key of 3 consonants or more:
+#: a shorter one (gl, dm) would match anything by prefix.
 _PREFIX_MIN_KEY = 3
 
 
 def phonetic_keys(text: str) -> set[str]:
-    """Фонетичні ключі поперек мов і письма: кирилиця → латиниця, англійські
-    диграфи → один звук, голосні відкинуто, повтори злито.
+    """Phonetic keys across languages and scripts: Cyrillic → Latin, English
+    digraphs → one sound, vowels dropped, repeats merged.
 
-    «Гугл» і Google → gl, «Телеграм» і Telegram → tlgrm, «Олексій» і «Алексей» → lks;
-    «Акмеец» (brgts) і Acmecorp (brgds) — різні. Голосних ключ не розрізняє навмисно:
-    саме ними відрізняються переклади uk/ru/en одного імені. Латинське j дає два
-    ключі: «дж» (Jason → Джейсон) і «й» (Julia → Юлія)."""
+    «Гугл» and Google → gl, «Телеграм» and Telegram → tlgrm, «Олексій» and «Алексей» → lks;
+    «Акмеец» (brgts) and Acmecorp (brgds) differ. The key deliberately does not distinguish vowels:
+    it is exactly by them that uk/ru/en translations of one name differ. Latin j gives two
+    keys: «дж» («Jason → Джейсон») and «й» («Julia → Юлія»)."""
     w = "".join(_CYR_TO_LAT.get(ch, ch) for ch in text.casefold())
     w = _NON_LATIN_RE.sub("", w)
     for src, dst in _PHONETIC_RULES:
@@ -136,14 +136,14 @@ def _prefix_match(alias_keys: set[str], canon_keys: set[str]) -> bool:
 
 
 def same_name(alias: str, canonical: str) -> bool:
-    """Аліас — те саме імʼя, а не помилка Whisper: відмінок («Адаму» при «Адам»),
-    переклад чи транслітерація («Гугл» при Google, «Роботес фонд» при Робота Fund)."""
+    """An alias is the same name, not a Whisper error: a case («Адаму» for «Адам»),
+    a translation or transliteration («Гугл» for Google, «Роботес фонд» for Робота Fund)."""
     if _stems(alias) & _stems(canonical):
         return True
     a_words, c_words = _words(alias), _words(canonical)
     if _prefix_match(phonetic_keys("".join(a_words)), phonetic_keys("".join(c_words))):
         return True
-    # Окремі слова: «гугл диск» при Google, «Julia Bondarenko» при «Юлія».
+    # Individual words: «гугл диск» for Google, «Julia Bondarenko» for «Юлія».
     a_keys = [phonetic_keys(w) for w in a_words]
     for cw in c_words:
         c_keys = phonetic_keys(cw)
@@ -155,10 +155,10 @@ def same_name(alias: str, canonical: str) -> bool:
 
 
 def is_error_alias(alias: str, canonical: str) -> bool:
-    """Аліас-помилка: не те саме імʼя ні за основою, ні за фонетичним ключем.
+    """An error alias: not the same name by either stem or phonetic key.
 
-    «Акмеец» при Acmecorp — помилка; «Адаму» при «Адам», «Гугл» при Google,
-    «Телеграм» при Telegram і «Фонд Робота» при «Робота Fund» — ні."""
+    «Акмеец» for Acmecorp is an error; «Адаму» for «Адам», «Гугл» for Google,
+    «Телеграм» for Telegram and «Фонд Робота» for «Робота Fund» are not."""
     if not _stems(alias) or not _stems(canonical):
         return False
     return not same_name(alias, canonical)
@@ -170,7 +170,7 @@ def _connect_ro(db_path: str) -> sqlite3.Connection:
 
 
 def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
-    """Ранжований список «важких» імен без кешу (див. docstring модуля)."""
+    """A ranked list of "hard" names without a cache (see the module docstring)."""
     conn = _connect_ro(db_path)
     try:
         types_sql = ",".join("?" * len(ENTITY_TYPES))
@@ -188,7 +188,7 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
         ):
             if alias:
                 aliases[eid].append(alias)
-        # Аудіо-транскрипції: текст, який написав саме Whisper (YouTube — чужі люди).
+        # Audio transcripts: the text written by Whisper itself (YouTube is other people).
         audio_text: dict[int, str] = {}
         for tid, text in conn.execute(
             "SELECT id, transcript_text FROM transcriptions "
@@ -203,7 +203,7 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
     finally:
         conn.close()
 
-    # Регістр слова в аудіо-текстах: скільки разів воно стоїть з малої / з великої.
+    # Word case in the audio texts: how many times it stands lowercase / capitalized.
     raw_counts: Counter[str] = Counter()
     for text in audio_text.values():
         raw_counts.update(_words(text))
@@ -213,8 +213,8 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
         (lower_n if word[0].islower() else upper_n)[word.casefold()] += n
 
     def is_common(name: str) -> bool:
-        # Складене імʼя із загальновживаним словом («Промінвест (хаб)», «RAG-система
-        # Андрія») — опис, а не назва; Whisper такі слова й так пише правильно.
+        # A compound name with a common word («Промінвест (хаб)») is a description,
+        # not a title («RAG-система Андрія»); Whisper writes such words correctly anyway.
         return any(lower_n[w] > upper_n[w] for w in (x.casefold() for x in _words(name)))
 
     folded_text: dict[int, str] = {}
@@ -226,7 +226,7 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
             ft = folded_text.get(tid)
             if ft is None:
                 ft = folded_text[tid] = audio_text[tid].casefold()
-            # Підрядок — швидкий відсів; регекс із lookbehind лише підтверджує межі слова.
+            # A substring is a fast filter; the regex with lookbehind only confirms word boundaries.
             if needle in ft and pattern.search(ft):
                 return True
         return False
@@ -256,7 +256,7 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
     for _, _, name in ranked:
         key = name.casefold()
         if key in seen_names:
-            continue  # двійники одного імені поперек типів (project + org)
+            continue  # twins of one name across types (project + org)
         seen_names.add(key)
         out.append(name)
         if len(out) >= limit:
@@ -265,7 +265,7 @@ def build_hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
 
 
 def hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
-    """Кешований :func:`build_hard_names`: у межах TTL у БД не ходить."""
+    """Cached :func:`build_hard_names`: within the TTL it does not touch the DB."""
     key = os.path.abspath(db_path)
     now = time.monotonic()
     with _cache_lock:
@@ -274,13 +274,13 @@ def hard_names(db_path: str, limit: int = VOCAB_LIMIT) -> list[str]:
             return list(hit[1][:limit])
         try:
             names = build_hard_names(db_path, limit=VOCAB_LIMIT)
-        except Exception:  # noqa: BLE001 — словник не має права зупинити транскрипцію
-            # Граф недоступний (нова БД без міграцій, замок) — транскрипція йде без
-            # словника; порожній список теж кешується, щоб не довбати БД на кожен тик живої.
-            logger.warning("словник імен не зібрано з %s", db_path, exc_info=True)
+        except Exception:  # noqa: BLE001 — the vocabulary must not be allowed to stop transcription
+            # The graph is unavailable (a new DB without migrations, a lock) — transcription goes on without
+            # the vocabulary; an empty list is cached too, so as not to hammer the DB on every live tick.
+            logger.warning("name vocabulary not built from %s", db_path, exc_info=True)
             names = []
         _cache[key] = (now + CACHE_TTL_S, names)
-        logger.info("словник імен перебудовано: %d імен", len(names))
+        logger.info("name vocabulary rebuilt: %d names", len(names))
         return list(names[:limit])
 
 
@@ -290,11 +290,11 @@ def clear_cache() -> None:
 
 
 def decode_options_for(source_kind: str, db_path: str | None) -> dict:
-    """Опції декодування для ``transcribe_with_progress`` на шляху ``source_kind``.
+    """Decoding options for ``transcribe_with_progress`` on the ``source_kind`` path.
 
-    YouTube і вимкнені прапори → ``{}`` (виклик faster-whisper як до K1)."""
+    YouTube and disabled flags → ``{}`` (the faster-whisper call as before K1)."""
     if source_kind not in SOURCE_KINDS:
-        raise ValueError(f"невідомий source_kind: {source_kind!r}")
+        raise ValueError(f"unknown source_kind: {source_kind!r}")
     if source_kind == "youtube":
         return {}
     opts: dict = {}
@@ -309,29 +309,29 @@ def decode_options_for(source_kind: str, db_path: str | None) -> dict:
 
 
 def check_error_pairs(path: str) -> int:
-    """Гейт карти дефекту ``translation-counted-as-asr-error``.
+    """The gate of the defect card ``translation-counted-as-asr-error``.
 
-    ``path`` — JSON-список ``{"alias", "canonical"}`` пар, які артефакт (список
-    фрагментів заміру, звіт словника) подає як помилки Whisper. Exit 1, якщо
-    серед них є переклад/транслітерація того самого імені («Гугл» при Google);
-    файл не того формату — гейт не застосовний, exit 0."""
+    ``path`` — a JSON list of ``{"alias", "canonical"}`` pairs that an artifact (the list of
+    measurement fragments, the vocabulary report) presents as Whisper errors. Exit 1 if
+    among them there is a translation/transliteration of the same name («Гугл» for Google);
+    a file of the wrong format — the gate is not applicable, exit 0."""
     import json
 
     try:
         with open(path, encoding="utf-8") as fh:
             pairs = json.load(fh)
     except (OSError, ValueError):
-        print(f"check-error-pairs: {path} — не JSON-список пар, гейт не застосовний")
+        print(f"check-error-pairs: {path} — not a JSON list of pairs, the gate is not applicable")
         return 0
     if not isinstance(pairs, list):
-        print(f"check-error-pairs: {path} — не список, гейт не застосовний")
+        print(f"check-error-pairs: {path} — not a list, the gate is not applicable")
         return 0
     bad = [p for p in pairs
            if isinstance(p, dict) and p.get("alias") and p.get("canonical")
            and same_name(str(p["alias"]), str(p["canonical"]))]
     for p in bad:
-        print(f"переклад, не помилка: «{p['alias']}» = «{p['canonical']}»")
-    print(f"check-error-pairs: {len(bad)} з {len(pairs)} пар — переклади того самого імені")
+        print(f"translation, not an error: «{p['alias']}» = «{p['canonical']}»")
+    print(f"check-error-pairs: {len(bad)} of {len(pairs)} pairs — translations of the same name")
     return 1 if bad else 0
 
 
@@ -339,11 +339,11 @@ def _main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="python -m app.services.vocabulary",
-                                     description="Словник «важких» імен (K1).")
+                                     description="A dictionary of \"hard\" names (K1).")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_check = sub.add_parser("check-error-pairs", help="гейт карти дефекту: переклад ≠ помилка")
+    p_check = sub.add_parser("check-error-pairs", help="defect-card gate: translation ≠ error")
     p_check.add_argument("path")
-    p_show = sub.add_parser("show", help="зібраний словник (БД лише читається)")
+    p_show = sub.add_parser("show", help="the assembled dictionary (the DB is only read)")
     p_show.add_argument("--db", default="whisper_history.db")
     args = parser.parse_args(argv)
     if args.cmd == "check-error-pairs":

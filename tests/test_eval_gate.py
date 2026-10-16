@@ -1,7 +1,7 @@
-"""Смок-тести `evals/gate.py` + `evals/snapshot.py` + `evals/golden_io.py`
-(eval-gate, історія 01) — синтетична БД (`app.db.migrations.init_database`),
-`app.services.retrieval.search` підмінений фейком: жодного реального
-e5/GPU виклику, жодного `ANTHROPIC_API_KEY`, жодного звернення до мережі.
+"""Smoke tests of `evals/gate.py` + `evals/snapshot.py` + `evals/golden_io.py`
+(eval-gate, story 01): a synthetic DB (`app.db.migrations.init_database`),
+`app.services.retrieval.search` replaced by a fake: no real
+e5/GPU call, no `ANTHROPIC_API_KEY`, no network access.
 """
 import hashlib
 import json
@@ -21,7 +21,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ============================================================
-# фікстури / хелпери
+# fixtures / helpers
 # ============================================================
 
 @pytest.fixture
@@ -61,10 +61,10 @@ def _item(item_id, tid, name, *, status="labeled", slice_="calls",
 
 @pytest.fixture
 def db_taxonomy(db):
-    """`db` (id 1/2, без напрямку/тегів) + дерево напрямок→проєкт і тег `AI`
-    (C8/filter_leak): #3 — усередині проєкту «Акмекорп» напрямку «Фонд
-    Робота», з тегом AI; #4 — поза деревом і без тегів (чуже, яке фільтр
-    не мав би пропускати у видачу)."""
+    """`db` (ids 1/2, no direction/tags) + a direction->project tree and the tag `AI`
+    (C8/filter_leak): #3 is inside the project «Акмекорп» of the direction «Фонд
+    Робота», with the tag AI; #4 is outside the tree and has no tags (a foreign record the filter
+    must not let into the results)."""
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
@@ -73,9 +73,9 @@ def db_taxonomy(db):
         "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
         "VALUES (4, 'file', 'Чужий дзвінок', 'x')")
     conn.commit()
-    # «Фонд Робота» — один із дефолтних напрямків, які сіє сама міграція
-    # (`app/db/migrations.py`, v?? «Фонд/Особисте/AI/…») — створювати вдруге
-    # не можна (`_assert_free_name` впаде на дублі), тож беремо готовий.
+    # «Фонд Робота» is one of the default directions seeded by the migration itself
+    # (`app/db/migrations.py`, v?? «Фонд/Особисте/AI/…»); it cannot be created a second
+    # time (`_assert_free_name` would fail on duplicates), so we take the ready one.
     fund_id = conn.execute(
         "SELECT id FROM categories WHERE name = 'Фонд Робота'").fetchone()[0]
     fund = {"id": fund_id}
@@ -87,11 +87,11 @@ def db_taxonomy(db):
 
 
 def _leak_search(target, *, leaked=None):
-    """Ціль завжди перша (recall@k=1.0); `leaked` — опційний додатковий чанк
-    запису, якого фільтр не мав би пропустити (C8/filter_leak). БЕЗ filler-
-    чанків (на відміну від `_good_search`) — filler-id (9000+) не існує в
-    `transcriptions`, і для пунктів з `category_id`/`tags` це рахувалось би
-    витоком (запис без категорії/тегів не входить у жоден фільтр)."""
+    """The target is always first (recall@k=1.0); `leaked` is an optional extra chunk
+    of a record the filter must not let through (C8/filter_leak). WITHOUT filler
+    chunks (unlike `_good_search`): filler ids (9000+) do not exist in
+    `transcriptions`, and for items with `category_id`/`tags` that would count as
+    a leak (a record without a category/tags is in no filter)."""
     def _search(db_path, query, top_k=8, category_id=None, **kwargs):
         chunks = [{"transcription_id": target[0], "source_name": target[1]}]
         if leaked is not None:
@@ -101,7 +101,7 @@ def _leak_search(target, *, leaked=None):
 
 
 def _good_search(target_by_query):
-    """Ціль (якщо задана) завжди перша у пулі — recall@k=1.0 на будь-якому k."""
+    """The target (if set) is always first in the pool: recall@k=1.0 at any k."""
     def _search(db_path, query, top_k=8, category_id=None, **kwargs):
         target = target_by_query.get(query)
         chunks = []
@@ -114,24 +114,24 @@ def _good_search(target_by_query):
 
 
 def _bad_search(db_path, query, top_k=8, category_id=None, **kwargs):
-    """Ціль ніколи не потрапляє у видачу — recall@k=0.0 всюди."""
+    """The target never makes it into the results: recall@k=0.0 everywhere."""
     chunks = [{"transcription_id": 9000 + i, "source_name": "filler"} for i in range(top_k)]
     return {"query": query, "chunks": chunks, "vector_available": True}
 
 
 def _real_snapshot(src, dst):
-    """Побудувати справжній `VACUUM INTO`-знімок (`journal_mode=delete`), той
-    самий шлях, що продакшн `evals/snapshot.py::make_snapshot`.
+    """Build a real `VACUUM INTO` snapshot (`journal_mode=delete`), the same
+    path as production `evals/snapshot.py::make_snapshot`.
 
-    Знахідка 4 (review-round-2): фікстура `db` після `init_database` вже в
-    `journal_mode=wal` — WAL-конект на вже-WAL файл не чіпає жоден байт, тож
-    байтові твердження (хеш/mtime/відсутність `-wal`) вакуумні на самій
-    фікстурі: чотири з пʼяти тверджень D16-тесту проходили і на дефектному
-    коді. На `delete`-цілі перший же `get_db_connection` (яка ставить
-    `PRAGMA journal_mode=WAL`) фізично міняє байти заголовка — твердження
-    стають несучими. Передумову перевіряємо тут-таки, щоб доказ не зогнив
-    мовчки назад у вакуумний, якщо дефолти `init_database`/`make_snapshot`
-    колись зміняться.
+    Finding 4 (review-round-2): the `db` fixture after `init_database` is already in
+    `journal_mode=wal`; a WAL connect to an already-WAL file touches no byte, so
+    byte assertions (hash/mtime/absence of `-wal`) are vacuous on the
+    fixture itself: four of the five assertions of the D16 test passed on defective
+    code too. On a `delete` target the very first `get_db_connection` (which sets
+    `PRAGMA journal_mode=WAL`) physically changes header bytes, so the assertions
+    become load-bearing. We check the precondition right here, so the proof does not rot
+    silently back into a vacuous one if the `init_database`/`make_snapshot` defaults
+    ever change.
     """
     ev_snapshot.make_snapshot(src, dst)
     conn = sqlite3.connect(dst)
@@ -140,7 +140,7 @@ def _real_snapshot(src, dst):
     finally:
         conn.close()
     assert mode == "delete", (
-        f"знімок не в journal_mode=delete (маємо {mode!r}) — доказ знову вакуумний"
+        f"the snapshot is not in journal_mode=delete (got {mode!r}): the proof is vacuous again"
     )
     return dst
 
@@ -181,8 +181,8 @@ def test_default_snapshot_path_format():
 
 
 def test_auto_snapshot_reuses_when_source_unchanged(tmp_path, monkeypatch):
-    """D8/знахідка 10: повторний прогін на незміненому джерелі не створює
-    другий 315-МБ знімок — той самий шлях перевикористовується."""
+    """D8/finding 10: a repeated run on an unchanged source does not create
+    a second 315 MB snapshot; the same path is reused."""
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path / "snapshots")
     src = str(tmp_path / "src.db")
     conn = sqlite3.connect(src)
@@ -197,7 +197,7 @@ def test_auto_snapshot_reuses_when_source_unchanged(tmp_path, monkeypatch):
 
 
 def test_auto_snapshot_prunes_old_on_source_change(tmp_path, monkeypatch):
-    """D8: якщо джерело змінилось, старий знімок з тим самим basename прибирається."""
+    """D8: if the source changed, the old snapshot with the same basename is removed."""
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path / "snapshots")
     src = str(tmp_path / "src.db")
     conn = sqlite3.connect(src)
@@ -208,9 +208,9 @@ def test_auto_snapshot_prunes_old_on_source_change(tmp_path, monkeypatch):
     first = ev_snapshot.auto_snapshot(src)
     assert os.path.exists(first)
 
-    # Мутуємо джерело і форсуємо інший таймстемп у назві знімка, інакше
-    # другий знімок у ту саму секунду перезаписав би перший файл на диску,
-    # а mtime файлу міг не встигнути тикнути в межах роздільної здатності ФС.
+    # We mutate the source and force a different timestamp in the snapshot name, otherwise
+    # a second snapshot within the same second would overwrite the first file on disk,
+    # and the file mtime might not tick within the FS resolution.
     conn = sqlite3.connect(src)
     conn.execute("INSERT INTO t DEFAULT VALUES")
     conn.commit()
@@ -223,13 +223,13 @@ def test_auto_snapshot_prunes_old_on_source_change(tmp_path, monkeypatch):
     second = ev_snapshot.auto_snapshot(src)
     assert second != first
     assert os.path.exists(second)
-    assert not os.path.exists(first)  # старий прибраний
+    assert not os.path.exists(first)  # the old one was removed
 
 
 def test_prune_other_snapshots_keeps_protected_path(tmp_path, monkeypatch):
-    """D20/знахідка 5: знімок, названий ЖИВОЮ базовою лінією, не видаляється
-    прунером, доки лінію не перезаписано — навіть якщо він не `keep` цього
-    прогону. На синтетичних файлах, без реального SQLite."""
+    """D20/finding 5: a snapshot named by a LIVE baseline is not deleted
+    by the pruner until the baseline is overwritten, even if it is not this run `keep`.
+    On synthetic files, without real SQLite."""
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path)
     protected = tmp_path / "whisper_history-11111111-111111.db"
     protected.write_text("old")
@@ -245,9 +245,9 @@ def test_prune_other_snapshots_keeps_protected_path(tmp_path, monkeypatch):
 
 
 def test_prune_other_snapshots_removes_sidecars_of_pruned_snapshot(tmp_path, monkeypatch):
-    """Знахідка 14: прунер прибирає `.db`, а `-wal`/`-shm`/`.meta.json`
-    лишає сиротами — рівно ті файли, що зараз лежать у `evals/snapshots/`
-    від знімка `130113` без жодного `.db` поруч."""
+    """Finding 14: the pruner removes `.db` but leaves `-wal`/`-shm`/`.meta.json`
+    as orphans: exactly the files now lying in `evals/snapshots/`
+    from the `130113` snapshot with no `.db` next to them."""
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path)
     old = tmp_path / "whisper_history-11111111-111111.db"
     old.write_text("old")
@@ -269,8 +269,8 @@ def test_prune_other_snapshots_removes_sidecars_of_pruned_snapshot(tmp_path, mon
 
 
 def test_prune_other_snapshots_sweeps_preexisting_orphan_sidecars(tmp_path, monkeypatch):
-    """Знахідка 14 (сироти від попереднього багу, БЕЗ `.db` поруч) — прунер
-    їх теж прибирає, а не лишає накопичуватись назавжди."""
+    """Finding 14 (orphans from the previous bug, WITHOUT a `.db` next to them): the pruner
+    removes them too, rather than leaving them to accumulate forever."""
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path)
     orphan_wal = tmp_path / "whisper_history-11111111-111111.db-wal"
     orphan_shm = tmp_path / "whisper_history-11111111-111111.db-shm"
@@ -300,7 +300,7 @@ def test_read_golden_jsonl_valid(tmp_path):
 def test_read_golden_jsonl_invalid_json_reports_line_number(tmp_path):
     path = tmp_path / "bad.jsonl"
     path.write_text('{"id": "a", "question": "q"}\nnot json\n', encoding="utf-8")
-    with pytest.raises(golden_io.GoldenSetError, match="рядку 2"):
+    with pytest.raises(golden_io.GoldenSetError, match="line 2"):
         golden_io.read_golden(str(path))
 
 
@@ -320,7 +320,7 @@ def test_read_golden_legacy_list_form(tmp_path):
     items = golden_io.read_golden(str(path))
     assert items[0]["source"] == "legacy"
     assert items[0]["status"] == "labeled"
-    assert items[0]["slice"] == "calls"  # без conn -> дефолт
+    assert items[0]["slice"] == "calls"  # without conn -> default
 
 
 def test_read_golden_legacy_items_key_form(tmp_path):
@@ -334,7 +334,7 @@ def test_read_golden_legacy_items_key_form(tmp_path):
 def test_read_golden_legacy_infers_slice_from_source_type(db, tmp_path):
     path = tmp_path / "legacy3.json"
     path.write_text(json.dumps([
-        {"id": "x", "question": "q", "expected_transcription_ids": [1]},  # id=1 -> telegram у фікстурі
+        {"id": "x", "question": "q", "expected_transcription_ids": [1]},  # id=1 -> telegram in the fixture
     ]), encoding="utf-8")
     conn = sqlite3.connect(db)
     items = golden_io.read_golden(str(path), conn=conn)
@@ -343,8 +343,8 @@ def test_read_golden_legacy_infers_slice_from_source_type(db, tmp_path):
 
 
 def test_golden_io_legacy_slice_lookup_broken_conn_logs_and_defaults(db, tmp_path, capsys):
-    """Знахідка 18: побитий/невідповідний conn не має тихо ставати slice="calls"
-    без сліду в логу (CLAUDE.md: no bare except without a log)."""
+    """Finding 18: a broken/mismatched conn must not quietly become slice="calls"
+    without a trace in the log (CLAUDE.md: no bare except without a log)."""
     path = tmp_path / "legacy4.json"
     path.write_text(json.dumps([
         {"id": "x", "question": "q", "expected_transcription_ids": [1]},
@@ -356,11 +356,11 @@ def test_golden_io_legacy_slice_lookup_broken_conn_logs_and_defaults(db, tmp_pat
 
     items = golden_io.read_golden(str(path), conn=_BrokenConn())
     assert items[0]["slice"] == "calls"
-    assert "не вдалось визначити source_type" in capsys.readouterr().err
+    assert "could not determine source_type" in capsys.readouterr().err
 
 
 # ============================================================
-# golden_io.py — read_jsonl (D13, знахідка 21): спільний зчитувач для всіх eval-CLI
+# golden_io.py: read_jsonl (D13, finding 21): the shared reader for all eval CLIs
 # ============================================================
 
 def test_golden_io_read_jsonl_returns_raw_dicts(tmp_path):
@@ -384,7 +384,7 @@ def test_golden_io_read_jsonl_missing_file_raises(tmp_path):
 def test_golden_io_read_jsonl_invalid_json_line_reports_line_number(tmp_path):
     path = tmp_path / "bad2.jsonl"
     path.write_text('{"a":1}\nnot json\n', encoding="utf-8")
-    with pytest.raises(golden_io.GoldenSetError, match="рядку 2"):
+    with pytest.raises(golden_io.GoldenSetError, match="line 2"):
         golden_io.read_jsonl(str(path))
 
 
@@ -396,7 +396,7 @@ def test_golden_io_read_jsonl_non_object_line_raises(tmp_path):
 
 
 # ============================================================
-# gate.py — CLI/parsing хелпери
+# gate.py: CLI/parsing helpers
 # ============================================================
 
 def test_parse_k_list():
@@ -408,35 +408,35 @@ def test_parse_min_recall():
 
 
 # ============================================================
-# gate.py — D15.3: виведення --min-recall із калібрувальної лінії
+# gate.py: D15.3: deriving --min-recall from the calibration baseline
 # ============================================================
 
 def test_derive_min_recall_threshold_matches_rule_on_synthetic_line():
-    """Правило, не переписані числа (D15.3): synthetic recall_at_k/n ->
-    floor_0.05(recall_at_k - 2/n), обчислене незалежно від _derive_min_recall_threshold."""
-    recall_at_k, n = 0.70, 20  # 0.70 - 2/20 = 0.60 -> точно на межі сітки
+    """The rule, not re-typed numbers (D15.3): synthetic recall_at_k/n ->
+    floor_0.05(recall_at_k - 2/n), computed independently of _derive_min_recall_threshold."""
+    recall_at_k, n = 0.70, 20  # 0.70 - 2/20 = 0.60 -> exactly on the grid boundary
     assert gate._derive_min_recall_threshold(recall_at_k, n) == pytest.approx(0.60)
 
-    recall_at_k, n = 0.32142857142857145, 15  # заміряна лінія 03.09 (recall@8, plan.md D15)
+    recall_at_k, n = 0.32142857142857145, 15  # the baseline measured on 03.09 (recall@8, plan.md D15)
     expected = 0.05 * int((recall_at_k - 2 / n) / 0.05 + 1e-9)
     assert gate._derive_min_recall_threshold(recall_at_k, n) == pytest.approx(expected)
     assert gate._derive_min_recall_threshold(recall_at_k, n) == pytest.approx(0.15)
 
 
 def test_derive_min_recall_threshold_floor_not_round():
-    """floor_0.05, не round_0.05 — 0.145 лежить у комірці [0.10, 0.15), round дав
-    би 0.15, floor мусить дати 0.10."""
+    """floor_0.05, not round_0.05: 0.145 lies in the cell [0.10, 0.15), round would give
+    0.15, floor must give 0.10."""
     assert gate._derive_min_recall_threshold(0.165, 100) == pytest.approx(0.10)  # 0.165-0.02=0.145 -> 0.10
 
 
 def test_floor_grid_handles_float_boundary_without_epsilon_bug():
-    """0.30/0.05 = 5.999999999999999 у float — без epsilon floor скидає межове
-    значення в сусідню комірку нижче (0.25 замість 0.30)."""
+    """0.30/0.05 = 5.999999999999999 in float: without an epsilon floor drops the boundary
+    value into the neighbouring cell below (0.25 instead of 0.30)."""
     assert gate._floor_grid(0.30) == pytest.approx(0.30)
 
 
 # ============================================================
-# gate.py — наскрізний смок (Tracer): pass / поріг / sabotage / жива БД
+# gate.py: end-to-end smoke (Tracer): pass / threshold / sabotage / live DB
 # ============================================================
 
 def test_gate_pass(db, tmp_path, monkeypatch):
@@ -483,20 +483,20 @@ def test_gate_sabotage_shuffle_flips_pass_to_fail(db, tmp_path, monkeypatch):
                         "--min-recall", "2=0.9,3=0.9"])
     assert rc_ok == 0
 
-    # Голова пулу (стара top-k) і хвіст тасуються НЕЗАЛЕЖНО, тоді хвіст стає
-    # перед головою (D1) — ціль з позиції 0 (у голові) гарантовано опиняється
-    # за межами нових перших k, на будь-якому k.
+    # The pool head (the old top-k) and the tail are shuffled INDEPENDENTLY, then the tail goes
+    # before the head (D1): the target from position 0 (in the head) is guaranteed to end up
+    # outside the new first k, at any k.
     rc_bad = gate.main(["--golden", golden, "--db", db, "--k", "2,3",
                          "--min-recall", "2=0.9,3=0.9", "--sabotage", "shuffle"])
     assert rc_bad == 1
 
 
 def test_sabotage_pool_guarantees_displacement_at_default_k():
-    """D1/знахідка 1: пряме доведення властивості на рівні `_sabotage_pool` —
-    жодна з перших k позицій ПУЛУ не лишається в перших k ПІСЛЯ саботажу, на
-    дефолтних пулах гейта (k*4 для k=8,12), для ОБОХ режимів. Стара
-    `random.Random(0).shuffle` над усім пулом цієї гарантії не давала саме
-    на цих k (знахідка 1) — доведено тестом на k=2,3, спростовано на k=8,12."""
+    """D1/finding 1: direct proof of the property at the `_sabotage_pool` level:
+    none of the first k positions of the POOL stays in the first k AFTER sabotage, on
+    the gate default pools (k*4 for k=8,12), for BOTH modes. The old
+    `random.Random(0).shuffle` over the whole pool did not give this guarantee exactly
+    at these k (finding 1): proved by a test at k=2,3, refuted at k=8,12."""
     for k in (8, 12):
         pool = [{"transcription_id": i} for i in range(k * 4)]
         old_head = {c["transcription_id"] for c in pool[:k]}
@@ -507,9 +507,9 @@ def test_sabotage_pool_guarantees_displacement_at_default_k():
 
 
 def test_gate_sabotage_shuffle_flips_pass_to_fail_at_default_k(db, tmp_path, monkeypatch):
-    """D1/знахідка 1 наскрізно, на ДЕФОЛТНИХ --k 8,12 (не 2,3) — саме той
-    сценарій, де стара `shuffle` мовчала (`rc=0`) замість `rc=1`. 15 пунктів,
-    ціль кожного завжди перша у пулі — найтиповіший вигляд розміченого набору."""
+    """D1/finding 1 end to end, on the DEFAULT --k 8,12 (not 2,3): exactly the
+    scenario where the old `shuffle` stayed silent (`rc=0`) instead of `rc=1`. 15 items,
+    each target is always first in the pool: the most typical shape of a labeled set."""
     items = [_item(f"q{i}", i, f"S{i}") for i in range(1, 16)]
     targets = {it["id"]: (i, f"S{i}") for i, it in enumerate(items, start=1)}
     golden = _golden_jsonl(tmp_path, items)
@@ -535,9 +535,9 @@ def test_gate_sabotage_reverse_flips_pass_to_fail_at_default_k(db, tmp_path, mon
 
 
 def test_gate_no_sabotage_requests_top_k_equal_k_not_pool(db, tmp_path, monkeypatch):
-    """D4/знахідка 5: без саботажу гейт міряє те, що продакшн реально
-    віддає на цьому k (`top_k=k`), не зріз k із запиту `k*4` — `_cap_comments`
-    рахує стелю коментарів від `top_k`, тож більший запит спотворює замір."""
+    """D4/finding 5: without sabotage the gate measures what production really
+    returns at this k (`top_k=k`), not a slice of k from a `k*4` request: `_cap_comments`
+    computes the comments ceiling from `top_k`, so a larger request distorts the measurement."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen_top_k = []
 
@@ -554,8 +554,8 @@ def test_gate_no_sabotage_requests_top_k_equal_k_not_pool(db, tmp_path, monkeypa
 
 
 def test_gate_sabotage_still_requests_larger_pool(db, tmp_path, monkeypatch):
-    """Саботаж лишається вправі просити більший пул — інструмент перевірки
-    гейта, не замір продакшн-видачі (Non-goals)."""
+    """Sabotage stays free to ask for a larger pool: it is a tool for checking
+    the gate, not a measurement of production results (Non-goals)."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen_top_k = []
 
@@ -572,8 +572,8 @@ def test_gate_sabotage_still_requests_larger_pool(db, tmp_path, monkeypatch):
 
 
 def test_gate_verdict_requires_both_k_fail_at_8_pass_at_12(db, tmp_path, monkeypatch):
-    """Урок `eval-verdict-flips-with-k`: вердикт не приймається на одному k.
-    Ціль на позиції 9 (0-індексовано) — поза top-8, всередині top-12."""
+    """Lesson `eval-verdict-flips-with-k`: the verdict is not accepted at one k.
+    The target is at position 9 (0-indexed): outside top-8, inside top-12."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
 
     def _search(db_path, query, top_k=8, category_id=None, **kwargs):
@@ -585,7 +585,7 @@ def test_gate_verdict_requires_both_k_fail_at_8_pass_at_12(db, tmp_path, monkeyp
     monkeypatch.setattr("app.services.retrieval.search", _search)
     rc = gate.main(["--golden", golden, "--db", db, "--k", "8,12",
                      "--min-recall", "8=0.9,12=0.9"])
-    assert rc == 1  # k=12 проходить (recall=1.0), k=8 провалюється (recall=0.0) -> сукупно 1
+    assert rc == 1  # k=12 passes (recall=1.0), k=8 fails (recall=0.0) -> overall 1
 
 
 def test_gate_live_db_without_yes_live_exits_2(db, tmp_path, monkeypatch):
@@ -596,7 +596,7 @@ def test_gate_live_db_without_yes_live_exits_2(db, tmp_path, monkeypatch):
 
 
 # ============================================================
-# gate.py — знімок живої БД за замовчуванням (C5)
+# gate.py: snapshot of the live DB by default (C5)
 # ============================================================
 
 def test_gate_auto_snapshots_live_db_by_default(db, tmp_path, monkeypatch):
@@ -615,10 +615,10 @@ def test_gate_auto_snapshots_live_db_by_default(db, tmp_path, monkeypatch):
 
 
 def test_gate_auto_snapshot_protects_snapshot_named_by_live_baseline(db, tmp_path, monkeypatch):
-    """D20/знахідка 5: прунер не має права видалити знімок, на який показує
-    ЖИВА лінія (`--baseline`), навіть коли джерело змінилось і `auto_snapshot`
-    чесно будує НОВИЙ знімок з тим самим basename. Раніше саме це вбивало
-    калібрувальну лінію S1 назавжди."""
+    """D20/finding 5: the pruner has no right to delete the snapshot a
+    LIVE baseline (`--baseline`) points to, even when the source changed and `auto_snapshot`
+    honestly builds a NEW snapshot with the same basename. This is exactly what used to kill
+    the S1 calibration baseline forever."""
     snap_dir = tmp_path / "snapshots"
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", snap_dir)
     monkeypatch.setattr(gate, "is_live_db", lambda p: p == db)
@@ -633,9 +633,9 @@ def test_gate_auto_snapshot_protects_snapshot_named_by_live_baseline(db, tmp_pat
     first_snapshot = json.loads(baseline_path.read_text(encoding="utf-8"))["db_snapshot"]["path"]
     assert os.path.exists(first_snapshot)
 
-    # Джерело змінюється, і форсуємо інший таймстемп у назві знімка (той
-    # самий трюк, що test_auto_snapshot_prunes_old_on_source_change) —
-    # auto_snapshot тепер будує НОВИЙ знімок замість першого.
+    # The source changes, and we force a different timestamp in the snapshot name (the
+    # same trick as test_auto_snapshot_prunes_old_on_source_change):
+    # auto_snapshot now builds a NEW snapshot instead of the first.
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
@@ -649,21 +649,21 @@ def test_gate_auto_snapshot_protects_snapshot_named_by_live_baseline(db, tmp_pat
 
     rc2 = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.0",
                       "--baseline", str(baseline_path)])
-    # Інший провенанс (новий знімок) -> exit 2 — очікувано (D17/знахідка 7).
-    # Головне тут: старий артефакт НЕ зникає, лінію ще можна перевірити.
+    # A different provenance (a new snapshot) -> exit 2 is expected (D17/finding 7).
+    # What matters here: the old artifact does NOT disappear, the baseline can still be checked.
     assert rc2 == 2
-    assert os.path.exists(first_snapshot), "прунер видалив знімок, названий живою лінією"
+    assert os.path.exists(first_snapshot), "the pruner deleted the snapshot named by a live baseline"
 
 
 def test_gate_auto_snapshot_protects_conventional_baseline_without_flags(
         db, tmp_path, monkeypatch):
-    """Ремонтний раунд 1 (Findings): захист прунера раніше бачив ЛИШЕ прапорці
-    `--baseline`/`--write-baseline` ЦЬОГО виклику (`args.baseline`/
-    `args.write_baseline`, обидва `default=None`). Прогін без жодного з них —
-    саботажні прогони, ручні заміри, будь-який `python -m evals.gate --db ...`
-    — про `evals/baseline.local.json` узагалі не питав, і прунер вільно знищував
-    знімок живої лінії. Саме так S1 і померла. Тут лінія лежить на конвенційному
-    шляху заздалегідь, а прогін під тестом НЕ передає ні --baseline, ні
+    """Repair round 1 (Findings): the pruner protection used to see ONLY the flags
+    `--baseline`/`--write-baseline` of THIS call (`args.baseline`/
+    `args.write_baseline`, both `default=None`). A run with neither of them
+    (sabotage runs, manual measurements, any `python -m evals.gate --db ...`)
+    never asked about `evals/baseline.local.json` at all, and the pruner freely destroyed
+    the live baseline snapshot. This is exactly how S1 died. Here the baseline lies at the conventional
+    path beforehand, and the run under test passes neither --baseline nor
     --write-baseline."""
     snap_dir = tmp_path / "snapshots"
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", snap_dir)
@@ -675,17 +675,17 @@ def test_gate_auto_snapshot_protects_conventional_baseline_without_flags(
     monkeypatch.chdir(tmp_path)
     baseline_path = tmp_path / "evals" / "baseline.local.json"
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
-    # Бутстрап лінії на конвенційному шляху (--write-baseline тут лише готує
-    # фікстуру — сам прогін під тестом нижче про нього не знає).
+    # Bootstrap of the baseline at the conventional path (--write-baseline only prepares
+    # the fixture here; the run under test below knows nothing about it).
     rc1 = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9",
                       "--write-baseline", str(baseline_path)])
     assert rc1 == 0
     first_snapshot = json.loads(baseline_path.read_text(encoding="utf-8"))["db_snapshot"]["path"]
     assert os.path.exists(first_snapshot)
 
-    # Джерело змінюється, і форсуємо інший таймстемп у назві знімка (той
-    # самий трюк, що test_auto_snapshot_prunes_old_on_source_change) —
-    # auto_snapshot тепер будує НОВИЙ знімок замість першого.
+    # The source changes, and we force a different timestamp in the snapshot name (the
+    # same trick as test_auto_snapshot_prunes_old_on_source_change):
+    # auto_snapshot now builds a NEW snapshot instead of the first.
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
@@ -697,29 +697,29 @@ def test_gate_auto_snapshot_protects_conventional_baseline_without_flags(
         ev_snapshot, "default_snapshot_path",
         lambda s: str(snap_dir / (Path(s).stem + "-99999999-999999.db")))
 
-    # Прогін БЕЗ --baseline і БЕЗ --write-baseline.
+    # A run WITHOUT --baseline and WITHOUT --write-baseline.
     rc2 = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.0"])
     assert rc2 == 0
     assert os.path.exists(first_snapshot), (
-        "прунер видалив знімок конвенційної лінії, хоч жоден із "
-        "--baseline/--write-baseline не передавався цим прогоном")
+        "the pruner deleted the conventional baseline snapshot, although neither "
+        "--baseline/--write-baseline was passed by this run")
 
 
 # ============================================================
-# gate.py — вимір НЕ тримає WAL-rw проти файлу, названого db_snapshot (D6/ADR-003)
+# gate.py: the measurement does NOT hold a WAL-rw connection against the file named db_snapshot (D6/ADR-003)
 # ============================================================
 
 def test_gate_measurement_does_not_wal_the_snapshot(db, tmp_path, monkeypatch):
-    # Знахідка 4 (review-round-2): ціль — справжній знімок (journal_mode=delete),
-    # не фікстура `db` (уже journal_mode=wal після init_database), інакше
-    # твердження нижче вакуумні. Див. `_real_snapshot`.
+    # Finding 4 (review-round-2): the target is a real snapshot (journal_mode=delete),
+    # not the `db` fixture (already journal_mode=wal after init_database), otherwise
+    # the assertions below are vacuous. See `_real_snapshot`.
     snap = _real_snapshot(db, str(tmp_path / "snap.db"))
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen_paths = []
 
     def _search(db_path, query, top_k=8, category_id=None, **kwargs):
         seen_paths.append(db_path)
-        with get_db_connection(db_path) as conn:  # той самий шлях, що продакшн retrieval.search
+        with get_db_connection(db_path) as conn:  # the same path as production retrieval.search
             conn.execute("SELECT 1").fetchone()
         return {"query": query, "chunks": [{"transcription_id": 1, "source_name": "TG чат"}],
                 "vector_available": True}
@@ -735,14 +735,14 @@ def test_gate_measurement_does_not_wal_the_snapshot(db, tmp_path, monkeypatch):
     assert os.path.getmtime(snap) == mtime_before
     assert not os.path.exists(snap + "-wal")
     assert not os.path.exists(snap + "-shm")
-    assert seen_paths and seen_paths[0] != snap  # scratch-копія, не сам знімок
+    assert seen_paths and seen_paths[0] != snap  # a scratch copy, not the snapshot itself
 
 
 def test_scratch_copy_carries_wal_sidecar(tmp_path):
-    """Знахідка 13: `_scratch_copy` копіює лише `.db` — якщо джерело несе
-    `-wal` з непорожнім наповненням, вимір іде проти стану СТАРІШОГО за
-    committed. Копія мусить представляти те саме зафіксоване наповнення,
-    що й файл, чию ідентичність гейт звітує як `db_snapshot`."""
+    """Finding 13: `_scratch_copy` copies only `.db`; if the source carries
+    a `-wal` with non-empty content, the measurement runs against a state OLDER than
+    committed. The copy must represent the same committed content
+    as the file whose identity the gate reports as `db_snapshot`."""
     src = tmp_path / "snap.db"
     src.write_bytes(b"main-content")
     (tmp_path / "snap.db-wal").write_bytes(b"wal-content")
@@ -751,16 +751,16 @@ def test_scratch_copy_carries_wal_sidecar(tmp_path):
     with gate._scratch_copy(str(src)) as copy_path:
         assert Path(copy_path + "-wal").read_bytes() == b"wal-content"
         assert Path(copy_path + "-shm").read_bytes() == b"shm-content"
-    # прибирається все, включно з сайдкарами, після виходу з контексту
+    # everything is removed, including sidecars, after leaving the context
     assert not os.path.exists(copy_path)
     assert not os.path.exists(copy_path + "-wal")
     assert not os.path.exists(copy_path + "-shm")
 
 
 def test_gate_no_snapshot_yes_live_skips_scratch_copy(db, tmp_path, monkeypatch):
-    """`--no-snapshot --yes-live`, наведені на СПРАВДІ ЖИВУ БД, лишається
-    єдиним документованим обходом (docstring модуля, D16) — вимір іде проти
-    буквального `--db`, не копії."""
+    """`--no-snapshot --yes-live`, pointed at the REAL LIVE DB, remains
+    the only documented bypass (module docstring, D16): the measurement runs against
+    the literal `--db`, not a copy."""
     monkeypatch.setattr(gate, "is_live_db", lambda p: p == db)
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen_paths = []
@@ -778,14 +778,14 @@ def test_gate_no_snapshot_yes_live_skips_scratch_copy(db, tmp_path, monkeypatch)
 
 
 def test_gate_no_snapshot_yes_live_on_non_live_target_still_scratch_copies(db, tmp_path, monkeypatch, capsys):
-    """D16: та сама пара прапорців, наведена на ЦІЛЬ, ЩО НЕ Є живою БД (тут —
-    знімок/довільний файл, `is_live_db` за замовчуванням каже False), НЕ сміє
-    вимикати `_scratch_copy` — інакше `retrieval.search` ставить постійний
-    WAL на файл, чию ідентичність гейт же й штампує як `db_snapshot`, і
-    будь-яка лінія, знята до цього, назавжди читається як «інший провенанс»."""
-    # Знахідка 4 (review-round-2): ціль — справжній знімок (journal_mode=delete),
-    # не фікстура `db` (уже journal_mode=wal після init_database), інакше
-    # твердження нижче вакуумні. Див. `_real_snapshot`.
+    """D16: the same pair of flags, pointed at a TARGET THAT IS NOT the live DB (here a
+    snapshot/arbitrary file, `is_live_db` says False by default), MUST NOT
+    disable `_scratch_copy`; otherwise `retrieval.search` sets a permanent
+    WAL on the file whose identity the gate itself stamps as `db_snapshot`, and
+    any baseline taken before that is forever read as a "different provenance"."""
+    # Finding 4 (review-round-2): the target is a real snapshot (journal_mode=delete),
+    # not the `db` fixture (already journal_mode=wal after init_database), otherwise
+    # the assertions below are vacuous. See `_real_snapshot`.
     snap = _real_snapshot(db, str(tmp_path / "snap.db"))
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen_paths = []
@@ -809,16 +809,16 @@ def test_gate_no_snapshot_yes_live_on_non_live_target_still_scratch_copies(db, t
     assert os.path.getmtime(snap) == mtime_before
     assert not os.path.exists(snap + "-wal")
     assert not os.path.exists(snap + "-shm")
-    assert seen_paths and seen_paths[0] != snap  # scratch-копія, не сам файл
+    assert seen_paths and seen_paths[0] != snap  # a scratch copy, not the file itself
 
-    # Знахідка 15: --no-snapshot нічого не пропустив мовчки — гейт сказав про
-    # це в рантаймі, не лише в довідці.
+    # Finding 15: --no-snapshot did not skip anything silently: the gate said so
+    # at runtime, not only in the help.
     err = capsys.readouterr().err
-    assert "--no-snapshot" in err and "захисна копія" in err
+    assert "--no-snapshot" in err and "protective copy" in err
 
 
 # ============================================================
-# gate.py — unlabeled/negative/по зрізах
+# gate.py: unlabeled/negative/per slice
 # ============================================================
 
 def test_gate_skips_unlabeled_items(db, tmp_path, monkeypatch):
@@ -835,13 +835,13 @@ def test_gate_skips_unlabeled_items(db, tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.retrieval.search", _search)
     rc = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9"])
     assert rc == 0
-    assert calls == ["b"]  # "a" (unlabeled) взагалі не пошуковується
+    assert calls == ["b"]  # "a" (unlabeled) is not searched at all
 
 
 def test_gate_all_unlabeled_exits_2_never_pass(db, tmp_path, monkeypatch, capsys):
-    """D2/знахідка 2: набір без жодного `status="labeled"` пункту (саме те,
-    що видає build_golden без розмітки) — помилка даних, НЕ PASS. Раніше
-    друкувало `[gate] PASS k=8,12` і виходило з 0, навіть під -q."""
+    """D2/finding 2: a set without a single `status="labeled"` item (exactly what
+    build_golden yields without labelling) is a data error, NOT a PASS. It used to
+    print `[gate] PASS k=8,12` and exit 0, even under -q."""
     items = [_item("a", 1, "TG чат", status="unlabeled")]
     golden = _golden_jsonl(tmp_path, items)
     monkeypatch.setattr("app.services.retrieval.search", _bad_search)
@@ -868,13 +868,13 @@ def test_gate_negative_status_excluded_from_aggregate_but_in_report(db, tmp_path
     assert rc == 0
 
     data = json.loads(json_out.read_text(encoding="utf-8"))
-    assert data["aggregate"]["2"]["n"] == 1  # лише "b" (labeled) у агрегації
+    assert data["aggregate"]["2"]["n"] == 1  # only "b" (labeled) in the aggregation
     ids_in_report = [r["id"] for r in data["per_item"]["2"]]
     assert "neg" in ids_in_report and "b" in ids_in_report
 
 
 # ============================================================
-# gate.py — базова лінія: запис + per-item diff + регресія пункту
+# gate.py: baseline: write + per-item diff + item regression
 # ============================================================
 
 def test_gate_write_baseline_then_detect_regression(db, tmp_path, monkeypatch):
@@ -891,7 +891,7 @@ def test_gate_write_baseline_then_detect_regression(db, tmp_path, monkeypatch):
     assert baseline["k"] == [2]
     assert baseline["items"]["a"]["2"]["hit"] is True
 
-    # "a" перестає знаходитись -> item hit->miss -> регресія відносно лінії
+    # "a" stops being found -> item hit->miss -> regression against the baseline
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"b": (2, "Дзвінок")}))
     rc2 = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.0",
                       "--baseline", str(baseline_path)])
@@ -899,9 +899,9 @@ def test_gate_write_baseline_then_detect_regression(db, tmp_path, monkeypatch):
 
 
 def test_gate_fails_on_item_regression_alone_when_mean_drop_allowed(db, tmp_path, monkeypatch):
-    """Той самий сценарій, що вище, але з --max-drop 1.0 (падіння mean більше
-    НЕ провалює гейт) — провал лишається лише через item_regressions (default
-    --max-item-regressions 0), ізольовано від причини mean_drop."""
+    """The same scenario as above, but with --max-drop 1.0 (a mean drop larger
+    does NOT fail the gate): the failure remains only via item_regressions (default
+    --max-item-regressions 0), isolated from the mean_drop cause."""
     items = [_item("a", 1, "TG чат"), _item("b", 2, "Дзвінок")]
     golden = _golden_jsonl(tmp_path, items)
     monkeypatch.setattr("app.services.retrieval.search",
@@ -919,8 +919,8 @@ def test_gate_fails_on_item_regression_alone_when_mean_drop_allowed(db, tmp_path
 
 
 def test_gate_fails_on_mean_drop_without_item_regression(db, tmp_path, monkeypatch):
-    """Recall падає (0.5->0.0), але bool hit лишається False до і після
-    (regression рахує лише True->False) — провал лише через mean_drop."""
+    """Recall drops (0.5->0.0), but the bool hit stays False before and after
+    (regression counts only True->False): a failure only via mean_drop."""
     item = {"id": "a", "question": "a", "slice": "calls", "status": "labeled",
             "expected_transcription_ids": [1, 2], "expected_source_name_contains": []}
     golden = _golden_jsonl(tmp_path, [item])
@@ -939,16 +939,16 @@ def test_gate_fails_on_mean_drop_without_item_regression(db, tmp_path, monkeypat
                       "--write-baseline", str(baseline_path)])
     assert rc1 == 0
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    assert baseline["items"]["a"]["2"]["hit"] is False  # 0.5 < 0.999 -> не hit
+    assert baseline["items"]["a"]["2"]["hit"] is False  # 0.5 < 0.999 -> not a hit
 
     monkeypatch.setattr("app.services.retrieval.search", _partial([]))  # recall=0.0
     rc2 = gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.0",
                       "--baseline", str(baseline_path), "--max-item-regressions", "5"])
-    assert rc2 == 1  # False->False (без регресії пункту), провал лише через mean_drop
+    assert rc2 == 1  # False->False (no item regression), failure only via mean_drop
 
 
 # ============================================================
-# gate.py — провенанс базової лінії (D5, знахідки 6, 13)
+# gate.py: baseline provenance (D5, findings 6, 13)
 # ============================================================
 
 def test_gate_write_baseline_records_provenance(db, tmp_path, monkeypatch):
@@ -966,7 +966,7 @@ def test_gate_write_baseline_records_provenance(db, tmp_path, monkeypatch):
 
 
 def test_gate_write_baseline_skipped_on_fail(db, tmp_path, monkeypatch):
-    """D12/знахідка 15: регресований прогін не стає мовчки новою істиною."""
+    """D12/finding 15: a regressed run does not silently become the new truth."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _bad_search)
     baseline_path = tmp_path / "baseline.json"
@@ -977,8 +977,8 @@ def test_gate_write_baseline_skipped_on_fail(db, tmp_path, monkeypatch):
 
 
 def test_gate_baseline_vector_available_mismatch_exits_2(db, tmp_path, monkeypatch):
-    """Знахідка 6: e5 недоступна в цьому прогоні — не має тихо читатись як
-    ранжувальна регресія відносно лінії, знятої з доступною e5."""
+    """Finding 6: e5 is unavailable in this run; it must not quietly read as
+    a ranking regression against a baseline taken with e5 available."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
 
     def _search_with_avail(avail):
@@ -1000,7 +1000,7 @@ def test_gate_baseline_vector_available_mismatch_exits_2(db, tmp_path, monkeypat
 
 
 def test_gate_baseline_snapshot_identity_mismatch_exits_2(db, tmp_path, monkeypatch):
-    """Знахідка 13: лінія, знята за іншим знімком, не видає тихий вердикт."""
+    """Finding 13: a baseline taken over a different snapshot gives no quiet verdict."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
     baseline_path = tmp_path / "baseline.json"
@@ -1016,9 +1016,9 @@ def test_gate_baseline_snapshot_identity_mismatch_exits_2(db, tmp_path, monkeypa
 
 
 def test_gate_baseline_different_golden_set_exits_2(db, tmp_path, monkeypatch):
-    """Знахідка 6: лінія знята над іншим набором (інші id) не сміє тихо
-    вважатись порівнянною лише тому, що знімок/vector_available/rerank
-    збіглись — інакше mean_drop рахує різницю проти чужих пунктів."""
+    """Finding 6: a baseline taken over a different set (other ids) must not quietly
+    be considered comparable merely because the snapshot/vector_available/rerank
+    matched; otherwise mean_drop computes a difference against foreign items."""
     items1 = [_item("a", 1, "TG чат")]
     golden1 = _golden_jsonl(tmp_path, items1, name="g1.jsonl")
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
@@ -1036,8 +1036,8 @@ def test_gate_baseline_different_golden_set_exits_2(db, tmp_path, monkeypatch):
 
 
 def test_gate_baseline_missing_provenance_exits_2(db, tmp_path, monkeypatch):
-    """Стара лінія (до цього ремонту) без db_snapshot/vector_available/rerank
-    у новому форматі — провенанс невідомий, не порівнюваний мовчки."""
+    """An old baseline (before this repair) without db_snapshot/vector_available/rerank
+    in the new format: the provenance is unknown, not silently comparable."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
     baseline_path = tmp_path / "baseline.json"
@@ -1051,16 +1051,16 @@ def test_gate_baseline_missing_provenance_exits_2(db, tmp_path, monkeypatch):
 
 
 # ============================================================
-# gate.py — гейт не сміє PASS, не перевіривши нічого (D2, review-round-2,
-# знахідка 1: двоє дверей)
+# gate.py: the gate must not PASS having checked nothing (D2, review-round-2,
+# finding 1: two doors)
 # ============================================================
 
 def test_gate_k_without_threshold_or_baseline_entry_exits_2_not_pass(db, tmp_path, monkeypatch):
-    """Двері (а): лінія знята на k=2, прогін на k=3 — --min-recall не містить
-    запису для 3, а лінія теж не містить (записана лише на k=2). Жодна
-    перевірка для k=3 не існує, тому навіть тотальний обвал (recall 0.0) не
-    сміє видати PASS/0 — вердикту немає (2). ДО правки цей тест падає:
-    гейт друкує PASS і повертає 0."""
+    """Door (a): the baseline taken at k=2, the run at k=3: --min-recall has no
+    entry for 3, and the baseline has none either (written only at k=2). No
+    check for k=3 exists, so even a total collapse (recall 0.0) must not
+    give PASS/0: there is no verdict (2). BEFORE the fix this test fails:
+    the gate prints PASS and returns 0."""
     items = [_item("a", 1, "TG чат")]
     golden = _golden_jsonl(tmp_path, items)
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
@@ -1069,31 +1069,31 @@ def test_gate_k_without_threshold_or_baseline_entry_exits_2_not_pass(db, tmp_pat
                       "--write-baseline", str(baseline_path)])
     assert rc1 == 0
 
-    monkeypatch.setattr("app.services.retrieval.search", _bad_search)  # тотальний обвал
+    monkeypatch.setattr("app.services.retrieval.search", _bad_search)  # total collapse
     rc2 = gate.main(["--golden", golden, "--db", db, "--k", "3", "--min-recall", "2=0.9",
                       "--baseline", str(baseline_path)])
     assert rc2 == 2
 
 
 def test_gate_name_only_items_check_source_name_hit_rate_not_silent_pass(db, tmp_path, monkeypatch):
-    """Двері (б), досяжні на дефолтних --k 8,12: пункт розмічений лише
-    `expected_source_name_contains` (README радить це як стійкішу до дрейфу
-    id альтернативу) лишає recall_at_k.mean = None — абсолютний поріг мусить
-    звірятись проти source_name_hit_rate, інакше тотальний промах мовчки
-    минається. ДО правки цей тест падає: гейт друкує PASS k=8,12 і 0,
-    попри те що очікуване джерело жодного разу не зʼявилось у видачі."""
+    """Door (b), reachable at the default --k 8,12: an item labelled only with
+    `expected_source_name_contains` (the README recommends this as an alternative more robust
+    to id drift) leaves recall_at_k.mean = None; the absolute threshold must
+    be checked against source_name_hit_rate, otherwise a total miss silently
+    passes. BEFORE the fix this test fails: the gate prints PASS k=8,12 and 0,
+    although the expected source never once appeared in the results."""
     items = [{"id": "a", "question": "a", "slice": "calls", "status": "labeled",
               "expected_transcription_ids": [], "expected_source_name_contains": ["TG чат"]}]
     golden = _golden_jsonl(tmp_path, items)
-    monkeypatch.setattr("app.services.retrieval.search", _bad_search)  # ціль ніколи не в топі
-    rc = gate.main(["--golden", golden, "--db", db])  # дефолтні --k 8,12 і --min-recall
-    assert rc == 1  # реальний вердикт якості (FAIL), не мовчазний PASS
+    monkeypatch.setattr("app.services.retrieval.search", _bad_search)  # the target is never in the top
+    rc = gate.main(["--golden", golden, "--db", db])  # default --k 8,12 and --min-recall
+    assert rc == 1  # a real quality verdict (FAIL), not a silent PASS
 
 
 def test_gate_name_only_items_pass_when_source_name_found(db, tmp_path, monkeypatch):
-    """Той самий набір, що вище, але ціль реально знаходиться — перевірка
-    source_name_hit_rate тепер РЕАЛЬНО фіксує успіх, не просто ніколи не
-    провалює."""
+    """The same set as above, but the target really is found: the check of
+    source_name_hit_rate now REALLY records success, rather than merely never
+    failing."""
     items = [{"id": "a", "question": "a", "slice": "calls", "status": "labeled",
               "expected_transcription_ids": [], "expected_source_name_contains": ["TG чат"]}]
     golden = _golden_jsonl(tmp_path, items)
@@ -1103,23 +1103,23 @@ def test_gate_name_only_items_pass_when_source_name_found(db, tmp_path, monkeypa
 
 
 def test_default_min_recall_does_not_exceed_rule_applied_to_calibration_line():
-    """Ремонтний раунд 1 (D15.4): корпус дрейфує в обидва боки (recall@12
-    0.5357→0.6071 за сім годин фонового інджесту 03.09), тож рівність
-    `_DEFAULT_MIN_RECALL` числам ОДНІЄЇ знятої лінії — вакуумна умова, яка
-    протухає при наступному знятті. Інваріант, що лишається правдою при
-    дрейфі: шипований дефолт — найнижче з виведених по всіх лініях, отже
-    НЕ ПЕРЕВИЩУЄ порогу, виведеного з ЧИННОЇ лінії. Числа "виміряної лінії"
-    читаються з `evals/baseline.local.json` на диску (не вшиті вручну) —
-    файл gitignored, тож на машині без знятої лінії тест пропускається з
-    явною причиною, а не мовчки проходить вакуумно."""
+    """Repair round 1 (D15.4): the corpus drifts in both directions (recall@12
+    0.5357->0.6071 over seven hours of background ingest on 03.09), so equality of
+    `_DEFAULT_MIN_RECALL` to the numbers of ONE taken baseline is a vacuous condition that
+    goes stale at the next measurement. An invariant that stays true under
+    drift: the shipped default is the lowest of those derived across all baselines, hence
+    it does NOT EXCEED the threshold derived from the CURRENT baseline. The "measured baseline" numbers
+    are read from `evals/baseline.local.json` on disk (not hard-coded) -
+    the file is gitignored, so on a machine without a taken baseline the test is skipped with
+    an explicit reason, rather than silently passing vacuously."""
     baseline_path = _PROJECT_ROOT / "evals" / "baseline.local.json"
     if not baseline_path.exists():
-        pytest.skip(f"{baseline_path} відсутній (gitignored) — калібрувальну лінію "
-                    "не знято на цій машині, немає чинних чисел для звірки")
+        pytest.skip(f"{baseline_path} is missing (gitignored): the calibration baseline "
+                    "was not taken on this machine, there are no current numbers to check against")
     line = json.loads(baseline_path.read_text(encoding="utf-8"))
     aggregate = line["aggregate"]
     default = gate._parse_min_recall(gate._DEFAULT_MIN_RECALL)
-    assert default, "_DEFAULT_MIN_RECALL має задавати хоч один k"
+    assert default, "_DEFAULT_MIN_RECALL must set at least one k"
     checked = 0
     for k_str, stats in aggregate.items():
         k = int(k_str)
@@ -1127,33 +1127,33 @@ def test_default_min_recall_does_not_exceed_rule_applied_to_calibration_line():
             continue
         derived_ceiling = gate._derive_min_recall_threshold(stats["recall_at_k"], stats["n"])
         assert default[k] <= derived_ceiling + 1e-9, (
-            f"k={k}: дефолт {default[k]} перевищує верхню межу {derived_ceiling}, "
-            f"виведену з чинної лінії ({baseline_path}, n={stats['n']}) — "
-            "дефолт треба знизити (D15.4: він детектор обвалу, не стеля)"
+            f"k={k}: default {default[k]} exceeds the upper bound {derived_ceiling}, "
+            f"derived from the current baseline ({baseline_path}, n={stats['n']}) - "
+            "the default must be lowered (D15.4: it is a collapse detector, not a ceiling)"
         )
         checked += 1
     assert checked == len(default), (
-        "чинна лінія не покриває всі k з _DEFAULT_MIN_RECALL — перевірку зроблено не для всіх")
+        "the current baseline does not cover all k from _DEFAULT_MIN_RECALL: the check was not done for all")
 
 
 # ============================================================
-# gate.py — збій інфраструктури під час заміру ≠ вердикт якості (D3, знахідка 4)
+# gate.py: an infrastructure failure during measurement != a quality verdict (D3, finding 4)
 # ============================================================
 
 def test_gate_search_exception_exits_2_not_1(db, tmp_path, monkeypatch, capsys):
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
 
     def _boom(db_path, query, top_k=8, category_id=None, **kwargs):
-        raise RuntimeError("модель не піднялась")
+        raise RuntimeError("model did not come up")
 
     monkeypatch.setattr("app.services.retrieval.search", _boom)
     rc = gate.main(["--golden", golden, "--db", db, "--k", "8"])
     assert rc == 2
-    assert "модель не піднялась" in capsys.readouterr().err
+    assert "model did not come up" in capsys.readouterr().err
 
 
 # ============================================================
-# gate.py — вивід
+# gate.py: output
 # ============================================================
 
 def test_gate_quiet_prints_single_line(db, tmp_path, monkeypatch, capsys):
@@ -1167,7 +1167,7 @@ def test_gate_quiet_prints_single_line(db, tmp_path, monkeypatch, capsys):
 
 
 # ============================================================
-# gate.py — помилки використання (exit 2)
+# gate.py: usage errors (exit 2)
 # ============================================================
 
 def test_gate_missing_golden_file_exits_2(db, tmp_path):
@@ -1185,12 +1185,12 @@ def test_gate_invalid_golden_line_exits_2_with_line_number(db, tmp_path, capsys)
     path.write_text('{"id": "a", "question": "q"}\nnot json\n', encoding="utf-8")
     rc = gate.main(["--golden", str(path), "--db", db])
     assert rc == 2
-    assert "рядку 2" in capsys.readouterr().err
+    assert "line 2" in capsys.readouterr().err
 
 
 def test_gate_json_out_requires_local_convention_exits_2(db, tmp_path):
-    """D10/знахідка 19: --json-out пише реальні питання й transcription_id —
-    єдина нова поверхня, яка мусить впасти під конвенцію приватності *.local.*."""
+    """D10/finding 19: --json-out writes real questions and transcription_id;
+    the only new surface that must fall under the *.local.* privacy convention."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     rc = gate.main(["--golden", golden, "--db", db, "--k", "2",
                      "--json-out", str(tmp_path / "gate_run.json")])
@@ -1208,10 +1208,10 @@ def test_gate_json_out_local_convention_accepted(db, tmp_path, monkeypatch):
 
 
 def test_gate_json_out_repo_root_path_rejected(db, tmp_path):
-    """Знахідка 3 (review-round-2): `gate_run.local.json` у корені репозиторію
-    відповідає конвенції ІМЕНІ, але git його ВІДСТЕЖИТЬ — нема кореневого
-    правила `*.local.json` у .gitignore. Має впасти під exit 2 до будь-якого
-    запису на диск."""
+    """Finding 3 (review-round-2): `gate_run.local.json` in the repository root
+    matches the NAME convention, but git TRACKS it: there is no root
+    `*.local.json` rule in .gitignore. It must fail with exit 2 before any
+    write to disk."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     path = gate._PROJECT_ROOT / "gate_run.local.json"
     assert not path.exists()
@@ -1226,9 +1226,9 @@ def test_gate_json_out_repo_root_path_rejected(db, tmp_path):
 
 
 def test_gate_json_out_nested_evals_subdir_rejected(db, tmp_path):
-    """`.gitignore` покриває лише `evals/*.local.json` НАПРЯМУ (без `**`) —
-    вкладений каталог на кшталт `evals/runs/` під це правило не підпадає.
-    Раніше filename-евристика приймала такий шлях; git його відстежить."""
+    """`.gitignore` covers only `evals/*.local.json` DIRECTLY (without `**`);
+    a nested directory such as `evals/runs/` does not fall under this rule.
+    Previously the filename heuristic accepted such a path; git will track it."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     path = gate._PROJECT_ROOT / "evals" / "runs" / "x.local.json"
     rc = gate.main(["--golden", golden, "--db", db, "--k", "2",
@@ -1238,8 +1238,8 @@ def test_gate_json_out_nested_evals_subdir_rejected(db, tmp_path):
 
 
 def test_gate_json_out_real_evals_dir_path_still_accepted(db, tmp_path, monkeypatch):
-    """Контроль: шлях, що ДІЙСНО підпадає під `evals/*.local.json`
-    у справжньому репозиторії, git не рахує "гейт зламав легітимний випадок"."""
+    """Control: a path that REALLY falls under `evals/*.local.json`
+    in the real repository, git does not count as "the gate broke a legitimate case"."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
     path = gate._PROJECT_ROOT / "evals" / "gate_run_test.local.json"
@@ -1254,37 +1254,37 @@ def test_gate_json_out_real_evals_dir_path_still_accepted(db, tmp_path, monkeypa
 
 
 def test_gate_no_snapshot_help_does_not_overclaim_after_d16(capsys):
-    """Знахідка 15: довідка `--no-snapshot` не сміє стверджувати, що прапорець
-    завжди означає "напряму на --db" — на не-живій цілі захисна копія
-    (_scratch_copy) все одно застосовується (D16)."""
+    """Finding 15: the `--no-snapshot` help must not claim that the flag
+    always means "directly on --db": on a non-live target the protective copy
+    (_scratch_copy) is still applied (D16)."""
     with pytest.raises(SystemExit):
         gate.main(["--help"])
     help_text = capsys.readouterr().out
     assert "--no-snapshot" in help_text
-    assert "захисна копія" in help_text or "_scratch_copy" in help_text
+    assert "protective copy" in help_text or "_scratch_copy" in help_text
 
 
 # ============================================================
-# gate.py — наскрізний прогін на РЕАЛЬНОМУ знімку і e5 (C9: маркер `eval`,
-# скіп з причиною, якщо нема golden-set/архіву/моделі)
+# gate.py: end-to-end run on a REAL snapshot and e5 (C9: the `eval` marker,
+# skip with a reason if there is no golden-set/archive/model)
 # ============================================================
 
 @pytest.mark.eval
 def test_gate_real_snapshot_passes_with_local_golden_set(tmp_path, monkeypatch):
-    """Canary, не строгий CI-гейт (знахідка 14): архів дрейфує (нові записи,
-    переінджест), тож PASS тут — сигнал "перевір вручну, якщо почервоніло",
-    а не залізний контракт коду. Знімок пишеться у tmp_path, НЕ в
-    evals/snapshots/ реального репо — інакше кожен прогін лишає 315-МБ
-    артефакт у робочому дереві (finding 14)."""
+    """Canary, not a strict CI gate (finding 14): the archive drifts (new records,
+    re-ingest), so PASS here is a signal "check by hand if it turns red",
+    not an iron contract of the code. The snapshot is written to tmp_path, NOT to
+    evals/snapshots/ of the real repo; otherwise every run leaves a 315 MB
+    artifact in the working tree (finding 14)."""
     golden_path = _PROJECT_ROOT / "evals" / "golden_set.local.json"
     db_path = _PROJECT_ROOT / "whisper_history.db"
     if not golden_path.exists():
-        pytest.skip(f"нема {golden_path} — локальний golden-set не розмічено")
+        pytest.skip(f"no {golden_path}: the local golden-set is not labeled")
     if not db_path.exists():
-        pytest.skip(f"нема {db_path} — немає локального архіву")
+        pytest.skip(f"no {db_path}: there is no local archive")
     from app.services import embeddings
     if not embeddings.is_available():
-        pytest.skip(f"e5 недоступна: {embeddings.unavailability_reason()}")
+        pytest.skip(f"e5 unavailable: {embeddings.unavailability_reason()}")
 
     monkeypatch.setattr(ev_snapshot, "_SNAPSHOT_DIR", tmp_path / "snapshots")
 
@@ -1293,14 +1293,14 @@ def test_gate_real_snapshot_passes_with_local_golden_set(tmp_path, monkeypatch):
 
 
 # ============================================================
-# gate.py — прапорець --rerank (18.09.2026, знахідка стадії вмикання
-# Хвилі B: гейт міряв конфігурацію, якої в продакшені немає)
+# gate.py: the --rerank flag (18.09.2026, a finding of the Wave B enabling
+# stage: the gate measured a configuration that does not exist in production)
 # ============================================================
 
 def test_gate_rerank_flag_reaches_retrieval_search(db, tmp_path, monkeypatch):
-    """Без прапорця `retrieval.search` отримує rerank=False, з ним — True.
-    Саме цей аргумент відрізняє замір від бою: RAG-чат вмикає реранкер при
-    RECALL_RERANK_ENABLED=1, а гейт до цієї правки тримав False константою."""
+    """Without the flag `retrieval.search` gets rerank=False, with it True.
+    This exact argument distinguishes the measurement from production: the RAG chat enables the reranker at
+    RECALL_RERANK_ENABLED=1, while the gate before this fix held False as a constant."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     seen = []
     inner = _good_search({"a": (1, "TG чат")})
@@ -1322,9 +1322,9 @@ def test_gate_rerank_flag_reaches_retrieval_search(db, tmp_path, monkeypatch):
 
 
 def test_gate_rerank_recorded_in_provenance_and_verdict_line(db, tmp_path, monkeypatch, capsys):
-    """Прогін підписує конфігурацію двічі: у рядку вердикту (єдиний рядок під
-    `-q`) і в `--json-out`. Інакше два файли зводяться через `evals.compare`
-    без жодної згадки, що один знятий з реранкером, а другий без."""
+    """The run signs the configuration twice: in the verdict line (the only line under
+    `-q`) and in `--json-out`. Otherwise two files merged via `evals.compare`
+    carry no mention that one was taken with the reranker and the other without."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
     out_path = tmp_path / "run.local.json"
@@ -1359,7 +1359,7 @@ def test_normalize_expected_leak_nonzero_raises():
 def test_normalize_expected_leak_zero_ok():
     item = golden_io._normalize({"id": "a", "question": "q", "expected_leak": 0},
                                  source="manual", default_status="labeled")
-    assert item["id"] == "a"  # не впало
+    assert item["id"] == "a"  # did not crash
 
 
 # ============================================================
@@ -1398,7 +1398,7 @@ def test_gate_filter_leak_category_axis_fails_despite_full_recall(db_taxonomy, t
                                                                     capsys):
     golden = _golden_jsonl(tmp_path, [
         _item("a", 3, "Акмекорп дзвінок", category_id=db_taxonomy["fund_id"])])
-    # #4 не в піддереві «Фонд Робота» — чуже, що фільтр не мав би пропустити.
+    # #4 is not in the subtree of «Фонд Робота»: a foreign record the filter must not let through.
     monkeypatch.setattr("app.services.retrieval.search",
                          _leak_search((3, "Акмекорп дзвінок"), leaked=(4, "Чужий дзвінок")))
     rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
@@ -1410,7 +1410,7 @@ def test_gate_filter_leak_category_axis_fails_despite_full_recall(db_taxonomy, t
 def test_gate_filter_leak_tags_axis_fails_on_untagged_chunk(db_taxonomy, tmp_path, monkeypatch):
     golden = _golden_jsonl(tmp_path, [
         _item("b", 3, "Акмекорп дзвінок", tags=["AI"])])
-    # #2 (з базової `db`) не має тегу AI.
+    # #2 (from the base `db`) does not have the tag AI.
     monkeypatch.setattr("app.services.retrieval.search",
                          _leak_search((3, "Акмекорп дзвінок"), leaked=(2, "Дзвінок")))
     rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
@@ -1425,7 +1425,7 @@ def test_gate_filter_leak_none_without_filters(db_taxonomy, tmp_path, monkeypatc
     out_path = tmp_path / "out.local.json"
     rc = gate.main(["--golden", golden, "--db", db_taxonomy["db"], "--k", "2",
                      "--min-recall", "2=0.5", "--json-out", str(out_path)])
-    assert rc == 0  # без category_id/tags — filter_leak не рахується, витоку немає
+    assert rc == 0  # without category_id/tags filter_leak is not counted, there is no leak
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert payload["per_item"]["2"][0]["filter_leak"] is None
 
@@ -1444,9 +1444,9 @@ def test_gate_json_out_reports_filter_leak_per_item_and_aggregate(db_taxonomy, t
 
 
 def test_gate_baseline_without_rerank_not_compared_to_rerank_run(db, tmp_path, monkeypatch, capsys):
-    """Лінія, знята БЕЗ реранкера, не сміє мовчки судити прогін З ним:
-    провенанс не збігається, отже per-item diff і вердикт за лінією
-    вимикаються (той самий захист, що вже стоїть на знімку БД)."""
+    """A baseline taken WITHOUT the reranker must not silently judge a run WITH it:
+    the provenance does not match, so the per-item diff and the baseline verdict
+    are switched off (the same protection that already stands on the DB snapshot)."""
     golden = _golden_jsonl(tmp_path, [_item("a", 1, "TG чат")])
     monkeypatch.setattr("app.services.retrieval.search", _good_search({"a": (1, "TG чат")}))
     base = tmp_path / "base.local.json"
@@ -1455,4 +1455,4 @@ def test_gate_baseline_without_rerank_not_compared_to_rerank_run(db, tmp_path, m
     capsys.readouterr()
     gate.main(["--golden", golden, "--db", db, "--k", "2", "--min-recall", "2=0.9",
                "--rerank", "--baseline", str(base)])
-    assert "не збігається" in capsys.readouterr().err
+    assert "does not match" in capsys.readouterr().err

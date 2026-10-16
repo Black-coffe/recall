@@ -1,10 +1,10 @@
-"""VACUUM INTO знімок БД для evals/gate.py (eval-gate, історія 01).
+"""VACUUM INTO snapshot of the DB for evals/gate.py (eval-gate, story 01).
 
-Джерело відкривається СТРОГО `mode=ro` (SQLite фізично забороняє запис,
-не лише конвенція коду) — гейт ганяється на copy-БД і не сміє мутувати
-бойовий файл (ADR-003). Live-db-гард (`is_live_db`/`open_readonly`) лишається
-в `evals/graph_links.py` — цей модуль лише вміє зробити знімок, рішення
-"чи знімати" приймає `evals/gate.py`.
+The source is opened STRICTLY with `mode=ro` (SQLite physically forbids writes,
+not just a code convention): the gate runs on a copy DB and must not mutate
+the live file (ADR-003). The live-db guard (`is_live_db`/`open_readonly`) stays
+in `evals/graph_links.py`; this module only knows how to take a snapshot, the decision
+of "whether to snapshot" is made by `evals/gate.py`.
 """
 from __future__ import annotations
 
@@ -21,18 +21,18 @@ _SNAPSHOT_DIR = _PROJECT_ROOT / "evals" / "snapshots"
 
 
 def _ro_uri(db_path: str) -> str:
-    """URI для `sqlite3.connect(..., uri=True)` у режимі `mode=ro`."""
+    """URI for `sqlite3.connect(..., uri=True)` in `mode=ro`."""
     return Path(db_path).resolve().as_uri() + "?mode=ro"
 
 
 def make_snapshot(src: str, dst: str) -> str:
-    """Скопіювати `src` у `dst` через `VACUUM INTO` з read-only зʼєднання.
+    """Copy `src` to `dst` via `VACUUM INTO` from a read-only connection.
 
-    `src` відкривається лише `mode=ro` — SQLite не дозволить запис навіть
-    якщо щось спробує, тож джерело гарантовано лишається байт-у-байт
-    незмінним (хеш/mtime). `dst` створює сам SQLite (`VACUUM INTO` вимагає,
-    щоб файл ще не існував) — якщо старий знімок з такою назвою лишився,
-    прибираємо його перед викликом.
+    `src` is opened only with `mode=ro`: SQLite will not allow a write even
+    if something tries, so the source is guaranteed to stay byte-for-byte
+    unchanged (hash/mtime). `dst` is created by SQLite itself (`VACUUM INTO` requires
+    the file not to exist yet): if an old snapshot with that name is left over,
+    it is removed before the call.
     """
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,7 +47,7 @@ def make_snapshot(src: str, dst: str) -> str:
 
 
 def default_snapshot_path(src: str) -> str:
-    """`evals/snapshots/<db-basename>-<YYYYMMDD-HHMMSS>.db` (план, C5)."""
+    """`evals/snapshots/<db-basename>-<YYYYMMDD-HHMMSS>.db` (plan, C5)."""
     basename = Path(src).stem
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return str(_SNAPSHOT_DIR / f"{basename}-{stamp}.db")
@@ -63,8 +63,8 @@ def _src_identity(src: str) -> dict:
 
 
 def _existing_snapshot_for(src: str, basename: str) -> Optional[str]:
-    """Знімок з тим самим basename, чиє джерело (розмір+mtime) збігається з
-    поточним `src` (D8) — джерело не змінилось, новий знімок не потрібен."""
+    """A snapshot with the same basename whose source (size+mtime) matches
+    the current `src` (D8): the source has not changed, no new snapshot is needed."""
     if not _SNAPSHOT_DIR.exists():
         return None
     identity = _src_identity(src)
@@ -76,9 +76,9 @@ def _existing_snapshot_for(src: str, basename: str) -> Optional[str]:
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
-            # Не ковтаємо мовчки (CLAUDE.md) — побитий метафайл лише
-            # пропускається (нижче створиться новий знімок), не крашить гейт.
-            print(f"[snapshot] пошкоджений метафайл {meta_file}, пропускаю: {exc}",
+            # Do not swallow silently (CLAUDE.md): a broken metafile is only
+            # skipped (a new snapshot is created below), it does not crash the gate.
+            print(f"[snapshot] corrupted metafile {meta_file}, skipping: {exc}",
                   file=sys.stderr)
             continue
         if (meta.get("src") == identity["src"]
@@ -89,49 +89,49 @@ def _existing_snapshot_for(src: str, basename: str) -> Optional[str]:
 
 
 def _norm(path: str) -> str:
-    """Нормалізація для порівняння шляхів знімків (case/`.`/`..`) — той самий
-    файл мусить збігатися незалежно від того, як його записали (`os.path.abspath`
-    у `gate.py` чи `_SNAPSHOT_DIR / ...` тут)."""
+    """Normalization for comparing snapshot paths (case/`.`/`..`): the same
+    file must match regardless of how it was written (`os.path.abspath`
+    in `gate.py` or `_SNAPSHOT_DIR / ...` here)."""
     return os.path.normcase(os.path.abspath(path))
 
 
 def _remove_snapshot_files(db_stem: str) -> None:
-    """Прибрати знімок цілком: `.db` + сайдкари `-wal`/`-shm` + `.meta.json`
-    (знахідки 13/14 — прибирання лише `.db` лишає сирітські файли, які
-    жоден наступний прогін уже не претендує почистити)."""
+    """Remove a snapshot entirely: `.db` + `-wal`/`-shm` sidecars + `.meta.json`
+    (findings 13/14: removing only `.db` leaves orphan files that
+    no later run will ever claim to clean up)."""
     for suffix in ("", "-wal", "-shm"):
         candidate = Path(db_stem + suffix)
         if candidate.exists():
             try:
                 candidate.unlink()
             except OSError as exc:
-                print(f"[snapshot] не вдалось прибрати {candidate}: {exc}", file=sys.stderr)
+                print(f"[snapshot] failed to remove {candidate}: {exc}", file=sys.stderr)
     meta_file = Path(_meta_path(db_stem))
     if meta_file.exists():
         try:
             meta_file.unlink()
         except OSError as exc:
-            print(f"[snapshot] не вдалось прибрати метафайл {meta_file}: {exc}",
+            print(f"[snapshot] failed to remove metafile {meta_file}: {exc}",
                   file=sys.stderr)
 
 
 def _prune_other_snapshots(basename: str, keep: str,
                             protect: Iterable[str] = ()) -> None:
-    """Прибрати всі знімки з тим самим basename, крім `keep` (D8 — знімок не
-    плодиться безкінечно; `whisper_history.db` важить 315 МБ) і крім
-    `protect` (D20/знахідка 5): шляхи знімків, названих ЖИВОЮ базовою лінією
-    (`db_snapshot.path` файлу, який ще не перезаписано `--write-baseline`).
-    D8 і D5 інакше знищують одне одного — прунер видаляв саме той знімок,
-    без якого лінія стає невідтворюваною назавжди."""
+    """Remove all snapshots with the same basename except `keep` (D8: a snapshot must not
+    multiply endlessly; `whisper_history.db` weighs 315 MB) and except
+    `protect` (D20/finding 5): paths of snapshots named by a LIVE baseline
+    (the `db_snapshot.path` of a file not yet overwritten by `--write-baseline`).
+    Otherwise D8 and D5 destroy each other: the pruner deleted exactly the snapshot
+    without which the baseline becomes unreproducible forever."""
     keep_norm = {_norm(keep)} | {_norm(p) for p in protect}
     for db_file in _SNAPSHOT_DIR.glob(f"{basename}-*.db"):
         if _norm(str(db_file)) in keep_norm:
             continue
         _remove_snapshot_files(str(db_file))
 
-    # Сироти від попередніх багів чи перерваних прогонів (знахідка 14) —
-    # `-wal`/`-shm` без `.db` поруч (напр. `.db` уже прибраний раніше, коли
-    # прунер ще не чистив сайдкари). Не чіпаємо ті, чий `.db` під захистом.
+    # Orphans from earlier bugs or interrupted runs (finding 14):
+    # `-wal`/`-shm` without a `.db` next to them (e.g. the `.db` was already removed earlier, when
+    # the pruner did not yet clean sidecars). Do not touch those whose `.db` is protected.
     for suffix in ("-wal", "-shm"):
         for sidecar in _SNAPSHOT_DIR.glob(f"{basename}-*.db{suffix}"):
             db_stem = str(sidecar)[: -len(suffix)]
@@ -140,21 +140,21 @@ def _prune_other_snapshots(basename: str, keep: str,
             try:
                 sidecar.unlink()
             except OSError as exc:
-                print(f"[snapshot] не вдалось прибрати сирітський сайдкар {sidecar}: {exc}",
+                print(f"[snapshot] failed to remove orphan sidecar {sidecar}: {exc}",
                       file=sys.stderr)
 
 
 def auto_snapshot(src: str, protect: Iterable[str] = ()) -> str:
-    """Знімок `src` за дефолтним шляхом (C5) — те, що `gate.py` робить
-    автоматично, коли `--db` вказує на живу БД (без `--no-snapshot`).
+    """Snapshot of `src` at the default path (C5): what `gate.py` does
+    automatically when `--db` points to a live DB (without `--no-snapshot`).
 
-    D8: якщо джерело не змінилось із часу останнього знімка з тим самим
-    basename (розмір+mtime), той знімок перевикористовується замість нового
-    315-МБ файлу; інакше створюється новий, а старі з тим самим basename
-    прибираються (максимум один живий знімок на джерело) — КРІМ шляхів
-    у `protect` (D20): знімки, названі живими базовими лініями, `gate.py`
-    передає сюди, щоб прунер не знищив артефакт, без якого лінію вже не
-    відтворити."""
+    D8: if the source has not changed since the last snapshot with the same
+    basename (size+mtime), that snapshot is reused instead of a new
+    315 MB file; otherwise a new one is created and old ones with the same basename
+    are removed (at most one live snapshot per source), EXCEPT paths
+    in `protect` (D20): snapshots named by live baselines, which `gate.py`
+    passes here so the pruner does not destroy the artifact without which the baseline can
+    no longer be reproduced."""
     basename = Path(src).stem
     existing = _existing_snapshot_for(src, basename)
     if existing:

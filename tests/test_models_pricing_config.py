@@ -1,10 +1,10 @@
-"""Тести єдиної точки правди для моделей Claude (REMEDIATION_PLAN Волна 3, T6.2).
+"""Tests of the single source of truth for Claude models (REMEDIATION_PLAN Wave 3, T6.2).
 
-Покриваємо:
-- app.services.models: дефолт, env-override CLAUDE_MODEL, adaptive-thinking gate.
-- app.services.pricing: усі реально вживані моделі мають ціну (немає "дір").
-- app.services.copilot.config: normal (Sonnet) і gnarly (Opus) моделі лишаються
-  РІЗНИМИ (не схлопнуті), і обидві env-override'яться незалежно.
+We cover:
+- app.services.models: default, CLAUDE_MODEL env override, adaptive-thinking gate.
+- app.services.pricing: all models actually used have a price (no "holes").
+- app.services.copilot.config: normal (Sonnet) and gnarly (Opus) models stay
+  DIFFERENT (not collapsed), and both are env-overridden independently.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class TestAdaptiveThinkingGate:
 
 
 class TestPricingSync:
-    """pricing.py не повинен мати 'дір' де cost estimate тихо падає на дефолт."""
+    """pricing.py must not have "holes" where the cost estimate quietly falls back to the default."""
 
     @pytest.mark.parametrize("model", [
         models.DEFAULT_MODEL,                  # app-wide default (opus-5)
@@ -57,12 +57,12 @@ class TestPricingSync:
     ])
     def test_actually_used_models_have_explicit_price(self, model):
         assert model in pricing.MODEL_PRICES, (
-            f"{model} реально вживається кодом, але відсутній у MODEL_PRICES — "
-            "cost estimate тихо впаде на DEFAULT_PRICE_MODEL"
+            f"{model} is actually used by the code, but is missing from MODEL_PRICES — "
+            "the cost estimate will quietly fall back to DEFAULT_PRICE_MODEL"
         )
 
     def test_opus_4_8_price_is_not_the_old_wrong_value(self):
-        # Було (15.0, 75.0) — невідомо звідки взяте, розбіжне з тарифами Anthropic.
+        # Was (15.0, 75.0) — taken from who knows where, diverging from Anthropic rates.
         assert pricing.MODEL_PRICES["claude-opus-4-8"] != (15.0, 75.0)
 
     def test_estimate_cost_known_model_uses_its_own_price(self):
@@ -77,8 +77,8 @@ class TestPricingSync:
 
 
 class TestThinkingOffGate:
-    """Claude 5 (Opus 5 / Sonnet 5): thinking on-by-default → live-виклики
-    копілота мають явно вимикати його. Fable 5 — НЕ можна (disabled = 400)."""
+    """Claude 5 (Opus 5 / Sonnet 5): thinking on-by-default → live copilot
+    calls must turn it off explicitly. Fable 5 — NOT allowed (disabled = 400)."""
 
     @pytest.mark.parametrize("model", ["claude-opus-5", "claude-sonnet-5"])
     def test_claude5_needs_explicit_off(self, model):
@@ -92,8 +92,8 @@ class TestThinkingOffGate:
         assert models.needs_explicit_thinking_off(model) is False
 
     def test_escalator_passes_thinking_disabled_for_claude5_only(self):
-        """Регресія: _request мусить слати thinking=disabled для Claude 5 і НЕ
-        слати поле взагалі для старших поколінь."""
+        """Regression: _request must send thinking=disabled for Claude 5 and NOT
+        send the field at all for older generations."""
         from app.services.copilot.escalate import Escalator
 
         captured: dict = {}
@@ -130,7 +130,7 @@ class TestThinkingOffGate:
 
 
 class TestCopilotModelsNotCollapsed:
-    """Copilot normal (Sonnet) і gnarly (Opus) — свідомо РІЗНІ моделі."""
+    """Copilot normal (Sonnet) and gnarly (Opus) — deliberately DIFFERENT models."""
 
     def test_medium_importance_uses_normal_model_no_gnarly(self):
         cfg = copilot_config.resolve_settings({"mode": "medium", "importance": "medium"})
@@ -153,5 +153,5 @@ class TestCopilotModelsNotCollapsed:
         monkeypatch.delenv("COPILOT_MODEL_API_GNARLY", raising=False)
         cfg = copilot_config.resolve_settings({"mode": "medium", "importance": "high"})
         assert cfg["model_api"] == "claude-sonnet-5"
-        # gnarly лишається дефолтним (Opus) — env-override normal не чіпає gnarly.
+        # gnarly stays default (Opus) — the normal env override does not touch gnarly.
         assert cfg["model_api_gnarly"] == models.COPILOT_GNARLY_MODEL_DEFAULT

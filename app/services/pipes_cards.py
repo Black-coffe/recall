@@ -1,20 +1,20 @@
-"""Картки брифінгу для Telegram (K5): повідомлення складає код, не модель.
+"""Brief cards for Telegram (K5): the message is assembled by code, not by the model.
 
-Власник 15.10.2026 про перший живий брифінг K4: «прям очень кеуча текста который
-не хочется читать», `**` видно буквально. Тому:
+The owner on 15.10.2026 about the first live K4 brief: «a really huge wall of text that
+I don't want to read», `**` visible literally. Hence:
 
-- текст — HTML (`parse_mode=HTML`) лише з тегами ``b``, ``i``, ``a``;
-- задачі згруповані блоками за КОРЕНЕВИМ напрямком (дерево ``categories.parent_id``),
-  у блоці ≤ ``MAX_CARDS`` найтерміновіших і рядок «ще N →» на ``/tasks?category_id=``;
-- картка = що · хто · до коли · звідки + посилання на запис із підсвіткою задачі;
-- Claude дає лише 1–2 рядки «головне» простим текстом (``clean_headline``).
+- the text is HTML (`parse_mode=HTML`) with only the tags ``b``, ``i``, ``a``;
+- tasks are grouped in blocks by ROOT direction (the ``categories.parent_id`` tree),
+  a block has ≤ ``MAX_CARDS`` most urgent ones and a line "N more →" to ``/tasks?category_id=``;
+- a card = what · who · due when · from where + a link to the recording with the task highlighted;
+- Claude gives only 1-2 "headline" lines as plain text (``clean_headline``).
 
-Приватність: кожне поле спершу маскується і перевіряється стоп-словами
-(``pipes_privacy``) і лише потім обрізається й екранується — обрізка не може
-розрізати телефон навпіл, а екранування не ховає стоп-слово від перевірки.
+Privacy: every field is first masked and checked against stop words
+(``pipes_privacy``) and only then truncated and escaped — truncation cannot
+cut a phone number in half, and escaping does not hide a stop word from the check.
 
-Блоки розділені порожнім рядком: ``tg_bot.split_text`` ріже саме там, тож жодна
-частина повідомлення не рве тег.
+Blocks are separated by an empty line: ``tg_bot.split_text`` cuts exactly there, so no
+part of the message breaks a tag.
 """
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ _TITLE_KEYS = ("weekly_digest", "dropped_commitments", "open_questions")
 
 
 def _t(key: str, **vars) -> str:
-    """Службовий рядок брифінгу мовою налаштування на момент складання."""
+    """Service line of the brief in the language of the setting at assembly time."""
     return tr("telegram.brief." + key, lang=server_lang(), **vars)
 
-#: Задачі зводу: відро → (позначка, ранг терміновості).
+#: Digest tasks: bucket → (marker, urgency rank).
 _TASK_KINDS = {"overdue": ("🔴", 0), "this_week": ("🟡", 1), "no_date": ("⚪", 2)}
 
 
@@ -51,10 +51,10 @@ def _dm(iso: Any) -> str:
     return f"{s[8:10]}.{s[5:7]}" if len(s) >= 10 else s
 
 
-# ------------------------------------------------------------- приватність
+# ------------------------------------------------------------- privacy
 
 class _Guard:
-    """Поле → маска → стоп-слова → обрізка → html.escape. Стоп-слова збираються в ``leaked``."""
+    """Field → mask → stop words → truncate → html.escape. Stop words are collected into ``leaked``."""
 
     def __init__(self, words: Iterable[str]):
         self.words = list(words)
@@ -73,11 +73,11 @@ def _href(url: str, label: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
 
 
-# --------------------------------------------------------------- напрямки
+# --------------------------------------------------------------- directions
 
 @dataclass
 class _Dirs:
-    """Звідки пункт і в якому він напрямку — одним проходом по БД."""
+    """Where an item comes from and which direction it is in — in one pass over the DB."""
     cats: dict[int, tuple[str, Optional[int]]] = field(default_factory=dict)
     task: dict[int, tuple[Optional[int], Optional[int]]] = field(default_factory=dict)
     rec: dict[int, Optional[int]] = field(default_factory=dict)
@@ -114,7 +114,7 @@ def _load_dirs(db_path: str, task_ids: set[int], rec_ids: set[int]) -> _Dirs:
     return d
 
 
-# ----------------------------------------------------------------- картки
+# ----------------------------------------------------------------- cards
 
 @dataclass
 class _Card:
@@ -122,7 +122,7 @@ class _Card:
     leaf: Optional[int]
     sort: tuple
     html: str
-    item_id: Optional[int] = None    # задача → номер і ряд кнопок (K5 k5-task-buttons)
+    item_id: Optional[int] = None    # task → number and a row of buttons (K5 k5-task-buttons)
 
 
 def _int(v: Any) -> Optional[int]:
@@ -168,7 +168,7 @@ def _digest_tasks(res: dict, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
                 when = _t("thisWeek", date=_dm(due))
             else:
                 when = _t("noDate")
-            # Протерміновані — найстаріший дедлайн першим; без дати — як прийшли.
+            # Overdue — oldest deadline first; undated — in order of arrival.
             cards.append(_task_card(it, mark, when, d, g, base,
                                     (rank, str(due or ""), i)))
     return cards
@@ -208,7 +208,7 @@ def _questions(items: list, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
 
 
 def _numbered(c: _Card, buttons: Optional[list]) -> str:
-    """Задача з id → «N.» замість «•» і її id у ``buttons`` (порядок = номер)."""
+    """A task with an id → "N." instead of "•" and its id in ``buttons`` (order = number)."""
     from app.services.brief_actions import MAX_ITEMS
     if buttons is None or c.item_id is None or len(buttons) >= MAX_ITEMS:
         return c.html
@@ -218,7 +218,7 @@ def _numbered(c: _Card, buttons: Optional[list]) -> str:
 
 def _blocks(title: str, cards: list[_Card], d: _Dirs, g: _Guard, base: str, *,
             more_link: bool, buttons: Optional[list] = None) -> list[str]:
-    """Секція → абзаци: заголовок і по блоку на кореневий напрямок."""
+    """Section → paragraphs: a heading and one block per root direction."""
     if not cards:
         return []
     groups: dict[Optional[int], list[_Card]] = {}
@@ -267,14 +267,14 @@ def _corrections(items: list, g: _Guard, base: str) -> list[str]:
     return ["\n".join(lines)]
 
 
-# ------------------------------------------------------------------ рендер
+# ------------------------------------------------------------------ render
 
 _MD = re.compile(r"(\*\*|__|`+|~~)")
 _LEAD = re.compile(r"^\s*(?:#{1,6}\s*|[-*•]\s+|\d+[.)]\s+|>\s*)")
 
 
 def clean_headline(text: str, *, max_lines: int = 2, max_len: int = 300) -> str:
-    """«Головне» від Claude: простий текст, ≤2 рядки — розмітку моделі прибирає код."""
+    """"Headline" from Claude: plain text, ≤2 lines — the model's markup is stripped by code."""
     lines = []
     for line in (text or "").splitlines():
         line = _LEAD.sub("", _MD.sub("", line)).strip().strip("*_").strip()
@@ -286,9 +286,9 @@ def clean_headline(text: str, *, max_lines: int = 2, max_len: int = 300) -> str:
 
 
 def link_base() -> str:
-    """База посилань на Recall у картках: ``RECALL_PUBLIC_URL`` (адреса, видима з телефона —
-    у власника Tailscale), інакше ``RECALL_API_URL``. Власник 15.10.2026: «Ссылки в новых карточках
-    брифинга ведут на адрес Recall на этом компьютере, поэтому с телефона они не откроются.»"""
+    """Base of Recall links in cards: ``RECALL_PUBLIC_URL`` (an address visible from the phone —
+    the owner has Tailscale), otherwise ``RECALL_API_URL``. Owner on 15.10.2026: «Links in the new cards
+    of the brief lead to the Recall address on this computer, so they will not open from the phone.»"""
     from app.core import settings as _settings
     return (_settings.env("RECALL_PUBLIC_URL").strip() or _settings.env("RECALL_API_URL").strip()
             or "http://127.0.0.1:5050").rstrip("/")
@@ -302,12 +302,12 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
            headline: Optional[str] = None, missing: Iterable[str] = (), hidden: int = 0,
            words: Optional[Iterable[str]] = None,
            buttons: Optional[list] = None) -> tuple[str, list[str]]:
-    """→ (HTML повідомлення, стоп-слова, що трапились у полях). Непорожній список = не слати.
+    """→ (message HTML, stop words that occurred in fields). A non-empty list = do not send.
 
-    ``words`` — стоп-лист (за замовчуванням ``privacy.stop_words()``; ``PrivacyError``
-    летить назовні). ``buttons`` (список, K5) — задачі звіту й «упущено» нумеруються
-    «1.», «2.»…, їхні id дописуються туди в порядку номерів (→ ``brief_actions.keyboard``),
-    а внизу зʼявляється рядок про те, що кнопки працюють лише з увімкненим ПК."""
+    ``words`` is the stop list (default ``privacy.stop_words()``; ``PrivacyError``
+    propagates out). ``buttons`` (a list, K5): the tasks of the report and "missed" are numbered
+    "1.", "2."…, their ids are appended there in number order (→ ``brief_actions.keyboard``),
+    and at the bottom a line appears saying the buttons work only with the PC on."""
     from app.services import privacy
     g = _Guard(privacy.stop_words() if words is None else words)
     base = (base_url or link_base()).rstrip("/")
@@ -355,6 +355,6 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
 
 
 def __getattr__(name: str):
-    if name == "NO_DIR":          # сумісність: назва «без напрямку» залежить від мови
+    if name == "NO_DIR":          # compatibility: the "no direction" name depends on the language
         return _t("noDir")
     raise AttributeError(name)

@@ -1,14 +1,14 @@
-"""Тести для персистентності JobQueue (T2.1, REMEDIATION_PLAN Волна 1).
+"""Tests for JobQueue persistence (T2.1, REMEDIATION_PLAN Wave 1).
 
-Перевіряють, що:
-  - без db_path JobQueue поводиться як і раніше (чиста пам'ять, тести
-    tests/test_job_queue.py не ламаються);
-  - зі встановленим db_path стан job'а дублюється у таблицю ``jobs``
-    (міграція v26, app/db/migrations.py);
-  - "рестарт застосунку" (нова JobQueue з порожнім dict-кешем, та сама БД)
-    через recover_crashed() позначає незавершені job'и як 'crashed' і
-    робить їх одразу видимими через list()/get() — так само, як recording
-    SessionStore.recover_orphaned() робить для сесій запису.
+They check that:
+  - without db_path JobQueue behaves as before (pure memory, the
+    tests/test_job_queue.py tests do not break);
+  - with db_path set, the job state is mirrored into the ``jobs`` table
+    (migration v26, app/db/migrations.py);
+  - an "application restart" (a new JobQueue with an empty dict cache, the same DB)
+    via recover_crashed() marks unfinished jobs as 'crashed' and
+    makes them immediately visible via list()/get() — just as recording
+    SessionStore.recover_orphaned() does for recording sessions.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from app.services.job_queue import JobQueue
 
 
 def test_recover_crashed_noop_without_db_path():
-    """Без set_db_path/конструктор-параметра — поведінка як до T2.1."""
+    """Without set_db_path/the constructor parameter — behaviour as before T2.1."""
     executor = ThreadPoolExecutor(max_workers=1)
     try:
         queue = JobQueue(executor=executor)
@@ -44,9 +44,9 @@ def test_persist_writes_row_to_jobs_table(tmp_path: Path):
         queue = JobQueue(executor=executor, db_path=db)
         job = queue.submit("youtube_download", lambda j: "ok", meta={"title": "т"})
         job._future.result(timeout=5)
-        # _persist у finally-блоці _runner виконується синхронно перед
-        # поверненням з потоку задачі, але future.result() гарантує лише
-        # завершення самої функції — даємо невеликий запас на flush.
+        # _persist in the finally block of _runner runs synchronously before
+        # the task thread returns, but future.result() only guarantees
+        # the completion of the function itself — we give a small margin for the flush.
         deadline = time.time() + 2
         row = None
         while time.time() < deadline:
@@ -59,7 +59,7 @@ def test_persist_writes_row_to_jobs_table(tmp_path: Path):
                 break
             time.sleep(0.02)
 
-        assert row is not None, "job не потрапив у таблицю jobs"
+        assert row is not None, "the job did not get into the jobs table"
         assert row["kind"] == "youtube_download"
         assert row["state"] == "completed"
         assert "т" in (row["meta_json"] or "")
@@ -68,7 +68,7 @@ def test_persist_writes_row_to_jobs_table(tmp_path: Path):
 
 
 def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
-    """Емулює: job був 'running' у процесі, який упав, потім рестарт."""
+    """Emulates: the job was 'running' in a process that crashed, then a restart."""
     db = str(tmp_path / "test.db")
     init_database(db)
 
@@ -78,8 +78,8 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
 
     def long_job(job):
         started.set()
-        # Тримаємо job у стані 'running', доки тест явно не відпустить —
-        # імітує довгу транскрипцію, перервану крахом процесу.
+        # Keep the job in the 'running' state until the test explicitly releases it —
+        # imitates a long transcription interrupted by a process crash.
         release.wait(timeout=5)
         return "done"
 
@@ -88,10 +88,10 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
         job = queue1.submit(
             "transcription", long_job, meta={"file": "call.mp3"}
         )
-        assert started.wait(timeout=5), "job не стартував вчасно"
+        assert started.wait(timeout=5), "the job did not start in time"
 
-        # Дочекатись, поки _persist(state='running') реально запишеться в БД
-        # (виконується в тому ж потоці задачі одразу після job.state='running').
+        # Wait until _persist(state='running') is actually written to the DB
+        # (it runs in the same task thread right after job.state='running').
         deadline = time.time() + 2
         persisted_running = False
         while time.time() < deadline:
@@ -103,15 +103,15 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
                 persisted_running = True
                 break
             time.sleep(0.02)
-        assert persisted_running, "стан 'running' не зафіксувався в jobs до 'рестарту'"
+        assert persisted_running, "the 'running' state was not recorded in jobs before the 'restart'"
 
-        # --- "Рестарт застосунку" ---
-        # Нова JobQueue з порожнім dict-кешем, та сама SQLite БД — рівно
-        # так, як після kill+перезапуску процесу app.py.
+        # --- "Application restart" ---
+        # A new JobQueue with an empty dict cache, the same SQLite DB — exactly
+        # as after kill+restart of the app.py process.
         executor2 = ThreadPoolExecutor(max_workers=1)
         try:
             queue2 = JobQueue(executor=executor2, db_path=db)
-            assert queue2.get(job.id) is None  # порожній кеш до recovery
+            assert queue2.get(job.id) is None  # empty cache before recovery
 
             recovered = queue2.recover_crashed()
             assert job.id in recovered
@@ -121,17 +121,17 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
             assert got.state == "crashed"
             assert got.error
 
-            # Видимо і через list() — так само, як через /api/jobs
+            # Visible via list() too — just as via /api/jobs
             ids = [j.id for j in queue2.list()]
             assert job.id in ids
 
-            # Повторний виклик recovery — ідемпотентний (рядок вже crashed,
-            # тому знову не потрапляє у вибірку queued/running).
+            # A repeated recovery call is idempotent (the row is already crashed,
+            # so it again does not fall into the queued/running selection).
             assert queue2.recover_crashed() == []
         finally:
             executor2.shutdown(wait=True)
     finally:
-        # Прибираємо потік першої черги, щоб не тримати ресурс між тестами.
+        # Clean up the first queue's thread so as not to hold a resource between tests.
         release.set()
         job._future.result(timeout=5)
         executor1.shutdown(wait=True)

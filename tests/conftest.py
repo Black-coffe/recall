@@ -1,8 +1,8 @@
-"""Pytest fixtures загального користування."""
+"""Shared pytest fixtures."""
 import os
 import sys
 
-# Додаємо корень проекту в sys.path щоб імпорти працювали
+# Add the project root to sys.path so imports work
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
@@ -10,5 +10,5 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _ui_lang_auto(monkeypatch):
-    """Мова інтерфейсу в тестах — auto (→ українська), незалежно від .env власника."""
+    """Interface language in tests — auto (→ Ukrainian), regardless of the owner's .env."""
     monkeypatch.setenv("RECALL_UI_LANG", "auto")

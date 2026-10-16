@@ -1,4 +1,4 @@
-"""Секрети з екрана (spec video-visual-timeline, історія 02)."""
+"""Secrets from the screen (spec video-visual-timeline, story 02)."""
 import io
 import shutil
 import sqlite3
@@ -10,7 +10,7 @@ from app.services import screen_secrets as ss
 
 
 def _words(*tokens, y=10):
-    """Слова одного рядка з рамками [x, y, w, h, текст]."""
+    """Words of one line with boxes [x, y, w, h, text]."""
     out, x = [], 0
     for t in tokens:
         out.append([x, y, 10 * len(t), 20, t])
@@ -73,7 +73,7 @@ def test_redact_blackens_box():
     out = ss.redact(img, [[50, 20, 40, 20]], 200, 100)
     assert out.getpixel((70, 30)) == (0, 0, 0)
     assert out.getpixel((5, 5)) == (255, 255, 255)
-    assert img.getpixel((70, 30)) == (255, 255, 255)        # оригінал не чіпається
+    assert img.getpixel((70, 30)) == (255, 255, 255)        # the original is untouched
 
 
 class _Tty(io.StringIO):
@@ -127,7 +127,7 @@ def test_reveal_wrong_confirmation_writes_nothing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# конвеєр: жодного сирого значення поза screen_secrets
+# pipeline: no raw value outside screen_secrets
 # ---------------------------------------------------------------------------
 
 FFMPEG = shutil.which('ffmpeg')
@@ -164,15 +164,15 @@ def test_pipeline_masks_everywhere_and_redacts_described_frame(tmp_path, monkeyp
             assert secret not in (val or ''), (table, col)
     assert conn.execute('SELECT value FROM screen_secrets').fetchone()[0] == secret
     conn.close()
-    # кадр для опису: рамка секрету чорна (відео 320×180, OCR-кадр теж 320×180)
-    assert seen, 'опис не викликався'
+    # frame for the description: the secret box is black (video 320x180, the OCR frame is also 320x180)
+    assert seen, 'description was not called'
     img = seen[0]
     sx = img.width / 320
     assert img.getpixel((int(300 * sx), int(110 * sx))) == (0, 0, 0)
 
 
 def test_symbol_only_password_is_still_masked():
-    """Ідемпотентність маски не мусить вимикати маскування паролів без літер і цифр."""
+    """Mask idempotence must not disable masking of passwords without letters and digits."""
     found = ss.scan_text('password: !@#$%^&*')
     assert '!@#$%^&*' in {s.value for s in found}
     assert ss.scan(_words('Пароль:', '!@#$%^&*')) != []

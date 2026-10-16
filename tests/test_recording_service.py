@@ -1,8 +1,8 @@
-"""Тести для app.services.recording.service (Phase 9.3).
+"""Tests for app.services.recording.service (Phase 9.3).
 
-Тести використовують fake recorder/writer factories — реальні
-WASAPI streams і файли не задіяні. Це робить тести швидкими і
-не залежними від наявності аудіо-девайсів на CI.
+The tests use fake recorder/writer factories — real
+WASAPI streams and files are not involved. This makes the tests fast and
+independent of the presence of audio devices on CI.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from app.services.recording.session_store import (
 # ---------------------------------------------------------------- fakes
 
 class FakeRecorder:
-    """Mock WasapiRecorder — без реального WASAPI."""
+    """Mock WasapiRecorder — without a real WASAPI."""
 
     instances: list["FakeRecorder"] = []
 
@@ -50,7 +50,7 @@ class FakeRecorder:
         self._is_closed = False
         self._callback_error = None
         self.events: list[dict] = []
-        self.drain_delay = 0.0  # імітація повільного drain (ізоляція сесій)
+        self.drain_delay = 0.0  # simulates a slow drain (session isolation)
         FakeRecorder.instances.append(self)
 
     @classmethod
@@ -89,8 +89,8 @@ class FakeRecorder:
 
     def push_fake_audio(self, num_bytes: int = 1024, value: int = 3000,
                         timestamp: float | None = None):
-        """Імітація callback'у: додає кадр і оновлює LevelMeter."""
-        # Створимо фейкові int16 семпли — синусоїда щоб level був ненульовий
+        """Simulates the callback: adds a frame and updates the LevelMeter."""
+        # Create fake int16 samples — a sine wave so that the level is non-zero
         import struct
         n = num_bytes // 2
         data = struct.pack(f'<{n}h', *([value] * n))
@@ -101,19 +101,19 @@ class FakeRecorder:
 
 
 class FakeAppSource(FakeRecorder):
-    """Mock AppAudioSource: створюється через app_source_factory(spec, rate, ch)."""
+    """Mock AppAudioSource: created through app_source_factory(spec, rate, ch)."""
 
     app_instances: list["FakeAppSource"] = []
 
     def __init__(self, spec, sample_rate, channels):
         super().__init__(device_index=None, sample_rate=sample_rate, channels=channels)
-        FakeRecorder.instances.remove(self)  # system-рекордери рахуються окремо
+        FakeRecorder.instances.remove(self)  # system recorders are counted separately
         self.spec = spec
         FakeAppSource.app_instances.append(self)
 
 
 class FakeWriter:
-    """Mock ChunkedPcmWriter без файлових операцій."""
+    """Mock ChunkedPcmWriter without file operations."""
     def __init__(self, path: Path):
         self.path = Path(path)
         self.buffer = bytearray()
@@ -167,19 +167,19 @@ def reset_fakes():
 
 @pytest.fixture(autouse=True)
 def fake_device_params(monkeypatch):
-    """Параметри девайса — теж hardware-межа, і її треба фейкати.
+    """The device parameters are a hardware boundary too, and must be faked.
 
-    `RecordingService._open_stream` питає `resolve_device_params()` ДО того, як
-    створити рекордер через `recorder_factory` — тобто підміни фабрики замало.
-    Реальна функція йде в WASAPI, і на машині, де індекс 5/10/20 не має
-    input-каналів, кидає `DeviceNotAvailableError`, який `_resolve_params`
-    свідомо НЕ глушить (native WASAPI SEGV-ить на `open()` неіснуючого девайса).
-    Через це весь файл падав залежно від того, які звукові пристрої стоять у
-    машині, всупереч обіцянці в докстрингу модуля («не залежними від наявності
-    аудіо-девайсів»).
+    `RecordingService._open_stream` asks `resolve_device_params()` BEFORE
+    creating the recorder through `recorder_factory` — so replacing the factory is not enough.
+    The real function goes to WASAPI, and on a machine where index 5/10/20 has no
+    input channels it raises `DeviceNotAvailableError`, which `_resolve_params`
+    deliberately does NOT swallow (native WASAPI SEGVs on `open()` of a nonexistent device).
+    Because of this the whole file failed depending on which sound devices are in the
+    machine, contrary to the promise in the module docstring («independent of the presence of
+    audio devices»).
 
-    Фейк повертає рівно те, що попросили — «девайс підтримує цільові параметри».
-    Тест, який навмисно перевірятиме відмову девайса, має підмінити це сам.
+    The fake returns exactly what was asked — «the device supports the target parameters».
+    A test that deliberately checks a device refusal must replace this itself.
     """
     monkeypatch.setattr(
         'app.services.recording.service.resolve_device_params',
@@ -196,8 +196,8 @@ def store(tmp_path: Path) -> SessionStore:
 def service(store: SessionStore) -> RecordingService:
     return RecordingService(
         store=store,
-        sse_broker=None,  # без SSE
-        chunk_seconds=1,  # короткий tick для тестів
+        sse_broker=None,  # no SSE
+        chunk_seconds=1,  # a short tick for tests
         sample_rate=48000,
         channels=2,
         recorder_factory=FakeRecorder,
@@ -261,13 +261,13 @@ def test_pause_resume_flow(service: RecordingService, store: SessionStore):
         service.pause(sid)
         mf = store.read(sid)
         assert mf['status'] == STATUS_PAUSED
-        # Останній segment закритий
+        # The last segment is closed
         assert mf['segments'][-1]['end_ts'] is not None
 
         service.resume(sid)
         mf = store.read(sid)
         assert mf['status'] == STATUS_RECORDING
-        # Новий segment відкритий
+        # The new segment is open
         assert len(mf['segments']) == 2
         assert mf['segments'][-1]['end_ts'] is None
     finally:
@@ -302,7 +302,7 @@ def test_stop_finalizes_state(service: RecordingService, store: SessionStore):
     service.stop(sid, name='Test recording')
     assert service.active_session_id is None
     mf = store.read(sid)
-    assert mf['status'] == STATUS_STOPPING  # finalize callback не задано
+    assert mf['status'] == STATUS_STOPPING  # finalize callback is not set
     assert mf['name'] == 'Test recording'
 
 
@@ -324,7 +324,7 @@ def test_stop_without_active_session(service: RecordingService):
 
 
 def test_unknown_sid_is_not_found_on_every_per_session_method(service: RecordingService):
-    """WRONG_SESSION зник: чужий sid при живій сесії — просто не знайдено."""
+    """WRONG_SESSION is gone: a foreign sid with a live session — simply not found."""
     from app.services.recording.audio_source import SystemSpec
     sid = service.start(mic_device_index=10, system_device_index=20)
     try:
@@ -357,7 +357,7 @@ def test_get_state_active_session(service: RecordingService):
     sid = service.start(mic_device_index=10, system_device_index=20,
                         mic_device_name='M', system_device_name='S')
     try:
-        # Симулюємо аудіо щоб level був ненульовий
+        # Simulate audio so that the level is non-zero
         FakeRecorder.instances[0].push_fake_audio(2048)
         time.sleep(0.05)
         state = service.get_state(sid)
@@ -389,8 +389,8 @@ def test_get_state_nonexistent(service: RecordingService):
 def test_flush_loop_drains_audio_into_writer(
     service: RecordingService, store: SessionStore
 ):
-    """Перевіряємо що flush_loop фактично забирає кадри з recorder'у,
-    пише у writer і оновлює manifest. Чекаємо до 3 секунди
+    """Check that flush_loop really takes frames from the recorder,
+    writes to the writer and updates the manifest. We wait up to 3 seconds
     (chunk_seconds=1)."""
     sid = service.start(mic_device_index=10)
     try:
@@ -398,8 +398,8 @@ def test_flush_loop_drains_audio_into_writer(
         for _ in range(5):
             rec.push_fake_audio(num_bytes=4096)
 
-        # Чекаємо інваріант: manifest.streams.mic.bytes >= 4096*5.
-        # Це гарантує і flush, і update_stream_bytes.
+        # We wait for the invariant: manifest.streams.mic.bytes >= 4096*5.
+        # This guarantees both the flush and update_stream_bytes.
         deadline = time.time() + 3.0
         last_bytes = 0
         while time.time() < deadline:
@@ -420,7 +420,7 @@ def test_flush_loop_drains_audio_into_writer(
 
 
 def test_flush_loop_publishes_levels_to_sse():
-    """Якщо broker задано — публікуються level events."""
+    """If a broker is set — level events are published."""
     class MockBroker:
         def __init__(self):
             self.events: list[tuple[str, str, dict]] = []
@@ -432,7 +432,7 @@ def test_flush_loop_publishes_levels_to_sse():
 
     broker = MockBroker()
     store = SessionStore(Path(__file__).parent.parent / '.tmp_test_sse')
-    # Чистимо tmp
+    # Clean up tmp
     import shutil
     shutil.rmtree(store.base_dir, ignore_errors=True)
     store.base_dir.mkdir(parents=True)
@@ -444,7 +444,7 @@ def test_flush_loop_publishes_levels_to_sse():
     sid = svc.start(mic_device_index=10)
     try:
         FakeRecorder.instances[0].push_fake_audio(4096)
-        time.sleep(0.4)  # достатньо щоб були level events (10Hz)
+        time.sleep(0.4)  # enough for level events to appear (10Hz)
         events = list(broker.events)
         kinds = {ev[1] for ev in events}
         assert 'status' in kinds  # initial status=recording
@@ -457,7 +457,7 @@ def test_flush_loop_publishes_levels_to_sse():
 # ---------------------------------------------------------------- recovery
 
 def test_recover_orphaned_marks_crashed(store: SessionStore):
-    # Створюємо «осиротілі» сесії на диску ДО створення сервісу
+    # Create «orphaned» sessions on disk BEFORE creating the service
     store.create('rec_orphan_a', 48000, 2)  # status=recording
     store.create('rec_orphan_b', 48000, 2)
     store.update_status('rec_orphan_b', STATUS_PAUSED)
@@ -498,17 +498,17 @@ def test_recover_orphaned_no_active_sessions(store: SessionStore):
 # ---------------------------------------------------------------- list_devices
 
 def test_list_devices_returns_list(service: RecordingService):
-    """Просто перевіряємо що метод не падає — реальний WASAPI використовується."""
+    """Just check that the method does not fail — the real WASAPI is used."""
     devices = service.list_devices()
     assert isinstance(devices, list)
-    # Не перевіряємо вміст — на CI може бути 0 девайсів
+    # We do not check the content — on CI there may be 0 devices
 
 
-# ------------------------------------------- recovery: незавершений finalize
+# ------------------------------------------- recovery: an unfinished finalize
 
 def _crash_without_mp3(store: SessionStore, sid: str) -> None:
-    """Сесія, що впала ДО створення final.mp3 — стан після рестарту,
-    який убив сам finalize-job."""
+    """A session that fell over BEFORE final.mp3 was created — the state after a restart
+    that killed the finalize job itself."""
     store.create(sid, 48000, 2)
     store.update_status(sid, STATUS_CRASHED)
 
@@ -527,7 +527,7 @@ def test_recover_unfinalized_requeues_crashed_without_mp3(store: SessionStore):
 
 
 def test_recover_unfinalized_skips_sessions_with_live_mp3(store: SessionStore):
-    """crashed, але MP3 на диску є — фіналізувати нічого, це робота reconcile."""
+    """crashed, but the MP3 is on disk — there is nothing to finalize, that is reconcile's job."""
     store.create('rec_has_mp3', 48000, 2)
     mp3 = store.session_dir('rec_has_mp3') / 'final.mp3'
     mp3.write_bytes(b'id3')
@@ -545,7 +545,7 @@ def test_recover_unfinalized_skips_sessions_with_live_mp3(store: SessionStore):
 
 
 def test_recover_unfinalized_stops_after_max_attempts(store: SessionStore):
-    """Детерміновано битий запис не має молотити важкий job на кожному старті."""
+    """A deterministically broken recording must not grind a heavy job at every start."""
     from app.services.recording.service import MAX_FINALIZE_ATTEMPTS
 
     _crash_without_mp3(store, 'rec_broken')
@@ -575,7 +575,7 @@ def test_recover_unfinalized_noop_without_callback(store: SessionStore):
 from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
 from app.services.recording.service import NoSystemStreamError
 
-_BPS = 48000 * 2 * 2  # байт/с формату 48000/2 s16le
+_BPS = 48000 * 2 * 2  # bytes/s of the 48000/2 s16le format
 
 
 class _Broker:
@@ -627,12 +627,12 @@ def test_two_sessions_are_independent_and_stop_does_not_wait_for_neighbour(store
         svc.resume(a)
         assert store.read(a)['status'] == STATUS_RECORDING
 
-        rec_b.drain_delay = 1.0  # flush-потік B «висить» у drain під lock'ом B
+        rec_b.drain_delay = 1.0  # B's flush thread «hangs» in drain under B's lock
         time.sleep(0.25)
         t0 = time.perf_counter()
         svc.stop(a)
         took = time.perf_counter() - t0
-        assert took < 0.5, f"stop(A) чекав на B: {took:.2f}s"
+        assert took < 0.5, f"stop(A) waited for B: {took:.2f}s"
         assert svc.active_session_ids() == [b]
         assert store.read(b)['status'] == STATUS_RECORDING
     finally:
@@ -718,13 +718,13 @@ def test_app_source_start_failure_cleans_up_like_open_failure(store):
 
 
 def _retarget_with_hole(store, monkeypatch, recorded_seconds: float):
-    """Живий 'all' → include; старий записав recorded_seconds з 2.0 активних."""
+    """A live 'all' → include; the old one recorded recorded_seconds from 2.0 active."""
     broker = _Broker()
     created: list[FakeAppSource] = []
 
     def factory(spec, rate, ch):
         src = FakeAppSource(spec, rate, ch)
-        # кадр, знятий новим джерелом ДО моменту заміни — має бути відкинутий
+        # a frame captured by the new source BEFORE the moment of the swap — must be dropped
         src.push_fake_audio(400, value=7, timestamp=time.time() - 0.001)
         created.append(src)
         return src
@@ -778,7 +778,7 @@ def test_retarget_short_hole_is_not_padded(store, monkeypatch):
 
 
 def test_retarget_back_to_all_keeps_stream_format(service, store):
-    """'all'-стрім повертається на свій endpoint; include-стрім — 'all' через app source."""
+    """An 'all' stream returns to its own endpoint; an include stream — to 'all' through the app source."""
     a = service.start(system_device_index=20)
     b = service.start(system_source=SystemSpec('include', ('zoom.exe',)))
     try:
@@ -790,7 +790,7 @@ def test_retarget_back_to_all_keeps_stream_format(service, store):
         service.retarget_system(b, SystemSpec('all'))
         last = FakeAppSource.app_instances[-1]
         assert last.spec == SystemSpec('all')
-        assert len(FakeRecorder.instances) == 2  # endpoint для b не відкривався
+        assert len(FakeRecorder.instances) == 2  # the endpoint for b was not opened
         assert store.read(b)['streams'][STREAM_SYSTEM]['source_events'][-1]['to'] == {
             'mode': 'all', 'apps': [], 'device_index': None}
     finally:

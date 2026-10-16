@@ -1,4 +1,4 @@
-"""Тести для app.services.recording.pcm_writer (Phase 9.2)."""
+"""Tests for app.services.recording.pcm_writer (Phase 9.2)."""
 from __future__ import annotations
 
 import os
@@ -18,7 +18,7 @@ def test_append_then_flush_creates_file(tmp_path: Path):
     try:
         w.append(b'\x01\x02\x03\x04')
         assert w.buffered_bytes == 4
-        assert w.total_bytes == 0  # ще не на диску
+        assert w.total_bytes == 0  # not on disk yet
         n = w.flush()
         assert n == 4
         assert w.total_bytes == 4
@@ -45,7 +45,7 @@ def test_close_flushes_remaining_buffer(tmp_path: Path):
     p = tmp_path / 'm.pcm'
     w = ChunkedPcmWriter(p)
     w.append(b'XYZW')
-    # Без явного flush — close мусить дописати
+    # Without an explicit flush — close must write out the rest
     w.close()
     assert p.read_bytes() == b'XYZW'
     assert w.total_bytes == 4
@@ -56,7 +56,7 @@ def test_double_close_idempotent(tmp_path: Path):
     w = ChunkedPcmWriter(p)
     w.append(b'data')
     w.close()
-    w.close()  # не повинно падати
+    w.close()  # must not fail
     assert w.is_closed is True
 
 
@@ -74,7 +74,7 @@ def test_empty_append_is_noop(tmp_path: Path):
         w.append(b'')
         w.flush()
         assert w.total_bytes == 0
-    # Файл міг бути створений lazy-open, але пустий
+    # The file may have been created by a lazy open, but it is empty
     if p.exists():
         assert p.read_bytes() == b''
 
@@ -90,8 +90,8 @@ def test_empty_flush_is_noop(tmp_path: Path):
 # ---------------------------------------------------------------- recovery
 
 def test_open_existing_file_continues_from_end(tmp_path: Path):
-    """Recovery use-case: writer відкриває вже існуючий PCM (наприклад,
-    після крах рестарту). total_bytes ініціалізується розміром файлу."""
+    """Recovery use case: the writer opens an already existing PCM (for example,
+    after a crash restart). total_bytes is initialized with the file size."""
     p = tmp_path / 'm.pcm'
     p.write_bytes(b'OLDDATA')
 
@@ -110,7 +110,7 @@ def test_explicit_open(tmp_path: Path):
     w = ChunkedPcmWriter(p)
     w.open()
     assert p.parent.exists()
-    # Файл створений (даже до append)
+    # The file is created (even before append)
     assert p.exists()
     w.close()
 
@@ -118,8 +118,8 @@ def test_explicit_open(tmp_path: Path):
 # ---------------------------------------------------------------- threading
 
 def test_concurrent_append_preserves_all_bytes(tmp_path: Path):
-    """Якщо багато потоків викликає append, після фінального flush
-    мусять зберегтися УСІ байти (не обов'язково в порядку)."""
+    """If many threads call append, after the final flush
+    ALL the bytes must be preserved (not necessarily in order)."""
     p = tmp_path / 'm.pcm'
     chunks_per_thread = 200
     threads_count = 8
@@ -143,14 +143,14 @@ def test_concurrent_append_preserves_all_bytes(tmp_path: Path):
 
     data = p.read_bytes()
     assert len(data) == threads_count * chunks_per_thread * payload_size
-    # Кожен потік написав по chunks_per_thread * payload_size байт зі своїм id
+    # Each thread wrote chunks_per_thread * payload_size bytes with its own id
     for i in range(threads_count):
         assert data.count(bytes([i])) == chunks_per_thread * payload_size
 
 
 def test_concurrent_flush_safe(tmp_path: Path):
-    """Повторні flush з різних потоків не повинні падати або
-    дублювати дані."""
+    """Repeated flushes from different threads must not fail or
+    duplicate data."""
     p = tmp_path / 'm.pcm'
     barrier = threading.Barrier(4)
 
@@ -175,7 +175,7 @@ def test_concurrent_flush_safe(tmp_path: Path):
 # ---------------------------------------------------------------- integrity
 
 def test_large_write_chunk(tmp_path: Path):
-    """Великі writes (>звичайного buffer) корректно обробляються."""
+    """Large writes (> the usual buffer) are handled correctly."""
     p = tmp_path / 'm.pcm'
     big = bytes(range(256)) * 4096  # 1 MiB
     with ChunkedPcmWriter(p) as w:
@@ -186,7 +186,7 @@ def test_large_write_chunk(tmp_path: Path):
 
 
 def test_fsync_actually_called(tmp_path: Path, monkeypatch):
-    """Перевіряємо що flush(fsync=True) викликає os.fsync."""
+    """Check that flush(fsync=True) calls os.fsync."""
     p = tmp_path / 'm.pcm'
     fsync_calls = []
     real_fsync = os.fsync
@@ -204,7 +204,7 @@ def test_fsync_actually_called(tmp_path: Path, monkeypatch):
         prev_count = len(fsync_calls)
         w.append(b'more')
         w.flush(fsync=False)
-        # fsync=False — додаткових викликів не має
+        # fsync=False — there must be no additional calls
         assert len(fsync_calls) == prev_count
 
 

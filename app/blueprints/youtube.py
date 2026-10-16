@@ -1,7 +1,7 @@
 """YouTube endpoints (Phase 5.6).
 
-- POST /api/youtube/info       (метадані по URL)
-- POST /api/youtube/download   (запуск скачування у background)
+- POST /api/youtube/info       (metadata by URL)
+- POST /api/youtube/download   (start the download in the background)
 - GET  /api/youtube/progress/<download_id>
 """
 import logging
@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 youtube_bp = Blueprint('youtube', __name__)
 
 
-# add_log запозичується з state — підв'язується в app.py під час init
+# add_log is borrowed from state - wired up in app.py during init
 
 
 @youtube_bp.route('/api/youtube/info', methods=['POST'])
 def get_youtube_info():
-    """Отримати метадані YouTube відео."""
+    """Get YouTube video metadata."""
     data = request.json
     url = data.get('url')
     if not url:
@@ -58,7 +58,7 @@ def get_youtube_info():
 
 def _download_youtube_core(url, download_id, save_to_library=False, quality='best',
                             start_time=None, end_time=None):
-    """Адаптер до app.services.youtube_pytubefix.download_youtube_audio."""
+    """Adapter to app.services.youtube_pytubefix.download_youtube_audio."""
     from app.db.connection import get_db_connection
 
     def get_db_conn():
@@ -80,9 +80,9 @@ def _download_youtube_core(url, download_id, save_to_library=False, quality='bes
 
 @youtube_bp.route('/api/youtube/download', methods=['POST'])
 def download_youtube():
-    """Завантажити аудіо з YouTube (background через job_queue)."""
-    # Rate limit застосовується через limiter.limit() в register-моменті
-    # — реєструємо decorator явно у factory або через limiter.shared_limit
+    """Download audio from YouTube (in the background via job_queue)."""
+    # The rate limit is applied via limiter.limit() at registration time
+    # - register the decorator explicitly in the factory or via limiter.shared_limit
     data = request.json
     url = data.get('url')
     start_time = data.get('start_time', None)
@@ -97,9 +97,9 @@ def download_youtube():
 
     download_id = str(uuid.uuid4())[:20]
     state.download_progress.set(download_id, {"status": "starting", "percent": 0})
-    logger.info(f"Створено нове завантаження з ID: {download_id}")
+    logger.info(f"Created a new download with ID: {download_id}")
 
-    # Захоплюємо current_app до submit — у фоновому потоці немає request context.
+    # Capture current_app before submit - there is no request context in the background thread.
     flask_app = current_app._get_current_object()
 
     try:
@@ -113,18 +113,18 @@ def download_youtube():
             job_id=download_id,
             meta={"url": url, "save_to_library": False, "trim": (start_time, end_time)},
         )
-        logger.info(f"Завантаження запущено в фоновому режимі")
+        logger.info(f"Download started in the background")
         if start_time is not None and end_time is not None:
-            logger.info(f"Обрізка: {start_time}s - {end_time}s")
+            logger.info(f"Trim: {start_time}s - {end_time}s")
         return jsonify({"success": True, "download_id": download_id})
     except Exception as e:
-        logger.error(f"[API] Помилка запуску завантаження: {e}")
+        logger.error(f"[API] Failed to start the download: {e}")
         state.download_progress.set(download_id, {"status": "error", "error": tr('capture.yt.err.start')})
         return jsonify({"success": False, "error": tr('capture.yt.err.start')}), 500
 
 
 @youtube_bp.route('/api/youtube/progress/<download_id>')
 def get_download_progress(download_id):
-    """Отримати прогрес завантаження."""
+    """Get the download progress."""
     progress = state.download_progress.get(download_id, {"status": "not_found"})
     return jsonify(progress)

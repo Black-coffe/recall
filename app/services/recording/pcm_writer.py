@@ -1,21 +1,21 @@
-"""Chunked PCM writer з fsync (Phase 9.2).
+"""Chunked PCM writer with fsync (Phase 9.2).
 
-Append-only writer для raw PCM-байтів з періодичним fsync для
-crash-resilience. Використовується RecordingService для двох
-паралельних потоків (mic + system).
+An append-only writer for raw PCM bytes with a periodic fsync for
+crash resilience. Used by RecordingService for two
+parallel streams (mic + system).
 
-Чому не WAV append:
-- WAV-хедер містить ``data chunk size`` — на append треба переписувати
-  заголовок. Якщо процес умер у момент write'у — заголовок битий.
-- Raw PCM = просто потік семплів. Append безпечний за визначенням.
-- Хедер додається на finalize коли розмір остаточний.
+Why not WAV append:
+- A WAV header contains ``data chunk size`` — on append the header
+  has to be rewritten. If the process died during the write — the header is broken.
+- Raw PCM = just a stream of samples. Append is safe by definition.
+- The header is added at finalize, when the size is final.
 
-Чому fsync:
-- ``write()`` тільки кладе у kernel buffer. Без fsync крах живлення
-  втрачає до 30 секунд даних (типовий dirty_writeback_centisecs).
-- ``fsync`` гарантує що дані фізично на диску.
-- Викликається після кожного flush (за замовчуванням раз на ~5 сек),
-  тому overhead мізерний.
+Why fsync:
+- ``write()`` only puts data into the kernel buffer. Without fsync a power failure
+  loses up to 30 seconds of data (the typical dirty_writeback_centisecs).
+- ``fsync`` guarantees the data is physically on disk.
+- It is called after every flush (by default once per ~5 sec),
+  so the overhead is negligible.
 """
 from __future__ import annotations
 
@@ -30,31 +30,31 @@ logger = logging.getLogger(__name__)
 
 
 class ChunkedPcmWriter:
-    """Append-only writer з in-RAM буфером та періодичним fsync.
+    """Append-only writer with an in-RAM buffer and a periodic fsync.
 
-    Threading: усі публічні методи thread-safe. Зазвичай audio thread
-    викликає :meth:`append`, окремий flush thread (або service)
-    викликає :meth:`flush` з регулярним інтервалом.
+    Threading: all public methods are thread-safe. Usually the audio thread
+    calls :meth:`append`, a separate flush thread (or the service)
+    calls :meth:`flush` at a regular interval.
 
     Lifecycle:
-    - Open: файл відкривається у binary append mode на першому
-      :meth:`append` (lazy) або явно через :meth:`open`.
-    - Append: байти ідуть у внутрішній буфер.
-    - Flush: буфер пишеться у файл, файл fsync'ається, лічильник
-      total bytes оновлюється.
-    - Close: фінальний flush + закриття дескриптора. Idempotent.
+    - Open: the file is opened in binary append mode on the first
+      :meth:`append` (lazy) or explicitly via :meth:`open`.
+    - Append: bytes go into the internal buffer.
+    - Flush: the buffer is written to the file, the file is fsynced, the
+      total bytes counter is updated.
+    - Close: a final flush + closing the descriptor. Idempotent.
 
     Crash semantics:
-    - Дані до останнього успішного flush — гарантовано на диску.
-    - Дані між flush'ами — у RAM, можуть втратитись.
-    - Файл append-only, тому існуючі дані ніколи не корумпуються
-      навіть якщо процес помре посеред write.
+    - Data up to the last successful flush is guaranteed to be on disk.
+    - Data between flushes is in RAM and may be lost.
+    - The file is append-only, so existing data is never corrupted
+      even if the process dies in the middle of a write.
     """
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self._buf = bytearray()
-        self._fh: Optional[int] = None  # raw file descriptor (для fsync)
+        self._fh: Optional[int] = None  # raw file descriptor (for fsync)
         self._total_bytes = 0
         self._closed = False
         self._lock = threading.Lock()
@@ -62,16 +62,16 @@ class ChunkedPcmWriter:
     # ---------- lifecycle
 
     def open(self) -> None:
-        """Відкриває файл для append'у. Створює якщо не існує.
+        """Opens the file for append. Creates it if it does not exist.
 
-        Якщо файл уже існує — продовжуємо з його кінця, total_bytes
-        ініціалізується розміром файлу. Це корисно для recovery.
+        If the file already exists — we continue from its end, total_bytes
+        is initialized with the file size. This is useful for recovery.
         """
         with self._lock:
             if self._fh is not None:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # O_APPEND гарантує атомарний append навіть з кількох процесів
+            # O_APPEND guarantees an atomic append even from several processes
             flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
             if hasattr(os, 'O_BINARY'):
                 flags |= os.O_BINARY
@@ -82,44 +82,44 @@ class ChunkedPcmWriter:
                 self._total_bytes = 0
 
     def close(self) -> None:
-        """Фінальний flush + закриття. Idempotent."""
+        """Final flush + close. Idempotent."""
         with self._lock:
             if self._closed:
                 return
-            # ВАЖЛИВО: спочатку дописати буфер, ПОТІМ позначити closed.
-            # Якщо поставити _closed=True раніше — _flush_locked відмовить.
+            # IMPORTANT: first write out the buffer, THEN mark closed.
+            # If _closed=True is set earlier — _flush_locked refuses.
             try:
                 self._flush_locked(fsync=True)
             except OSError as e:
-                logger.warning("close() flush error на %s: %s", self.path, e)
+                logger.warning("close() flush error on %s: %s", self.path, e)
             self._closed = True
             if self._fh is not None:
                 try:
                     os.close(self._fh)
                 except OSError as e:
-                    logger.warning("close() error на %s: %s", self.path, e)
+                    logger.warning("close() error on %s: %s", self.path, e)
                 self._fh = None
 
     # ---------- main api
 
     def append(self, data: bytes) -> None:
-        """Додає байти у in-RAM буфер. Не пише на диск.
+        """Adds bytes to the in-RAM buffer. Does not write to disk.
 
-        Виклик з audio thread дозволений — швидка операція, без I/O.
+        Calling from the audio thread is allowed — a fast operation, no I/O.
         """
         if not data:
             return
         with self._lock:
             if self._closed:
-                raise RuntimeError("PCM writer закритий")
+                raise RuntimeError("PCM writer is closed")
             self._buf.extend(data)
 
     def flush(self, fsync: bool = True) -> int:
-        """Пише буфер у файл і (опц.) робить fsync.
+        """Writes the buffer to the file and (optionally) does an fsync.
 
-        Повертає кількість записаних байт цієї операції.
-        Безпечний у спарних викликах: якщо буфер порожній — нічого
-        не робить.
+        Returns the number of bytes written by this operation.
+        Safe in paired calls: if the buffer is empty — does
+        nothing.
         """
         with self._lock:
             return self._flush_locked(fsync=fsync)
@@ -130,9 +130,9 @@ class ChunkedPcmWriter:
         if not self._buf:
             return 0
         if self._fh is None:
-            # Повторне відкриття після close не дозволяємо
+            # Reopening after close is not allowed
             if self._closed:
-                raise RuntimeError("PCM writer закритий")
+                raise RuntimeError("PCM writer is closed")
             # Lazy-open
             self.path.parent.mkdir(parents=True, exist_ok=True)
             flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -147,13 +147,13 @@ class ChunkedPcmWriter:
         chunk = bytes(self._buf)
         self._buf.clear()
 
-        # os.write може не записати все за один виклик — повторюємо
+        # os.write may not write everything in one call — we repeat
         written_total = 0
         view = memoryview(chunk)
         while written_total < len(chunk):
             n = os.write(self._fh, view[written_total:])
             if n <= 0:
-                raise OSError(f"os.write повернув {n} на {self.path}")
+                raise OSError(f"os.write returned {n} on {self.path}")
             written_total += n
 
         if fsync:
@@ -166,13 +166,13 @@ class ChunkedPcmWriter:
 
     @property
     def total_bytes(self) -> int:
-        """Загальна кількість успішно записаних і fsync'ених байт."""
+        """Total number of bytes successfully written and fsynced."""
         with self._lock:
             return self._total_bytes
 
     @property
     def buffered_bytes(self) -> int:
-        """Кількість байт у RAM-буфері, ще не записаних."""
+        """Number of bytes in the RAM buffer that are not yet written."""
         with self._lock:
             return len(self._buf)
 

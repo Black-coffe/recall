@@ -1,28 +1,28 @@
-"""Живий профіль Telegram-чату (Волна 4.5.2).
+"""Live profile of a Telegram chat (Wave 4.5.2).
 
-Запит власника: «кожне нове повідомлення не має бути унікальним — воно має
-доповнювати контекст своєї групи, постійно розширювати його».
+The owner's request: «each new message should not be unique — it should
+add to the context of its group, constantly widening it».
 
-**Що змінилось після ниток (v32).** У початковому задумі профіль мав вгадувати
-теми з сирого потоку повідомлень. Тепер теми — це відкриті нитки, тобто вже
-порахований факт. Тому профіль відповідає рівно на те, що НЕ виводиться з
-ниток і є властивістю саме чату:
+**What changed after threads (v32).** The original design had the profile guess
+topics from the raw message stream. Now topics are open threads, i.e. an already
+computed fact. So the profile answers exactly what is NOT derived from
+threads and is a property of the chat itself:
 
-- **хто тут і чим займається** — учасники з твердими числами;
-- **що висить без відповіді** — питання, на які ніхто не відповів;
-- **до чого дійшли** — рішення, розкидані по нитках.
+- **who is here and what they do**: participants with hard numbers;
+- **what hangs unanswered**: questions nobody answered;
+- **what was agreed**: decisions scattered across threads.
 
-**Тверді числа рахує SQL, не модель.** Скільки людина написала, коли зʼявилась
-і коли писала востаннє — це факт; вигадане число в профілі живої людини гірше
-за його відсутність. Модель отримує їх готовими і пише лише опис ролі та звід.
+**Hard numbers are computed by SQL, not the model.** How much a person wrote, when they appeared
+and when they last wrote is a fact; an invented number in a living person's profile is worse
+than its absence. The model receives them ready-made and writes only a role description and a digest.
 
-**Оновлення за порогом, ніколи не на кожне повідомлення** — інакше це рівно ті
-3142 виклики, від яких Волна 0 поставила гард (тепер локальні, але так само
-безглузді). Поріг: `TG_CONTEXT_MIN_NEW` нових повідомлень АБО
-`TG_CONTEXT_MAX_AGE_H` годин з останнього оновлення.
+**Updates are threshold-based, never per message**: otherwise these are exactly the
+3142 calls that Wave 0 put a guard against (local now, but just as
+pointless). Threshold: `TG_CONTEXT_MIN_NEW` new messages OR
+`TG_CONTEXT_MAX_AGE_H` hours since the last update.
 
-Нема Ollama — профіль усе одно будується, але лише з твердої частини
-(учасники, відкриті нитки); текстові поля лишаються порожніми, і це видно.
+No Ollama: the profile is still built, but only from the hard part
+(participants, open threads); the text fields stay empty, and that is visible.
 
 CLI:
     python -m app.services.tg_chat_context refresh --dry-run
@@ -45,29 +45,29 @@ from app.db.connection import get_db_connection
 logger = logging.getLogger(__name__)
 
 
-# Поріг оновлення. повідомлень — приблизно 6 сплесків за медіаною,
-# тобто профіль не переписується від кожної репліки «ок», але й не відстає
-# на тижні. 24 години — щоб мовчазний чат теж колись оновився.
+# Update threshold. 30 messages is roughly 6 bursts by the median,
+# i.e. the profile is not rewritten on every «ok» reply, but does not lag
+# by weeks either. 24 hours so that a silent chat also gets updated sometime.
 MIN_NEW_MESSAGES = int(os.environ.get("TG_CONTEXT_MIN_NEW", "30"))
 MAX_AGE_HOURS = int(os.environ.get("TG_CONTEXT_MAX_AGE_H", "24"))
 
-# Скільки останніх ниток показувати моделі. Профіль — про поточний стан справ,
-# а не літопис: торішні нитки лише розмивають звід.
+# How many recent threads to show the model. The profile is about the current state of affairs,
+# not a chronicle: last year's threads only blur the digest.
 RECENT_THREADS = int(os.environ.get("TG_CONTEXT_THREADS", "12"))
 
-# Скільки повідомлень нитки давати моделі для розбору. Нитка вже має назву —
-# вибірка потрібна лише щоб побачити, чим розмова скінчилась (питання без
-# відповіді, домовленість). ниток × повідомлень × 300 символів давали
-# промпт, на якому 32B не вкладалась і в 300 секунд, тобто найбільший чат —
-# єдиний, заради якого досьє й потрібне — стабільно деградував.
+# How many thread messages to give the model for analysis. A thread already has a name —
+# the sample is needed only to see how the conversation ended (an unanswered
+# question, an agreement). 12 threads x 8 messages x 300 characters gave a
+# prompt on which the 32B did not finish even in 300 seconds, so the largest chat —
+# the only one the dossier is needed for — consistently degraded.
 THREAD_SAMPLE = int(os.environ.get("TG_CONTEXT_THREAD_SAMPLE", "4"))
 _MSG_PREVIEW = 180
 
 CONTEXT_MODEL = os.environ.get("TG_CONTEXT_MODEL") or None
 
-# Досьє — пакетна задача (22 чати, раз на добу), а не реальний час, тож дефолтні
-# 60 секунд local_llm тут малі: промпт із ниток по повідомлень на 32B
-# стабільно не встигав, і кожен виклик падав у деградацію.
+# The dossier is a batch task (22 chats, once a day), not real time, so the default
+# 60 seconds of local_llm is too little here: a prompt of 12 threads x 8 messages on the 32B
+# consistently ran out of time, and every call fell into degradation.
 CONTEXT_TIMEOUT = float(os.environ.get("TG_CONTEXT_TIMEOUT", "300"))
 
 _SCHEMA = {
@@ -110,17 +110,17 @@ _SYSTEM = (
     "повідомлень: нічого не додумуй про людей і не приписуй їм намірів. "
     "Відкрите питання — те, на яке в наведених повідомленнях НІХТО не відповів. "
     "Рішення — те, про що явно домовились. "
-    # Мова задається явно: на першому прогоні 7B зсувалась на російську в
-    # україномовних чатах, і досьє виходило іншою мовою, ніж сам архів.
+    # The language is set explicitly: on the first run the 7B drifted to Russian in
+    # Ukrainian-language chats, and the dossier came out in a different language than the archive itself.
     "ВСЕ пиши УКРАЇНСЬКОЮ, навіть якщо в повідомленнях є інші мови. "
-    # Роль «бере участь в обговореннях» не несе інформації — це опис самого
-    # факту присутності в чаті, який і так видно з числа повідомлень.
+    # The role «takes part in discussions» carries no information — it describes the very
+    # fact of presence in the chat, which is visible from the message count anyway.
     #
-    # Приклад формулювання тут НЕ наводимо навмисно: у першій версії стояло
-    # «напр. веде юридичну частину», і 7B почала ставити рівно цю фразу різним
-    # людям у різних чатах. Приписати живій людині чужу зону відповідальності
-    # гірше, ніж лишити поле порожнім, тому критерій описуємо, а зразок для
-    # копіювання не даємо.
+    # We deliberately give no example wording here: the first version had
+    # «напр. веде юридичну частину», and the 7B started putting exactly this phrase on different
+    # people in different chats. Attributing someone else's area of responsibility to a living person is
+    # worse than leaving the field empty, so we describe the criterion and give no sample
+    # to copy.
     "Роль має називати конкретну зону відповідальності цієї людини, видну з "
     "її ВЛАСНИХ повідомлень, а не факт участі в чаті. Бери формулювання з "
     "того, що вона реально робить у наведених повідомленнях. Якщо зона не "
@@ -130,11 +130,11 @@ _SYSTEM = (
 
 
 # ============================================================
-# Тверда частина: рахує SQL
+# Hard part: computed by SQL
 # ============================================================
 
 def participants(db_path: str, chat_id: int) -> list[dict]:
-    """Хто пише в цьому чаті — з числами, яким можна вірити."""
+    """Who writes in this chat — with numbers that can be trusted."""
     with get_db_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT tg_sender AS name, COUNT(*) AS messages, "
@@ -146,7 +146,7 @@ def participants(db_path: str, chat_id: int) -> list[dict]:
 
 
 def open_threads(db_path: str, chat_id: int, limit: int = RECENT_THREADS) -> list[dict]:
-    """Поточні теми чату — це відкриті нитки, а не здогадка моделі."""
+    """The chat's current topics are open threads, not a model guess."""
     with get_db_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT id AS thread_id, label, msg_count, first_date, last_date "
@@ -179,7 +179,7 @@ def _watermark(db_path: str, chat_id: int) -> tuple[int, Optional[str]]:
 
 
 # ============================================================
-# Модель
+# Model
 # ============================================================
 
 def _preview(text: Optional[str]) -> str:
@@ -222,26 +222,26 @@ def _ask_model(title: str, people: list[dict], threads: list[dict],
             system=_SYSTEM, max_tokens=1200, model=model or CONTEXT_MODEL,
             timeout=CONTEXT_TIMEOUT)
     except Exception as exc:
-        logger.warning("[tg_context] модель не відповіла (%s) — лишаю тверду частину", exc)
+        logger.warning("[tg_context] model did not respond (%s) — keeping the hard part", exc)
         return None
     data = resp.get("data")
     return data if isinstance(data, dict) else None
 
 
 def _effective_model(model: Optional[str]) -> str:
-    """Назва моделі, якою реально згенеровано текст.
+    """Name of the model that actually generated the text.
 
-    Не `model or CONTEXT_MODEL`: обидва порожні у найчастішому випадку (нічого
-    не перекривали), і тоді колонка писала NULL — тобто «чим згенеровано» не
-    зберігалось саме тоді, коли все спрацювало. А NULL тут має означати рівно
-    одне: тексту немає взагалі."""
+    Not `model or CONTEXT_MODEL`: both are empty in the most common case (nothing
+    was overridden), and then the column wrote NULL — i.e. «what generated it» was
+    not stored exactly when everything worked. And NULL here must mean exactly
+    one thing: there is no text at all."""
     from app.services import local_llm
     return model or CONTEXT_MODEL or local_llm.LOCAL_LLM_MODEL
 
 
-#: Що модель пише, коли має на увазі «нічого». Просити її ставити null і
-#: перевіряти лише непорожність — недостатньо: на живому прогоні 18 учасників
-#: отримали роль рядком "null", і в досьє це виглядало як справжня роль.
+#: What the model writes when it means «nothing». Asking it to put null and
+#: checking only non-emptiness is not enough: on a live run 18 participants
+#: got the role string "null", and in the dossier it looked like a real role.
 _PLACEHOLDERS = {"null", "none", "n/a", "na", "-", "—", "невідомо", "unknown",
                  "немає", "нема", "не вказано", "не видно"}
 
@@ -258,10 +258,10 @@ def _valid_thread_ids(threads: list[dict]) -> set[int]:
 
 
 def _clean_items(items: Any, key: str, valid: set[int]) -> list[dict]:
-    """Викинути вигадані thread_id і порожні рядки.
+    """Drop invented thread_ids and empty strings.
 
-    Модель охоче посилається на нитки, яких не показували, — така цитата
-    веде в нікуди і гірша за її відсутність."""
+    The model readily cites threads that were not shown; such a citation
+    leads nowhere and is worse than its absence."""
     out = []
     for it in items or []:
         if not isinstance(it, dict):
@@ -280,11 +280,11 @@ def _clean_items(items: Any, key: str, valid: set[int]) -> list[dict]:
 
 
 # ============================================================
-# Оновлення
+# Update
 # ============================================================
 
 def needs_refresh(db_path: str, chat_id: int, *, now: Optional[datetime] = None) -> bool:
-    """Чи час перебудовувати профіль. Поріг, а не кожне повідомлення."""
+    """Whether it is time to rebuild the profile. A threshold, not every message."""
     total, _ = _watermark(db_path, chat_id)
     with get_db_connection(db_path) as conn:
         row = conn.execute(
@@ -306,7 +306,7 @@ def needs_refresh(db_path: str, chat_id: int, *, now: Optional[datetime] = None)
 
 def refresh_chat(db_path: str, chat_id: int, *, model: Optional[str] = None,
                  use_llm: bool = True) -> dict:
-    """Перебудувати профіль одного чату."""
+    """Rebuild the profile of one chat."""
     people = participants(db_path, chat_id)
     threads = open_threads(db_path, chat_id)
     total, last_date = _watermark(db_path, chat_id)
@@ -328,11 +328,11 @@ def refresh_chat(db_path: str, chat_id: int, *, model: Optional[str] = None,
     decisions: list[dict] = []
     previous = get_context(db_path, chat_id)
     if data is None and previous:
-        # Модель не відповіла — це НЕ підстава стирати вже зібране досьє.
-        # Спіймано на живому прогоні: один таймаут 32B перетворив нормальний
-        # профіль на порожній, бо upsert записував None поверх. Тверду частину
-        # (учасники, нитки) і водяний знак оновлюємо — вони не залежать від
-        # моделі; текстову лишаємо попередню, позначивши stale.
+        # The model did not respond — that is NOT a reason to erase an already assembled dossier.
+        # Caught on a live run: one 32B timeout turned a normal
+        # profile into an empty one, because the upsert wrote None over it. The hard part
+        # (participants, threads) and the watermark are updated — they do not depend on the
+        # model; the text part keeps the previous one, marked stale.
         summary = previous.get("summary")
         roles = {p["name"]: p["role"] for p in (previous.get("participants") or [])
                  if p.get("role")}
@@ -349,8 +349,8 @@ def refresh_chat(db_path: str, chat_id: int, *, model: Optional[str] = None,
         questions = _clean_items(data.get("open_questions"), "question", valid)
         decisions = _clean_items(data.get("decisions"), "decision", valid)
 
-    # Роль приклеюємо до ТВЕРДОГО рядка учасника: числа лишаються з SQL,
-    # від моделі береться лише опис.
+    # The role is attached to the participant's HARD row: the numbers stay from SQL,
+    # only the description comes from the model.
     enriched = [{**p, "role": roles.get(p["name"])} for p in people]
 
     with get_db_connection(db_path) as conn:
@@ -370,9 +370,9 @@ def refresh_chat(db_path: str, chat_id: int, *, model: Optional[str] = None,
              json.dumps(threads, ensure_ascii=False),
              json.dumps(questions, ensure_ascii=False),
              json.dumps(decisions, ensure_ascii=False),
-             # model=None означає «текстову частину зібрати не вдалося». При
-             # збереженні попередньої лишаємо і її модель — інакше запис казав
-             # би, що тексту немає, тоді як він є (просто не свіжий).
+             # model=None means «the text part could not be assembled». When
+             # the previous one is kept, its model is kept too — otherwise the record would say
+             # there is no text, when there is (just not fresh).
              _effective_model(model) if data else (previous or {}).get("model"),
              total, last_date))
         conn.commit()
@@ -405,7 +405,7 @@ def refresh_all(db_path: str, *, dry_run: bool = True, force: bool = False,
 
 
 # ============================================================
-# Читання
+# Reading
 # ============================================================
 
 def get_context(db_path: str, chat_id: int) -> Optional[dict]:
@@ -446,18 +446,18 @@ def main(argv: Optional[list] = None) -> int:
     default_db = str(Config.BASE_DIR / Config.DATABASE)
 
     p = argparse.ArgumentParser(prog="tg_chat_context",
-                                description="Живий профіль Telegram-чату (Волна 4.5.2).")
+                                description="Live profile of a Telegram chat (Wave 4.5.2).")
     p.add_argument("--db", default=default_db)
     sub = p.add_subparsers(dest="command", required=True)
 
-    r = sub.add_parser("refresh", help="Перебудувати профілі чатів за порогом")
+    r = sub.add_parser("refresh", help="Rebuild chat profiles by threshold")
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--chat", type=int, default=None)
-    r.add_argument("--force", action="store_true", help="Ігнорувати поріг")
+    r.add_argument("--force", action="store_true", help="Ignore the threshold")
     r.add_argument("--model", default=None)
-    r.add_argument("--no-llm", action="store_true", help="Лише тверда частина")
+    r.add_argument("--no-llm", action="store_true", help="Hard part only")
 
-    s = sub.add_parser("show", help="Показати профіль чату")
+    s = sub.add_parser("show", help="Show a chat profile")
     s.add_argument("--chat", type=int, required=True)
 
     args = p.parse_args(argv)
@@ -465,7 +465,7 @@ def main(argv: Optional[list] = None) -> int:
         return _print(refresh_all(args.db, dry_run=args.dry_run, force=args.force,
                                   chat_id=args.chat, model=args.model,
                                   use_llm=not args.no_llm))
-    return _print(get_context(args.db, args.chat) or {"error": "профілю ще немає"})
+    return _print(get_context(args.db, args.chat) or {"error": "no profile yet"})
 
 
 if __name__ == "__main__":

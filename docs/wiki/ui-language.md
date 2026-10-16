@@ -13,12 +13,14 @@ last-verified: 2026-10-15
 - Browser resolves `auto` itself (`navigator.languages[0]` starting with `uk` -> uk, else en; `static/js/recall/i18n.js:13`)
   and sends the resolved language as `X-Recall-Lang` on every API call (`api.js`; direct `fetch` must add `R.i18n.headers()`).
 - Server `request_lang()`: header -> explicit setting -> `uk`. The server has no browser language, so header-less
-  requests (downloads, MCP proxy, tests) with `auto` are Ukrainian.
+  requests (downloads, tests) with `auto` are Ukrainian; the MCP proxy sends `X-Recall-Lang: en`.
 - Telegram (brief text, buttons, callback replies) never sees a request: it uses `server_lang()` (`en` only when the
   setting is explicitly `en`). Language is read at render/press time, not frozen at import (`brief_actions.FOOTER` is a lazy attribute).
 - Not translated by design: archive content (summaries, tasks, Claude's brief headline, direction/entity names,
-  transcripts), LLM prompts, transcription language values, exports, logs, CLI output, MCP tool surface, service-layer
-  exception texts (`str(e)`) and process-log lines (`audio.py`, `youtube_pytubefix.py`) - those stay Ukrainian.
+  transcripts), LLM prompts, transcription language values, exports and CLI output. Logs and internal exception texts
+  are English (`.claude/rules/code-language.md`); user-facing service texts (YouTube, local model, errors, bot) live in
+  the `svc_*` catalog modules and follow the request language. The MCP process runs with `RECALL_UI_LANG=en` and sends
+  `X-Recall-Lang: en` to the app, so the whole MCP surface is English.
 - Every UI string has a key in both languages with identical `{vars}` and plural forms: server catalog
   `app/core/i18n_catalog/<area>.py`, client `static/js/recall/i18n/<area>.js`. Missing key returns the key (never throws).
   Guards: `tests/test_i18n.py`, `tests/test_i18n_js.py`, `tests/test_i18n_coverage.py` (no Cyrillic literals outside

@@ -1,4 +1,4 @@
-"""Візуальна стрічка, ендпоінти кадрів і MCP-проксі (spec video-visual-timeline, історія 03)."""
+"""Visual timeline, frame endpoints and the MCP proxy (spec video-visual-timeline, story 03)."""
 import json
 import shutil
 import sqlite3
@@ -18,8 +18,8 @@ SECRET = 'Qw3rty!2026'
 
 @pytest.fixture
 def analyzed(tmp_path, monkeypatch):
-    """Синтетичний запис 0–8 червоний, 8–16 синій, 16–24 зелений; OCR — фейк із секретом
-    на синьому кадрі; транскрипт — три фрази."""
+    """Synthetic recording: 0-8 red, 8-16 blue, 16-24 green; OCR is a fake with a secret
+    on the blue frame; the transcript is three phrases."""
     from tests.test_video_frames import _seed_recording
     from app.services import document_parser, embeddings, video_analysis, video_frames
     monkeypatch.setattr(video_frames, '_ffmpeg', lambda ff=None: FFMPEG)
@@ -68,7 +68,7 @@ def test_timeline_pagination_and_shift(analyzed):
     page = vt.build(db, tid, limit=2)
     assert len(page['items']) == 2 and page['next_offset'] == 2
     shifted = vt.build(db, tid, shift=8.0)
-    # зсув на 8 с: перший відрізок (0–8) бачить фразу з 9–14
+    # shift by 8 s: the first segment (0-8) sees the phrase from 9-14
     assert [s['text'] for s in shifted['items'][0]['transcript']] == ['Ось тут вводимо пароль']
 
 
@@ -95,9 +95,9 @@ def test_render_frame_redacts_secret_box(analyzed):
     img, meta = vt.render_frame(db, tid, 12.0, size='thumb')
     assert meta['redacted_boxes'] == 1
     sx = img.width / 320
-    assert img.getpixel((int(140 * sx), int(70 * sx))) == (0, 0, 0)     # рамка секрету
+    assert img.getpixel((int(140 * sx), int(70 * sx))) == (0, 0, 0)     # secret box
     r, g, b = img.getpixel((int(300 * sx), int(170 * sx)))
-    assert b > 150                                                     # решта кадру синя
+    assert b > 150                                                     # the rest of the frame is blue
 
 
 def test_build_not_analyzed_and_missing(tmp_path):
@@ -112,6 +112,28 @@ def test_build_not_analyzed_and_missing(tmp_path):
     with pytest.raises(vt.TimelineError) as e:
         vt.build(db, 99)
     assert e.value.code == 'NOT_FOUND'
+
+
+# --- english-code-16: markdown labels follow the language setting, data stays as is ---------
+
+def test_markdown_labels_follow_language_setting(monkeypatch):
+    res = {'transcription_id': 7, 'title': 'Дзвінок', 'status': 'ready', 'total': 3, 'next_offset': 1,
+           'items': [{'start': 0.0, 'end': 8.0, 'frame_type': None, 'frame_url': '/f?t=1',
+                      'duplicate_of': 2, 'ocr_text': 'Таблиця бюджету', 'description': 'слайд',
+                      'transcript': [{'speaker': 'SPEAKER_00', 'start': 1.0, 'text': 'Отже'}]}]}
+    monkeypatch.setenv('RECALL_UI_LANG', 'en')
+    md = vt.to_markdown(res)
+    assert '# Visual timeline — Дзвінок (#7)' in md and '· frame' in md and '![frame](/f?t=1)' in md
+    assert '_Screen repeat of frame #2._' in md and 'On screen: Таблиця бюджету' in md
+    assert 'Description: слайд' in md and 'Spoken:' in md and '_Next: offset=1 (total 3)._' in md
+    assert 'Говорили:' not in md and 'На екрані' not in md
+    monkeypatch.setenv('RECALL_UI_LANG', 'uk')
+    md = vt.to_markdown(res)
+    assert '# Візуальна стрічка — Дзвінок (#7)' in md and 'Говорили:' in md
+    assert 'На екрані: Таблиця бюджету' in md and '_Далі: offset=1 (усього 3)._' in md
+    not_ready = vt.to_markdown({'transcription_id': 7, 'status': 'not_analyzed',
+                                'hint': vt.tr('svc_pipes.timeline.hint.notAnalyzed', lang='en')})
+    assert 'run video_analyze first' in not_ready
 
 
 @needs_ffmpeg
@@ -177,7 +199,7 @@ def test_frame_endpoint_without_video_is_no_video(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# MCP: get_frame перетворює base64 у Image-контент
+# MCP: get_frame turns base64 into Image content
 # ---------------------------------------------------------------------------
 
 def test_mcp_get_frame_returns_image_content(monkeypatch):
@@ -190,7 +212,7 @@ def test_mcp_get_frame_returns_image_content(monkeypatch):
             'frames': [{'t': 3.0, 'frame_text': '',
                         'image_b64': base64.b64encode(buf.getvalue()).decode()}]}
     monkeypatch.setattr(m, '_api', lambda *a, **k: json.loads(json.dumps(fake)))
-    # фільтр приватного (mcp-visual-privacy) — окремо в test_mcp_visual_privacy; тут без БД
+    # the private filter (mcp-visual-privacy) is tested separately in test_mcp_visual_privacy; no DB here
     monkeypatch.setattr(m._privacy, 'private_tids', lambda *a, **k: set())
     monkeypatch.setattr(m._privacy, 'stop_words', lambda: [])
     monkeypatch.setenv('RECALL_MCP_VISUAL', 'images')
@@ -211,13 +233,13 @@ def test_mcp_video_analyze_passes_only_given_params(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ремонт раунду 1
+# round 1 repair
 # ---------------------------------------------------------------------------
 
 @needs_ffmpeg
 def test_secret_appearing_mid_segment_is_redacted_on_that_frame(tmp_path, monkeypatch):
-    """Рядок токена зʼявляється на 10-й с і нового відрізка не відкриває: кадр t=20
-    мусить OCR-итись сам, а не брати рамки представника t≈0.7."""
+    """The token line appears at the 10th s and does not open a new segment: the frame t=20
+    must be OCRed itself, not take the boxes of the representative t~0.7."""
     from tests.test_video_frames import _make_video
     from app.services import document_parser, embeddings, video_analysis, video_frames
     from app.db.migrations import init_database
@@ -227,7 +249,7 @@ def test_secret_appearing_mid_segment_is_redacted_on_that_frame(tmp_path, monkey
     def _ocr(img):
         sx = img.width / 1280
         r, g, b = img.getpixel((int(200 * sx), int(306 * sx)))
-        if r > 200 and g > 200:                     # рядок уже на екрані
+        if r > 200 and g > 200:                     # the line is already on screen
             return f'Пароль: {SECRET}', [[int(100 * sx), int(300 * sx), int(60 * sx), int(14 * sx), 'Пароль:'],
                                          [int(170 * sx), int(300 * sx), int(170 * sx), int(14 * sx), SECRET]]
         return 'Порожній редактор документа', [[10, 10, 200, 20, 'Порожній']]
@@ -249,7 +271,7 @@ def test_secret_appearing_mid_segment_is_redacted_on_that_frame(tmp_path, monkey
     conn.commit()
     conn.close()
     video_analysis.analyze_video(db, 1, ffmpeg=FFMPEG)
-    assert vt.build(db, 1)['total'] == 1                     # рядок справді не відкрив відрізка
+    assert vt.build(db, 1)['total'] == 1                     # the line really did not open a segment
     img, meta = vt.render_frame(db, 1, 20.0, size='full')
     assert meta['redacted_boxes'] == 1
     sx = img.width / 1280
@@ -284,11 +306,11 @@ def test_describe_unavailable_is_not_saved_as_done(analyzed, monkeypatch):
     calls = []
     monkeypatch.setattr(video_vision, 'availability', lambda b=None: calls.append(1) or (False, 'x'))
     again = video_analysis.analyze_video(db, tid, describe=True, ffmpeg=FFMPEG)
-    assert again.get('skipped') != 'already analyzed' and calls   # спроба повторюється
+    assert again.get('skipped') != 'already analyzed' and calls   # the attempt is repeated
 
 
 def test_ui_vision_backend_without_describe_means_describe(tmp_path, monkeypatch):
-    """UI-чекбокс «Claude-опис» шле лише vision_backend — це запит на опис."""
+    """The UI checkbox "Claude description" sends only vision_backend: that is a request for a description."""
     from app.blueprints import transcription as tr
     from app.services import video_analysis
     from app.db.migrations import init_database

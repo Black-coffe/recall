@@ -1,17 +1,17 @@
-"""Назва й опис на входах створення запису + PATCH Аудіотеки + display_name у читачів.
+"""Title and description on the record creation inputs + Audio library PATCH + display_name in readers.
 
-Спека `editable-title-description`, історія 02. Перевіряється кожен шлях, яким
-у проєкті народжується рядок архіву або картка Аудіотеки:
+Spec `editable-title-description`, story 02. Every path by which
+a row of the archive or an Audio library card is born in the project is checked:
 
-* `POST /api/transcribe` (file + library) — whisper підмінений фейком;
-* `POST /api/documents/upload` — парсер підмінений фейком;
-* `POST /api/recording/<sid>/save` → manifest → `register_recording()` — без заліза;
-* `PATCH /api/audio/downloads/<id>` — контракт C3;
-* експорти й `target_name` коментаря — читачі, яким тепер потрібен `display_name`.
+* `POST /api/transcribe` (file + library): whisper replaced by a fake;
+* `POST /api/documents/upload`: the parser replaced by a fake;
+* `POST /api/recording/<sid>/save` -> manifest -> `register_recording()`: no hardware;
+* `PATCH /api/audio/downloads/<id>`: contract C3;
+* exports and the comment `target_name`: readers that now need `display_name`.
 
-Бойовий `whisper_history.db` не відкривається: кожна фікстура піднімає свою
-тимчасову БД через `init_database`. Фікстури кириличні — саме на кирилиці цей
-проєкт уже ловив баги порівняння (памʼятка `plan-dictated-sql-ignored-own-memory`).
+The live `whisper_history.db` is not opened: every fixture brings up its own
+temporary DB via `init_database`. Fixtures are Cyrillic: it is on Cyrillic that this
+project has already caught comparison bugs (memory note `plan-dictated-sql-ignored-own-memory`).
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ DESCRIPTION = "Домовились про дедлайни на Q3 — пере
 
 
 # ============================================================
-# Спільне
+# Shared
 # ============================================================
 
 def _tx_row(db_path: str, tid: int):
@@ -58,8 +58,8 @@ def _audio_row(db_path: str, aid: int):
 
 
 class _FakeWhisper:
-    """Мінімальний контракт whisper_manager для transcribe(). Лічильник
-    викликів потрібен там, де 400 мусить прилетіти ДО транскрипції."""
+    """Minimal whisper_manager contract for transcribe(). The call counter
+    is needed where a 400 must arrive BEFORE transcription."""
 
     def __init__(self):
         self.calls = 0
@@ -75,7 +75,7 @@ class _FakeWhisper:
 
 @pytest.fixture
 def tx_env(tmp_path: Path, monkeypatch):
-    """transcription_bp на тимчасовій БД + фейковий whisper."""
+    """transcription_bp on a temporary DB + a fake whisper."""
     from app.blueprints.transcription import transcription_bp
 
     db_path = str(tmp_path / "create.db")
@@ -116,7 +116,7 @@ def _post_file(client, **extra):
 
 
 # ============================================================
-# 1. POST /api/transcribe — файл
+# 1. POST /api/transcribe - file
 # ============================================================
 
 class TestTranscribeFile:
@@ -127,10 +127,10 @@ class TestTranscribeFile:
         tid = r.get_json()["transcription_id"]
 
         row = _tx_row(db_path, tid)
-        # Побайтово: кирилиця не перекодована й не обрізана.
+        # Byte for byte: the Cyrillic is neither re-encoded nor truncated.
         assert row["title"] == TITLE
         assert row["description"] == DESCRIPTION
-        # source_name — провенанс, назва його не чіпає.
+        # source_name is provenance; the title does not touch it.
         assert row["source_name"] == "дзвінок.mp3"
         assert whisper.calls == 1
 
@@ -154,7 +154,7 @@ class TestTranscribeFile:
         r = _post_file(client, title="я" * 201)
         assert r.status_code == 400
         assert r.get_json()["success"] is False
-        # Головне: whisper не запускався — 400 мусить прилетіти до роботи.
+        # The main point: whisper was not started; the 400 must arrive before the work.
         assert whisper.calls == 0
         conn = sqlite3.connect(db_path)
         assert conn.execute("SELECT COUNT(*) FROM transcriptions").fetchone()[0] == 0
@@ -246,7 +246,7 @@ class TestDocumentUpload:
 
 
 # ============================================================
-# 3. source_type=library — успадкування від Аудіотеки
+# 3. source_type=library - inheritance from the Audio library
 # ============================================================
 
 def _insert_audio(db_path: str, audio_file: Path, **overrides) -> int:
@@ -295,11 +295,11 @@ class TestLibraryInheritance:
         assert r.status_code == 200
         row = _tx_row(db_path, r.get_json()["transcription_id"])
         assert row["title"] == "Своя назва запису"
-        # Опис у формі не передали — копія з Аудіотеки лишається.
+        # The description was not passed in the form: the copy from the Audio library stays.
         assert row["description"] == DESCRIPTION
 
     def test_library_row_untouched_after_transcribe(self, tx_env):
-        """Без автосинхронізації: два рядки живуть окремо (гриль, відповідь 3)."""
+        """No auto-sync: the two rows live separately (grill, answer 3)."""
         client, db_path, _, tmp_path = tx_env
         audio = tmp_path / "lib3.mp3"
         audio.write_bytes(b"fake")
@@ -312,7 +312,7 @@ class TestLibraryInheritance:
 
 
 # ============================================================
-# 4. Стоп-екран рекордера → manifest → Аудіотека
+# 4. Recorder stop screen -> manifest -> Audio library
 # ============================================================
 
 @pytest.fixture
@@ -355,7 +355,7 @@ def rec_env(tmp_path: Path, monkeypatch):
 
 
 class TestVocabularyWiring:
-    """K1: кожен шлях /api/transcribe передає decode_options; YouTube — порожні."""
+    """K1: every /api/transcribe path passes decode_options; YouTube - empty ones."""
 
     @pytest.fixture
     def spy(self, monkeypatch):
@@ -431,8 +431,8 @@ class TestRecordingSave:
         conn.close()
 
     def test_second_save_updates_existing_description(self, rec_env):
-        """Ідемпотентність: авто-реєстрація при finalize вже могла вставити
-        рядок — ручний save мусить дописати в нього опис, а не створити другий."""
+        """Idempotency: the auto-registration at finalize may have already inserted
+        the row; a manual save must add the description to it, not create a second one."""
         client, db_path, store, sid = rec_env
         first = client.post(f"/api/recording/{sid}/save", json={"name": "Перша"})
         assert first.status_code == 200
@@ -444,7 +444,7 @@ class TestRecordingSave:
 
 
 # ============================================================
-# 5. PATCH /api/audio/downloads/<id> (контракт C3)
+# 5. PATCH /api/audio/downloads/<id> (contract C3)
 # ============================================================
 
 @pytest.fixture
@@ -487,7 +487,7 @@ class TestAudioLibraryPatch:
         r = client.patch(f"/api/audio/downloads/{aid}", json={"description": None})
         assert r.status_code == 200
         assert _audio_row(db_path, aid)["description"] is None
-        # Назва не зачеплена.
+        # The title is untouched.
         assert _audio_row(db_path, aid)["title"] == "Стара назва"
 
     def test_empty_body_is_400(self, audio_env):
@@ -504,8 +504,8 @@ class TestAudioLibraryPatch:
         r = client.patch(f"/api/audio/downloads/{aid}", json={"title": "я" * 201})
         assert r.status_code == 400
         err = r.get_json()["error"]
-        # Помилка — доменна (контракт C2), не str() випадкового винятку:
-        # ні шляхів, ні SQL, ні назв таблиць у тексті.
+        # The error is a domain one (contract C2), not str() of a random exception:
+        # no paths, no SQL, no table names in the text.
         assert "200" in err
         for leak in ("Traceback", "sqlite3", "audio_downloads", "SELECT", "\\"):
             assert leak not in err
@@ -513,8 +513,8 @@ class TestAudioLibraryPatch:
 
 
 class TestAudioLibraryListDescription:
-    """Ремонт раунду 1 (ask 1): GET список мусить віддавати description
-    (раніше було write-only, PATCH -> GET -> PATCH тихо стирав опис)."""
+    """Round 1 repair (ask 1): the GET list must return description
+    (it used to be write-only, PATCH -> GET -> PATCH silently erased the description)."""
 
     def _item(self, client, aid):
         r = client.get("/api/audio/downloads")
@@ -559,8 +559,8 @@ class TestAudioLibraryListDescription:
         assert item["title"] == "Дзвінок із банком"
         assert item["description"] == new_description
 
-        # Клієнт переклопачує ці самі значення в наступний PATCH (як робить
-        # модалка audio.js, префілена з рядка списку).
+        # The client passes these same values into the next PATCH (as the
+        # audio.js modal does, prefilled from the list row).
         r2 = client.patch(f"/api/audio/downloads/{aid}", json={
             "title": item["title"], "description": item["description"],
         })
@@ -575,9 +575,9 @@ class TestAudioLibraryListDescription:
         assert item["description"] is None
 
     def test_multiline_description_survives_list_roundtrip(self, audio_env):
-        """Гейт-9 (знахідка 6): жоден тест у цьому класі досі не ніс `\\n` —
-        PATCH з переносом рядка -> GET список мусить віддати рядок побайтово,
-        а не з'їденим/екранованим переносом."""
+        """Gate 9 (finding 6): no test in this class carried `\\n` so far;
+        a PATCH with a line break -> the GET list must return the string byte for byte,
+        not with an eaten/escaped line break."""
         client, db_path, aid = audio_env
         new_description = "Умови кредиту\nставка 18%"
         r = client.patch(f"/api/audio/downloads/{aid}", json={
@@ -592,7 +592,7 @@ class TestAudioLibraryListDescription:
 
 
 # ============================================================
-# 6. Читачі: експорт і target_name коментаря
+# 6. Readers: export and the comment target_name
 # ============================================================
 
 def _seed_transcript(db_path: str, *, title=None) -> int:
@@ -606,8 +606,8 @@ def _seed_transcript(db_path: str, *, title=None) -> int:
 
 
 class TestExportShowsDisplayName:
-    """`display_name` = title → source_name → «Запис #id». У контенті експорту
-    має стояти саме він; `source_name` у JSON-пейлоаді лишається провенансом."""
+    """`display_name` = title -> source_name -> "Запис #id". The export content
+    must carry exactly it; `source_name` in the JSON payload stays provenance."""
 
     def _export(self, client, db_path, fmt, tid):
         return client.post(f"/api/export/{fmt}", json={
@@ -641,9 +641,9 @@ class TestExportShowsDisplayName:
         tid = _seed_transcript(db_path, title=TITLE)
         r = self._export(client, db_path, "txt", tid)
         assert r.status_code == 200
-        # Імʼя згенерованого файлу теж іде від display_name, а не source_name.
-        # Werkzeug віддає кирилицю в RFC 5987-формі (filename*=UTF-8''%D0%9F…),
-        # тож порівнюємо після unquote, а не з сирим заголовком.
+        # The generated file name also derives from display_name, not source_name.
+        # Werkzeug gives Cyrillic in the RFC 5987 form (filename*=UTF-8''%D0%9F…),
+        # so we compare after unquote, not against the raw header.
         from urllib.parse import unquote
         disposition = unquote(r.headers.get("Content-Disposition", ""))
         assert "Планірка-з-Андрієм" in disposition

@@ -1,8 +1,8 @@
-"""Серверний шар перекладу: мова запиту, `tr`/`tr_n` над пакетом `i18n_catalog`.
+"""Server-side translation layer: request language, `tr`/`tr_n` over the `i18n_catalog` package.
 
-Мова: заголовок ``X-Recall-Lang: en|uk`` → вона; нема/сміття → ``server_lang()``
-(явне ``RECALL_UI_LANG`` uk/en, ``auto`` → uk). ``RECALL_UI_LANG`` читається
-з ``os.environ`` на кожен виклик, тож зміна через Налаштування діє без рестарту.
+Language: the ``X-Recall-Lang: en|uk`` header wins; missing/garbage → ``server_lang()``
+(explicit ``RECALL_UI_LANG`` uk/en, ``auto`` → uk). ``RECALL_UI_LANG`` is read
+from ``os.environ`` on every call, so a change through Settings takes effect without a restart.
 """
 from __future__ import annotations
 
@@ -49,12 +49,12 @@ def request_lang() -> str:
 def tr(key: str, lang: str | None = None, **vars) -> str:
     entry = _get_catalog().get(key)
     if entry is None:
-        logger.warning("i18n: невідомий ключ %r", key)
+        logger.warning("i18n: unknown key %r", key)
         return key
     lang = lang if lang in LANGS else request_lang()
     text = entry.get(lang) or entry.get("uk")
     if isinstance(text, dict):
-        logger.warning("i18n: ключ %r — плюраль, викликайте tr_n", key)
+        logger.warning("i18n: key %r is a plural, call tr_n", key)
         return key
     return text.format_map(vars) if vars else text
 
@@ -73,12 +73,12 @@ def _plural_form(lang: str, n: int) -> str:
 def tr_n(key: str, n: int, lang: str | None = None, **vars) -> str:
     entry = _get_catalog().get(key)
     if entry is None:
-        logger.warning("i18n: невідомий ключ %r", key)
+        logger.warning("i18n: unknown key %r", key)
         return key
     lang = lang if lang in LANGS else request_lang()
     forms = entry.get(lang) or entry.get("uk")
     if not isinstance(forms, dict):
-        logger.warning("i18n: ключ %r — не плюраль", key)
+        logger.warning("i18n: key %r is not a plural", key)
         return key
     form = _plural_form(lang, n)
     text = forms.get(form) or forms.get("other") or forms.get("many") or next(iter(forms.values()))
@@ -89,7 +89,7 @@ _SSE_FIELDS = ("error", "label", "text")
 
 
 def _uk_pattern(key: str):
-    """Регекс за uk-шаблоном ключа: ``{var}`` → іменована група."""
+    """Regex from the uk template of a key: ``{var}`` → named group."""
     import re
     uk = _get_catalog()[key]["uk"]
     parts = re.split(r"\{(\w+)\}", uk)
@@ -99,12 +99,12 @@ def _uk_pattern(key: str):
 
 
 def localize_sse(frames, lang: str, keys):
-    """Перекласти тексти статусів/помилок у SSE-кадрах сервісу на мову запиту.
+    """Translate status/error texts in a service's SSE frames into the request language.
 
-    Сервіси (research/rag) стрімлять українські рядки поза request-контекстом;
-    blueprint, що знає мову, пропускає кадри крізь цей фільтр. Поле
-    ``error``/``label``/``text`` кадру, яке дослівно збігається з uk-текстом
-    одного з ``keys``, замінюється на текст мови ``lang``; решта — як є.
+    Services (research/rag) stream Ukrainian strings outside a request context;
+    a blueprint that knows the language passes the frames through this filter. A frame's
+    ``error``/``label``/``text`` field that literally equals the uk text
+    of one of ``keys`` is replaced with the text in language ``lang``; the rest is left as is.
     """
     import json
     if lang not in LANGS or lang == "uk":

@@ -1,11 +1,11 @@
 """Recording session storage (Phase 9.2).
 
-Кожна сесія = окрема папка в ``RECORDING_DIR/<session_id>/`` з:
+Each session = a separate folder in ``RECORDING_DIR/<session_id>/`` with:
 
-- ``manifest.json`` — state machine, оновлюється атомарно через tmp+rename.
-- ``mic.pcm``, ``system.pcm`` — raw PCM, append-only, дописуються через
-  :class:`ChunkedPcmWriter` (інший модуль).
-- ``mic.wav``, ``system.wav``, ``final.mp3`` — створюються на finalize
+- ``manifest.json`` — the state machine, updated atomically through tmp+rename.
+- ``mic.pcm``, ``system.pcm`` — raw PCM, append-only, written through
+  :class:`ChunkedPcmWriter` (another module).
+- ``mic.wav``, ``system.wav``, ``final.mp3`` — created at finalize
   (Phase 9.4).
 
 Manifest schema (version 1):
@@ -32,13 +32,13 @@ Manifest schema (version 1):
       "auto_name": "Запис 2026-05-04 12:34"
     }
 
-Crash-resilience: атомарний rename гарантує що manifest на диску
-завжди валідний JSON. Якщо процес умре посеред write — тимчасовий
-файл лишається .tmp і ігнорується; основний manifest актуальний на
-момент попереднього успішного rename'у.
+Crash resilience: an atomic rename guarantees that the manifest on disk
+is always valid JSON. If the process dies in the middle of a write — the temporary
+file stays as .tmp and is ignored; the main manifest is current as of
+the moment of the previous successful rename.
 
-Thread-safety: усі мутації йдуть через :meth:`modify` під per-session
-RLock. Концурентний read дозволений.
+Thread safety: all mutations go through :meth:`modify` under a per-session
+RLock. A concurrent read is allowed.
 """
 from __future__ import annotations
 
@@ -58,15 +58,15 @@ logger = logging.getLogger(__name__)
 MANIFEST_VERSION = 2
 MANIFEST_FILENAME = 'manifest.json'
 
-# Single source of truth для валідації session_id. Захист від path traversal:
-# session_id використовується як ім'я підпапки в RECORDING_DIR і у URL-routes,
-# тому будь-які '..', '/', '\' або інші spec-символи блокуємо. Формат:
-# rec_ + 1..64 символів [a-f0-9] (hex з uuid4().hex[:16] = 16 hex chars,
-# беремо ширше обмеження для майбутньої гнучкості). У тестах допускаємо
-# алфавітні символи через підкреслювання — `^rec_[a-z0-9_]+$`.
+# Single source of truth for session_id validation. Protection against path traversal:
+# session_id is used as a subfolder name in RECORDING_DIR and in URL routes,
+# so we block any '..', '/', '\' or other special characters. Format:
+# rec_ + 1..64 characters [a-f0-9] (hex from uuid4().hex[:16] = 16 hex chars,
+# we take a wider limit for future flexibility). In tests we allow
+# alphabetic characters through underscores — `^rec_[a-z0-9_]+$`.
 _SESSION_ID_RE = re.compile(r'^rec_[a-z0-9_]{1,64}$')
 
-# Допустимі статуси сесії. Recovery шукає перші три.
+# Allowed session statuses. Recovery looks for the first three.
 STATUS_RECORDING = 'recording'
 STATUS_PAUSED = 'paused'
 STATUS_STOPPING = 'stopping'
@@ -81,15 +81,15 @@ STREAM_SYSTEM = 'system'
 
 
 class SessionStoreError(RuntimeError):
-    """Помилка операції над сесією."""
+    """Error of an operation on a session."""
 
 
 class SessionStore:
-    """Файлове сховище для recording-сесій з atomic manifest.
+    """A file store for recording sessions with an atomic manifest.
 
-    Не зберігає стан у пам'яті (окрім locks) — manifest читається з
-    диска на кожен ``modify``. Це навмисно: робить store re-entrant
-    і простішим для recovery.
+    Does not keep state in memory (except locks) — the manifest is read from
+    disk on every ``modify``. This is deliberate: it makes the store re-entrant
+    and simpler for recovery.
     """
 
     def __init__(self, base_dir: Path | str):
@@ -110,20 +110,20 @@ class SessionStore:
         auto_name: Optional[str] = None,
         system_source: Optional[dict] = None,
     ) -> dict:
-        """Створює нову сесію. Повертає створений manifest.
+        """Creates a new session. Returns the created manifest.
 
-        ``system_source`` (``SystemSpec.to_dict()``) пишеться у
-        ``streams.system.source`` разом із порожнім ``source_events``, коли
-        системний потік існує; такий потік ``enabled`` навіть без імені девайса
-        (include/exclude-джерело не має endpoint'а).
+        ``system_source`` (``SystemSpec.to_dict()``) is written to
+        ``streams.system.source`` together with an empty ``source_events`` when the
+        system stream exists; such a stream is ``enabled`` even without a device name
+        (an include/exclude source has no endpoint).
 
-        Якщо session_id вже існує — кидає :class:`SessionStoreError`.
-        Валідація session_id (path traversal protection) — у
+        If session_id already exists — raises :class:`SessionStoreError`.
+        Validation of session_id (path traversal protection) is in
         :meth:`session_dir`.
         """
         session_dir = self.session_dir(session_id)
         if session_dir.exists():
-            raise SessionStoreError(f"Сесія {session_id} вже існує")
+            raise SessionStoreError(f"Session {session_id} already exists")
 
         session_dir.mkdir(parents=True)
         now = _now_iso()
@@ -141,10 +141,10 @@ class SessionStore:
                     'bytes': 0,
                     'error': None,
                     'enabled': mic_device_name is not None,
-                    # Per-stream native параметри. Заповнюються
-                    # _open_stream після resolve_device_params, бо
-                    # девайс може не підтримувати запитуваний rate
-                    # (наприклад моно-mic 88200Hz при requested 48000/2).
+                    # Per-stream native parameters. Filled in by
+                    # _open_stream after resolve_device_params, because the
+                    # device may not support the requested rate
+                    # (for example a mono mic at 88200Hz when 48000/2 was requested).
                     'sample_rate': None,
                     'channels': None,
                 },
@@ -177,47 +177,47 @@ class SessionStore:
         return manifest
 
     def session_dir(self, session_id: str) -> Path:
-        """Шлях до папки сесії. Валідує session_id проти path traversal.
+        """The path to the session folder. Validates session_id against path traversal.
 
-        Кидає :class:`SessionStoreError` якщо session_id містить
-        небезпечні символи ('..', '/', '\\') або не відповідає
-        патерну ``^rec_[a-z0-9_]{1,64}$``. Це гарантує що
-        ``base_dir / session_id`` ніколи не виходить за межі base_dir.
+        Raises :class:`SessionStoreError` if session_id contains
+        dangerous characters ('..', '/', '\\') or does not match
+        the pattern ``^rec_[a-z0-9_]{1,64}$``. This guarantees that
+        ``base_dir / session_id`` never goes outside base_dir.
         """
         if not _SESSION_ID_RE.fullmatch(session_id or ''):
             raise SessionStoreError(
-                f"Невалідний session_id: {session_id!r} "
-                "(мусить відповідати ^rec_[a-z0-9_]{1,64}$)"
+                f"Invalid session_id: {session_id!r} "
+                "(must match ^rec_[a-z0-9_]{1,64}$)"
             )
         return self.base_dir / session_id
 
     def pcm_path(self, session_id: str, stream: str) -> Path:
-        """Шлях до raw PCM файлу для стріму ('mic' або 'system')."""
+        """The path to the raw PCM file for a stream ('mic' or 'system')."""
         if stream not in (STREAM_MIC, STREAM_SYSTEM):
-            raise ValueError(f"Невідомий stream: {stream!r}")
+            raise ValueError(f"Unknown stream: {stream!r}")
         return self.session_dir(session_id) / f'{stream}.pcm'
 
     def read(self, session_id: str) -> dict:
-        """Читає manifest з диска. Кидає :class:`SessionStoreError`
-        якщо сесія/manifest відсутні чи зламані.
+        """Reads the manifest from disk. Raises :class:`SessionStoreError`
+        if the session/manifest is missing or broken.
 
-        Self-healing шляхів (03.07.2026): manifest зберігає АБСОЛЮТНІ
-        шляхи (``final_mp3_path``, ``primary_video_path``,
-        ``streams.video[].path``). Після переїзду/перейменування кореня
-        проєкту ці шляхи стають мертвими — файл фізично лежить у тій же
-        сесійній папці, просто за старим абсолютним префіксом. Якщо шлях
-        не існує, а файл з тим самим basename знайдено в папці ЦІЄЇ
-        сесії — підміняємо його У ПОВЕРНУТОМУ dict. Це read-only:
-        на диск нічого не пишеться (лікування живе, лише поки живий цей
-        dict; якщо потрібне persist — це зробить окремий modify()).
+        Path self-healing (03.07.2026): the manifest stores ABSOLUTE
+        paths (``final_mp3_path``, ``primary_video_path``,
+        ``streams.video[].path``). After a move/rename of the project
+        root these paths become dead — the file physically lies in the same
+        session folder, just under the old absolute prefix. If the path
+        does not exist and a file with the same basename is found in THIS
+        session's folder — we substitute it IN THE RETURNED dict. This is read-only:
+        nothing is written to disk (the healing lives only as long as this
+        dict lives; if persistence is needed, a separate modify() does it).
         """
         session_dir = self.session_dir(session_id)
         manifest = self._read_manifest(session_dir)
         healed = self._heal_paths(manifest, session_dir)
         if healed:
             logger.debug(
-                "Manifest %s: self-healing підмінив %d шлях(ів) на актуальні "
-                "(файл(и) знайдено в папці сесії за старим basename)",
+                "Manifest %s: self-healing replaced %d path(s) with current ones "
+                "(the file(s) were found in the session folder by the old basename)",
                 session_id, healed,
             )
         return manifest
@@ -228,9 +228,9 @@ class SessionStore:
 
     @classmethod
     def _heal_paths(cls, manifest: dict, session_dir: Path) -> int:
-        """Мутує ``manifest`` in-place, підміняючи мертві абсолютні шляхи
-        на живі (той самий basename у ``session_dir``). Повертає кількість
-        підмінених полів."""
+        """Mutates ``manifest`` in place, replacing dead absolute paths
+        with live ones (the same basename in ``session_dir``). Returns the number
+        of replaced fields."""
         healed = 0
         for field in cls._REPATH_TOP_LEVEL_FIELDS:
             fixed = cls._heal_one_path(manifest.get(field), session_dir)
@@ -249,7 +249,7 @@ class SessionStore:
 
     @staticmethod
     def _heal_one_path(path: Optional[str], session_dir: Path) -> Optional[str]:
-        """``None`` якщо шлях не треба чіпати; інакше — новий актуальний шлях."""
+        """``None`` if the path should not be touched; otherwise the new current path."""
         if not path or os.path.isfile(path):
             return None
         candidate = session_dir / os.path.basename(path)
@@ -266,10 +266,10 @@ class SessionStore:
         session_id: str,
         modifier: Callable[[dict], None],
     ) -> dict:
-        """Атомарне read-modify-write під session lock.
+        """Atomic read-modify-write under the session lock.
 
-        ``modifier(manifest)`` мутує manifest in-place. Повертає новий
-        manifest після запису.
+        ``modifier(manifest)`` mutates the manifest in place. Returns the new
+        manifest after the write.
         """
         with self._lock_for(session_id):
             session_dir = self.session_dir(session_id)
@@ -291,9 +291,9 @@ class SessionStore:
         return self.modify(session_id, _m)
 
     def set_description(self, session_id: str, description: Optional[str]) -> dict:
-        """Опис запису (editable-title-description-02) — той самий шлях, що й
-        `set_name`; ключ 'description' відсутній у старих manifest'ах,
-        читачі беруть його через ``.get('description')``."""
+        """The recording description (editable-title-description-02) — the same path as
+        `set_name`; the 'description' key is absent from old manifests,
+        readers take it through ``.get('description')``."""
         def _m(mf: dict) -> None:
             mf['description'] = description
         return self.modify(session_id, _m)
@@ -304,10 +304,10 @@ class SessionStore:
         stream: str,
         total_bytes: int,
     ) -> None:
-        """Оновити лічильник total bytes для стріму. Викликається з
-        ChunkedPcmWriter після успішного flush+fsync."""
+        """Update the total bytes counter for a stream. Called from
+        ChunkedPcmWriter after a successful flush+fsync."""
         if stream not in (STREAM_MIC, STREAM_SYSTEM):
-            raise ValueError(f"Невідомий stream: {stream!r}")
+            raise ValueError(f"Unknown stream: {stream!r}")
         def _m(mf: dict) -> None:
             mf['streams'][stream]['bytes'] = int(total_bytes)
         self.modify(session_id, _m)
@@ -319,7 +319,7 @@ class SessionStore:
         error: Optional[str],
     ) -> None:
         if stream not in (STREAM_MIC, STREAM_SYSTEM):
-            raise ValueError(f"Невідомий stream: {stream!r}")
+            raise ValueError(f"Unknown stream: {stream!r}")
         def _m(mf: dict) -> None:
             mf['streams'][stream]['error'] = error
         self.modify(session_id, _m)
@@ -331,16 +331,16 @@ class SessionStore:
         sample_rate: int,
         channels: int,
     ) -> None:
-        """Зафіксувати native (rate, channels) для стріму.
+        """Record the native (rate, channels) for a stream.
 
-        Викликається з RecordingService._open_stream() після
-        resolve_device_params() — гарантує що finalize читатиме
-        правильні параметри для WAV-хедера, навіть якщо девайс
-        не підтримував requested rate (моно-мікрофон з 88200Hz
-        при requested 48000/2).
+        Called from RecordingService._open_stream() after
+        resolve_device_params() — guarantees that finalize will read the
+        right parameters for the WAV header, even if the device
+        did not support the requested rate (a mono microphone at 88200Hz
+        when 48000/2 was requested).
         """
         if stream not in (STREAM_MIC, STREAM_SYSTEM):
-            raise ValueError(f"Невідомий stream: {stream!r}")
+            raise ValueError(f"Unknown stream: {stream!r}")
         def _m(mf: dict) -> None:
             mf['streams'][stream]['sample_rate'] = int(sample_rate)
             mf['streams'][stream]['channels'] = int(channels)
@@ -353,13 +353,13 @@ class SessionStore:
         source: dict,
         event: Optional[dict] = None,
     ) -> None:
-        """Поточне джерело стріму + (опційно) одна мітка в ``source_events``.
+        """The current stream source + (optionally) one mark in ``source_events``.
 
-        Additive-ключі без bump'у ``MANIFEST_VERSION``: finalize і recovery
-        читають лише байти, тож старі читачі їх не помічають.
+        Additive keys without a bump of ``MANIFEST_VERSION``: finalize and recovery
+        read only bytes, so old readers do not notice them.
         """
         if stream not in (STREAM_MIC, STREAM_SYSTEM):
-            raise ValueError(f"Невідомий stream: {stream!r}")
+            raise ValueError(f"Unknown stream: {stream!r}")
         def _m(mf: dict) -> None:
             st = mf['streams'][stream]
             st['source'] = dict(source)
@@ -369,7 +369,7 @@ class SessionStore:
 
     @staticmethod
     def stream_source(manifest: dict, stream: str) -> dict:
-        """Джерело стріму з manifest'у; manifest до SystemSpec (нема ``source``) → ``all``."""
+        """The stream source from the manifest; a manifest predating SystemSpec (no ``source``) → ``all``."""
         src = ((manifest.get('streams') or {}).get(stream) or {}).get('source')
         if not isinstance(src, dict):
             return {'mode': 'all', 'apps': [], 'device_index': None}
@@ -380,7 +380,7 @@ class SessionStore:
         }
 
     def add_video_track(self, session_id: str, track: dict) -> None:
-        """Додати запис відео-треку до manifest['streams']['video'].
+        """Add a video track record to manifest['streams']['video'].
 
         Tolerant of v1 manifests that lack the 'video' key: initialises it
         on-the-fly so old sessions don't crash.
@@ -388,8 +388,8 @@ class SessionStore:
         def _m(mf: dict) -> None:
             vids = mf['streams'].setdefault('video', [])
             tid = track.get('track_id')
-            # upsert по track_id: оновити наявний трек, а не плодити дублі
-            # (кличеться і на start, і на stop супервізора).
+            # upsert by track_id: update the existing track rather than breed duplicates
+            # (called on both the supervisor's start and stop).
             for i, t in enumerate(vids):
                 if t.get('track_id') == tid:
                     vids[i] = {**t, **dict(track)}
@@ -398,9 +398,9 @@ class SessionStore:
         self.modify(session_id, _m)
 
     def update_video_track(self, session_id: str, track_id: str, **fields) -> None:
-        """Оновити поля існуючого відео-треку за його track_id.
+        """Update the fields of an existing video track by its track_id.
 
-        Якщо track_id не знайдено — логується warning, маніфест не змінюється.
+        If track_id is not found — a warning is logged, the manifest is not changed.
         Tolerant of v1 manifests that lack the 'video' key.
         """
         def _m(mf: dict) -> None:
@@ -416,17 +416,17 @@ class SessionStore:
         self.modify(session_id, _m)
 
     def open_segment(self, session_id: str) -> int:
-        """Закриває попередній segment (якщо відкритий) і відкриває новий.
-        Повертає index нового segment'у.
+        """Closes the previous segment (if open) and opens a new one.
+        Returns the index of the new segment.
 
-        Викликається на resume після pause. На create перший segment
-        створюється автоматично — цю функцію викликати не потрібно.
+        Called on resume after pause. On create the first segment
+        is created automatically — this function does not need to be called.
         """
         def _m(mf: dict) -> None:
             now = _now_iso()
             segments = mf['segments']
             if segments and segments[-1].get('end_ts') is None:
-                # Закриваємо відкритий segment
+                # Close the open segment
                 last = segments[-1]
                 last['end_ts'] = now
                 last['duration_sec'] = _iso_diff_seconds(last['start_ts'], now)
@@ -444,7 +444,7 @@ class SessionStore:
         return manifest['segments'][-1]['index']
 
     def close_segment(self, session_id: str) -> None:
-        """Закриває останній відкритий segment (на pause/stop)."""
+        """Closes the last open segment (on pause/stop)."""
         def _m(mf: dict) -> None:
             segments = mf['segments']
             if segments and segments[-1].get('end_ts') is None:
@@ -457,8 +457,8 @@ class SessionStore:
     # --- queries
 
     def list_all(self) -> list[dict]:
-        """Список manifest'ів усіх сесій. Зламані manifest'и пропускає
-        з warning'ом."""
+        """A list of manifests of all sessions. Broken manifests are skipped
+        with a warning."""
         out: list[dict] = []
         if not self.base_dir.is_dir():
             return out
@@ -472,29 +472,29 @@ class SessionStore:
                 with open(manifest_path, 'r', encoding='utf-8') as f:
                     out.append(json.load(f))
             except (OSError, json.JSONDecodeError) as e:
-                logger.warning("Зіпсований manifest у %s: %s", entry, e)
+                logger.warning("Corrupted manifest in %s: %s", entry, e)
         return out
 
     def list_orphaned(self) -> list[dict]:
-        """Сесії в активному статусі (recording/paused/stopping).
-        Викликається при старті додатку для recovery."""
+        """Sessions in an active status (recording/paused/stopping).
+        Called at application start for recovery."""
         return [m for m in self.list_all() if m.get('status') in ACTIVE_STATUSES]
 
     def list_unfinalized(self) -> list[dict]:
-        """Сесії ``crashed``, які так і не отримали ``final.mp3``.
+        """``crashed`` sessions that never got a ``final.mp3``.
 
-        Другий (після :meth:`list_orphaned`) вхід у recovery. Закриває діру,
-        через яку запис міг зникнути НАЗАВЖДИ: перший рестарт переводив активну
-        сесію в ``crashed`` і ставив finalize у чергу, а другий рестарт убивав
-        уже сам job (``jobs.state='crashed'``). Після цього сесію не бачив ніхто —
-        ``list_orphaned`` дивиться тільки на ACTIVE_STATUSES, ``reconcile`` —
-        тільки на вже фіналізовані, ``/save`` для ``crashed`` віддає 500, а
-        UI-банер ``/api/recordings/recovered`` одноразовий. PCM лежав на диску
-        мертвим вантажем (реальний випадок 21.07.2026: 10-годинна сесія, 8.2 ГБ).
+        The second (after :meth:`list_orphaned`) entry into recovery. It closes the hole
+        through which a recording could vanish FOREVER: the first restart moved an active
+        session to ``crashed`` and queued a finalize, and the second restart killed
+        the job itself (``jobs.state='crashed'``). After that nobody saw the session —
+        ``list_orphaned`` looks only at ACTIVE_STATUSES, ``reconcile`` —
+        only at already finalized ones, ``/save`` returns 500 for ``crashed``, and
+        the UI banner ``/api/recordings/recovered`` is one-shot. The PCM lay on disk
+        as dead cargo (a real case on 21.07.2026: a 10-hour session, 8.2 GB).
 
-        Повертає сесії зі ``status == 'crashed'``, де ``final_mp3_path`` порожній
-        або файл за ним не існує (переїзд проєкту / ручне видалення). Сесії з
-        живим MP3 не чіпаємо — їх підбере ``reconcile_recordings``.
+        Returns sessions with ``status == 'crashed'`` where ``final_mp3_path`` is empty
+        or the file it points to does not exist (project move / manual deletion). Sessions with
+        a live MP3 are not touched — ``reconcile_recordings`` picks them up.
         """
         out: list[dict] = []
         for m in self.list_all():
@@ -507,7 +507,7 @@ class SessionStore:
         return out
 
     def delete(self, session_id: str) -> None:
-        """Видаляє папку сесії повністю. Idempotent."""
+        """Deletes the session folder completely. Idempotent."""
         import shutil
         session_dir = self.session_dir(session_id)
         if session_dir.exists():
@@ -531,28 +531,28 @@ class SessionStore:
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
         except FileNotFoundError as e:
-            raise SessionStoreError(f"Manifest не знайдено: {manifest_path}") from e
+            raise SessionStoreError(f"Manifest not found: {manifest_path}") from e
         except json.JSONDecodeError as e:
-            raise SessionStoreError(f"Manifest зламано ({manifest_path}): {e}") from e
+            raise SessionStoreError(f"Manifest is broken ({manifest_path}): {e}") from e
 
-        # Phase 9.10 hardening: попередження якщо schema-version не співпадає.
-        # Зараз ми лише warn'аємо і повертаємо as-is — наступні версії
-        # додадуть logic міграції старих manifest'ів. Це робить майбутні
-        # schema changes безпечнішими: ми хоча б знаємо що manifest старий.
+        # Phase 9.10 hardening: a warning if the schema version does not match.
+        # For now we only warn and return as is — future versions
+        # will add the migration logic for old manifests. This makes future
+        # schema changes safer: we at least know the manifest is old.
         version = manifest.get('version')
         if version is not None and version != MANIFEST_VERSION:
             logger.warning(
-                "Manifest %s має version=%s, очікується %s — продовжую "
-                "без міграції (поведінка може бути неочікувана)",
+                "Manifest %s has version=%s, expected %s — continuing "
+                "without migration (behaviour may be unexpected)",
                 manifest_path, version, MANIFEST_VERSION,
             )
         return manifest
 
     def _write_manifest(self, session_dir: Path, manifest: dict) -> None:
-        """Atomic write: запис у tmp + fsync + os.replace.
+        """Atomic write: write to tmp + fsync + os.replace.
 
-        Інваріант: на диску завжди валідний JSON. Якщо процес умре
-        посеред write — tmp файл залишається, основний нерушений.
+        Invariant: the disk always holds valid JSON. If the process dies
+        in the middle of a write — the tmp file stays, the main one is untouched.
         """
         manifest_path = session_dir / MANIFEST_FILENAME
         tmp_path = session_dir / (MANIFEST_FILENAME + '.tmp')
@@ -566,18 +566,18 @@ class SessionStore:
 # ------------------------------------------------------------- helpers
 
 def _now_iso() -> str:
-    """ISO-8601 в UTC з timezone-suffix."""
+    """ISO-8601 in UTC with a timezone suffix."""
     return datetime.now(tz=timezone.utc).isoformat(timespec='seconds')
 
 
 def _iso_diff_seconds(start_iso: str, end_iso: str) -> float:
-    """Кількість секунд між двома ISO-датами."""
+    """The number of seconds between two ISO dates."""
     start = datetime.fromisoformat(start_iso)
     end = datetime.fromisoformat(end_iso)
     return round((end - start).total_seconds(), 3)
 
 
 def _default_auto_name() -> str:
-    """Auto-suggested name типу 'Запис 2026-05-04 14:32' (локальний час)."""
+    """An auto-suggested name like 'Запис 2026-05-04 14:32' (local time)."""
     now = datetime.now()
     return f"Запис {now.strftime('%Y-%m-%d %H:%M')}"

@@ -1,16 +1,16 @@
-"""Юніт-тести Meeting Memory enrichment (app/services/enrichment.py) — T7.5.
+"""Unit tests of Meeting Memory enrichment (app/services/enrichment.py) — T7.5.
 
-Офлайн, реальна (тимчасова, tmp_path) SQLite БД через init_database
-(патерн tests/test_migrations.py) — без Claude API/мережі. Покриває:
+Offline, a real (temporary, tmp_path) SQLite DB via init_database
+(the tests/test_migrations.py pattern) — no Claude API/network. Covers:
   - _normalize / _count_mentions
-  - _find_entity / _upsert_entity: створення, дедуп (регістр/пробіли/пунктуація),
-    пошук через alias, ідемпотентність повторного виклику, лінк на speakers
+  - _find_entity / _upsert_entity: creation, dedup (case/whitespace/punctuation),
+    lookup via alias, idempotency of a repeated call, link to speakers
   - _recompute_entity_aggregates
   - _enrich_card: idempotency (enriched_at + version), force re-run,
-    м'яка деградація на збій Claude-виклику (T6.3 retry_needed)
-  - _persist_card: повний round-trip (summary/topics/entities/action_items),
-    idempotent re-run (стара розмітка перезаписується, не дублюється)
-  - list_unenriched_ids: фільтрація вже збагачених / soft-deleted
+    soft degradation on a Claude call failure (T6.3 retry_needed)
+  - _persist_card: full round-trip (summary/topics/entities/action_items),
+    idempotent re-run (old markup is overwritten, not duplicated)
+  - list_unenriched_ids: filtering out already enriched / soft-deleted
 """
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def test_count_mentions_case_insensitive_and_multiple_names():
 def test_count_mentions_ignores_short_names_and_empty_input():
     assert enrichment._count_mentions("", ["Андрій"]) == 0
     assert enrichment._count_mentions("текст", []) == 0
-    assert enrichment._count_mentions("A б в", ["A"]) == 0  # довжина < 2 — ігнорується
+    assert enrichment._count_mentions("A б в", ["A"]) == 0  # length < 2 is ignored
 
 
 # ============================================================
@@ -128,7 +128,7 @@ def test_upsert_entity_dedup_across_case_and_whitespace(db_path, variant):
         eid1 = enrichment._upsert_entity(c, "person", "Андрій Коваль")
         eid2 = enrichment._upsert_entity(c, "person", variant)
         conn.commit()
-        assert eid1 == eid2, f"варіант {variant!r} мав дедупитись до тієї ж сутності"
+        assert eid1 == eid2, f"variant {variant!r} should have been deduplicated to the same entity"
         n = c.execute("SELECT COUNT(*) AS n FROM entities").fetchone()["n"]
         assert n == 1
 
@@ -137,7 +137,7 @@ def test_upsert_entity_dedup_via_alias(db_path):
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
         eid1 = enrichment._upsert_entity(c, "person", "Андрій Коваль", aliases=["Дрю"])
-        eid2 = enrichment._upsert_entity(c, "person", "Дрю")  # той самий, тільки через alias
+        eid2 = enrichment._upsert_entity(c, "person", "Дрю")  # the same one, only via alias
         conn.commit()
         assert eid1 == eid2
         n = c.execute("SELECT COUNT(*) AS n FROM entities").fetchone()["n"]
@@ -145,19 +145,19 @@ def test_upsert_entity_dedup_via_alias(db_path):
 
 
 def test_find_entity_respects_type_boundary(db_path):
-    """Той самий normalized-рядок в іншому типі — окрема сутність (alias унікальний
-    глобально, тому _find_entity ще й перевіряє збіг типу)."""
+    """The same normalized string in another type is a separate entity (an alias is unique
+    globally, so _find_entity also checks the type match)."""
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
         eid_person = enrichment._upsert_entity(c, "person", "Фонд")
-        eid_org = enrichment._upsert_entity(c, "org", "Фонд Х")  # різне ім'я — не колізія alias
+        eid_org = enrichment._upsert_entity(c, "org", "Фонд Х")  # a different name — not an alias collision
         conn.commit()
         assert eid_person != eid_org
-        # прямий пошук по типу не має плутати типи
+        # a direct lookup by type must not confuse the types
         found_person = enrichment._find_entity(c, "person", "фонд")
         found_org = enrichment._find_entity(c, "org", "фонд")
         assert found_person == eid_person
-        assert found_org is None  # "фонд" (без Х) не існує як org
+        assert found_org is None  # «фонд» (without «Х») does not exist as an org
 
 
 def test_upsert_entity_adds_new_aliases_incrementally(db_path):
@@ -168,19 +168,19 @@ def test_upsert_entity_adds_new_aliases_incrementally(db_path):
         conn.commit()
         aliases = {r["normalized_alias"] for r in
                    c.execute("SELECT normalized_alias FROM entity_aliases WHERE entity_id=?", (eid,))}
-        # _normalize стрижe пунктуацію на КРАЯХ рядка ("A.K." -> "a.k" — кінцева
-        # крапка теж пунктуація-на-краю і зрізається).
+        # _normalize strips punctuation at the EDGES of the string ("A.K." -> "a.k" — the trailing
+        # dot is also edge punctuation and gets cut).
         assert {"дрю", "a.k", "андрій коваль"} <= aliases
 
 
 def test_upsert_entity_fills_role_only_when_previously_empty(db_path):
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
-        eid = enrichment._upsert_entity(c, "person", "Андрій Коваль")  # без ролі
+        eid = enrichment._upsert_entity(c, "person", "Андрій Коваль")  # without a role
         enrichment._upsert_entity(c, "person", "Андрій Коваль", role="CTO")
         role1 = c.execute("SELECT role FROM entities WHERE id=?", (eid,)).fetchone()["role"]
         assert role1 == "CTO"
-        # повторний виклик з ІНШОЮ роллю НЕ перезаписує вже заповнену
+        # a repeated call with a DIFFERENT role does NOT overwrite the already filled one
         enrichment._upsert_entity(c, "person", "Андрій Коваль", role="CEO")
         role2 = c.execute("SELECT role FROM entities WHERE id=?", (eid,)).fetchone()["role"]
         assert role2 == "CTO"
@@ -205,15 +205,15 @@ def test_upsert_entity_links_speaker_when_name_matches(db_path):
         c = conn.cursor()
         c.execute("INSERT INTO speakers (name) VALUES (?)", ("Андрій Коваль",))
         conn.commit()
-        eid = enrichment._upsert_entity(c, "person", "Андрій Коваль")  # точний збіг
+        eid = enrichment._upsert_entity(c, "person", "Андрій Коваль")  # exact match
         conn.commit()
         row = c.execute("SELECT speaker_id FROM entities WHERE id=?", (eid,)).fetchone()
         assert row["speaker_id"] is not None
 
 
 def test_upsert_entity_links_speaker_ascii_case_insensitive(db_path):
-    """speakers.name COLLATE NOCASE — SQLite NOCASE фолдить лише ASCII, не кирилицю.
-    Перевіряємо на латиниці, де ця гарантія справді працює."""
+    """speakers.name COLLATE NOCASE — SQLite NOCASE folds only ASCII, not Cyrillic.
+    We check on Latin, where this guarantee really works."""
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
         c.execute("INSERT INTO speakers (name) VALUES (?)", ("John Smith",))
@@ -233,7 +233,7 @@ def test_upsert_entity_does_not_overwrite_existing_speaker_link(db_path):
         c.execute("UPDATE entities SET speaker_id=? WHERE id=?", (sid_a, eid))
         c.execute("INSERT INTO speakers (name) VALUES (?)", ("Особа",))
         conn.commit()
-        enrichment._upsert_entity(c, "person", "Особа")  # повторний виклик з можливим матчем
+        enrichment._upsert_entity(c, "person", "Особа")  # a repeated call with a possible match
         conn.commit()
         row = c.execute("SELECT speaker_id FROM entities WHERE id=?", (eid,)).fetchone()
         assert row["speaker_id"] == sid_a
@@ -244,9 +244,9 @@ def test_upsert_entity_does_not_overwrite_existing_speaker_link(db_path):
 # ============================================================
 
 def test_recompute_entity_aggregates_sums_mentions_and_meetings(db_path):
-    # Транскрипти створюємо ЗАЗДАЛЕГІДЬ окремими короткими з'єднаннями — не
-    # переплітаємо з відкритою (незакомміченою) транзакцією нижче, інакше
-    # SQLite віддає "database is locked" (writer-лок конкуруючих з'єднань).
+    # Create the transcripts UP FRONT in separate short connections — do not
+    # interleave with the open (uncommitted) transaction below, otherwise
+    # SQLite gives "database is locked" (writer lock of competing connections).
     tid1 = _insert_transcription(db_path)
     tid2 = _insert_transcription(db_path)
     with get_db_connection(db_path) as conn:
@@ -304,7 +304,7 @@ def test_persist_card_writes_summary_topics_and_entities(db_path):
         ai = c.execute("SELECT task, owner_name, owner_entity_id FROM action_items "
                        "WHERE transcription_id=?", (tid,)).fetchone()
         assert ai["task"] == "Надіслати кошторис"
-        assert ai["owner_entity_id"] is not None  # owner resolved до person-сутності
+        assert ai["owner_entity_id"] is not None  # owner resolved to a person entity
 
 
 def test_persist_card_rerun_is_idempotent_not_duplicated(db_path):
@@ -316,7 +316,7 @@ def test_persist_card_rerun_is_idempotent_not_duplicated(db_path):
         conn.commit()
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
-        # другий прогін з ІНШИМ набором сутностей — старе має бути замінено, не додано
+        # a second pass with a DIFFERENT set of entities — the old ones must be replaced, not added to
         card2 = dict(card, people=[{"name": "Інша Особа"}], action_items=[])
         enrichment._persist_card(c, tid, card2, "текст", "2026-05-12 10:00:00", "2026-05-12")
         conn.commit()
@@ -330,8 +330,8 @@ def test_persist_card_rerun_is_idempotent_not_duplicated(db_path):
         assert people_names == {"Інша Особа"}
         actions = c.execute("SELECT COUNT(*) AS n FROM action_items WHERE transcription_id=?",
                             (tid,)).fetchone()["n"]
-        assert actions == 0  # перезаписано порожнім списком
-        # стара сутність-людина лишилась у entities (глобальний граф), але без лінку на цей мітинг
+        assert actions == 0  # overwritten with an empty list
+        # the old person entity stayed in entities (the global graph), but without a link to this meeting
         old_people = c.execute("SELECT canonical_name FROM entities WHERE type='person'").fetchall()
         assert "Андрій Коваль" in {r["canonical_name"] for r in old_people}
 
@@ -382,7 +382,7 @@ def test_enrich_card_skips_when_already_enriched_same_version(db_path, monkeypat
     assert len(calls) == 1
     res2 = enrichment._enrich_card(db_path, tid)
     assert res2["status"] == "skipped"
-    assert len(calls) == 1, "друга спроба без force НЕ мала викликати Claude знову"
+    assert len(calls) == 1, "the second attempt without force must NOT call Claude again"
 
 
 def test_enrich_card_force_reruns_even_if_already_enriched(db_path, monkeypatch):
@@ -403,16 +403,16 @@ def test_enrich_card_reruns_when_version_bumped(db_path, monkeypatch):
     enrichment._enrich_card(db_path, tid)
     monkeypatch.setattr(enrichment, "ENRICHMENT_VERSION", enrichment.ENRICHMENT_VERSION + 1)
     res2 = enrichment._enrich_card(db_path, tid)
-    assert res2["status"] == "enriched", "бампнута ENRICHMENT_VERSION мала форсувати re-run"
+    assert res2["status"] == "enriched", "the bumped ENRICHMENT_VERSION should have forced a re-run"
 
 
 def test_enrich_card_skips_telegram_without_force(db_path, monkeypatch):
-    """Phase 17: TG — embed-only, картка Claude на нього не витрачається.
+    """Phase 17: TG is embed-only, a Claude card is not spent on it.
 
-    Рішення діяло лише на шляху інжесту (telegram.py:_submit_embed_only), а
-    backfill і кнопка індексера заходили з чорного ходу: у card-фазі не було
-    жодної перевірки source_type. На живих даних це 3142 чатових однорядковики
-    («Ок», «Дякую») → платні виклики Claude одним натисканням.
+    The decision applied only on the ingest path (telegram.py:_submit_embed_only), while
+    backfill and the indexer button came in through the back door: the card phase had
+    no source_type check at all. On live data that is 3142 one-line chat messages
+    («Ок», «Дякую») -> paid Claude calls with one click.
     """
     tid = _insert_transcription(db_path, source_type="telegram",
                                 source_name="[TG] Fund: привіт")
@@ -421,16 +421,16 @@ def test_enrich_card_skips_telegram_without_force(db_path, monkeypatch):
                         lambda *a, **k: calls.append(1) or _sample_card())
     res = enrichment._enrich_card(db_path, tid)
     assert res["status"] == "skipped" and res["reason"] == "telegram_embed_only"
-    assert not calls, "Claude не мав викликатись на TG-записі"
+    assert not calls, "Claude must not be called on a TG record"
 
-    # Ручний обхід лишається: Волна 5 зробить вибіркове збагачення TG.
+    # The manual bypass remains: Wave 5 will make TG enrichment selective.
     res2 = enrichment._enrich_card(db_path, tid, force=True)
     assert res2["status"] == "enriched" and len(calls) == 1
 
 
 def test_list_unenriched_skips_telegram_needing_only_card(db_path):
-    """Індексер не має рахувати TG-записи як роботу, якщо їм бракує лише картки:
-    інакше користувач бачить обсяг, якого не існує (3142 записи на живих даних)."""
+    """The indexer must not count TG records as work if all they lack is a card:
+    otherwise the user sees a volume that does not exist (records on live data)."""
     tg_tid = _insert_transcription(db_path, source_type="telegram",
                                    embedded_at="2026-05-12 10:00:00",
                                    embedding_model=enrichment.embeddings.EMBED_MODEL,
@@ -440,19 +440,19 @@ def test_list_unenriched_skips_telegram_needing_only_card(db_path):
                                      embedding_model=enrichment.embeddings.EMBED_MODEL,
                                      embedding_version=enrichment.embeddings.EMBED_VERSION)
     ids = enrichment.list_unenriched_ids(db_path)
-    assert tg_tid not in ids, "TG без картки — не робота для індексера"
-    assert file_tid in ids, "звичайний запис без картки лишається роботою"
+    assert tg_tid not in ids, "TG without a card is not work for the indexer"
+    assert file_tid in ids, "an ordinary record without a card stays work"
 
 
 def test_list_unenriched_keeps_telegram_needing_embed(db_path):
-    """Але якщо TG-запису бракує ВЕКТОРІВ — він робота: саме так він потрапляє в пошук."""
+    """But if a TG record lacks VECTORS it is work: that is how it gets into search."""
     tg_tid = _insert_transcription(db_path, source_type="telegram")
     assert tg_tid in enrichment.list_unenriched_ids(db_path)
 
 
 def test_enrich_card_soft_degrades_on_claude_exception(db_path, monkeypatch):
-    """T6.3: збій Claude-виклику НЕ прокидається — повертає status=retry_needed,
-    щоб не валити embed-фазу/увесь backfill-прохід."""
+    """T6.3: a Claude call failure is NOT propagated — returns status=retry_needed,
+    so as not to break the embed phase/the whole backfill pass."""
     tid = _insert_transcription(db_path)
 
     def _boom(*a, **k):
@@ -462,7 +462,7 @@ def test_enrich_card_soft_degrades_on_claude_exception(db_path, monkeypatch):
     res = enrichment._enrich_card(db_path, tid)
     assert res["status"] == "retry_needed"
     assert "529" in res["error"]
-    # рядок НЕ позначено enriched (щоб наступний backfill підхопив і спробував знову)
+    # the row is NOT marked enriched (so the next backfill picks it up and tries again)
     row_enriched = enrichment.list_unenriched_ids(db_path)
     assert tid in row_enriched
 
@@ -484,7 +484,7 @@ def test_enrich_transcription_soft_degrade_still_runs_embed_phase(db_path, monke
     res = enrichment.enrich_transcription(db_path, tid)
     assert res["card"]["status"] == "retry_needed"
     assert res["embed"]["status"] == "embedded"
-    assert res["status"] == "done"  # embed-фаза виконала роботу, попри збій card-фази
+    assert res["status"] == "done"  # the embed phase did the work despite the card-phase failure
     assert embed_calls == [tid]
 
 
@@ -512,9 +512,9 @@ def test_list_unenriched_ids_excludes_fully_enriched(db_path, monkeypatch):
 
 
 def test_list_unenriched_ids_includes_stale_embedding_version(db_path, monkeypatch):
-    """T6.5: зміна логіки чанкінгу видна ЛИШЕ по embedding_version. Якщо список
-    роботи її не звіряє, бамп EMBED_VERSION лишається декларацією: перекодувати
-    архів нікому — індексер таких записів не називає."""
+    """T6.5: a change of chunking logic is visible ONLY by embedding_version. If the work
+    list does not check it, a bump of EMBED_VERSION stays a declaration: nobody
+    will re-encode the archive — the indexer does not name such records."""
     tid = _insert_transcription(db_path)
     monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
                         lambda *a, **k: _sample_card())
@@ -529,7 +529,7 @@ def test_list_unenriched_ids_includes_stale_embedding_version(db_path, monkeypat
 
     assert tid in enrichment.list_unenriched_ids(db_path)
 
-    # …і NULL (записи до міграції v28) — теж стара нарізка, теж робота
+    # ...and NULL (records from before migration v28) — also old chunking, also work
     with get_db_connection(db_path) as conn:
         conn.execute("UPDATE transcriptions SET embedding_version=NULL WHERE id=?", (tid,))
         conn.commit()
@@ -543,7 +543,7 @@ def test_list_unenriched_ids_excludes_soft_deleted(db_path):
 
 
 # ============================================================
-# Ремонт 3 (review #3): duplicate_of не збагачується/не бекфіляється
+# Repair 3 (review #3): duplicate_of is not enriched/not backfilled
 # ============================================================
 
 def test_list_unenriched_ids_excludes_duplicate(db_path):
@@ -565,7 +565,7 @@ def test_backfill_force_excludes_duplicate(db_path, monkeypatch):
 
     enrichment.backfill(db_path, force=True)
 
-    assert calls == [1], "Claude мав викликатись рівно раз (для оригіналу), не для дубля"
+    assert calls == [1], "Claude must be called exactly once (for the original), not for the duplicate"
     with get_db_connection(db_path) as conn:
         dup_row = conn.execute(
             "SELECT enriched_at FROM transcriptions WHERE id=?", (dup,)).fetchone()
@@ -590,8 +590,8 @@ def test_enrich_transcription_skips_duplicate(db_path, monkeypatch):
     res = enrichment.enrich_transcription(db_path, dup)
 
     assert res["status"] == "skipped_duplicate"
-    assert not calls, "Claude не мав викликатись на дублі"
-    assert not embed_calls, "чанки/ембеддинги не мали будуватись для дубля"
+    assert not calls, "Claude must not be called on duplicates"
+    assert not embed_calls, "chunks/embeddings must not be built for a duplicate"
     with get_db_connection(db_path) as conn:
         row = conn.execute(
             "SELECT enriched_at FROM transcriptions WHERE id=?", (dup,)).fetchone()
@@ -600,20 +600,20 @@ def test_enrich_transcription_skips_duplicate(db_path, monkeypatch):
     assert row["enriched_at"] is None
     assert chunks["n"] == 0
 
-    # Оригінал того самого тексту збагачується як і раніше.
+    # The original of the same text is enriched as before.
     res_orig = enrichment.enrich_transcription(db_path, original)
     assert res_orig["card"]["status"] == "enriched"
     assert calls == [1]
 
 
 # ============================================================
-# enrich_transcription: model keyword-only + прокидання до extract_meeting_card
+# enrich_transcription: model keyword-only + passing through to extract_meeting_card
 # (production-rag-wave-b-03)
 # ============================================================
 
 def test_enrich_transcription_model_is_keyword_only(db_path):
     with pytest.raises(TypeError):
-        enrichment.enrich_transcription(db_path, 1, "claude-sonnet-5")  # noqa: не keyword
+        enrichment.enrich_transcription(db_path, 1, "claude-sonnet-5")  # noqa: not keyword
 
 
 def test_enrich_transcription_model_reaches_extract_meeting_card(db_path, monkeypatch):
@@ -634,13 +634,13 @@ def test_enrich_transcription_model_none_keeps_default_behavior(db_path, monkeyp
     monkeypatch.setattr(enrichment.text_polishing, "extract_meeting_card",
                         lambda *a, **k: calls.append(k.get("model")) or _sample_card())
     monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: False)
-    enrichment.enrich_transcription(db_path, tid)  # model не передано → None
+    enrichment.enrich_transcription(db_path, tid)  # model not passed -> None
     assert calls == [None]
 
 
 # ============================================================
-# text_polishing._truncate_card_body: стеля довжини extract_meeting_card
-# (production-rag-wave-b-03 — раніше стелі не було взагалі)
+# text_polishing._truncate_card_body: length ceiling of extract_meeting_card
+# (production-rag-wave-b-03 — there was no ceiling at all before)
 # ============================================================
 
 def test_truncate_card_body_noop_under_ceiling():
@@ -657,11 +657,11 @@ def test_truncate_card_body_cuts_head_and_tail_over_ceiling(caplog):
     assert result.startswith("A")
     assert result.endswith("A")
     assert "[…]" in result
-    assert any("текст задовгий" in r.message for r in caplog.records)
+    assert any("text too long" in r.message for r in caplog.records)
 
 
 # ============================================================
-# CLI backfill-cards (production-rag-wave-b-03) — лише card-фаза, --dry-run
+# CLI backfill-cards (production-rag-wave-b-03) — card phase only, --dry-run
 # ============================================================
 
 def test_select_backfill_card_rows_excludes_telegram_deleted_duplicate_and_done(db_path):
@@ -729,7 +729,7 @@ def test_backfill_cards_runs_once_then_zero_on_rerun(db_path, monkeypatch):
 
     result2 = enrichment.backfill_cards(db_path)
     assert result2 == {"total": 0, "done": 0, "skipped": 0, "failed": 0}
-    assert len(calls) == 1, "повторний запуск не мав звернутись до Claude знову"
+    assert len(calls) == 1, "a rerun must not have called Claude again"
 
 
 def test_backfill_cards_logs_and_continues_on_unexpected_error(db_path, monkeypatch):
@@ -741,31 +741,31 @@ def test_backfill_cards_logs_and_continues_on_unexpected_error(db_path, monkeypa
 
     def _boom_then_ok(db_path_, transcription_id, model=None, force=False, effort="medium"):
         if transcription_id == tid_boom:
-            raise RuntimeError("несподівана помилка")
+            raise RuntimeError("unexpected error")
         return orig_enrich_card(db_path_, transcription_id, model=model, force=force, effort=effort)
 
     monkeypatch.setattr(enrichment, "_enrich_card", _boom_then_ok)
     result = enrichment.backfill_cards(db_path)
     assert result == {"total": 2, "done": 1, "skipped": 0, "failed": 1}
-    assert tid_ok  # запис без бум-помилки таки обробився
+    assert tid_ok  # the record without the boom error did get processed
 
 
 def test_cli_dry_run_after_subcommand_prints_report_without_writing(db_path, capsys):
     tid = _insert_transcription(db_path)
     assert enrichment.main(["--db", db_path, "backfill-cards", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "Записів без картки: 1" in out
+    assert "Records without a card: 1" in out
     with get_db_connection(db_path) as conn:
         row = conn.execute("SELECT summary_json FROM transcriptions WHERE id=?", (tid,)).fetchone()
     assert row["summary_json"] is None
 
 
 def test_cli_dry_run_before_subcommand(db_path, capsys):
-    """--dry-run рятує з будь-якого місця рядка (як dedup_audio.py)."""
+    """--dry-run works from anywhere on the line (like dedup_audio.py)."""
     _insert_transcription(db_path)
     assert enrichment.main(["--db", db_path, "--dry-run", "backfill-cards"]) == 0
     out = capsys.readouterr().out
-    assert "Записів без картки: 1" in out
+    assert "Records without a card: 1" in out
 
 
 def test_cli_without_dry_run_runs_real_backfill(db_path, monkeypatch, capsys):
@@ -790,7 +790,7 @@ def test_cli_model_override_reaches_extract_meeting_card(db_path, monkeypatch):
 
 
 # ============================================================
-# Історія 06: підказки тегів → suggested_tags_json
+# Story 06: tag suggestions -> suggested_tags_json
 # ============================================================
 
 def _card_with_tags(tags):
@@ -800,8 +800,8 @@ def _card_with_tags(tags):
 
 
 def test_filter_suggested_tags_dedup_length_and_cap():
-    """Акцептанс: casefold-дублі схлопуються, задовга назва (>40) відкидається,
-    результат обрізаний до рівно 5."""
+    """Acceptance: casefold duplicates collapse, an overlong name (>40) is dropped,
+    the result is truncated to exactly 5."""
     long_name = "x" * 50
     tags = ["AI", " ai ", "Інвестори", long_name, "a", "b", "c", "d"]
     result = enrichment._filter_suggested_tags(tags, existing_names=[])
@@ -897,7 +897,7 @@ def test_backfill_cards_dry_run_does_not_write_suggested_tags(db_path, monkeypat
 
 
 # ============================================================
-# Історія 06: словник тегів у промпті extract_meeting_card
+# Story 06: tag vocabulary in the extract_meeting_card prompt
 # ============================================================
 
 class _FakeCardBlock:

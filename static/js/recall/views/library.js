@@ -1,5 +1,5 @@
 /* Recall — Library / History list. A real, deep-linkable list: filters,
-   search and pagination all live in the URL. Selection mode adds bulk напрямок
+   search and pagination all live in the URL. Selection mode adds bulk category
    assignment (Phase 15D — seeds the k-NN auto-suggest) and bulk delete. */
 (function () {
     'use strict';
@@ -16,9 +16,9 @@
         { k: 'telegram', label: 'Telegram' },
     ];
 
-    // Контекстні фасет-поля — зʼявляються лише під обране джерело й фільтрують
-    // у реальному часі (від 2 символів) по метаданих, яких немає в FTS-пошуку
-    // по тексту (відправник, назва чату, автор каналу).
+    // Contextual facet fields — appear only under the chosen source and filter
+    // in real time (from 2 characters) by metadata that is not in the FTS search
+    // by text (sender, chat name, channel author).
     const FACETS = {
         telegram: [
             { key: 'tg_sender', icon: 'fa-user', ph: T('library.lib.facet.sender') },
@@ -30,8 +30,8 @@
     };
     const FACET_KEYS = ['tg_sender', 'tg_chat', 'yt_author'];
 
-    // C9: напрямок/проєкт/тег — три різні осі, і підказка пояснює, як вони
-    // складаються (напрямок тягне свої проєкти, тег ріже впоперек усіх напрямків).
+    // C9: category/project/tag are three different axes, and the hint explains how they
+    // combine (a category pulls in its projects, a tag cuts across all categories).
     const FILTER_HINT = T('library.filterHint');
 
     let listEl = null, cats = null, state = null;
@@ -40,8 +40,8 @@
     // narrowed first rather than firing dozens of paginated fetches.
     const SELECT_ALL_CAP = 3000;
 
-    // Порожня видача з активними фільтрами — пояснити, ЩО саме звужує
-    // результат (шлях / теги / період), а не просто «нічого не знайдено».
+    // An empty result with active filters — explain WHAT exactly narrows
+    // the result (path / tags / period), not just "nothing found".
     function filterExplain(st, catsCache) {
         if (!st.category_id && !st.tags.length && !st.since && !st.until) return null;
         const bits = [];
@@ -117,9 +117,9 @@
         sb.addEventListener('click', (e) => {
             const b = e.target.closest('.rc-chip'); if (!b) return;
             state.source_type = b.dataset.src; state.page = 1;
-            // Зміна джерела скидає контекстні фасети (вони specific до джерела).
+            // A source change resets the contextual facets (they are source-specific).
             FACET_KEYS.forEach(k => { state[k] = ''; });
-            selected.clear(); // T4.5: фільтр змінився — старий bulk-вибір міг стати невидимим
+            selected.clear(); // T4.5: the filter changed — the old bulk selection could have become invisible
             sb.querySelectorAll('.rc-chip').forEach(c => c.classList.toggle('is-active', c === b));
             renderFacets(ctx);
             sync(); load(ctx);
@@ -230,7 +230,7 @@
         state.until = q.until || '';
         FACET_KEYS.forEach(k => { state[k] = q[k] || ''; });
         state.page = 1;
-        selected.clear(); // T4.5: застосування збереженого пошуку теж міняє фільтр
+        selected.clear(); // T4.5: applying a saved search also changes the filter
         // reflect into controls
         const si = ctx.mount.querySelector('#rcLibSearch'); if (si) si.value = state.search;
         const cs = ctx.mount.querySelector('#rcLibCat'); if (cs) cs.value = state.category_id;
@@ -272,8 +272,8 @@
         R.router.replace('/library' + (qs ? '?' + qs : ''));
     }
 
-    // Спільний набір параметрів фільтра для load() і selectAllFiltered() —
-    // один список полів, щоб нова вісь не забувалась в одному з двох місць.
+    // A shared set of filter parameters for load() and selectAllFiltered() —
+    // one list of fields, so a new axis is not forgotten in one of the two places.
     function filterParams() {
         return {
             search: state.search || undefined,
@@ -322,8 +322,8 @@
         listEl.innerHTML = curRows.map(rowHTML).join('');
         listEl.querySelectorAll('.rc-rec').forEach(el => {
             el.addEventListener('click', (e) => {
-                // Зовнішнє посилання (напр. «відкрити у Telegram») не має ще й
-                // відкривати сторінку транскрипту під ним.
+                // An external link (e.g. «відкрити у Telegram») must not also
+                // open the transcript page beneath it.
                 if (e.target.closest('.rc-rec__ext')) return;
                 if (selecting) toggleRow(ctx, el);
                 else R.router.navigate(el.dataset.href);
@@ -366,9 +366,9 @@
                 openMeta(parseInt(btn.dataset.id, 10), true);
             });
         });
-        // Коментарі: лічильники одним запитом ПІСЛЯ рендеру рядків. Не блокуємо
-        // список — картка без бейджа лишається повністю робочою, а бейдж
-        // доїжджає окремо (лічильники не варті затримки всієї Бібліотеки).
+        // Comments: counters in one request AFTER the rows render. We do not block
+        // the list — a card without a badge stays fully functional, and the badge
+        // arrives separately (the counters are not worth delaying the whole Library).
         if (R.comments && !selecting) {
             R.comments.decorate('transcription',
                 curRows.map(r => ({ id: r.id, el: listEl.querySelector(`.rc-rec[data-id="${r.id}"]`) }))
@@ -383,9 +383,9 @@
         renderBulkBar(ctx);
     }
 
-    // Мета-рядок збираємо з масиву й фільтруємо порожнє. Хардкодити роздільники
-    // між <span> не можна: у телеграм-записів немає ні мови, ні моделі, і в
-    // рядку лишались висячі «· ·» (той самий баг, якого немає в audio.js).
+    // We build the meta row from an array and filter out empties. Hardcoding separators
+    // between <span>s is not allowed: Telegram records have neither language nor model, and
+    // the row was left with dangling «· ·» (the same bug audio.js does not have).
     function meta(parts) {
         const kept = parts.filter(Boolean);
         return kept.join('<span class="sep">·</span>');
@@ -397,30 +397,30 @@
         sticker: T('library.lib.docType.sticker'), document: T('library.lib.docType.document'),
     };
 
-    // Назва чату: власне поле, інакше — з префікса «[TG] Чат: текст…», яким
-    // склеєний source_name у інджесті.
+    // Chat name: its own field, otherwise — from the prefix «[TG] Чат: текст…» that
+    // source_name is glued with at ingest.
     function tgChat(t) {
         if (t.tg_chat_title) return t.tg_chat_title;
         const m = /^\[TG\]\s*([^:]+):/.exec(t.source_name || '');
         return m ? m[1].trim() : 'Telegram';
     }
 
-    // Три форми рядка під три різні типи обʼєкта. Спільний каркас
-    // (заголовок / мета / тіло), різний СЕНС кожного слота:
-    //  · телеграм — заголовок це провенанс (чат+відправник), читається тіло;
-    //  · дзвінок/відео — заголовок це назва запису, він і читається;
-    //  · документ — заголовок це імʼя файлу.
+    // Three row forms for three different object types. A shared skeleton
+    // (title / meta / body), a different MEANING of each slot:
+    //  · telegram — the title is provenance (chat+sender), the body is read;
+    //  · call/video — the title is the record name, and it is what is read;
+    //  · document — the title is the file name.
     function rowParts(t) {
         const src = t.source_type;
         const dt = DOC_TYPE_LABEL[t.doc_type];
         const tasks = t.open_tasks > 0
             ? `<span class="rc-rec__sig">${T('library.lib.tasks', { count: t.open_tasks })}</span>` : '';
-        // «Не збагачено» — виняток (для дзвінків/файлів це меншість), тож це
-        // сигнал «Claude ще не розбирав», а не декоративний бейдж на всьому.
+        // «Не збагачено» is an exception (for calls/files it is a minority), so it is
+        // a signal "Claude has not parsed it yet", not a decorative badge on everything.
         const raw = (src !== 'telegram' && !t.enriched_at)
             ? `<span class="rc-rec__warn">${T('library.lib.notEnriched')}</span>` : '';
-        // Дубль лишається в списку (свої коментарі/файл/задачі), але його текст
-        // уже представлений оригіналом — і в пошуку бере участь саме оригінал.
+        // A duplicate stays in the list (its own comments/file/tasks), but its text
+        // is already represented by the original — and in search the original takes part.
         const dup = t.duplicate_of
             ? `<span class="rc-rec__warn">${T('library.lib.dup', { id: t.duplicate_of })}</span>` : '';
 
@@ -431,7 +431,7 @@
                 titleClass: 'rc-rec__title rc-rec__title--label',
                 meta: meta([UI.srcBadge(src), dt ? `<span>${dt}</span>` : '',
                             `<span>${U.fmtDate(t.created_at)}</span>`, tasks, dup]),
-                bodyLead: true,      // тіло — головний текст, а не хвіст картки
+                bodyLead: true,      // body is the main text, not the card's tail
             };
         }
         if (src === 'document') {
@@ -458,9 +458,9 @@
         };
     }
 
-    // Читальні чипи тегів рядка (без «×» — зняти тег можна лише на сторінці
-    // запису). Власна розмітка, а не UI.tagChip: тут рядок будується як
-    // рядок HTML (map+join у список), не як живий DOM-вузол.
+    // Read-only tag chips of the row (without «×» — a tag can be removed only on the
+    // record page). Own markup, not UI.tagChip: here the row is built as
+    // an HTML string (map+join into the list), not as a live DOM node.
     function rowTags(t) {
         const tags = t.tags || [];
         if (!tags.length) return '';
@@ -477,15 +477,15 @@
             : `<i class="rc-rec__glyph ${U.SRC_ICON[t.source_type] || 'fa-solid fa-file'}" aria-hidden="true"></i>`;
         const preview = U.esc(t.transcript_preview || '')
             .replace(/«MARK»/g, '<mark>').replace(/«\/MARK»/g, '</mark>');
-        // Напрямок ховаємо, коли фільтр по ньому вже активний — тоді чип
-        // однаковий на всіх рядках і не несе інформації.
+        // We hide the category when a filter on it is already active — then the chip is
+        // the same on all rows and carries no information.
         const cat = state && state.category_id ? '' : UI.catChip(t.category_id);
         const tgLink = !selecting && t.tg_link
             ? `<a class="rc-iconbtn rc-rec__ext" href="${U.esc(t.tg_link)}" target="_blank" rel="noopener"
                   title="${U.esc(T('library.lib.openTg'))}" aria-label="${U.esc(T('library.lib.openTg'))}"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '';
         const check = selecting ? `<span class="rc-rec__check"><input type="checkbox" ${selected.has(t.id) ? 'checked' : ''} tabindex="-1"></span>` : '';
         const edit = !selecting ? `<button class="rc-iconbtn rc-rec__edit" data-act="edit" data-id="${t.id}" title="${U.esc(T('library.lib.editMeta'))}" aria-label="${U.esc(T('library.lib.editMeta'))}"><i class="fa-solid fa-pen"></i></button>` : '';
-        // Запис без власної назви — помітна кнопка: локальна модель пропонує варіанти.
+        // A record without its own title — a prominent button: the local model proposes variants.
         const name = !selecting && UI.isUnnamedRecording(t)
             ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" data-id="${t.id}" title="${U.esc(T('library.lib.suggestTitle'))}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.lib.suggest')}</button>` : '';
         const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="${U.esc(T('library.lib.deleteRecord'))}" aria-label="${U.esc(T('library.lib.deleteRecord'))}"><i class="fa-solid fa-trash"></i></button>` : '';
@@ -636,8 +636,8 @@
         } catch (err) { UI.toast(err && err.message, 'error'); if (apply) apply.disabled = false; }
     }
 
-    // Одиничне видалення (soft-delete + undo-toast). Оптимістично прибирає
-    // рядок зі списку; якщо DELETE впаде — повертає рядок назад.
+    // Single deletion (soft-delete + undo-toast). Optimistically removes
+    // the row from the list; if DELETE fails — puts the row back.
     async function doSingleDelete(ctx, id, title) {
         const ok = await UI.confirmModal({
             title: T('library.lib.del.title'),
@@ -669,7 +669,7 @@
 
     async function doBulkDelete(ctx) {
         const ids = [...selected];
-        const BIG_N = 10; // від такої кількості вимагаємо усвідомленого type-to-confirm
+        const BIG_N = 10; // from this count we require a conscious type-to-confirm
         const needsTypeConfirm = ids.length > BIG_N;
         const ok = await UI.modal({
             title: T('library.lib.bulkDel.title'),

@@ -1,10 +1,10 @@
-"""Детермінована математика метрик для evals/ (REMEDIATION_PLAN Волна 3, T6.1).
+"""Deterministic metric math for evals/ (REMEDIATION_PLAN Wave 3, T6.1).
 
-Жодних мережевих/GPU-викликів тут немає навмисно — увесь цей модуль має
-бути тестованим офлайн (``tests/test_eval_metrics.py``) на синтетичних
-даних, щоб зміну формул recall@k / citation-rate можна було перевірити без
-реального API-ключа чи БД. Побудова запиту (retrieval.search) і генерація
-відповіді (rag.answer_question) — окремо, у ``run_eval.py``.
+There are deliberately no network/GPU calls here: this whole module must
+be testable offline (``tests/test_eval_metrics.py``) on synthetic
+data, so a change to the recall@k / citation-rate formulas can be checked without a
+real API key or DB. Query building (retrieval.search) and answer generation
+(rag.answer_question) live separately, in ``run_eval.py``.
 """
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ import re
 from typing import Iterable, Optional
 
 
-# Формат цитат у відповіді RAG узгоджений з системним промптом
-# app/services/rag.py::_RAG_SYSTEM_PROMPT — "[n]" (можна кілька: [1][3]).
+# The citation format in the RAG answer matches the system prompt
+# app/services/rag.py::_RAG_SYSTEM_PROMPT: "[n]" (several allowed: [1][3]).
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 def source_ids_from_chunks(chunks: Iterable[dict]) -> list[int]:
-    """Витягти transcription_id зі списку чанків (як повертає retrieval.search),
-    зберігаючи порядок і без дублів (перша поява — найвищий ранг)."""
+    """Extract transcription_id from a list of chunks (as returned by retrieval.search),
+    keeping order and without duplicates (first occurrence = highest rank)."""
     seen: set[int] = set()
     out: list[int] = []
     for ch in chunks:
@@ -32,11 +32,11 @@ def source_ids_from_chunks(chunks: Iterable[dict]) -> list[int]:
 
 
 def recall_at_k(expected_ids: Iterable[int], retrieved_ids: Iterable[int]) -> Optional[float]:
-    """Частка очікуваних джерел, що знайшлися у top-k retrieved.
+    """Share of expected sources found in the top-k retrieved.
 
-    ``|expected ∩ retrieved| / |expected|``. Повертає ``None``, якщо
-    ``expected_ids`` порожній (golden-item без цього критерію — не рахуємо
-    ні як провал, ні як успіх, просто пропускаємо в агрегації).
+    ``|expected ∩ retrieved| / |expected|``. Returns ``None`` if
+    ``expected_ids`` is empty (a golden item without this criterion is counted
+    neither as a failure nor as a success, it is just skipped in aggregation).
     """
     expected = set(expected_ids)
     if not expected:
@@ -46,12 +46,12 @@ def recall_at_k(expected_ids: Iterable[int], retrieved_ids: Iterable[int]) -> Op
 
 
 def source_name_hit(name_substrings: Iterable[str], chunks: Iterable[dict]) -> Optional[bool]:
-    """Чи серед retrieved-чанків є джерело, чия ``source_name`` містить
-    (case-insensitive) хоча б один із очікуваних підрядків.
+    """Whether any retrieved chunk has a source whose ``source_name`` contains
+    (case-insensitive) at least one of the expected substrings.
 
-    Стійкіша альтернатива ``expected_transcription_ids`` — ID транскрипту
-    змінюється при переінджесті архіву, назва зазвичай ні. Повертає ``None``,
-    якщо ``name_substrings`` порожній (критерій не заданий).
+    A more robust alternative to ``expected_transcription_ids``: the transcript ID
+    changes when the archive is re-ingested, the name usually does not. Returns ``None``
+    if ``name_substrings`` is empty (criterion not set).
     """
     subs = [s.lower() for s in name_substrings if s]
     if not subs:
@@ -61,21 +61,21 @@ def source_name_hit(name_substrings: Iterable[str], chunks: Iterable[dict]) -> O
 
 
 def has_citation(answer: str) -> bool:
-    """Чи містить відповідь хоча б одне цитування у форматі ``[n]``."""
+    """Whether the answer contains at least one citation in the ``[n]`` format."""
     return bool(_CITATION_RE.search(answer or ""))
 
 
 def cited_indices(answer: str) -> list[int]:
-    """Усі індекси цитат [n], що зустрічаються у відповіді (з дублями, у
-    порядку появи) — корисно для перевірки, що цитати посилаються на реально
-    надані фрагменти (1..found)."""
+    """All citation indices [n] found in the answer (with duplicates, in
+    order of appearance) - useful for checking that citations point to fragments
+    that were actually provided (1..found)."""
     return [int(m) for m in _CITATION_RE.findall(answer or "")]
 
 
 def citations_in_range(answer: str, found: int) -> bool:
-    """Чи ВСІ цитати [n] у відповіді посилаються на дійсні індекси фрагментів
-    (1..found)? Порожня відповідь / без цитат → True (нема що перевіряти —
-    used by evaluate_item лише коли found > 0 і has_citation вже True)."""
+    """Whether ALL citations [n] in the answer point to valid fragment indices
+    (1..found)? Empty answer / no citations -> True (nothing to check -
+    used by evaluate_item only when found > 0 and has_citation is already True)."""
     idxs = cited_indices(answer)
     if not idxs:
         return True
@@ -84,15 +84,15 @@ def citations_in_range(answer: str, found: int) -> bool:
 
 def evaluate_item(golden: dict, retrieved_chunks: list[dict],
                    answer: Optional[str] = None) -> dict:
-    """Порахувати метрики для ОДНОГО golden-запису проти реального результату.
+    """Compute metrics for ONE golden record against the actual result.
 
-    ``golden`` — один запис golden-set (див. evals/golden_set.example.json).
-    ``retrieved_chunks`` — ``retrieval.search(...)["chunks"]`` (top-k).
-    ``answer`` — текст відповіді RAG (``rag.answer_question(...)["answer"]``),
-    якщо запускали і генерацію відповіді, інакше ``None`` (тільки retrieval).
+    ``golden`` is one golden-set record (see evals/golden_set.example.json).
+    ``retrieved_chunks`` is ``retrieval.search(...)["chunks"]`` (top-k).
+    ``answer`` is the RAG answer text (``rag.answer_question(...)["answer"]``),
+    if answer generation was run too, otherwise ``None`` (retrieval only).
 
-    Returns dict з ключами (усі опційні метрики — ``None``, якщо критерій
-    не заданий у golden-записі або відповідь не генерувалась):
+    Returns a dict with keys (all optional metrics are ``None`` if the criterion
+    is not set in the golden record or no answer was generated):
       id, recall_at_k, source_name_hit, has_citation, citations_valid
     """
     retrieved_ids = source_ids_from_chunks(retrieved_chunks)
@@ -112,11 +112,11 @@ def evaluate_item(golden: dict, retrieved_chunks: list[dict],
 
 
 def aggregate(results: list[dict]) -> dict:
-    """Звести список ``evaluate_item(...)`` у підсумкові метрики для таблиці.
+    """Fold a list of ``evaluate_item(...)`` results into summary metrics for the table.
 
-    Кожна метрика агрегується лише по записах, де вона не ``None`` (щоб
-    golden-записи без певного критерію не псували середнє). ``*_n`` — на
-    скількох записах порахована метрика (для інтерпретації середнього).
+    Each metric is aggregated only over records where it is not ``None`` (so
+    golden records without a given criterion do not skew the mean). ``*_n`` is how
+    many records the metric was computed on (for interpreting the mean).
     """
     def _agg(key: str, as_bool: bool = False) -> dict:
         vals = [r[key] for r in results if r.get(key) is not None]

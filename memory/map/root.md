@@ -1,6 +1,6 @@
 # root — core: app.py boot, config, state, whisper
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 Adjacent slice: `root-processes.md` (telegram_*, mcp_server.py).
 
 ## app.py
@@ -47,7 +47,7 @@ whisper.preload ∈ (ready,disabled) ∧ boot_finished`, otherwise 503.
 **Registry (`app/core/settings.py`):** the single source of 168 env flags (+`RECALL_UI_LANG` `auto|uk|en`, :77; `tests/conftest.py:14`
 forces `auto` in every test, because the owner's `.env` is loaded by `config.py`/`app.py`) (count by `^    Setting(`): `REGISTRY`, `by_name()`,
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI `python -m app.core.settings env-example`).
-No heavy dependencies (does not import `app.*`/`flask`/`torch`/`config`). Groups: `«Труби»` (`PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`,
+Setting descriptions are English (4.17.0). No heavy dependencies (does not import `app.*`/`flask`/`torch`/`config`). Groups: `«Труби»` (`PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`,
 `PIPES_RETRY_MAX`, `PIPES_MODEL`, `TELEGRAM_BOT_TOKEN` secret, `TELEGRAM_BOT_CHAT_ID`); `RECALL_PUBLIC_URL`; `«Auth / доступ»`,
 `RECALL_PROXY_ALLOWED_IPS`.
 **Auth gate (`app/core/auth.py`):** one `before_request` on `/api/*` (exempt: OPTIONS, non-`/api/`, `/api/health`, `/api/ready`).

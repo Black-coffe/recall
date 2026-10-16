@@ -1,9 +1,9 @@
-"""Каталог серверних текстів інтерфейсу: по модулю на область.
+"""Catalog of the server-side interface texts: one module per area.
 
-Кожен модуль (крім приватних ``_*``) експортує ``MESSAGES: dict`` виду
-``{"<area>.<key>": {"uk": "...", "en": "..."}}``; значення мови може бути
-словником форм плюралю (``uk``: one/few/many, ``en``: one/other).
-Нові модулі підхоплюються автоматично (``pkgutil``), без правки цього файлу.
+Every module (except private ``_*`` ones) exports ``MESSAGES: dict`` of the form
+``{"<area>.<key>": {"uk": "...", "en": "..."}}``; a language value may be a
+dict of plural forms (``uk``: one/few/many, ``en``: one/other).
+New modules are picked up automatically (``pkgutil``), no edit of this file needed.
 """
 from __future__ import annotations
 
@@ -23,14 +23,14 @@ def load_modules() -> dict:
 
 
 def merged() -> dict:
-    """Єдиний словник ключів; дубль ключа між модулями — ValueError."""
+    """The single key dictionary; a key duplicated between modules raises ValueError."""
     result: dict = {}
     owner: dict = {}
     for name, messages in load_modules().items():
         for key, value in messages.items():
             if key in result:
                 raise ValueError(
-                    f"i18n: дубль ключа {key!r} у модулях {owner[key]!r} і {name!r}")
+                    f"i18n: duplicate key {key!r} in modules {owner[key]!r} and {name!r}")
             result[key] = value
             owner[key] = name
     return result

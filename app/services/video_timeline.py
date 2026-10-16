@@ -1,12 +1,12 @@
-"""Візуальна стрічка запису: кадр + фрази за той самий інтервал (spec video-visual-timeline, історія 03).
+"""Visual timeline of a recording: frame + phrases over the same interval (spec video-visual-timeline, story 03).
 
-Читає те, що записав ``video_analysis.analyze_video`` (``video_keyframes``), і
-транскрипт (``transcriptions.segments``). Зображення кадрів не зберігаються —
-``render_frame`` ріже кадр з відео на запит і зафарбовує рамки секретів
-(``screen_secrets``). Якщо запис ще не аналізували, рамок нема — тоді кадр
-OCR-иться на льоту, щоб секрет не пішов назовні.
+Reads what ``video_analysis.analyze_video`` wrote (``video_keyframes``) and the
+transcript (``transcriptions.segments``). Frame images are not stored:
+``render_frame`` cuts a frame from the video on demand and paints over secret boxes
+(``screen_secrets``). If the recording has not been analyzed yet, there are no boxes — then the frame is
+OCR-ed on the fly so that a secret does not go out.
 
-Текст тут уже замаскований (історія 02); сирі секрети цей модуль не читає.
+The text here is already masked (story 02); this module does not read raw secrets.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import logging
 from io import BytesIO
 from typing import Optional
 
+from app.core.i18n import tr
 from app.db.connection import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ def _load(conn, tid: int):
                       "video_keyframes_count, video_analysis_params "
                       "FROM transcriptions WHERE id = ?", (tid,)).fetchone()
     if not tx:
-        raise TimelineError('NOT_FOUND', f'запис #{tid} не знайдено')
+        raise TimelineError('NOT_FOUND', f'recording #{tid} not found')
     rows = conn.execute(
         "SELECT id, ts_offset_sec, end_sec, video_time_sec, frame_type, duplicate_of, "
         "change_score, ocr_text, vision_text, vision_model, ocr_boxes_json "
@@ -49,13 +50,13 @@ def _load(conn, tid: int):
     try:
         segs = json.loads(tx['segments'] or '[]')
     except ValueError:
-        logger.warning("segments запису #%s не JSON — стрічка без транскрипту", tid)
+        logger.warning("segments of recording #%s is not JSON — timeline without transcript", tid)
         segs = []
     return tx, rows, segs
 
 
 def _transcript_for(segs: list, start: float, end: float, shift: float) -> list:
-    """Сегменти транскрипту, що перетинаються з [start, end] (час кадру + shift)."""
+    """Transcript segments that intersect [start, end] (frame time + shift)."""
     a, b = start + shift, end + shift
     out = []
     for s in segs:
@@ -70,7 +71,7 @@ def _item(tid: int, r, segs: list, shift: float, with_transcript: bool,
           track_offset: float = 0.0) -> dict:
     start = float(r['ts_offset_sec'] or 0)
     end = float(r['end_sec'] if r['end_sec'] is not None else start)
-    # час представника у стрічці = час у відео + зсув доріжки
+    # the representative's time in the timeline = time in the video + the track's shift
     frame_time = start if r['video_time_sec'] is None else \
         float(r['video_time_sec']) + track_offset
     item = {
@@ -99,12 +100,12 @@ def _track_offset(db_path: str, tid: int) -> float:
 def build(db_path: str, tid: int, *, start: Optional[float] = None, end: Optional[float] = None,
           with_transcript: bool = True, include_camera: bool = False, shift: float = 0.0,
           limit: int = 50, offset: int = 0) -> dict:
-    """Стрічка з пагінацією. ``shift`` — зсув транскрипту відносно відео (с)."""
+    """Paginated timeline. ``shift`` is the transcript's shift relative to the video (s)."""
     with get_db_connection(db_path) as conn:
         tx, rows, segs = _load(conn, tid)
     if not tx['video_analysis_at']:
         return {'transcription_id': tid, 'status': 'not_analyzed', 'total': 0, 'items': [],
-                'hint': 'спершу video_analyze — нарізка ще не робилась'}
+                'hint': tr('svc_pipes.timeline.hint.notAnalyzed')}
     picked = [r for r in rows
               if (include_camera or r['frame_type'] not in HIDDEN_TYPES)
               and (start is None or (r['end_sec'] or r['ts_offset_sec']) >= start)
@@ -115,7 +116,7 @@ def build(db_path: str, tid: int, *, start: Optional[float] = None, end: Optiona
     try:
         params = json.loads(tx['video_analysis_params'] or 'null')
     except ValueError:
-        logger.debug("video_analysis_params не JSON", exc_info=True)
+        logger.debug("video_analysis_params is not JSON", exc_info=True)
         params = None
     return {
         'transcription_id': tid, 'title': tx['title'] or tx['source_name'],
@@ -128,32 +129,36 @@ def build(db_path: str, tid: int, *, start: Optional[float] = None, end: Optiona
 
 
 def to_markdown(result: dict) -> str:
-    """Стрічка для читання людиною й агентом."""
-    lines = [f"# Візуальна стрічка — {result.get('title') or ''} (#{result.get('transcription_id')})", '']
+    """Timeline for reading by a human and an agent."""
+    lines = [tr('svc_pipes.timeline.md.title', title=result.get('title') or '',
+                tid=result.get('transcription_id')), '']
     if result.get('status') != 'ready':
         return '\n'.join(lines + [f"_{result.get('hint') or result.get('status')}_"])
     for it in result.get('items') or []:
-        lines.append(f"## {_hms(it['start'])} – {_hms(it['end'])} · {it['frame_type'] or 'кадр'}")
-        lines.append(f"![кадр]({it['frame_url']})")
+        lines.append(f"## {_hms(it['start'])} – {_hms(it['end'])} · "
+                     f"{it['frame_type'] or tr('svc_pipes.timeline.md.frame')}")
+        lines.append(f"![{tr('svc_pipes.timeline.md.frame')}]({it['frame_url']})")
         if it.get('duplicate_of'):
-            lines.append(f"_Повтор екрана з кадру #{it['duplicate_of']}._")
+            lines.append(tr('svc_pipes.timeline.md.repeat', frame=it['duplicate_of']))
         ocr = ' '.join((it.get('ocr_text') or '').split())
         if ocr:
-            lines.append(f"На екрані: {ocr[:400]}{'…' if len(ocr) > 400 else ''}")
+            lines.append(tr('svc_pipes.timeline.md.onScreen',
+                            text=f"{ocr[:400]}{'…' if len(ocr) > 400 else ''}"))
         if it.get('description'):
-            lines.append(f"Опис: {it['description']}")
+            lines.append(tr('svc_pipes.timeline.md.description', text=it['description']))
         if it.get('transcript'):
-            lines.append('Говорили:')
+            lines.append(tr('svc_pipes.timeline.md.spoken'))
             for s in it['transcript']:
                 lines.append(f"- {s.get('speaker') or '?'} ({_hms(s['start'])}): \"{s['text']}\"")
         lines.append('')
     if result.get('next_offset') is not None:
-        lines.append(f"_Далі: offset={result['next_offset']} (усього {result['total']})._")
+        lines.append(tr('svc_pipes.timeline.md.next', offset=result['next_offset'],
+                        total=result['total']))
     return '\n'.join(lines)
 
 
 # ---------------------------------------------------------------------------
-# кадри на льоту
+# frames on the fly
 # ---------------------------------------------------------------------------
 
 def _covering(rows, t: float):
@@ -166,13 +171,13 @@ def _covering(rows, t: float):
 
 def render_frame(db_path: str, tid: int, t: float, *, size: str = 'thumb',
                  ffmpeg: Optional[str] = None):
-    """→ (PIL-кадр із зафарбованими секретами, метадані відрізка). ``t`` — час стрічки."""
+    """→ (PIL frame with secrets painted over, segment metadata). ``t`` is the timeline time."""
     from app.services import screen_secrets as ss
     from app.services import video_analysis as va
     from app.services import video_frames as vf
     info = va.resolve_recording_video(db_path, tid)
     if info is None:
-        raise TimelineError('NO_VIDEO', f'у запису #{tid} немає відео')
+        raise TimelineError('NO_VIDEO', f'recording #{tid} has no video')
     offset = float(info.get('start_offset_sec') or 0.0)
     with get_db_connection(db_path) as conn:
         _, rows, _ = _load(conn, tid)
@@ -182,19 +187,19 @@ def render_frame(db_path: str, tid: int, t: float, *, size: str = 'thumb',
     row = _covering(rows, float(t))
     is_representative = (row is not None and row['video_time_sec'] is not None
                          and abs(float(row['video_time_sec']) - video_t) < 0.05)
-    # frame_text — текст САМЕ цього кадру (секрети замасковані) або None, якщо OCR не було:
-    # за ним MCP перевіряє стоп-слова (spec mcp-visual-privacy)
+    # frame_text — the text of exactly THIS frame (secrets masked) or None if there was no OCR:
+    # MCP checks stop words against it (spec mcp-visual-privacy)
     if is_representative and row['ocr_boxes_json'] is not None:
-        # рівно той кадр, що OCR-ився при аналізі — його рамки секретів точні
+        # exactly the frame that was OCR-ed during analysis — its secret boxes are exact
         boxes, w, h = ss.secret_boxes(row['ocr_boxes_json'])
         frame_text = row['ocr_text'] or ''
     elif is_representative and row['ocr_text'] is not None:
-        boxes, w, h = [], 0, 0                  # той самий кадр: OCR був, секретів нема
+        boxes, w, h = [], 0, 0                  # the same frame: OCR ran, no secrets
         frame_text = row['ocr_text'] or ''
     else:
-        # будь-який інший момент: секрет міг зʼявитись усередині відрізка (рядок
-        # токена не відкриває нового відрізка, прокрутку зливає settle) — тож
-        # шукаємо секрети саме на цьому кадрі
+        # any other moment: a secret could appear inside the segment (a token
+        # line does not open a new segment, scrolling is merged by settle) — so
+        # we look for secrets on exactly this frame
         boxes, w, h, frame_text = _live_secret_boxes(info['primary_video_path'], video_t, ffmpeg)
     meta = {'t': round(float(t), 2), 'size': size, 'redacted_boxes': len(boxes),
             'frame_text': frame_text}
@@ -211,7 +216,7 @@ def _live_secret_boxes(video: str, video_t: float, ffmpeg: Optional[str]):
     from app.services import video_analysis as va
     from app.services import video_frames as vf
     if not dp.ocr_available():
-        logger.warning("OCR недоступний — кадр без аналізу віддається повністю зафарбованим")
+        logger.warning("OCR unavailable — a frame without analysis is returned fully painted over")
         return [[0, 0, 10 ** 6, 10 ** 6]], 1, 1, None
     img = vf.grab_frame(video, video_t, max_width=va._OCR_MAX_WIDTH, ffmpeg=ffmpeg)
     text, words = va.ocr_words(img)
@@ -229,7 +234,7 @@ def jpeg_b64(img, quality: int = 80) -> str:
 def frames(db_path: str, tid: int, *, t: Optional[float] = None, start: Optional[float] = None,
            end: Optional[float] = None, limit: int = 6, size: str = 'thumb',
            include_camera: bool = False, ffmpeg: Optional[str] = None) -> dict:
-    """Один кадр за ``t`` або представники відрізків у [start, end] (≤ limit, ≤ 12)."""
+    """One frame by ``t`` or the segments' representatives in [start, end] (≤ limit, ≤ 12)."""
     limit = max(1, min(int(limit or 6), MAX_FRAMES_PER_CALL))
     if t is not None:
         times = [float(t)]
@@ -237,10 +242,10 @@ def frames(db_path: str, tid: int, *, t: Optional[float] = None, start: Optional
         res = build(db_path, tid, start=start, end=end, with_transcript=False,
                     include_camera=include_camera, limit=200)
         if res['status'] != 'ready':
-            raise TimelineError('NOT_ANALYZED', 'запис ще не нарізано — спершу video_analyze '
-                                '(або передай t, щоб узяти один кадр без аналізу)')
+            raise TimelineError('NOT_ANALYZED', 'the recording has not been cut yet — run video_analyze first '
+                                '(or pass t to take one frame without analysis)')
         items = [i for i in res['items'] if not i.get('duplicate_of')]
-        if len(items) > limit:                      # рівномірно по інтервалу
+        if len(items) > limit:                      # evenly across the interval
             step = len(items) / limit
             items = [items[int(k * step)] for k in range(limit)]
         times = [i['frame_time'] for i in items]
@@ -256,17 +261,17 @@ def frames(db_path: str, tid: int, *, t: Optional[float] = None, start: Optional
 def frames_for_text(db_path: str, tid: int, *, query: Optional[str] = None,
                     segment_index: Optional[int] = None, window: float = 5.0,
                     shift: float = 0.0, max_matches: int = 5) -> dict:
-    """Фраза (підрядок, без урахування регістру) або індекс сегмента → кадри у вікні ±window."""
+    """A phrase (substring, case-insensitive) or a segment index → frames in the ±window."""
     with get_db_connection(db_path) as conn:
         tx, rows, segs = _load(conn, tid)
     if segment_index is not None:
         if not 0 <= int(segment_index) < len(segs):
-            raise TimelineError('NOT_FOUND', f'сегмента {segment_index} нема')
+            raise TimelineError('NOT_FOUND', f'segment {segment_index} does not exist')
         matches = [(int(segment_index), segs[int(segment_index)])]
     else:
         q = (query or '').casefold().strip()
         if not q:
-            raise TimelineError('BAD_REQUEST', 'потрібен query або segment_index')
+            raise TimelineError('BAD_REQUEST', 'query or segment_index is required')
         matches = [(i, s) for i, s in enumerate(segs) if q in (s.get('text') or '').casefold()]
         matches = matches[:max_matches]
     toff = _track_offset(db_path, tid)
@@ -286,11 +291,11 @@ def frames_for_text(db_path: str, tid: int, *, query: Optional[str] = None,
 def search_visual(db_path: str, query: str, *, transcription_ids: Optional[list] = None,
                   date_from: Optional[str] = None, date_to: Optional[str] = None,
                   limit: int = 20) -> dict:
-    """Пошук по OCR і описах кадрів усього архіву (підрядок, casefold у Python —
-    SQLite LOWER не згортає кирилицю). Текст уже замаскований."""
+    """Search across OCR and frame descriptions of the whole archive (substring, casefold in Python —
+    SQLite LOWER does not fold Cyrillic). The text is already masked."""
     q = (query or '').casefold().strip()
     if not q:
-        raise TimelineError('BAD_REQUEST', 'порожній запит')
+        raise TimelineError('BAD_REQUEST', 'empty query')
     sql = ("SELECT k.id, k.transcription_id, k.ts_offset_sec, k.end_sec, k.video_time_sec, "
            "k.frame_type, "
            "k.ocr_text, k.vision_text, t.title, t.source_name, t.meeting_date, t.created_at "

@@ -84,17 +84,17 @@
         loadSpeakers(ctx);
     }
 
-    // Витягти повідомлення для тосту з помилки API: 409 has_projects несе
-    // короткий код у .message (err.body.error === 'has_projects'), а
-    // людський текст зі списком проєктів — у err.body.message; решта кодів
-    // (two_levels/self_parent/bad_parent/duplicate) уже людські в .message.
+    // Extract a toast message from an API error: 409 has_projects carries
+    // a short code in .message (err.body.error === 'has_projects'), and
+    // the human text with the list of projects is in err.body.message; the other codes
+    // (two_levels/self_parent/bad_parent/duplicate) are already human in .message.
     function apiErrMsg(e, fallback) {
         return (e && e.body && e.body.message) || (e && e.message) || fallback || R.t('settings.err.generic');
     }
 
-    // ---- мова інтерфейсу ------------------------------------------------------
-    // GET/POST /api/settings/ui-lang: auto|uk|en у .env; після збереження — reload,
-    // щоб shell отримав новий data-ui-lang. «Українська»/«English» — без перекладу.
+    // ---- interface language ------------------------------------------------------
+    // GET/POST /api/settings/ui-lang: auto|uk|en in .env; after saving — reload,
+    // so the shell gets the new data-ui-lang. «Українська»/«English» — not translated.
     async function loadLang(ctx) {
         const box = ctx.mount.querySelector('#rcSetLang');
         if (!box) return;
@@ -127,12 +127,12 @@
         });
     }
 
-    // ---- AI / Claude API-ключ (T5.1) ---------------------------------------
-    // Онбординг-стіна: раніше єдиний спосіб задати ANTHROPIC_API_KEY був
-    // ручним редагуванням .env, про існування якого користувачу ніхто не
-    // казав. Тепер — masked-інпут + Зберегти + Перевірити зʼєднання (лёгкий
-    // Haiku-виклик) + статус-крапка. Ключ ніколи не запитується назад із
-    // бекенду (лише {configured: bool}) і не логується на фронті.
+    // ---- AI / Claude API key (T5.1) ---------------------------------------
+    // Onboarding wall: previously the only way to set ANTHROPIC_API_KEY was
+    // manual editing of .env, whose existence nobody told the user
+    // about. Now — a masked input + Save + Check connection (a light
+    // Haiku call) + a status dot. The key is never requested back from the
+    // backend (only {configured: bool}) and is not logged on the front.
     async function loadAiKey(ctx) {
         const box = ctx.mount.querySelector('#rcSetAiKey');
         if (!box) return;
@@ -206,7 +206,7 @@
         });
     }
 
-    // ---- напрямки: керування (дерево, CRUD + reparent + перенесення/обʼєднання) ----
+    // ---- categories: management (tree, CRUD + reparent + move/merge) ----
     let _cats = [];
     async function loadCategories(ctx) {
         const box = ctx.mount.querySelector('#rcSetCats');
@@ -240,10 +240,10 @@
         </div>`;
     }
 
-    // Опції reparent-селекта одного вузла: усі ІНШІ напрямки + «без напрямку»
-    // (= сам стає/лишається напрямком). Проєкти як цілі не пропонуються —
-    // третього рівня в дереві нема (сервер однаково відхилить, це лише щоб
-    // не показувати завідомо криву опцію).
+    // Options of the reparent select of one node: all OTHER categories + «без напрямку»
+    // (= it becomes/stays a category itself). Projects are not offered as targets —
+    // there is no third level in the tree (the server would reject it anyway, this is only so as
+    // not to show a knowingly wrong option).
     function reparentOptions(c) {
         const cur = c.parent_id == null ? '' : String(c.parent_id);
         const directions = _cats.filter((x) => x.level !== 'project' && x.id !== c.id);
@@ -307,7 +307,7 @@
         if (cat) { UI.toast(R.t('settings.cats.created', { name: cat.name }), 'success'); loadCategories(ctx); }
     }
 
-    // Перенести/обʼєднати напрямок у інший (з опцією видалити джерело).
+    // Move/merge a category into another (with the option to delete the source).
     function mergeCategory(ctx, src) {
         const others = _cats.filter(x => x.id !== src.id);
         if (!others.length) { UI.toast(R.t('settings.cats.noOther'), 'info'); return; }
@@ -348,7 +348,7 @@
         });
     }
 
-    // ---- теги: словник (CRUD + злиття) -------------------------------------
+    // ---- tags: dictionary (CRUD + merge) -------------------------------------
     let _tags = [];
     async function loadTags(ctx) {
         const box = ctx.mount.querySelector('#rcSetTags');
@@ -419,7 +419,7 @@
         catch (e) { UI.toast(apiErrMsg(e), 'error'); }
     }
 
-    // Обʼєднати тег з іншим (усі записи src переходять на keep, src зникає).
+    // Merge a tag with another (all records of src move to keep, src disappears).
     function mergeTag(ctx, src) {
         const others = _tags.filter(x => x.id !== src.id);
         if (!others.length) { UI.toast(R.t('settings.tags.noOther'), 'info'); return; }
@@ -456,7 +456,7 @@
         });
     }
 
-    // ---- co-pilot status (Phase 19, Крок 9) --------------------------------
+    // ---- co-pilot status (Phase 19, Step 9) --------------------------------
     const cpMode = (m) => ({ light: R.t('settings.cp.mode.light'), medium: R.t('settings.cp.mode.medium'), hard: R.t('settings.cp.mode.hard') })[m];
     const cpImp = (m) => ({ low: R.t('settings.cp.imp.low'), medium: R.t('settings.cp.imp.medium'), high: R.t('settings.cp.imp.high') })[m];
     async function loadCopilot(ctx) {
@@ -490,11 +490,11 @@
         if (toggleBtn) toggleBtn.addEventListener('click', () => onCopilotToggle(ctx, toggleBtn));
     }
 
-    // Тумблер замість developer-інструкції «додайте COPILOT_ENABLED=1 у .env
-    // і перезапустіть» (T5.2). copilot_service створюється ОДИН раз при
-    // старті процесу (app.py) з cfg.COPILOT_ENABLED — рантайм-шляху
-    // ретроактивно піднятий/погасити його нема, тому чесно повідомляємо
-    // restart_required замість того, щоб брехати, що ввімкнулось одразу.
+    // A toggle instead of the developer instruction «додайте COPILOT_ENABLED=1 у .env
+    // і перезапустіть» (T5.2). copilot_service is created ONCE at
+    // process start (app.py) from cfg.COPILOT_ENABLED — there is no runtime path
+    // to retroactively raise/drop it, so we honestly report
+    // restart_required instead of lying that it turned on at once.
     async function onCopilotToggle(ctx, btn) {
         const next = btn.dataset.next === '1';
         btn.disabled = true;
@@ -560,10 +560,10 @@
         } catch (err) { box.innerHTML = UI.error(err && err.message); }
     }
 
-    // ---- діагностичний пакет (T8.1) -----------------------------------------
-    // Хвости файлових логів трьох процесів (redacted на бекенді) + system_info +
-    // версія/коміт у zip — щоб «пришлите лог» стало однією кнопкою. Без
-    // транскриптів/БД/.env (гарантія бекенда, не фронта).
+    // ---- diagnostic package (T8.1) -----------------------------------------
+    // Tails of the file logs of three processes (redacted on the backend) + system_info +
+    // version/commit in a zip — so that "send the log" becomes one button. Without
+    // transcripts/DB/.env (a backend guarantee, not the front's).
     async function exportDiagnosticPackage(ctx) {
         const btn = ctx.mount.querySelector('#rcDiagExport');
         if (!btn) return;

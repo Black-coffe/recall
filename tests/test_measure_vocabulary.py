@@ -1,9 +1,9 @@
-"""Інструмент заміру K1 (``tools/measure_vocabulary.py``), офлайн, без GPU.
+"""The K1 measurement tool (``tools/measure_vocabulary.py``), offline, no GPU.
 
-Фікстури кириличні: відбір аліасів-помилок і детектор змішаної мови працюють
-саме на кирилиці (памʼятка ``plan-dictated-sql-ignored-own-memory``). Імена вигадані
-(Zentrix / «Зентріц»): карта санітизації дзеркала їх не чіпає, тож фонетика тестів
-однакова в обох репозиторіях.
+The fixtures are Cyrillic: the selection of error aliases and the mixed-language detector work
+precisely on Cyrillic (memo ``plan-dictated-sql-ignored-own-memory``). The names are invented
+(Zentrix / «Зентріц»): the mirror sanitization map does not touch them, so the phonetics of the tests
+is the same in both repositories.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from app.services import vocabulary  # noqa: E402
 
 
 # ============================================================
-# Фікстура: граф + записи з файлами на диску
+# Fixture: a graph + recordings with files on disk
 # ============================================================
 
 def _seg(start, end, text):
@@ -75,7 +75,7 @@ def _clean(monkeypatch):
 
 
 # ============================================================
-# Відбір аліасів-помилок
+# Selection of error aliases
 # ============================================================
 
 def test_cyrillic_error_alias_selected_case_form_and_translation_not(db):
@@ -86,8 +86,8 @@ def test_cyrillic_error_alias_selected_case_form_and_translation_not(db):
         conn.close()
     by_name = {t["canonical"]: t["aliases"] for t in targets}
     assert sorted(by_name["Zentrix"]) == sorted(["Зентріц", "Зентрець"])
-    assert "Адам" not in by_name, "«Адаму» — відмінок, а не помилка"
-    assert "Google" not in by_name, "«Гугл» — переклад, а не помилка"
+    assert "Адам" not in by_name, "«Адаму» is a case form, not an error"
+    assert "Google" not in by_name, "«Гугл» is a translation, not an error"
 
 
 @pytest.mark.parametrize("alias, canonical, expected", [
@@ -111,7 +111,7 @@ def test_candidates_are_deterministic(db):
 
 
 # ============================================================
-# Змішана мова
+# Mixed language
 # ============================================================
 
 def test_rapid_alternation_detected_within_window():
@@ -140,7 +140,7 @@ def test_lang_of():
 
 
 # ============================================================
-# Перегляд власника
+# The owner's review
 # ============================================================
 
 def test_reviewed_ids_honour_unchecked_and_struck_rows():
@@ -162,19 +162,19 @@ def test_fragments_md_lists_rows_checked(db):
 
 
 # ============================================================
-# Прогін: відмова під час запису, ті самі опції, що й прод
+# Run: refusal during a recording, the same options as prod
 # ============================================================
 
 def test_run_refuses_while_recording(monkeypatch):
     monkeypatch.setattr(mv, "recording_active", lambda api, timeout=5.0: True)
-    with pytest.raises(SystemExit, match="Іде запис"):
+    with pytest.raises(SystemExit, match="recording is in progress"):
         mv.refuse_if_recording("http://x")
 
 
 def test_run_proceeds_when_api_down(monkeypatch, capsys):
     monkeypatch.setattr(mv, "recording_active", lambda api, timeout=5.0: None)
     mv.refuse_if_recording("http://x")
-    assert "недоступний" in capsys.readouterr().out
+    assert "unavailable" in capsys.readouterr().out
 
 
 def test_decode_options_match_prod_function(db):
@@ -184,11 +184,11 @@ def test_decode_options_match_prod_function(db):
     assert mv.decode_options("ml30", db) == {"multilingual": True}
     assert mv.decode_options("ml10", db) == {"multilingual": True, "chunk_length": 10}
     import os
-    assert vocabulary.ENV_MODE not in os.environ, "прапори прода не лишаються після заміру"
+    assert vocabulary.ENV_MODE not in os.environ, "prod flags do not remain after the measurement"
 
 
 class _FakeWM:
-    """Фейк менеджера: фіксує тривалість, якою менеджер обрав би шлях (batched > 600 с)."""
+    """A manager fake: records the duration with which the manager would pick the path (batched > 600 s)."""
 
     def __init__(self):
         self.seen = []
@@ -206,11 +206,11 @@ def test_fragment_of_long_recording_decodes_batched_then_restores():
     out = mv.transcribe(wm, "clip.wav", "m", "uk", {"hotwords": ["X"]}, 1800.0)
     assert out["text"] == "текст"
     assert wm.seen[0] == (1800.0, {"hotwords": ["X"]})
-    assert wm._get_duration_ffprobe("clip.wav") == 5.0, "справжня тривалість повернута"
+    assert wm._get_duration_ffprobe("clip.wav") == 5.0, "the real duration is restored"
 
 
 # ============================================================
-# Сліпі пари
+# Blind pairs
 # ============================================================
 
 def _mixed(n):
@@ -222,7 +222,7 @@ def test_ab_pairs_blind_with_separate_key():
     raw = {"variants": {
         "baseline": {f["id"]: {"text": f"базовий {f['id']}"} for f in mixed},
         "ml30": {f["id"]: {"text": f"мульти {f['id']}"} for f in mixed},
-        # M01 у ml10 збігається з baseline → нічия без показу.
+        # M01 in ml10 equals baseline → a tie, not shown.
         "ml10": {f["id"]: {"text": (f"базовий {f['id']}" if f["id"] == "M01" else f"вікно10 {f['id']}")}
                  for f in mixed},
     }}
@@ -230,16 +230,16 @@ def test_ab_pairs_blind_with_separate_key():
     assert len(key["pairs"]) == 5
     assert key["auto_ties"] == [{"fragment": "M01", "variant": "ml10"}]
     for name in ("baseline", "ml30", "ml10"):
-        assert name not in md, "назви варіантів не потрапляють у сліпий файл"
+        assert name not in md, "variant names do not get into the blind file"
     assert sum(1 for line in md.splitlines() if line.strip() == "Вердикт:") == 5
     sides = {(p["A"], p["B"]) for p in key["pairs"].values()}
     assert any(a == "baseline" for a, _ in sides) and any(b == "baseline" for _, b in sides), \
-        "сторона baseline перемішана"
-    assert mv.build_ab(mixed, raw, seed=1) == (md, key), "детерміновано за seed"
+        "the baseline side is shuffled"
+    assert mv.build_ab(mixed, raw, seed=1) == (md, key), "deterministic by seed"
 
 
 # ============================================================
-# Підсумок (історія 03)
+# Summary (story 03)
 # ============================================================
 
 @pytest.mark.parametrize("alias, canonical, word", [
@@ -271,7 +271,7 @@ def test_score_names_counts_only_reviewed_rows():
     }}
     s = mv.score_names(frags, raw, keep={"N01", "N02"})
     assert (s["baseline"]["strict"], s["hotwords"]["strict"], s["hotwords"]["n"]) == (0, 2, 2)
-    assert "N03" not in s["hotwords"]["per"], "викреслений власником рядок не рахується"
+    assert "N03" not in s["hotwords"]["per"], "a row struck by the owner is not counted"
 
 
 def test_score_control_flags_inserted_vocabulary_name():
@@ -326,7 +326,7 @@ def test_decide_multilingual_majority_and_window():
     assert d["multilingual"] and d["chunk_length"] is None
     d = mv.decide(*_decision_inputs(ml30_wins=5, ml10_wins=6))
     assert d["multilingual"] and d["chunk_length"] == 10
-    assert not mv.decide(*_decision_inputs(ml30_wins=5, ml10_wins=5))["multilingual"], "«майже» — не перемога"
+    assert not mv.decide(*_decision_inputs(ml30_wins=5, ml10_wins=5))["multilingual"], "«almost» is not a win"
 
 
 def test_owner_override_kept_next_to_rule():

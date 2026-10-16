@@ -1,4 +1,4 @@
-"""Каталог: область knowledge (blueprints memory, research, comments)."""
+"""Catalog: the knowledge area (memory, research, comments blueprints)."""
 MESSAGES: dict = {
     'knowledge.memory.err.channel': {
         "uk": 'Невідомий channel: {channels}',

@@ -1,20 +1,20 @@
 """Speaker management endpoints (Phase 10.4).
 
-CRUD над глобальною таблицею speakers + bulk-rename per-transcription.
+CRUD over the global speakers table + bulk-rename per transcription.
 
 Endpoints:
-- GET    /api/speakers                              — список (з опц. ?q= для autocomplete)
-- POST   /api/speakers                              — створити нового
-- PUT    /api/speakers/<id>                         — перейменувати/змінити колір
-- DELETE /api/speakers/<id>                         — видалити (заборонено для is_self=1)
+- GET    /api/speakers                              - list (with optional ?q= for autocomplete)
+- POST   /api/speakers                              - create a new one
+- PUT    /api/speakers/<id>                         - rename/change the color
+- DELETE /api/speakers/<id>                         - delete (forbidden for is_self=1)
 - PATCH  /api/transcriptions/<id>/speakers          — bulk: {raw_label: name|null}
-- POST   /api/speakers/merge                        — обʼєднати кількох в одного (снапшот для undo)
-- POST   /api/speakers/unmerge/<merge_id>           — відкотити merge зі снапшоту (T4.6)
-- GET    /api/speakers/<id>/samples                 — приклади фраз (merge-preview, T4.6)
+- POST   /api/speakers/merge                        - merge several into one (snapshot for undo)
+- POST   /api/speakers/unmerge/<merge_id>           - roll a merge back from the snapshot (T4.6)
+- GET    /api/speakers/<id>/samples                 - sample phrases (merge preview, T4.6)
 
-Cyrillic case-insensitive matching робиться на app-рівні (Python
-str.lower() підтримує Unicode case-folding, на відміну від SQLite
-COLLATE NOCASE який працює лише для ASCII).
+Cyrillic case-insensitive matching is done at the app level (Python
+str.lower() supports Unicode case folding, unlike SQLite
+COLLATE NOCASE which only works for ASCII).
 """
 from __future__ import annotations
 
@@ -36,9 +36,9 @@ logger = logging.getLogger(__name__)
 speakers_bp = Blueprint('speakers', __name__)
 
 
-# Базова валідація імені: 1-100 символів, не лише пробіли. Inline regex
-# для запобігання SQL/HTML-ін'єкцій ми не робимо тут — параметризовані
-# запити SQLite + escapeHTML на frontend закривають це.
+# Basic name validation: 1-100 characters, not only whitespace. We do not do an inline regex
+# here to prevent SQL/HTML injection - parameterized
+# SQLite queries + escapeHTML on the frontend cover that.
 _NAME_MAX_LEN = 100
 _COLOR_RE = re.compile(r'^#?[0-9a-fA-F]{6}$')
 
@@ -49,8 +49,8 @@ def _get_db():
 
 
 def _normalize_name(name: str) -> str:
-    """Trim + collapse internal whitespace. Не lower-cas-ить
-    (відображення зберігає оригінальний регістр)."""
+    """Trim + collapse internal whitespace. Does not lower-case
+    (the display keeps the original case)."""
     return ' '.join(name.split())
 
 
@@ -76,10 +76,10 @@ def _validate_color(raw) -> tuple[str | None, str | None]:
 
 
 def _find_speaker_case_insensitive(conn, name: str):
-    """Шукає спікера з case-insensitive matching (Cyrillic-safe).
+    """Looks up a speaker with case-insensitive matching (Cyrillic-safe).
 
-    SQLite COLLATE NOCASE працює тільки для ASCII, тому фільтруємо в Python.
-    Для невеликих таблиць (<1000 рядків) це O(n) і прийнятно.
+    SQLite COLLATE NOCASE only works for ASCII, so we filter in Python.
+    For small tables (<1000 rows) this is O(n) and acceptable.
     """
     target = name.lower()
     for row in conn.execute("SELECT id, name FROM speakers"):
@@ -104,10 +104,10 @@ def _serialize_speaker(row) -> dict:
 
 @speakers_bp.route('/api/speakers', methods=['GET'])
 def list_speakers():
-    """Список спікерів. ?q= для autocomplete (starts-with, case-insensitive).
+    """List of speakers. ?q= for autocomplete (starts-with, case-insensitive).
 
-    Сортування: usage_count desc, потім name asc. Це дає найвищу
-    "ймовірну" підказку першою (часто вживане ім'я).
+    Sorting: usage_count desc, then name asc. This puts the most
+    "likely" suggestion first (a frequently used name).
     """
     q_raw = (request.args.get('q') or '').strip()
     limit = max(1, min(50, request.args.get('limit', 50, type=int)))
@@ -120,7 +120,7 @@ def list_speakers():
         ''').fetchall()
 
     if q_raw:
-        # Cyrillic-safe starts-with: Python str.lower() обробляє Unicode
+        # Cyrillic-safe starts-with: Python str.lower() handles Unicode
         q_lower = q_raw.lower()
         filtered = [r for r in rows if r['name'].lower().startswith(q_lower)]
     else:
@@ -136,8 +136,8 @@ def list_speakers():
 
 @speakers_bp.route('/api/speakers', methods=['POST'])
 def create_speaker():
-    """Створити нового спікера. Якщо ім'я (case-insensitive) вже існує —
-    повертає 409 із посиланням на існуючий ID."""
+    """Create a new speaker. If the name (case-insensitive) already exists -
+    returns 409 with a reference to the existing ID."""
     data = request.get_json(silent=True) or {}
     name, name_err = _validate_name(data.get('name'))
     if name_err:
@@ -172,7 +172,7 @@ def create_speaker():
 
 @speakers_bp.route('/api/speakers/<int:speaker_id>', methods=['PUT'])
 def update_speaker(speaker_id):
-    """Перейменувати або змінити колір. is_self не редагується через цей API."""
+    """Rename or change the color. is_self is not editable through this API."""
     data = request.get_json(silent=True) or {}
     fields_to_update: list[tuple[str, object]] = []
 
@@ -197,7 +197,7 @@ def update_speaker(speaker_id):
         if not existing:
             return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
 
-        # При rename: перевірити на конфлікт case-insensitive (виключаючи цей же id)
+        # On rename: check for a case-insensitive conflict (excluding this same id)
         new_name = next((v for k, v in fields_to_update if k == 'name'), None)
         if new_name and new_name.lower() != existing['name'].lower():
             conflict = _find_speaker_case_insensitive(conn, new_name)
@@ -223,12 +223,12 @@ def update_speaker(speaker_id):
 
 @speakers_bp.route('/api/speakers/<int:speaker_id>', methods=['DELETE'])
 def delete_speaker(speaker_id):
-    """Видалити спікера. Заборонено для is_self=1 (потрібен системі).
+    """Delete a speaker. Forbidden for is_self=1 (needed by the system).
 
-    Phase 10.3 spec: ON DELETE SET NULL у transcription_speaker_map → всі
-    рядки з цим speaker_id отримають NULL (raw_label лишиться, frontend
-    показуватиме як "Спікер N" знову). foreign_keys=ON у connection
-    забезпечує спрацьовування cascade.
+    Phase 10.3 spec: ON DELETE SET NULL in transcription_speaker_map → all
+    rows with this speaker_id get NULL (raw_label stays, the frontend
+    will show them as "Спікер N" again). foreign_keys=ON in the connection
+    ensures the cascade fires.
     """
     with _get_db() as conn:
         row = conn.execute(
@@ -251,18 +251,18 @@ def delete_speaker(speaker_id):
 
 @speakers_bp.route('/api/transcriptions/<int:transcription_id>/speakers', methods=['PATCH'])
 def patch_transcription_speakers(transcription_id):
-    """Bulk-mapping raw_label → ім'я для конкретного transcript-а.
+    """Bulk mapping raw_label → name for a specific transcript.
 
     Body: {
         "mapping": {
-            "SPEAKER_00": "Андрій",         // створить/знайде → встановить speaker_id
-            "SPEAKER_01": null,             // очистить mapping (стане unnamed)
-            "self": "Андрій"                // переприв'язати self до іншого імені
+            "SPEAKER_00": "Андрій",         // creates/finds → sets speaker_id
+            "SPEAKER_01": null,             // clears the mapping (becomes unnamed)
+            "self": "Андрій"                // rebind self to another name
         }
     }
 
-    Returns: повний оновлений speaker map після операції + інкремент
-    usage_count для новостворених прив'язок.
+    Returns: the full updated speaker map after the operation + an increment of
+    usage_count for newly created bindings.
     """
     data = request.get_json(silent=True) or {}
     mapping = data.get('mapping', {})
@@ -274,9 +274,9 @@ def patch_transcription_speakers(transcription_id):
             return jsonify({'success': False, 'error': tr('settings.speakers.err.tx_not_found')}), 404
 
         c = conn.cursor()
-        usage_increments: list[int] = []  # speaker_ids на яких треба підняти usage_count
+        usage_increments: list[int] = []  # speaker_ids whose usage_count must be raised
 
-        # Phase 10.6: для voice fingerprinting беремо embedding з map
+        # Phase 10.6: for voice fingerprinting take the embedding from the map
         from app.services.diarization_service import (
             average_embeddings, blob_to_embedding, embedding_to_blob,
         )
@@ -285,7 +285,7 @@ def patch_transcription_speakers(transcription_id):
             if not isinstance(raw_label, str) or not raw_label:
                 continue
             if value is None or (isinstance(value, str) and not value.strip()):
-                # Очистити mapping
+                # Clear the mapping
                 c.execute(
                     'UPDATE transcription_speaker_map SET speaker_id = NULL '
                     'WHERE transcription_id = ? AND raw_label = ?',
@@ -293,7 +293,7 @@ def patch_transcription_speakers(transcription_id):
                 )
                 continue
 
-            # Знайти або створити спікера за іменем
+            # Find or create the speaker by name
             name, err = _validate_name(value)
             if err:
                 return jsonify({
@@ -307,8 +307,8 @@ def patch_transcription_speakers(transcription_id):
                 c.execute('INSERT INTO speakers (name) VALUES (?)', (name,))
                 speaker_id = c.lastrowid
 
-            # Phase 10.6: дістаємо embedding з transcription_speaker_map для
-            # цього raw_label (зберіг його diarization step при transcribe).
+            # Phase 10.6: fetch the embedding from transcription_speaker_map for
+            # this raw_label (saved by the diarization step during transcribe).
             map_row = c.execute(
                 'SELECT embedding FROM transcription_speaker_map '
                 'WHERE transcription_id = ? AND raw_label = ?',
@@ -316,10 +316,10 @@ def patch_transcription_speakers(transcription_id):
             ).fetchone()
             new_embedding = blob_to_embedding(map_row['embedding']) if map_row else None
 
-            # Upsert mapping. Якщо рядка ще немає (наприклад, fresh frontend
-            # додає mapping для labels що не виявились автоматично) —
-            # створимо. PRIMARY KEY на (transcription_id, raw_label) це
-            # підтримує через INSERT OR REPLACE.
+            # Upsert the mapping. If the row does not exist yet (e.g. a fresh frontend
+            # adds a mapping for labels that were not detected automatically) -
+            # create it. PRIMARY KEY on (transcription_id, raw_label) supports this
+            # via INSERT OR REPLACE.
             c.execute(
                 'INSERT OR REPLACE INTO transcription_speaker_map '
                 '(transcription_id, raw_label, speaker_id, embedding) '
@@ -329,8 +329,8 @@ def patch_transcription_speakers(transcription_id):
             )
             usage_increments.append(speaker_id)
 
-            # Running average у speakers.embedding. Вага старого = usage_count
-            # (скільки разів цей speaker_id вже вживався), нового = 1.
+            # Running average in speakers.embedding. Weight of the old = usage_count
+            # (how many times this speaker_id has already been used), of the new = 1.
             if new_embedding:
                 speaker_row = c.execute(
                     'SELECT embedding, usage_count FROM speakers WHERE id = ?',
@@ -340,7 +340,7 @@ def patch_transcription_speakers(transcription_id):
                 old_usage = speaker_row['usage_count'] if speaker_row else 0
                 merged = average_embeddings(
                     old_embedding, new_embedding,
-                    weight_a=max(1, old_usage),  # min 1 щоб не ділити на 0 при першому
+                    weight_a=max(1, old_usage),  # min 1 so as not to divide by 0 on the first
                     weight_b=1.0,
                 )
                 merged_blob = embedding_to_blob(merged)
@@ -349,7 +349,7 @@ def patch_transcription_speakers(transcription_id):
                     (merged_blob, speaker_id),
                 )
 
-        # Інкремент usage_count для нових прив'язок (унікально по speaker_id)
+        # Increment usage_count for new bindings (unique by speaker_id)
         for sid in set(usage_increments):
             c.execute(
                 'UPDATE speakers SET usage_count = usage_count + 1, '
@@ -358,7 +358,7 @@ def patch_transcription_speakers(transcription_id):
             )
         conn.commit()
 
-        # Повертаємо оновлений map
+        # Return the updated map
         speaker_rows = conn.execute('''
             SELECT m.raw_label, m.speaker_id, s.name, s.color, s.is_self
             FROM transcription_speaker_map m
@@ -384,21 +384,21 @@ def patch_transcription_speakers(transcription_id):
 # ---------------------------------------------------------------- stats (Phase 12.10)
 
 def _entity_index(conn) -> dict:
-    """Написання людини → id сутності графа, коли воно однозначне.
+    """A person's spelling → the graph entity id, when it is unambiguous.
 
-    Потрібно, щоб звести два шари: «Слава Верес» у діаризації і «Veres
-    Viacheslav» у переписці — це одна людина, але таблиці про це не знають.
-    Граф знає частину звʼязків (у сутності 478 «Юлія» серед аліасів є «Julia
-    Bondarenko»), тож беремо ЙОГО звʼязки, а не здогадуємось за схожістю імен.
+    Needed to bring two layers together: «Слава Верес» in diarization and «Veres
+    Viacheslav» in the correspondence are one person, but the tables do not know it.
+    The graph knows some of the links (entity 478 «Юлія» has «Julia
+    Bondarenko» among its aliases), so we take ITS links rather than guessing from name similarity.
 
-    Беремо ЛИШЕ `type='person'`: обидва списки — про людей, і привʼязка означає
-    «це та сама людина». Без цього фільтра канал або бот, чиє імʼя збігається з
-    назвою проєкту чи організації, отримав би `entity_id` і потрапив у лічильник
-    зведених — тобто шари «зійшлися б» через сутність, яка людиною не є.
+    We take ONLY `type='person'`: both lists are about people, and a link means
+    "this is the same person". Without this filter a channel or bot whose name coincides with
+    the name of a project or organization would get an `entity_id` and land in the merged
+    counter - i.e. the layers would "converge" through an entity that is not a person.
 
-    Ключі згортаємо `casefold()` у Python: SQLite `LOWER` не чіпає кирилицю.
-    Неоднозначні написання (те саме імʼя веде до кількох сутностей) свідомо
-    лишаємо без id — здогад тут коштував би дорожче за прочерк.
+    Keys are folded with `casefold()` in Python: SQLite `LOWER` does not touch Cyrillic.
+    Ambiguous spellings (the same name leads to several entities) are deliberately
+    left without an id - a guess here would cost more than a dash.
     """
     idx: dict[str, set] = defaultdict(set)
     for r in conn.execute("SELECT id, canonical_name AS name FROM entities "
@@ -414,51 +414,51 @@ def _entity_index(conn) -> dict:
 
 @speakers_bp.route('/api/speakers/stats', methods=['GET'])
 def speakers_stats():
-    """Агреговані статистики кожного спікера через всі transcripts.
+    """Aggregated statistics of each speaker across all transcripts.
 
-    Повертає для кожного спікера: transcripts_count, total_seconds (sum
-    end-start всіх segments цього speaker'а), words_count (split text),
-    first_seen, last_seen (created_at найстарішого / найновішого
-    transcript'у де він присутній).
+    Returns for each speaker: transcripts_count, total_seconds (sum of
+    end-start of all segments of this speaker), words_count (split text),
+    first_seen, last_seen (created_at of the oldest / newest
+    transcript in which they are present).
 
-    O(N) по transcriptions з diarization. Парсимо segments JSON у
-    Python — без JSON1 SQLite extension робити це SQL'ом неможливо.
+    O(N) over transcriptions with diarization. We parse the segments JSON in
+    Python - without the JSON1 SQLite extension this cannot be done in SQL.
 
-    **Два шари, а не один.** `speakers` — це діаризація, тобто ГОЛОСИ зі
-    дзвінків і записів: частина записів. Решта архіву — переписка, де
-    автор відомий точно (`tg_sender`, 35 людей на повідомлень) і де немає
-    ні секунд, ні діаризації. Поки відповідь мовчала про це, «статистика по
-    кожному спікеру» описувала дрібна частка архіву й читалась як увесь.
+    **Two layers, not one.** `speakers` is diarization, i.e. the VOICES from
+    calls and recordings: some recordings. The rest of the archive is correspondence, where the
+    author is known exactly (`tg_sender`, 35 people over messages) and where there are
+    neither seconds nor diarization. While the response was silent about this, "statistics for
+    each speaker" described a small share of the archive and read as all of it.
 
-    Тому в тілі три частини: `speakers` (голоси), `tg_senders` (переписка) і
-    `coverage` (що саме порахували). Числа шарів НЕ додаються: секунди мовлення
-    і кількість повідомлень — різні одиниці.
+    So the body has three parts: `speakers` (voices), `tg_senders` (correspondence) and
+    `coverage` (what exactly was counted). The layers' numbers are NOT added: seconds of speech
+    and a message count are different units.
     """
     with _get_db() as conn:
         # Base stats
         rows = conn.execute('''
             SELECT s.id, s.name, s.color, s.is_self, s.usage_count, s.created_at, s.updated_at,
-                   -- Рахуємо по `t`, а не по `m`: звʼязка в мапі лишається й
-                   -- після мʼякого видалення запису, тож `m` дав би видалене.
+                   -- Count by `t`, not by `m`: the link in the map stays even
+                   -- after a soft delete of the record, so `m` would give a deleted one.
                    COUNT(DISTINCT t.id) as transcripts_count,
-                   -- Дата ПОДІЇ, а не заливки. `created_at` тут означав «коли
-                   -- запис потрапив в архів», тоді як у `tg_senders` поруч
-                   -- лежить дата повідомлення: однаково названі поля з різним
-                   -- сенсом штовхають саме до того порівняння шарів, від якого
-                   -- застерігає опис тулза.
+                   -- The date of the EVENT, not of the upload. `created_at` here meant "when the
+                   -- record got into the archive", whereas next to it `tg_senders`
+                   -- carries the message date: identically named fields with different
+                   -- meanings push toward exactly the comparison of layers that the
+                   -- tool description warns against.
                    MAX(COALESCE(t.meeting_date, substr(t.created_at,1,10))) as last_seen,
                    MIN(COALESCE(t.meeting_date, substr(t.created_at,1,10))) as first_seen
             FROM speakers s
             LEFT JOIN transcription_speaker_map m ON m.speaker_id = s.id
-            -- Умова видалення саме в ON, а не в WHERE: інакше LEFT JOIN стає
-            -- внутрішнім і спікери без записів зникають зі списку.
+            -- The deletion condition is in ON, not in WHERE: otherwise the LEFT JOIN becomes
+            -- an inner one and speakers without records disappear from the list.
             LEFT JOIN transcriptions t ON t.id = m.transcription_id
                                       AND t.deleted_at IS NULL
             GROUP BY s.id
             ORDER BY s.usage_count DESC, s.name COLLATE NOCASE
         ''').fetchall()
 
-        # Map (tx_id, raw_label) → speaker_id для агрегації по segments
+        # Map (tx_id, raw_label) → speaker_id for aggregation by segments
         map_rows = conn.execute(
             'SELECT transcription_id, raw_label, speaker_id '
             'FROM transcription_speaker_map WHERE speaker_id IS NOT NULL'
@@ -498,8 +498,8 @@ def speakers_stats():
 
         ent_idx = _entity_index(conn)
 
-        # Другий шар: автори переписки. Одиниці тут інші (повідомлення, чати),
-        # тому це окремий список, а не дописані рядки до `speakers`.
+        # The second layer: correspondence authors. The units here are different (messages, chats),
+        # so it is a separate list, not extra rows added to `speakers`.
         tg_rows = conn.execute('''
             SELECT tg_sender AS name, COUNT(*) AS messages,
                    COUNT(DISTINCT tg_chat_id) AS chats,
@@ -512,11 +512,11 @@ def speakers_stats():
             ORDER BY messages DESC
         ''').fetchall()
 
-        # `deleted_at IS NULL` тут обовʼязковий: видалення одного запису мʼяке
-        # (ставить `deleted_at`), а рядки `transcription_speaker_map` лишаються
-        # до масового чищення. Без фільтра чисельник тримав би видалене, поки
-        # знаменник його вже не рахує, — і «частина записів» завищувало б
-        # покриття діаризації. Саме той клас твердження, проти якого ця гілка.
+        # `deleted_at IS NULL` is mandatory here: deleting a single record is soft
+        # (sets `deleted_at`), and the `transcription_speaker_map` rows stay
+        # until a bulk cleanup. Without the filter the numerator would hold deleted ones while
+        # the denominator no longer counts them - and "some recordings" would overstate the
+        # diarization coverage. Exactly the class of claim this branch guards against.
         diarized = conn.execute(
             'SELECT COUNT(DISTINCT m.transcription_id) AS n '
             'FROM transcription_speaker_map m '
@@ -533,8 +533,8 @@ def speakers_stats():
         'chats': r['chats'],
         'first_seen': r['first_seen'],
         'last_seen': r['last_seen'],
-        # Той самий графовий звʼязок, що й у спікерів: якщо в обох шарах стоїть
-        # той самий entity_id — це одна людина, і це знає граф, а не здогад.
+        # The same graph link as for speakers: if both layers carry
+        # the same entity_id - it is one person, and the graph knows it, not a guess.
         'entity_id': ent_idx.get((r['name'] or '').casefold().strip()),
     } for r in tg_rows]
 
@@ -581,14 +581,14 @@ def speakers_stats():
 
 @speakers_bp.route('/api/speakers/<int:speaker_id>/timeline', methods=['GET'])
 def speaker_timeline(speaker_id):
-    """Активність speaker'а по днях за останні N днів (default: 30).
+    """A speaker's activity by day for the last N days (default: 30).
 
-    Для кожного дня в інтервалі повертає:
-    - transcripts_count (DISTINCT transcript_ids де speaker присутній)
-    - total_seconds (сума duration всіх segments цього speaker'а)
+    For each day in the interval returns:
+    - transcripts_count (DISTINCT transcript_ids in which the speaker is present)
+    - total_seconds (sum of duration of all segments of this speaker)
     - words_count
 
-    Frontend будує bar chart day-by-day.
+    The frontend builds a day-by-day bar chart.
     """
     days = max(1, min(365, request.args.get('days', 30, type=int)))
 
@@ -599,7 +599,7 @@ def speaker_timeline(speaker_id):
         if not speaker:
             return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
 
-        # Усі transcripts де цей speaker присутній за останні N днів.
+        # All transcripts in which this speaker is present in the last N days.
         rows = conn.execute('''
             SELECT t.id, t.created_at, t.segments, m.raw_label
             FROM transcriptions t
@@ -637,7 +637,7 @@ def speaker_timeline(speaker_id):
             if text:
                 bucket['words_count'] += len(text.split())
 
-    # Перетворити set у count + serialize
+    # Turn the set into a count + serialize
     timeline = [
         {
             'date': day,
@@ -674,30 +674,30 @@ def _b64_blob(s) -> bytes | None:
 
 @speakers_bp.route('/api/speakers/merge', methods=['POST'])
 def merge_speakers():
-    """Об'єднати кілька спікерів у одного.
+    """Merge several speakers into one.
 
     Body: {
-        "keep_id": 3,                    // який залишити
-        "merge_ids": [7, 12]             // які влити та видалити
+        "keep_id": 3,                    // which to keep
+        "merge_ids": [7, 12]             // which to pour in and delete
     }
 
-    Дії:
-    1. Усі transcription_speaker_map.speaker_id ∈ merge_ids → keep_id
-    2. speakers.embedding keep_id оновлюється як weighted average
-       (вага = usage_count кожного, мін 1).
+    Actions:
+    1. All transcription_speaker_map.speaker_id ∈ merge_ids → keep_id
+    2. speakers.embedding of keep_id is updated as a weighted average
+       (weight = each one's usage_count, min 1).
     3. speakers.usage_count keep_id += sum(usage_count merge_ids)
-    4. DELETE merge_ids зі speakers.
+    4. DELETE merge_ids from speakers.
 
-    Заборонено:
-    - keep_id у merge_ids
-    - merge_ids містить is_self=1 (системний "Ви")
+    Forbidden:
+    - keep_id in merge_ids
+    - merge_ids contains is_self=1 (the system "Ви")
 
-    T4.6 (REMEDIATION_PLAN Волна 2): перед кроками 1-4 записує before-снапшот
-    (видалені speakers-рядки + попередній map-мапінг + entities.speaker_id,
-    які FK ON DELETE SET NULL обнулить) у ``speaker_merges`` — щоб
-    ``POST /api/speakers/unmerge/<merge_id>`` міг відкотити merge протягом
-    grace-періоду (``RECALL_SOFTDELETE_GRACE_DAYS``). Response додатково
-    містить ``merge_id`` для цього undo.
+    T4.6 (REMEDIATION_PLAN Wave 2): before steps 1-4 it records a before-snapshot
+    (the deleted speakers rows + the previous map mapping + entities.speaker_id,
+    which the FK ON DELETE SET NULL will null out) into ``speaker_merges`` - so that
+    ``POST /api/speakers/unmerge/<merge_id>`` can roll the merge back during the
+    grace period (``RECALL_SOFTDELETE_GRACE_DAYS``). The response additionally
+    contains ``merge_id`` for this undo.
     """
     data = request.get_json(silent=True) or {}
     keep_id = data.get('keep_id')
@@ -728,7 +728,7 @@ def merge_speakers():
         if not keep_row:
             return jsonify({'success': False, 'error': tr('settings.speakers.err.keep_not_found')}), 404
 
-        # Verify усі merge_ids існують та не є is_self
+        # Verify that all merge_ids exist and are not is_self
         placeholders = ','.join('?' * len(merge_ids))
         merge_rows = c.execute(
             f'SELECT id, name, color, is_self, embedding, usage_count, created_at, updated_at '
@@ -743,7 +743,7 @@ def merge_speakers():
                 'error': tr('settings.speakers.err.self_merge'),
             }), 400
 
-        # --- T4.6: before-снапшот (ДО будь-яких мутацій) ---
+        # --- T4.6: before-snapshot (BEFORE any mutations) ---
         map_before = c.execute(
             f'SELECT transcription_id, raw_label, speaker_id '
             f'FROM transcription_speaker_map WHERE speaker_id IN ({placeholders})',
@@ -778,10 +778,10 @@ def merge_speakers():
             ],
         }, ensure_ascii=False)
 
-        # 1. Re-link map: усі map'и з merge_ids → keep_id.
-        # Якщо у одному transcript є рядки з різними raw_label на різні
-        # merge_ids — після UPDATE усі вкажуть на keep_id, що ОК
-        # (PRIMARY KEY на (transcription_id, raw_label), не speaker_id).
+        # 1. Re-link the map: all maps from merge_ids → keep_id.
+        # If one transcript has rows with different raw_labels for different
+        # merge_ids - after the UPDATE all will point to keep_id, which is OK
+        # (the PRIMARY KEY is on (transcription_id, raw_label), not speaker_id).
         c.execute(
             f'UPDATE transcription_speaker_map SET speaker_id = ? '
             f'WHERE speaker_id IN ({placeholders})',
@@ -789,7 +789,7 @@ def merge_speakers():
         )
         relinked = c.rowcount
 
-        # 2. Average embeddings — weighted by usage_count, мін 1.
+        # 2. Average the embeddings - weighted by usage_count, min 1.
         keep_embedding = blob_to_embedding(keep_row['embedding'])
         keep_weight = max(1, keep_row['usage_count'] or 0)
         merged_embedding = keep_embedding
@@ -816,13 +816,13 @@ def merge_speakers():
         )
 
         # 4. Delete merge_ids (entities.speaker_id → FK ON DELETE SET NULL,
-        # тому знімок entities_relinked вище зроблено ДО цього кроку)
+        # so the entities_relinked snapshot above was taken BEFORE this step)
         c.execute(
             f'DELETE FROM speakers WHERE id IN ({placeholders})',
             merge_ids,
         )
 
-        # 5. Persist before-снапшот для undo
+        # 5. Persist the before-snapshot for undo
         merged_at = time.time()
         c.execute(
             'INSERT INTO speaker_merges (keep_id, merged_speaker_ids, before_json, merged_at) '
@@ -856,23 +856,23 @@ def merge_speakers():
 
 @speakers_bp.route('/api/speakers/unmerge/<int:merge_id>', methods=['POST'])
 def unmerge_speakers(merge_id):
-    """Відкотити merge_speakers зі снапшоту (undo), поки він не прострочений
-    (RECALL_SOFTDELETE_GRACE_DAYS) і ще не був відновлений раніше.
+    """Roll back merge_speakers from the snapshot (undo) while it has not expired
+    (RECALL_SOFTDELETE_GRACE_DAYS) and has not been restored before.
 
-    Дії (дзеркальні до merge):
-    1. Пересоздати видалені speakers-рядки (той самий id — AUTOINCREMENT
-       дозволяє явний INSERT з id; жоден новий speaker відтоді не міг зайняти
-       це число).
-    2. Повернути transcription_speaker_map.speaker_id для КОНКРЕТНИХ
-       (transcription_id, raw_label) пар, що змінив цей merge (map_before) —
-       НЕ всі поточні рядки на keep_id (щоб не займати чужі пізніші зміни).
-    3. Повернути entities.speaker_id, обнулений FK ON DELETE SET NULL —
-       лише якщо він і досі NULL (не перезаписуємо ручні зміни після merge).
-    4. Відновити embedding/usage_count keep_id зі снапшоту.
-    5. Позначити speaker_merges.restored_at.
+    Actions (mirror of merge):
+    1. Recreate the deleted speakers rows (the same id - AUTOINCREMENT
+       allows an explicit INSERT with an id; no new speaker could have taken
+       this number since).
+    2. Restore transcription_speaker_map.speaker_id for the SPECIFIC
+       (transcription_id, raw_label) pairs changed by this merge (map_before) -
+       NOT all current rows on keep_id (so as not to touch later changes by others).
+    3. Restore entities.speaker_id nulled by the FK ON DELETE SET NULL -
+       only if it is still NULL (we do not overwrite manual changes after the merge).
+    4. Restore the embedding/usage_count of keep_id from the snapshot.
+    5. Mark speaker_merges.restored_at.
 
-    409, якщо снапшот вже використано (restored_at IS NOT NULL) або
-    прострочено grace-періодом і прибрано purge'ом (тоді рядка вже нема — 404).
+    409 if the snapshot has already been used (restored_at IS NOT NULL) or
+    has expired the grace period and was removed by the purge (then the row no longer exists - 404).
     """
     with _get_db() as conn:
         c = conn.cursor()
@@ -890,9 +890,9 @@ def unmerge_speakers(merge_id):
         except (json.JSONDecodeError, TypeError):
             return jsonify({'success': False, 'error': tr('settings.speakers.err.snapshot_bad')}), 500
 
-        # 1. Пересоздати видалені speakers (INSERT OR IGNORE — якщо хтось уже
-        # створив нового спікера з тим самим id, теоретично неможливо через
-        # AUTOINCREMENT, але про всяк випадок не валимось).
+        # 1. Recreate the deleted speakers (INSERT OR IGNORE - if someone has already
+        # created a new speaker with the same id, theoretically impossible because of
+        # AUTOINCREMENT, but just in case we do not crash).
         for sp in snap.get('merged_speakers', []):
             c.execute(
                 'INSERT OR IGNORE INTO speakers '
@@ -903,8 +903,8 @@ def unmerge_speakers(merge_id):
                  sp.get('created_at'), sp.get('updated_at')),
             )
 
-        # 2. Повернути map-рядки саме цього merge (тільки якщо raw_label ще
-        # належить транскрипту — рядок міг бути видалений/змінений відтоді).
+        # 2. Restore the map rows of exactly this merge (only if raw_label still
+        # belongs to the transcript - the row could have been deleted/changed since).
         for m in snap.get('map_relinked', []):
             c.execute(
                 'UPDATE transcription_speaker_map SET speaker_id = ? '
@@ -912,15 +912,15 @@ def unmerge_speakers(merge_id):
                 (m['speaker_id'], m['transcription_id'], m['raw_label']),
             )
 
-        # 3. Повернути entities.speaker_id — лише де він і досі NULL (щоб не
-        # затерти ручне перепризначення користувача після merge).
+        # 3. Restore entities.speaker_id - only where it is still NULL (so as not to
+        # overwrite the user's manual reassignment after the merge).
         for e in snap.get('entities_relinked', []):
             c.execute(
                 'UPDATE entities SET speaker_id = ? WHERE id = ? AND speaker_id IS NULL',
                 (e['speaker_id'], e['id']),
             )
 
-        # 4. Відновити embedding/usage_count keep_id зі снапшоту.
+        # 4. Restore the embedding/usage_count of keep_id from the snapshot.
         keep_snap = snap.get('keep')
         if keep_snap:
             c.execute(
@@ -930,7 +930,7 @@ def unmerge_speakers(merge_id):
                  keep_snap['id']),
             )
 
-        # 5. Позначити снапшот використаним.
+        # 5. Mark the snapshot as used.
         c.execute(
             'UPDATE speaker_merges SET restored_at = ? WHERE id = ?',
             (time.time(), merge_id),
@@ -940,7 +940,7 @@ def unmerge_speakers(merge_id):
         restored_ids = [sp['id'] for sp in snap.get('merged_speakers', [])]
 
     logger.info(
-        f"[unmerge] merge_id={merge_id}: відновлено speakers={restored_ids}, "
+        f"[unmerge] merge_id={merge_id}: restored speakers={restored_ids}, "
         f"keep_id={row['keep_id']}"
     )
     return jsonify({
@@ -955,8 +955,8 @@ def unmerge_speakers(merge_id):
 
 @speakers_bp.route('/api/speakers/<int:speaker_id>/samples', methods=['GET'])
 def speaker_samples(speaker_id):
-    """Кілька прикладів фраз спікера — легкий merge-preview (T4.6), щоб фронт
-    показав приклади ДО об'єднання без важких агрегацій stats/timeline.
+    """A few sample phrases of a speaker - a light merge preview (T4.6), so the frontend
+    shows examples BEFORE merging without heavy stats/timeline aggregations.
 
     Query: ?limit=N (default 5, max 20).
     Returns: {success, speaker_id, speaker_name, samples: [{transcription_id,

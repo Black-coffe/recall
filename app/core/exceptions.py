@@ -1,12 +1,12 @@
 """
-Пользовательские исключения для приложения
+Custom exceptions for the application
 """
 
 from typing import Optional, Dict, Any
 
 
 class WhisperUIException(Exception):
-    """Базовое исключение для приложения"""
+    """Base exception for the application"""
     
     def __init__(self, message: str, error_code: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
         self.message = message
@@ -16,40 +16,40 @@ class WhisperUIException(Exception):
 
 
 class ValidationError(WhisperUIException):
-    """Ошибка валидации данных"""
+    """Data validation error"""
     pass
 
 
 class FileProcessingError(WhisperUIException):
-    """Ошибка обработки файла"""
+    """File processing error"""
     pass
 
 
 class TranscriptionError(WhisperUIException):
-    """Ошибка транскрибации"""
+    """Transcription error"""
     pass
 
 
 class YouTubeDownloadError(WhisperUIException):
-    """Ошибка загрузки с YouTube"""
+    """YouTube download error"""
     pass
 
 
 class ModelLoadError(WhisperUIException):
-    """Ошибка загрузки модели Whisper"""
+    """Whisper model loading error"""
     pass
 
 
 class DatabaseError(WhisperUIException):
-    """Ошибка базы данных"""
+    """Database error"""
     pass
 
 
 class ConfigurationError(WhisperUIException):
-    """Ошибка конфигурации"""
+    """Configuration error"""
     pass
 
 
 class SystemResourceError(WhisperUIException):
-    """Ошибка системных ресурсов"""
+    """System resources error"""
     pass

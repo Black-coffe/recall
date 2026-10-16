@@ -1,24 +1,24 @@
-"""Meeting Memory — оркестратор збагачення транскриптів (Phase 13).
+"""Meeting Memory — orchestrator for transcript enrichment (Phase 13).
 
-Перетворює сирий транскрипт на структуровану "картку мітингу" + наповнює
-наскрізний граф сутностей (люди / проєкти / організації) і таблицю action items,
-щоб Whisper працював як RAG-архів корпоративної памʼяті.
+Turns a raw transcript into a structured "meeting card" + fills the
+cross-meeting entity graph (people / projects / organizations) and the action items table,
+so that Whisper works as a RAG archive of corporate memory.
 
-Потік (один Claude-виклик на мітинг — text_polishing.extract_meeting_card):
-  1. Читаємо транскрипт + сегменти + speaker-map з БД.
-  2. Будуємо diarized-текст ('Імʼя: репліка') якщо є діаризація.
-  3. extract_meeting_card → summary/key_points/action_items/people/projects/orgs/topics.
-  4. У транзакції:
-     - UPDATE transcriptions: summary_json + topics_json (формат як в існуючих
-       ендпоінтах, щоб UI summary/topics працював), enriched_* маркери.
-     - upsert entities + aliases, лінк meeting_entities, перерахунок агрегатів.
-     - перезапис action_items (idempotent re-run).
+Flow (one Claude call per meeting — text_polishing.extract_meeting_card):
+  1. Read the transcript + segments + speaker-map from the DB.
+  2. Build the diarized text ('Name: utterance') if there is diarization.
+  3. extract_meeting_card -> summary/key_points/action_items/people/projects/orgs/topics.
+  4. In a transaction:
+     - UPDATE transcriptions: summary_json + topics_json (same format as the existing
+       endpoints, so the UI summary/topics keeps working), enriched_* markers.
+     - upsert entities + aliases, link meeting_entities, recompute aggregates.
+     - rewrite action_items (idempotent re-run).
 
-Ідемпотентність: enriched_at IS NOT NULL → skip (якщо force=False). Зміна
-ENRICHMENT_VERSION дозволяє форсувати масовий re-run при оновленні промптів.
+Idempotency: enriched_at IS NOT NULL -> skip (if force=False). Changing
+ENRICHMENT_VERSION lets a mass re-run be forced when prompts are updated.
 
-НЕ залежить від flask app context — приймає db_path явно (тестовно, можна
-викликати з JobQueue-воркера або backfill-скрипта).
+Does NOT depend on the flask app context — takes db_path explicitly (testable, can be
+called from a JobQueue worker or a backfill script).
 """
 from __future__ import annotations
 
@@ -36,25 +36,25 @@ from app.services import categories, commitments, embeddings, models, pricing, t
 
 logger = logging.getLogger(__name__)
 
-# Бамп при зміні промпту/схеми збагачення → backfill(force_version=True) переробить старі.
+# Bump when the enrichment prompt/schema changes -> backfill(force_version=True) redoes old ones.
 ENRICHMENT_VERSION = 1
 
 _VALID_ENTITY_TYPES = ("person", "project", "org", "topic")
 
-# Підказки тегів (історія 06): межі окремі від `categories.parse_tags` (те саме
-# strip+дедуп, але довжина і виключення вже підтверджених — рішення саме цього
-# шляху, не загальне правило тегів).
+# Tag suggestions (story 06): the bounds are separate from `categories.parse_tags` (same
+# strip+dedup, but the length and the exclusion of already confirmed tags are decisions of
+# this path only, not a general tag rule).
 _MAX_SUGGESTED_TAG_LEN = 40
 _MAX_SUGGESTED_TAGS = 5
 
 
 # ============================================================
-# Нормалізація / дедуплікація
+# Normalization / deduplication
 # ============================================================
 
 def _normalize(name: str) -> str:
-    """Канонічний ключ для дедупу: lowercase, прибрати пунктуацію по краях,
-    схлопнути пробіли. Зберігає кирилицю/латиницю/цифри."""
+    """Canonical key for dedup: lowercase, strip punctuation at the edges,
+    collapse whitespace. Keeps Cyrillic/Latin/digits."""
     if not name:
         return ""
     s = name.strip().lower()
@@ -64,8 +64,8 @@ def _normalize(name: str) -> str:
 
 
 def _count_mentions(text: str, names: list[str]) -> int:
-    """Скільки разів сутність (canonical + aliases) згадана у тексті.
-    Грубий case-insensitive підрахунок підрядків — для salience/ваги."""
+    """How many times an entity (canonical + aliases) is mentioned in the text.
+    A rough case-insensitive substring count — for salience/weight."""
     if not text or not names:
         return 0
     low = text.lower()
@@ -79,11 +79,11 @@ def _count_mentions(text: str, names: list[str]) -> int:
 
 
 # ============================================================
-# Граф сутностей
+# Entity graph
 # ============================================================
 
 def _find_entity(c, etype: str, normalized: str) -> Optional[int]:
-    """Знайти сутність за нормалізованим іменем (canonical або alias)."""
+    """Find an entity by normalized name (canonical or alias)."""
     if not normalized:
         return None
     row = c.execute(
@@ -92,7 +92,7 @@ def _find_entity(c, etype: str, normalized: str) -> Optional[int]:
     ).fetchone()
     if row:
         return row["id"]
-    # через alias (alias унікальний глобально; перевіряємо що тип збігається)
+    # via alias (an alias is globally unique; check that the type matches)
     row = c.execute(
         "SELECT e.id FROM entity_aliases a JOIN entities e ON e.id = a.entity_id "
         "WHERE a.normalized_alias = ? AND e.type = ?",
@@ -104,25 +104,25 @@ def _find_entity(c, etype: str, normalized: str) -> Optional[int]:
 
 
 def _find_merged_entity(c, etype: str, normalized: str) -> Optional[int]:
-    """Сутність, у яку вже злили рядок ЦЬОГО типу з таким написанням.
+    """The entity into which a row of THIS type with this spelling was already merged.
 
-    Без цього кросс-типове злиття не «прилипає»: після merge org→project
-    написання належить project, гілка з перевіркою типу не знаходить нічого, і
-    наступний enrich створює org НАНОВО — причому з нулем аліасів, бо всі його
-    `INSERT OR IGNORE` спотикаються об глобальний UNIQUE `normalized_alias`.
-    Рядок воскресає недосяжним для пошуку за псевдонімом, а кожне нове
-    написання плодить ще один.
+    Without this a cross-type merge does not "stick": after merging org->project
+    the spelling belongs to the project, the branch with the type check finds nothing, and
+    the next enrich creates the org AGAIN — and with zero aliases, because all its
+    `INSERT OR IGNORE` stumble on the global UNIQUE `normalized_alias`.
+    The row comes back to life unreachable by alias search, and every new
+    spelling breeds yet another one.
 
-    Дивимось саме на слід злиття (`metadata_json.merged_from`), а не просто на
-    аліас без перевірки типу: інакше org «Ткачук» мовчки ставав би людиною
-    Ткачук — тобто пари, які власник свідомо НЕ злив, схлопувались би самі.
-    Розбір JSON у Python, бо на JSON1 в цьому проєкті не покладаємось.
+    We look at the merge trace itself (`metadata_json.merged_from`), not merely at an
+    alias without a type check: otherwise the org «Ткачук» would silently become the person
+    Ткачук — i.e. pairs the owner deliberately did NOT merge would collapse on their own.
+    JSON is parsed in Python because this project does not rely on JSON1.
 
-    Збіг ТИПУ недостатній: рядок, що колись поглинув якийсь org, інакше
-    привласнював би будь-який org, чиє написання випадково лежить серед його
-    аліасів («BH» при поглинутому «Acmecorp Ltd»). Тому звіряємо ще й написання
-    — зі списку `aliases` поглинутого або, для старих записів без нього, з його
-    канонічним імʼям.
+    A TYPE match is not enough: a row that once absorbed some org would otherwise
+    appropriate any org whose spelling happens to sit among its
+    aliases («BH» with an absorbed «Acmecorp Ltd»). So we also check the spelling
+    — against the absorbed row's `aliases` or, for old records without it, against its
+    canonical name.
     """
     rows = c.execute(
         "SELECT e.id, e.metadata_json FROM entity_aliases a "
@@ -141,7 +141,7 @@ def _find_merged_entity(c, etype: str, normalized: str) -> Optional[int]:
             if not isinstance(gone, dict) or gone.get("type") != etype:
                 continue
             spellings = gone.get("aliases")
-            if not spellings:                      # записи до появи поля
+            if not spellings:                      # records from before the field existed
                 spellings = [_normalize(gone.get("name") or "")]
             if normalized in spellings:
                 return row["id"]
@@ -155,9 +155,9 @@ def _upsert_entity(
     role: Optional[str] = None,
     aliases: Optional[list[str]] = None,
 ) -> Optional[int]:
-    """Знайти або створити сутність; додати aliases; оновити роль якщо була порожня.
+    """Find or create an entity; add aliases; update the role if it was empty.
 
-    Returns entity_id або None якщо імʼя порожнє/невалідне.
+    Returns entity_id, or None if the name is empty/invalid.
     """
     if etype not in _VALID_ENTITY_TYPES:
         return None
@@ -167,7 +167,7 @@ def _upsert_entity(
         return None
 
     aliases = aliases or []
-    # Спроба знайти за canonical і за кожним alias
+    # Try to find by canonical and by each alias
     entity_id = _find_entity(c, etype, norm)
     if entity_id is None:
         for a in aliases:
@@ -184,7 +184,7 @@ def _upsert_entity(
         )
         entity_id = cur.lastrowid
     else:
-        # Доповнити роль якщо її ще не було
+        # Fill in the role if there was none
         if role:
             existing = c.execute(
                 "SELECT role FROM entities WHERE id = ?", (entity_id,)
@@ -195,7 +195,7 @@ def _upsert_entity(
                     (role, now, entity_id),
                 )
 
-    # Зареєструвати aliases (canonical теж як alias — для майбутніх lookup'ів)
+    # Register aliases (canonical too, as an alias — for future lookups)
     for a in [canonical, *aliases]:
         na = _normalize(a)
         if not na:
@@ -206,7 +206,7 @@ def _upsert_entity(
             (entity_id, a.strip(), na),
         )
 
-    # Лінк person → speakers (голосовий відбиток), якщо є збіг по імені
+    # Link person -> speakers (voiceprint) if the name matches
     if etype == "person":
         sp = c.execute(
             "SELECT id FROM speakers WHERE name = ? COLLATE NOCASE LIMIT 1",
@@ -222,7 +222,7 @@ def _upsert_entity(
 
 
 def _recompute_entity_aggregates(c, entity_ids: set[int]) -> None:
-    """Перерахувати mention_count / meeting_count з meeting_entities (idempotent)."""
+    """Recompute mention_count / meeting_count from meeting_entities (idempotent)."""
     for eid in entity_ids:
         c.execute(
             "UPDATE entities SET "
@@ -234,11 +234,11 @@ def _recompute_entity_aggregates(c, entity_ids: set[int]) -> None:
 
 
 # ============================================================
-# Diarized-текст для збагачення
+# Diarized text for enrichment
 # ============================================================
 
 def _diarized_text_for(c, transcription_id: int, segments_json: Optional[str]) -> Optional[str]:
-    """Зібрати 'Імʼя: репліка' формат із сегментів + speaker-map, якщо є діаризація."""
+    """Assemble the 'Name: utterance' format from segments + speaker-map, if there is diarization."""
     if not segments_json:
         return None
     try:
@@ -257,16 +257,16 @@ def _diarized_text_for(c, transcription_id: int, segments_json: Optional[str]) -
 
 
 # ============================================================
-# Підказки тегів (історія 06)
+# Tag suggestions (story 06)
 # ============================================================
 
 def _filter_suggested_tags(raw_tags, existing_names: list[str]) -> list[str]:
-    """`card["tags"]` (сирий вивід Claude) → готовий список для `suggested_tags_json`.
+    """`card["tags"]` (raw Claude output) -> a ready list for `suggested_tags_json`.
 
-    strip + дедуп по `categories.norm_name` (через `parse_tags`), відкидає
-    задовгі (>40 символів) і ті, що вже підтверджені в `record_tags` цього
-    запису, обрізає до 5. Не пише `record_tags` і не створює тег у словнику —
-    те й інше робить прийняття (історія 07); тут лише підказка.
+    strip + dedup by `categories.norm_name` (via `parse_tags`), drops
+    overlong (>40 characters) ones and those already confirmed in this record's
+    `record_tags`, truncates to 5. Does not write `record_tags` and does not create a tag in the dictionary —
+    acceptance does both (story 07); here it is only a hint.
     """
     if not isinstance(raw_tags, list) or not raw_tags:
         return []
@@ -284,24 +284,24 @@ def _filter_suggested_tags(raw_tags, existing_names: list[str]) -> list[str]:
 
 
 # ============================================================
-# Запис картки
+# Writing the card
 # ============================================================
 
 def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
                   created_at: Optional[str], existing_meeting_date: Optional[str]) -> None:
-    """Записати результат extract_meeting_card у БД (у межах транзакції caller'а)."""
+    """Write the extract_meeting_card result to the DB (within the caller's transaction)."""
     now = datetime.now().isoformat(timespec="seconds")
 
-    # --- summary_json у форматі існуючого summary-ендпоінта ---
+    # --- summary_json in the format of the existing summary endpoint ---
     summary_payload = {
         "summary": card.get("summary", ""),
         "key_points": card.get("key_points", []),
         "action_items": card.get("action_items", []),
     }
-    # --- topics_json у форматі існуючого topics-ендпоінта ---
+    # --- topics_json in the format of the existing topics endpoint ---
     topics_payload = {"topics": card.get("topics", []), "model": card.get("model", "")}
 
-    # meeting_date: зберегти існуючу, інакше — дата created_at
+    # meeting_date: keep the existing one, otherwise the created_at date
     meeting_date = existing_meeting_date
     if not meeting_date and created_at:
         meeting_date = str(created_at)[:10]
@@ -321,7 +321,7 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
         ),
     )
 
-    # --- підказки тегів: не record_tags, лише suggested_tags_json (історія 06) ---
+    # --- tag suggestions: not record_tags, only suggested_tags_json (story 06) ---
     existing_tag_names = [
         t["name"] for t in categories.tags_for(c, [transcription_id]).get(transcription_id, [])
     ]
@@ -332,7 +332,7 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
          transcription_id),
     )
 
-    # --- сутності: зібрати старі лінки (для перерахунку), стерти, перезаписати ---
+    # --- entities: collect old links (for recomputing), erase, rewrite ---
     old_links = c.execute(
         "SELECT entity_id FROM meeting_entities WHERE transcription_id = ?",
         (transcription_id,),
@@ -343,7 +343,7 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
     c.execute("DELETE FROM action_items WHERE transcription_id = ?", (transcription_id,))
 
     # person / project / org → entities + meeting_entities
-    person_index: dict[str, int] = {}  # normalized canonical/alias → entity_id (для resolve owner)
+    person_index: dict[str, int] = {}  # normalized canonical/alias -> entity_id (for owner resolve)
 
     def _ingest(items, etype):
         for item in items:
@@ -374,10 +374,10 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
     _ingest(card.get("people", []), "person")
     _ingest(card.get("projects", []), "project")
     _ingest(card.get("orgs", []), "org")
-    # topics теж як сутності (для уніфікованих сторінок сутностей / фасетного пошуку)
+    # topics as entities too (for unified entity pages / faceted search)
     _ingest([{"name": t} for t in card.get("topics", [])], "topic")
 
-    # --- action_items → нормалізована таблиця, owner resolve до person-сутності ---
+    # --- action_items -> normalized table, owner resolved to a person entity ---
     for ai in card.get("action_items", []):
         if not isinstance(ai, dict):
             continue
@@ -388,10 +388,10 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
         owner_eid = person_index.get(_normalize(owner_name)) if owner_name else None
         if owner_name and owner_eid is None:
             owner_eid = _find_entity(c, "person", _normalize(owner_name))
-        # Трек 1: дедлайн зберігаємо і сирою фразою (due), і нормалізованою датою.
-        # Пріоритет — due_date від моделі (вона бачила контекст розмови), але
-        # тільки якщо це справді ISO-дата; інакше рахуємо парсером від дати
-        # зустрічі. Так поле не залежить від того, чи послухалась модель.
+        # Track 1: the deadline is stored both as the raw phrase (due) and as a normalized date.
+        # Priority is the model's due_date (it saw the conversation context), but
+        # only if it is really an ISO date; otherwise the parser computes it from the
+        # meeting date. This way the field does not depend on whether the model complied.
         raw_due = ai.get("due")
         due_date, due_prec = commitments.parse_due(raw_due, meeting_date)
         model_due = (ai.get("due_date") or "").strip() if isinstance(ai.get("due_date"), str) else ""
@@ -408,16 +408,16 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
 
 
 # ============================================================
-# Публічний API
+# Public API
 # ============================================================
 
 def is_available() -> bool:
-    """Card-збагачення можливе лише з налаштованим Claude API ключем."""
+    """Card enrichment is possible only with a configured Claude API key."""
     return text_polishing.is_available()
 
 
 def any_available() -> bool:
-    """Чи є сенс запускати збагачення взагалі: Claude (card) АБО локальні embeddings."""
+    """Whether enrichment is worth running at all: Claude (card) OR local embeddings."""
     return text_polishing.is_available() or embeddings.is_available()
 
 
@@ -429,25 +429,25 @@ def enrich_transcription(
     force: bool = False,
     effort: str = "medium",
 ) -> dict:
-    """Повне збагачення транскрипту = card (Claude) + embeddings (локально).
+    """Full transcript enrichment = card (Claude) + embeddings (local).
 
-    Дві НЕЗАЛЕЖНІ фази з окремою idempotency:
-    - card: сутності/summary/action items через Claude (enriched_at маркер).
-    - embed: чанки + вектори локально (embedded_at маркер) — працює без API key.
+    Two INDEPENDENT phases, each with its own idempotency:
+    - card: entities/summary/action items via Claude (enriched_at marker).
+    - embed: chunks + vectors locally (embedded_at marker) — works without an API key.
 
-    effort: 'low' для масового backfill (×3 швидше/дешевше), 'medium' для
-    живої авто-транскрипції (якість).
+    effort: 'low' for mass backfill (3x faster/cheaper), 'medium' for
+    live auto-transcription (quality).
 
     Returns {"transcription_id", "status", "card": {...}, "embed": {...}}.
-    status: "done" якщо хоч одна фаза щось зробила, інакше "skipped".
+    status: "done" if at least one phase did something, otherwise "skipped".
     """
     with get_db_connection(db_path) as conn:
         dup_row = tx_repo.get_by_id(conn, transcription_id, columns=("id", "duplicate_of"))
     if dup_row and dup_row["duplicate_of"] is not None:
-        # Ремонт 3 (review #3): дублі (dedup_audio.py) не отримують ані картку
-        # Claude, ані чанки/ембеддинги — той самий early-exit і те саме слово
-        # "skipped_duplicate", яким інжест (transcription.py) вже позначає
-        # enrichment у відповіді /api/transcribe.
+        # Repair 3 (review #3): duplicates (dedup_audio.py) get neither a Claude
+        # card nor chunks/embeddings — the same early exit and the same word
+        # "skipped_duplicate" that ingest (transcription.py) already uses to mark
+        # enrichment in the /api/transcribe response.
         skip = {"status": "skipped_duplicate", "transcription_id": transcription_id}
         return {"transcription_id": transcription_id, "status": "skipped_duplicate",
                 "card": skip, "embed": skip}
@@ -477,11 +477,11 @@ def _enrich_card(
     force: bool = False,
     effort: str = "medium",
 ) -> dict:
-    """Card-фаза: сутності/summary/action items через Claude. Idempotent (enriched_at).
+    """Card phase: entities/summary/action items via Claude. Idempotent (enriched_at).
 
     Returns {"status": "enriched"|"skipped"|"not_found"|"empty", ...}.
     """
-    # --- READ (коротке зʼєднання, до мережевого виклику) ---
+    # --- READ (short connection, before the network call) ---
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
         row = tx_repo.get_by_id(
@@ -492,12 +492,12 @@ def _enrich_card(
         if not row:
             return {"status": "not_found", "transcription_id": transcription_id}
 
-        # Phase 17: Telegram іде embed-only — Claude-картка на чатовому
-        # однорядковику («Ок», «Дякую») марна, а на живих даних ще й платна.
-        # Рішення діяло ЛИШЕ на шляху інжесту (telegram.py:_submit_embed_only),
-        # а backfill і кнопка індексера заходили з чорного ходу: тут не було
-        # жодної перевірки source_type. force=True лишає ручний обхід, а Волна 5
-        # замінить це на вибірковий фільтр (маркери обіцянки + довжина).
+        # Phase 17: Telegram goes embed-only — a Claude card on a one-line chat
+        # message («Ок», «Дякую») is useless, and over records it is also paid.
+        # The decision applied ONLY on the ingest path (telegram.py:_submit_embed_only),
+        # while backfill and the indexer button came in through the back door: there was
+        # no source_type check here. force=True keeps a manual bypass, and Wave 5
+        # will replace this with a selective filter (promise markers + length).
         if row["source_type"] == "telegram" and not force:
             return {"status": "skipped", "transcription_id": transcription_id,
                     "reason": "telegram_embed_only"}
@@ -516,13 +516,13 @@ def _enrich_card(
         existing_meeting_date = row["meeting_date"]
         tag_vocabulary = [t["name"] for t in categories.list_tags(conn)]
 
-    # --- Claude call (поза БД-зʼєднанням — довга мережева операція) ---
-    # T6.3: раніше НЕ було try/except тут — збій одного транскрипту (мережа,
-    # некоректний JSON від моделі, вичерпані retry на транзиентних помилках)
-    # прокидався з _enrich_card() і рвав УСЮ пару фаз enrich_transcription()
-    # (embed-фаза, яка НЕ залежить від Claude, теж не встигала виконатись).
-    # М'яка деградація: позначаємо "retry_needed" замість жорсткого падіння —
-    # виклик embed-фази і решта backfill-проходу тривають.
+    # --- Claude call (outside the DB connection — a long network operation) ---
+    # T6.3: there used to be NO try/except here — a failure of one transcript (network,
+    # invalid JSON from the model, retries exhausted on transient errors)
+    # propagated out of _enrich_card() and broke the WHOLE pair of phases in enrich_transcription()
+    # (the embed phase, which does NOT depend on Claude, did not get to run either).
+    # Soft degradation: we mark "retry_needed" instead of a hard failure —
+    # the embed phase call and the rest of the backfill pass continue.
     try:
         card = text_polishing.extract_meeting_card(
             body_text, diarized_text=diarized, model=model, effort=effort,
@@ -530,7 +530,7 @@ def _enrich_card(
             tag_vocabulary=tag_vocabulary,
         )
     except Exception as e:
-        logger.warning("[enrich] tx=%s card-фаза збій (retry_needed): %s", transcription_id, e)
+        logger.warning("[enrich] tx=%s card phase failed (retry_needed): %s", transcription_id, e)
         return {"status": "retry_needed", "transcription_id": transcription_id,
                 "error": str(e)}
 
@@ -566,21 +566,21 @@ def _enrich_card(
 
 
 def list_unenriched_ids(db_path: str, limit: Optional[int] = None) -> list[int]:
-    """ID транскриптів, яким потрібна робота: card (Claude) АБО embed (вектори) ще
-    не зроблено / застаріло. Над-вибірка безпечна — фази skip'аються по-окремо."""
+    """IDs of transcripts that need work: card (Claude) OR embed (vectors) not yet
+    done / out of date. Over-selection is safe — the phases skip separately."""
     with get_db_connection(db_path) as conn:
-        # T4.6: не палимо Claude/embedding-токени на soft-deleted (undo-вікно
-        # ≠ дійсний контент; такі рядки й так скоро прибере grace-purge).
-        # Telegram потрапляє сюди ЛИШЕ через embed-фазу: картка йому не належить
-        # (див. _enrich_card), тож без цієї умови індексер рахував би 3142
-        # чатових повідомлення як «роботу» і показував чесному користувачу
-        # обсяг, якого не існує. `IS NOT` — NULL-safe (source_type може бути NULL).
-        # T6.5: embed-фаза застаріває не лише від зміни МОДЕЛІ, а й від зміни
-        # логіки чанкінгу — а це видно тільки по embedding_version. Без цієї
-        # умови бамп EMBED_VERSION лишався б декларацією: chunk_and_embed
-        # перерахував би запис, але список роботи його б не назвав, тож ніхто
-        # б не покликав. Умова дзеркалить idempotency-перевірку в
-        # embeddings.chunk_and_embed_transcription (NULL = стара нарізка).
+        # T4.6: do not burn Claude/embedding tokens on soft-deleted rows (the undo window
+        # is not valid content; the grace-purge will remove such rows soon anyway).
+        # Telegram gets here ONLY through the embed phase: a card does not apply to it
+        # (see _enrich_card), so without this condition the indexer would count 3142
+        # chat messages as "work" and show an honest user a
+        # volume that does not exist. `IS NOT` is NULL-safe (source_type may be NULL).
+        # T6.5: the embed phase goes stale not only on a MODEL change but also on a change
+        # of chunking logic — and that is visible only through embedding_version. Without this
+        # condition a bump of EMBED_VERSION would stay a declaration: chunk_and_embed
+        # would recompute a record, but the work list would not name it, so nobody
+        # would call it. The condition mirrors the idempotency check in
+        # embeddings.chunk_and_embed_transcription (NULL = old chunking).
         sql = (
             "SELECT id FROM transcriptions WHERE deleted_at IS NULL "
             "AND duplicate_of IS NULL AND ("
@@ -606,10 +606,10 @@ def backfill(
     progress_cb: Optional[Callable[[dict], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> dict:
-    """Прогнати збагачення по всій історії (як /indexer у meeting_archive).
+    """Run enrichment over the whole history (like /indexer in meeting_archive).
 
-    Idempotent — пропускає вже збагачені (якщо force=False). Помилка на одному
-    транскрипті не валить увесь прохід (логується, лічиться у failed).
+    Idempotent — skips already enriched ones (if force=False). An error on one
+    transcript does not break the whole pass (logged, counted in failed).
     """
     if force:
         with get_db_connection(db_path) as conn:
@@ -624,11 +624,11 @@ def backfill(
 
     total = len(ids)
     done = failed = skipped = 0
-    logger.info("[backfill] start: %d транскриптів (force=%s)", total, force)
+    logger.info("[backfill] start: %d transcripts (force=%s)", total, force)
 
     for i, tid in enumerate(ids):
         if cancel_cb and cancel_cb():
-            logger.info("[backfill] скасовано на %d/%d", i, total)
+            logger.info("[backfill] cancelled at %d/%d", i, total)
             break
         try:
             res = enrich_transcription(db_path, tid, model=model, force=force, effort=effort)
@@ -650,42 +650,42 @@ def backfill(
         optimize_chunk_index(db_path)
 
     result = {"total": total, "done": done, "skipped": skipped, "failed": failed}
-    logger.info("[backfill] завершено: %s", result)
+    logger.info("[backfill] finished: %s", result)
     return result
 
 
 def optimize_chunk_index(db_path: str) -> None:
-    """Злити сегменти FTS5-індексу чанків після масової перезаписи.
+    """Merge the FTS5 index segments of chunks after a mass rewrite.
 
-    Кожен ембединг робить DELETE+INSERT чанків запису, а тригери
-    `chunks_ai/ad/au` пишуть у `chunks_fts` — тисяча таких транзакцій лишає
-    індекс покришеним на сегменти. Ціна виміряна на живому архіві після
-    re-embed записів (T6.5): `_fts_search` — **64с** проти 9с, тобто
-    пошук ставав непридатним саме після проходу, який мав його покращити.
-    Сам `optimize` коштує ~0.4с і зводить 7797 сегментів до 2287.
-    Помилка тут не має валити backfill: індекс лишиться робочим, лише
-    повільним."""
+    Every embedding does DELETE+INSERT of a record's chunks, and the triggers
+    `chunks_ai/ad/au` write to `chunks_fts` — a thousand such transactions leave the
+    index fragmented into segments. The cost was measured on the live archive after a
+    re-embed of records (T6.5): `_fts_search` — **64 s** vs 9 s, i.e.
+    search became unusable right after the pass that was meant to improve it.
+    `optimize` itself costs ~0.4 s and reduces 7797 segments to 2287.
+    An error here must not break backfill: the index stays working, just
+    slow."""
     try:
         with get_db_connection(db_path) as conn:
             conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
             conn.commit()
-        logger.info("[backfill] chunks_fts optimize виконано")
+        logger.info("[backfill] chunks_fts optimize done")
     except Exception:
-        logger.warning("[backfill] chunks_fts optimize не вдався — пошук лишиться "
-                       "повільним до наступного проходу", exc_info=True)
+        logger.warning("[backfill] chunks_fts optimize failed — search will stay "
+                       "slow until the next pass", exc_info=True)
 
 
 # ============================================================
-# CLI: backfill-cards (Волна B production-rag) — лише card-фаза
+# CLI: backfill-cards (Wave B production-rag) — card phase only
 # ============================================================
 #
-# `backfill()`/`list_unenriched_ids()` вище лишаються як є (HTTP-шлях через
-# job_queue) — цей CLI офлайн, і бере записи вужче: лише картка (без
-# embed-фази), лише ті, кому вона взагалі бракує (`summary_json IS NULL`),
-# і з ручним вибором моделі — дефолт `models.get_default_model()` (Opus 5)
-# дорогий на великих архівах документів.
+# `backfill()`/`list_unenriched_ids()` above stay as they are (the HTTP path through
+# job_queue) — this CLI is offline and selects records more narrowly: card only (no
+# embed phase), only those that lack one altogether (`summary_json IS NULL`),
+# and with a manual model choice — the default `models.get_default_model()` (Opus 5)
+# is expensive on large document archives.
 
-#: --kind → source_type. 'all' лишає лише базовий фільтр (не Telegram).
+#: --kind -> source_type. 'all' leaves only the base filter (not Telegram).
 _KIND_SOURCE_TYPES = {
     "calls": ("file", "youtube", "recording"),
     "docs": ("document",),
@@ -694,8 +694,8 @@ _KIND_SOURCE_TYPES = {
 
 def _select_backfill_card_rows(db_path: str, kind: str = "all",
                                limit: Optional[int] = None) -> list[dict]:
-    """Записи без картки: не Telegram (embed-only, T Волна 0), не soft-deleted,
-    не дублі (dedup_audio). `kind` звужує до source_type."""
+    """Records without a card: not Telegram (embed-only, T Wave 0), not soft-deleted,
+    not duplicates (dedup_audio). `kind` narrows to a source_type."""
     sql = ("SELECT id, source_type, source_name, transcript_text, polished_text "
            "FROM transcriptions WHERE summary_json IS NULL "
            "AND source_type IS NOT 'telegram' AND deleted_at IS NULL "
@@ -704,7 +704,7 @@ def _select_backfill_card_rows(db_path: str, kind: str = "all",
     if kind != "all":
         types = _KIND_SOURCE_TYPES.get(kind)
         if not types:
-            raise ValueError(f"невідомий --kind: {kind!r}")
+            raise ValueError(f"unknown --kind: {kind!r}")
         sql += f" AND source_type IN ({','.join('?' * len(types))})"
         params.extend(types)
     sql += " ORDER BY id"
@@ -716,8 +716,8 @@ def _select_backfill_card_rows(db_path: str, kind: str = "all",
 
 
 def _dry_run_report(rows: list[dict], model: str) -> dict:
-    """Оцінка обсягу/вартості без жодного запису. tokens ≈ символи/4 (грубо,
-    без реального токенайзера); вартість — лише вхід (вихід невідомий заздалегідь)."""
+    """Estimate of volume/cost without any writes. tokens ~ characters/4 (rough,
+    no real tokenizer); the cost is input only (output is unknown in advance)."""
     lengths = [
         (r["id"], len(r.get("polished_text") or r.get("transcript_text") or ""))
         for r in rows
@@ -736,17 +736,17 @@ def _dry_run_report(rows: list[dict], model: str) -> dict:
 
 def backfill_cards(db_path: str, model: Optional[str] = None,
                    limit: Optional[int] = None, kind: str = "all") -> dict:
-    """Реальний прохід CLI: лише card-фаза (`_enrich_card`), НЕ embed.
+    """The real CLI pass: card phase only (`_enrich_card`), NOT embed.
 
-    Idempotent через саму вибірку (`summary_json IS NULL`) — повторний запуск
-    без нових записів обробляє 0. Збій Claude на одному записі не валить прохід:
-    `_enrich_card` вже ловить його і повертає "retry_needed" (лишається в
-    вибірці для наступного проходу), тут ловимо лише неочікувані помилки.
+    Idempotent through the selection itself (`summary_json IS NULL`) — a rerun
+    with no new records processes 0. A Claude failure on one record does not break the pass:
+    `_enrich_card` already catches it and returns "retry_needed" (the record stays in
+    the selection for the next pass), here we catch only unexpected errors.
     """
     rows = _select_backfill_card_rows(db_path, kind=kind, limit=limit)
     total = len(rows)
     done = skipped = failed = 0
-    logger.info("[backfill-cards] start: %d записів (kind=%s, model=%s)",
+    logger.info("[backfill-cards] start: %d records (kind=%s, model=%s)",
                 total, kind, model or models.get_default_model())
     for r in rows:
         try:
@@ -759,19 +759,19 @@ def backfill_cards(db_path: str, model: Optional[str] = None,
             failed += 1
             logger.error("[backfill-cards] tx=%s failed: %s", r["id"], e, exc_info=True)
     result = {"total": total, "done": done, "skipped": skipped, "failed": failed}
-    logger.info("[backfill-cards] завершено: %s", result)
+    logger.info("[backfill-cards] finished: %s", result)
     return result
 
 
 def _print_dry_run_report(report: dict) -> None:
-    print(f"Записів без картки: {report['count']}")
-    print(f"Символів разом: {report['total_chars']}")
-    print(f"Оцінка токенів (символи/4): {report['tokens_est']}")
-    print(f"Оцінка вартості лише за вхід ({report['model']}): "
+    print(f"Records without a card: {report['count']}")
+    print(f"Total characters: {report['total_chars']}")
+    print(f"Token estimate (characters/4): {report['tokens_est']}")
+    print(f"Input-only cost estimate ({report['model']}): "
           f"${report['cost_est_usd_input_only']:.4f}")
-    print("Топ-10 найдовших:")
+    print("Top 10 longest:")
     for item in report["top10"]:
-        print(f"  #{item['id']}: {item['chars']} символів")
+        print(f"  #{item['id']}: {item['chars']} characters")
 
 
 def _cmd(args) -> int:
@@ -793,26 +793,26 @@ def main(argv: Optional[list] = None) -> int:
 
     p = argparse.ArgumentParser(
         prog="enrichment",
-        description="Офлайн-бекфіл карток (summary/entities/action items) "
-                    "дзвінків і документів — БЕЗ embed-фази.")
+        description="Offline backfill of cards (summary/entities/action items) "
+                    "for calls and documents — WITHOUT the embed phase.")
     p.add_argument("--db", default=default_db)
-    # --dry-run має рятувати з будь-якого місця рядка (як у dedup_audio.py):
-    # верхній флаг у окремий dest, фінальне значення — OR обох.
+    # --dry-run must work from anywhere on the line (as in dedup_audio.py):
+    # the top-level flag goes to a separate dest, the final value is the OR of both.
     p.add_argument("--dry-run", dest="dry_run_pre", action="store_true",
-                   help="Нічого не писати, лише оцінка обсягу/вартості")
+                   help="Write nothing, only estimate volume/cost")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dry-run", action="store_true",
-                        help="Нічого не писати, лише оцінка обсягу/вартості")
+                        help="Write nothing, only estimate volume/cost")
     common.add_argument("--model", default=None,
-                        help="Override моделі Claude (дефолт — models.get_default_model())")
+                        help="Override the Claude model (default — models.get_default_model())")
     common.add_argument("--limit", type=int, default=None)
     common.add_argument("--kind", choices=("calls", "docs", "all"), default="all",
-                        help="calls=file/youtube/recording, docs=document, all=обидва")
+                        help="calls=file/youtube/recording, docs=document, all=both")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser(
         "backfill-cards", parents=[common],
-        help="Картка Claude для записів без summary_json (не Telegram/дублі/видалені)")
+        help="Claude card for records without summary_json (not Telegram/duplicates/deleted)")
 
     args = p.parse_args(argv)
     args.dry_run = args.dry_run or args.dry_run_pre

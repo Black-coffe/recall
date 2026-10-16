@@ -1,15 +1,15 @@
-"""Co-pilot REST endpoints (Phase 19, Крок 1).
+"""Co-pilot REST endpoints (Phase 19, Step 1).
 
-Тонкий HTTP-шар над :class:`CopilotService`. На Кроці 1 — лише CRUD сесії:
-старт (зі знімком налаштувань), стан, стоп. Live-аналіз (SSE-інсайти) — далі.
+A thin HTTP layer over :class:`CopilotService`. At Step 1 — only session CRUD:
+start (with a settings snapshot), state, stop. Live analysis (SSE insights) comes later.
 
-- ``POST /api/copilot/start``          — нова копілот-сесія (body: settings + recording_session_id?).
-- ``GET  /api/copilot/<id>/state``     — snapshot сесії.
-- ``POST /api/copilot/<id>/stop``      — завершити сесію.
-- ``POST /api/copilot/move``           — перенести копілот із запису A на запис B.
-- ``GET  /api/copilot/availability``   — чи увімкнено + чи доступний локальний LLM (для UI-панелі).
+- ``POST /api/copilot/start``          — new copilot session (body: settings + recording_session_id?).
+- ``GET  /api/copilot/<id>/state``     — session snapshot.
+- ``POST /api/copilot/<id>/stop``      — end the session.
+- ``POST /api/copilot/move``           — move the copilot from recording A to recording B.
+- ``GET  /api/copilot/availability``   — whether it is enabled + whether the local LLM is available (for the UI panel).
 
-Якщо ``state.copilot_service is None`` (COPILOT_ENABLED=False) — 503.
+If ``state.copilot_service is None`` (COPILOT_ENABLED=False) — 503.
 """
 from __future__ import annotations
 
@@ -56,18 +56,18 @@ def _busy_response(e: CopilotBusyError):
 
 
 def end_for_recording(recording_session_id: str) -> Optional[str]:
-    """Завершити копілот-сесію, прив'язану до запису (якщо є): зупинити фоновий
-    воркер, тоді закрити рядок. М'яко — помилки лише логуються.
+    """End the copilot session bound to the recording (if any): stop the background
+    worker, then close the row. Soft — errors are only logged.
 
-    Returns id завершеної копілот-сесії (рядком) або None, якщо активної не було.
+    Returns the id of the ended copilot session (as a string) or None if there was no active one.
     """
-    # Спершу зупинити фоновий топік-трекер (Крок 2), тоді закрити сесію.
+    # First stop the background topic tracker (Step 2), then close the session.
     if state.copilot_worker is not None:
         try:
             state.copilot_worker.stop(recording_session_id, wait=False)
         except Exception:
             logger.debug(
-                "copilot_worker.stop failed for %s (best-effort, не блокує stop/discard)",
+                "copilot_worker.stop failed for %s (best-effort, does not block stop/discard)",
                 recording_session_id, exc_info=True,
             )
     if state.copilot_service is None:
@@ -84,9 +84,9 @@ def end_for_recording(recording_session_id: str) -> Optional[str]:
 
 @copilot_bp.route('/api/copilot/availability', methods=['GET'])
 def availability():
-    """Стан фічі для UI: чи увімкнено + статус локального LLM + (для розділу
-    налаштувань) дефолти матриці, статус Claude-API та агрегати фідбеку.
-    Завжди 200 (навіть якщо вимкнено) — щоб панель могла показати причину."""
+    """Feature state for the UI: whether it is enabled + the local LLM status + (for the
+    settings section) the matrix defaults, the Claude API status and the feedback aggregates.
+    Always 200 (even if disabled) — so the panel can show the reason."""
     from app.services import text_polishing
     from app.services.copilot import config as cp_config
     enabled = state.copilot_service is not None
@@ -110,24 +110,24 @@ def availability():
 
 _LIVE_ASK_SCOPES = {'call', 'archive', 'both'}
 
-# top_k із тіла запиту — верхня межа проти неконтрольованого пошуку по архіву
-# (дзеркалить _MAX_TOP_K у live_ask.py, другий рубіж там же).
+# top_k from the request body — an upper bound against uncontrolled search over the archive
+# (mirrors _MAX_TOP_K in live_ask.py, the second line of defence is there too).
 _MAX_TOP_K = 20
 
-# Мітки спікера для промпта — той самий словник, що й `speaker_label` у
+# Speaker labels for the prompt — the same dictionary as `speaker_label` in
 # `live_transcribe.py` ('mic' → 'self', 'system' → 'other').
 _SPEAKER_LABELS = {'self': 'Оператор', 'other': 'Співрозмовник'}
 
 
 def _live_transcript_text(session_id: Optional[str]) -> Optional[str]:
-    """Живий транскрипт сесії текстом (для `scope='call'/'both'`).
+    """The session's live transcript as text (for `scope='call'/'both'`).
 
-    Кожен рядок позначений спікером (`[Оператор]`/`[Співрозмовник]`) — без
-    цього модель не може відповісти на «що сказав клієнт» (C3/приймання).
+    Each line is marked with the speaker (`[Оператор]`/`[Співрозмовник]`) — without
+    this the model cannot answer "what did the client say" (C3/acceptance).
 
-    None — немає сесії, живий воркер вимкнений в інстансі, або сесія без
-    активного live-прев'ю (finalized/ще не стартувала). `live_ask.ask_local`
-    перетворює це у зрозумілий `reason`, а не падає.
+    None — there is no session, the live worker is off in this instance, or the session has no
+    active live preview (finalized/not started yet). `live_ask.ask_local`
+    turns this into an understandable `reason` instead of failing.
     """
     if not session_id or state.live_transcribe_worker is None:
         return None
@@ -145,10 +145,10 @@ def _live_transcript_text(session_id: Optional[str]) -> Optional[str]:
 
 
 def _parse_top_k(raw: Any) -> tuple[Optional[int], Optional[str]]:
-    """``top_k`` з тіла запиту → (1.._MAX_TOP_K, дефолт 6) або (None, помилка).
+    """``top_k`` from the request body → (1.._MAX_TOP_K, default 6) or (None, error).
 
-    `int()` на `float('inf')` (Flask/JSON приймає ``Infinity``) кидає
-    `OverflowError` → без цієї перевірки запит падав у 500 замість 400.
+    `int()` on `float('inf')` (Flask/JSON accepts ``Infinity``) raises
+    `OverflowError` → without this check the request fell into a 500 instead of a 400.
     """
     if raw is None:
         return 6, None
@@ -162,8 +162,8 @@ def _parse_top_k(raw: Any) -> tuple[Optional[int], Optional[str]]:
 
 
 def _active_recording_ids() -> list:
-    """Живі сесії запису (C4 `active_session_ids()`); фолбек на
-    `active_session_id`, поки RecordingService старий (історія 04 не злита)."""
+    """Live recording sessions (C4 `active_session_ids()`); fallback to
+    `active_session_id` while RecordingService is old (story 04 is not merged)."""
     rs = state.recording_service
     if rs is None:
         return []
@@ -176,19 +176,19 @@ def _active_recording_ids() -> list:
 
 @copilot_bp.route('/api/copilot/live-ask', methods=['POST'])
 def live_ask_endpoint():
-    """C2 (`docs/specs/mcp-live-call/plan.md`): питання агента → локальна
-    модель (Ollama, $0) → відповідь з живого транскрипту і/або архіву.
+    """C2 (`docs/specs/mcp-live-call/plan.md`): an agent question → the local
+    model (Ollama, $0) → an answer from the live transcript and/or the archive.
 
     Body: ``{question: str, session_id: str|null, scope: 'call'|'archive'|'both',
-    top_k: int=6}``. ``session_id=null`` → береться активна сесія запису.
+    top_k: int=6}``. ``session_id=null`` → the active recording session is taken.
 
-    ЧОМУ БЕЗ `_require_service()`: це не крок ко-пілот-сесії (COPILOT_ENABLED),
-    а окремий read-only шлях уточнень агента — працює навіть якщо ко-пілот
-    вимкнено, доки доступні Ollama і/або архів (A2/non-goals цієї історії).
-    Нічого не пише в БД, в сесію запису чи у віджет оператора.
+    WHY NO `_require_service()`: this is not a copilot-session step (COPILOT_ENABLED),
+    but a separate read-only path of agent clarifications — it works even if the copilot
+    is off, as long as Ollama and/or the archive are available (A2/non-goals of this story).
+    Writes nothing to the DB, the recording session or the operator widget.
 
-    Завжди 200 (крім порожнього питання) — недоступність Ollama чи відсутність
-    контексту це `available: false` + `reason`, не помилка сервера.
+    Always 200 (except an empty question) — Ollama being unavailable or no
+    context is `available: false` + `reason`, not a server error.
     """
     data = request.get_json(silent=True) or {}
     question = (data.get('question') or '').strip()
@@ -202,9 +202,9 @@ def live_ask_endpoint():
         return jsonify({'success': False, 'error': top_k_err,
                         'error_code': 'INVALID_TOP_K'}), 400
 
-    # Історія 08: режим (raw під час запису / generated поза ним) визначається
-    # ЛИШЕ наявністю активної сесії запису на сервері, а не тілом запиту —
-    # агент не отримує параметра, яким міг би форсувати генерацію (non-goals).
+    # Story 08: the mode (raw during recording / generated outside it) is determined
+    # ONLY by whether an active recording session exists on the server, not by the request body —
+    # the agent gets no parameter with which it could force generation (non-goals).
     live_sids = _active_recording_ids()
     recording_active = bool(live_sids)
 
@@ -232,7 +232,7 @@ def live_ask_endpoint():
 
 @copilot_bp.route('/api/copilot/start', methods=['POST'])
 def start():
-    """Створити копілот-сесію. Body (JSON, усе опціональне):
+    """Create a copilot session. Body (JSON, everything optional):
     ``recording_session_id``, ``mode``, ``importance``, ``api_enabled``,
     ``budget_usd``, ``category_id``.
 
@@ -255,11 +255,11 @@ def start():
 
 @copilot_bp.route('/api/copilot/move', methods=['POST'])
 def move():
-    """Перенести копілот із запису A на живий запис B (C6).
+    """Move the copilot from recording A to the live recording B (C6).
 
-    Body: ``{from_session_id, to_session_id, settings?}``; без ``settings``
-    береться конфіг сесії на A. Не атомарно: A завершується першим, провал
-    старту на B → 200 ``COPILOT_MOVE_FAILED`` з ``ended_from: true``.
+    Body: ``{from_session_id, to_session_id, settings?}``; without ``settings``
+    the config of the session on A is taken. Not atomic: A is ended first, a failed
+    start on B → 200 ``COPILOT_MOVE_FAILED`` with ``ended_from: true``.
     """
     err = _require_service()
     if err:
@@ -307,7 +307,7 @@ def move():
 
 @copilot_bp.route('/api/copilot/sessions', methods=['GET'])
 def list_sessions():
-    """Список копілот-сесій (огляд «що підказував ко-пілот», Крок 7)."""
+    """List of copilot sessions (the "what the co-pilot suggested" overview, Step 7)."""
     err = _require_service()
     if err:
         return err
@@ -322,7 +322,7 @@ def list_sessions():
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/timeline', methods=['GET'])
 def timeline(copilot_session_id: int):
-    """Повна історична доріжка сесії (теми + події + агрегати) для таймлайну (Крок 7)."""
+    """Full historical track of a session (topics + events + aggregates) for the timeline (Step 7)."""
     err = _require_service()
     if err:
         return err
@@ -334,14 +334,14 @@ def timeline(copilot_session_id: int):
 
 
 def _session_comments(session: dict) -> list:
-    """Коментарі оператора цієї сесії — з транскрипту, якщо він уже є, інакше
-    з самої сесії запису.
+    """Operator comments of this session — from the transcript if it exists, otherwise
+    from the recording session itself.
 
-    Дві адреси, бо коментар переїжджає: під час дзвінка він висить на
-    `recording_session` (транскрипту ще немає), після транскрибування —
-    на `transcription` (Волна 4). Експорт має віддавати їх однаково в обох
-    станах, інакше вигрузка сесії, яку ще не транскрибували, мовчки губила б
-    усе, що оператор надиктував по ходу.
+    Two addresses, because a comment moves: during the call it hangs on
+    `recording_session` (no transcript yet), after transcription —
+    on `transcription` (Wave 4). The export must return them the same way in both
+    states, otherwise exporting a session that has not been transcribed yet would silently lose
+    everything the operator dictated along the way.
     """
     try:
         from app.services import comments as comments_svc
@@ -354,14 +354,14 @@ def _session_comments(session: dict) -> list:
         sid = session.get('recording_session_id')
         return comments_svc.list_for(db, 'recording_session', sid) if sid else []
     except Exception:
-        logger.debug("[copilot] коментарі до експорту не долучено", exc_info=True)
+        logger.debug("[copilot] operator comments not attached to the export", exc_info=True)
         return []
 
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/export', methods=['GET'])
 def export_session(copilot_session_id: int):
-    """Експорт сесії — діалог з таймкодами + інлайн-нотатки ко-пілота (Крок 8).
-    ``?format=md`` (дефолт) або ``json``. Віддає файл на завантаження."""
+    """Session export — dialogue with timecodes + inline co-pilot notes (Step 8).
+    ``?format=md`` (default) or ``json``. Serves a file for download."""
     err = _require_service()
     if err:
         return err
@@ -386,8 +386,8 @@ def export_session(copilot_session_id: int):
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/reingest', methods=['POST'])
 def reingest(copilot_session_id: int):
-    """Зберегти підказки ко-пілота в архів (Крок 8): новий transcriptions-запис
-    ``source_type='copilot'`` → enrich/embed тим самим пайплайном → шукабельно у RAG.
+    """Save the co-pilot hints into the archive (Step 8): a new transcriptions record
+    ``source_type='copilot'`` → enrich/embed through the same pipeline → searchable in RAG.
     Response: ``{success, transcription_id, source_name}``."""
     err = _require_service()
     if err:
@@ -413,7 +413,7 @@ def reingest(copilot_session_id: int):
         conn.commit()
         new_tid = cur.lastrowid
 
-    # enrich/embed у фоні — той самий пайплайн, що й для звичайної транскрипції.
+    # enrich/embed in the background — the same pipeline as for a regular transcription.
     try:
         from app.services import enrichment
         if state.job_queue is not None and enrichment.any_available():
@@ -428,8 +428,8 @@ def reingest(copilot_session_id: int):
 
 @copilot_bp.route('/api/copilot/by-transcription/<int:transcription_id>', methods=['GET'])
 def by_transcription(transcription_id: int):
-    """Знайти копілот-сесію транскрипту і повернути її таймлайн (для вкладки на
-    сторінці транскрипту). Завжди 200: ``{success, found, timeline?}``."""
+    """Find the copilot session of a transcript and return its timeline (for the tab on the
+    transcript page). Always 200: ``{success, found, timeline?}``."""
     err = _require_service()
     if err:
         return err
@@ -458,9 +458,9 @@ _IMPORTANCE = {'low', 'medium', 'high'}
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/settings', methods=['POST'])
 def update_settings(copilot_session_id: int):
-    """Змінити режим/важливість сесії НА ЛЬОТУ під час дзвінка (Крок 6). Body:
-    ``mode`` (light|medium|hard) та/або ``importance`` (low|medium|high).
-    Перерезолвлює матрицю, оновлює БД і живий воркер. Response: ``{success, config}``."""
+    """Change the session mode/importance ON THE FLY during a call (Step 6). Body:
+    ``mode`` (light|medium|hard) and/or ``importance`` (low|medium|high).
+    Re-resolves the matrix, updates the DB and the live worker. Response: ``{success, config}``."""
     err = _require_service()
     if err:
         return err
@@ -491,11 +491,11 @@ _OPERATOR_ACTIONS = {'dismiss', 'pin', 'unpin', 'thumbs_up', 'thumbs_down', 'esc
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/action', methods=['POST'])
 def action(copilot_session_id: int):
-    """Дія оператора над карткою-інсайтом (Крок 4). Body:
-    ``action`` (один з _OPERATOR_ACTIONS), ``event_id`` (інсайт, над яким діяли),
-    ``payload`` (опц.). escalate лише логуються — ефект у Кроці 5.
+    """Operator action on an insight card (Step 4). Body:
+    ``action`` (one of _OPERATOR_ACTIONS), ``event_id`` (the insight acted on),
+    ``payload`` (opt.). escalate is only logged — the effect is in Step 5.
 
-    Response 200: ``{success, event_id}`` (id записаної події дії).
+    Response 200: ``{success, event_id}`` (id of the recorded action event).
     """
     err = _require_service()
     if err:
@@ -517,7 +517,7 @@ def action(copilot_session_id: int):
         logger.exception("copilot action failed: %s", e)
         return jsonify({'success': False, 'error': str(e), 'error_code': 'INTERNAL'}), 500
 
-    # «Копнути глибше» → форсована ескалація картки в Claude (Крок 5).
+    # "Dig deeper" → forced escalation of the card to Claude (Step 5).
     escalated = False
     if act == 'escalate' and ev is not None and state.copilot_worker is not None:
         snap = state.copilot_service.get_state(copilot_session_id)

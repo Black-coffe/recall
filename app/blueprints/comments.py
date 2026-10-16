@@ -1,19 +1,19 @@
-"""Шар коментарів — HTTP API (Волна 1).
+"""Comments layer: HTTP API (Wave 1).
 
 Endpoints:
-- GET    /api/comments?target_type=&target_id=            — коментарі однієї картки
-- GET    /api/comments/recent?kind=&target_type=&limit=   — стрічка останніх
-- POST   /api/comments/counts  {target_type, ids: [...]}  — лічильники для списку
+- GET    /api/comments?target_type=&target_id=            — comments of one card
+- GET    /api/comments/recent?kind=&target_type=&limit=   — feed of the latest
+- POST   /api/comments/counts  {target_type, ids: [...]}  — counters for a list
 - POST   /api/comments   {target_type, target_id, body, kind?, pinned?, anchor_time?}
 - PATCH  /api/comments/<id>    {body?, kind?, pinned?, weight?, anchor_time?}
 - DELETE /api/comments/<id>                               — soft-delete
 - POST   /api/comments/<id>/restore
-- GET    /api/comments/meta                               — типи, ваги, цілі (для UI)
+- GET    /api/comments/meta                               — kinds, weights, targets (for the UI)
 
-Індексація (чанк + вектор) НЕ виконується в запиті: ембединг — GPU-операція,
-і POST з картки не має чекати на неї. Робота йде в `state.job_queue`, а якщо
-черги немає (тести, CLI-контекст) — синхронно, бо коментар, який ніколи не
-проіндексувався, гірший за повільний POST.
+Indexing (chunk + vector) is NOT done in the request: an embedding is a GPU operation,
+and a POST from a card must not wait for it. The work goes to `state.job_queue`, and if
+there is no queue (tests, CLI context) it runs synchronously, because a comment that was never
+indexed is worse than a slow POST.
 """
 from __future__ import annotations
 
@@ -36,26 +36,26 @@ def _db() -> str:
 
 
 def _link_graph(comment_id: int, db_path: str) -> None:
-    """Локальний звʼязок із графом (Волна 3, шар А) — безкоштовно, на інжесті.
+    """Local link to the graph (Wave 3, layer A) — free, at ingest.
 
-    У `finally` індексаційної задачі, а не після неї: якщо чанкінг упаде (OOM
-    на відеокарті, збій моделі), коментар не має ще й випасти з графа — це
-    рівно та тиха діра, через яку прохід 4.5.3 колись «працював» нулем викликів
-    (memory/offline-pass-not-wired-to-ingest). Звʼязок векторів не потребує.
+    In the `finally` of the indexing task, not after it: if chunking fails (OOM
+    on the GPU, model failure), the comment must not also drop out of the graph — this is
+    exactly the silent hole through which the 4.5.3 pass once "worked" with zero calls
+    (memory/offline-pass-not-wired-to-ingest). The link does not need vectors.
     """
     try:
         svc.link_entities_for_comment(db_path, comment_id)
     except Exception:
-        logger.warning("[comments] граф для #%s не оновлено", comment_id,
+        logger.warning("[comments] graph for #%s not refreshed", comment_id,
                        exc_info=True)
 
 
 def _schedule_index(comment_id: int, db_path: str) -> str:
-    """Поставити індексацію у чергу; без черги — зробити синхронно.
+    """Queue indexing; without a queue, do it synchronously.
 
-    Помилку черги ковтаємо з логом, але НЕ мовчки: коментар уже збережений і
-    видимий на картці, просто ще не в пошуку — бекфіл (`reindex`) його
-    підбере, бо `embedded_at` лишився NULL.
+    A queue error is swallowed with a log, but NOT silently: the comment is already saved and
+    visible on the card, just not in search yet — the backfill (`reindex`) will
+    pick it up, because `embedded_at` stayed NULL.
     """
     try:
         if state.job_queue is not None:
@@ -72,17 +72,17 @@ def _schedule_index(comment_id: int, db_path: str) -> str:
         finally:
             _link_graph(comment_id, db_path)
     except Exception:
-        logger.warning("[comments] індексацію #%s не поставлено — лишається "
-                       "для reindex", comment_id, exc_info=True)
+        logger.warning("[comments] indexing of #%s not queued — left "
+                       "for reindex", comment_id, exc_info=True)
         _link_graph(comment_id, db_path)
         return "deferred"
 
 
 @comments_bp.route('/api/comments/meta', methods=['GET'])
 def meta():
-    """Довідник для фронтенду: типи коментарів із вагами і список цілей.
-    Тримається на сервері, щоб UI і ранжування не розійшлись у визначенні
-    ваг (класична пастка дубльованої константи)."""
+    """Reference for the frontend: comment kinds with weights and the list of targets.
+    Kept on the server so the UI and ranking do not diverge in the definition of
+    weights (the classic trap of a duplicated constant)."""
     return jsonify({
         'kinds': [{'key': k, 'weight': w, 'attaches': k in svc.ATTACH_KINDS}
                   for k, w in sorted(svc.KIND_WEIGHTS.items(),
@@ -95,9 +95,9 @@ def meta():
 
 @comments_bp.route('/api/comments', methods=['GET'])
 def list_comments():
-    """`target_id` навмисно читається як РЯДОК і не приводиться до int тут:
-    сесія запису адресується `rec_<hex>`, і приведення в блюпринті просто
-    відкидало б її. Вид ключа знає сервіс (`TARGETS`) — одне місце правди."""
+    """`target_id` is deliberately read as a STRING and not cast to int here:
+    a recording session is addressed as `rec_<hex>`, and casting in the blueprint would just
+    discard it. The key kind is known to the service (`TARGETS`) — one source of truth."""
     target_type = (request.args.get('target_type') or '').strip()
     target_id = request.args.get('target_id')
     if not target_type or not target_id:
@@ -114,7 +114,7 @@ def list_comments():
 
 @comments_bp.route('/api/comments/recent', methods=['GET'])
 def recent():
-    """Стрічка коментарів для сторінки «Коментарі» — рядки + знаменник + фасети."""
+    """Feed of comments for the "Comments" page — rows + denominator + facets."""
     return jsonify(svc.list_recent(
         _db(),
         limit=request.args.get('limit', default=50, type=int),
@@ -128,8 +128,8 @@ def recent():
 
 @comments_bp.route('/api/comments/counts', methods=['POST'])
 def counts():
-    """POST, а не GET: списки Бібліотеки віддають до 3000 id за раз, і такий
-    запит не влазить у query-string."""
+    """POST, not GET: Library lists give up to 3000 ids at a time, and such a
+    request does not fit in a query string."""
     data = request.get_json(silent=True) or {}
     target_type = (data.get('target_type') or '').strip()
     ids = data.get('ids') or []
@@ -151,8 +151,8 @@ def create():
         c = svc.create(
             _db(),
             target_type=(data.get('target_type') or '').strip(),
-            # Без int(): рядкові цілі (сесія запису) приводяться в сервісі
-            # за видом ключа з TARGETS.
+            # No int(): string targets (a recording session) are cast in the service
+            # by key kind from TARGETS.
             target_id=data.get('target_id'),
             body=data.get('body') or '',
             kind=(data.get('kind') or svc.DEFAULT_KIND),
@@ -202,13 +202,13 @@ def delete(comment_id):
 
 @comments_bp.route('/api/comments/<int:comment_id>/analyze', methods=['POST'])
 def analyze(comment_id):
-    """Розібрати коментар через Claude: задачі + сутності (Волна 3, шар Б).
+    """Analyze a comment via Claude: tasks + entities (Wave 3, layer B).
 
-    Синхронний навмисно, попри те що це мережевий виклик: розбір запускає
-    ЛЮДИНА кнопкою на конкретному коментарі й чекає результат, щоб одразу
-    побачити, що витягнулось. Фонова задача тут дала б «десь колись зʼявиться»
-    — саме те, чого від платної дії не хочеться. Виклик короткий (вхід — два
-    речення, effort='low').
+    Synchronous on purpose, even though it is a network call: the analysis is started by a
+    PERSON with a button on a specific comment and waits for the result to see right away
+    what was extracted. A background task would give "it will appear sometime"
+    — exactly what you do not want from a paid action. The call is short (input is two
+    sentences, effort='low').
     """
     data = request.get_json(silent=True) or {}
     res = svc.analyze(_db(), comment_id,
@@ -221,8 +221,8 @@ def analyze(comment_id):
         return jsonify({'success': False, 'result': res,
                         'error': tr('knowledge.comments.err.no_api_key')}), 503
     if status == 'no_anchor':
-        # 409, а не 400: запит коректний, просто цій картці нема куди покласти
-        # задачу (файл без транскрипта, сутність, напрямок).
+        # 409, not 400: the request is valid, this card just has nowhere to put
+        # a task (a file without a transcript, an entity, a direction).
         return jsonify({'success': False, 'result': res,
                         'error': tr('knowledge.comments.err.no_transcript')}), 409
     if status == 'retry_needed':
@@ -234,11 +234,11 @@ def analyze(comment_id):
 
 @comments_bp.route('/api/comments/<int:comment_id>/derived', methods=['GET'])
 def derived(comment_id):
-    """Що цей коментар уже породив: задачі й звʼязки графа.
+    """What this comment has already produced: tasks and graph links.
 
-    Окремий ендпоінт, а не поле в `GET /api/comments`: список картки читається
-    на кожен клік по бейджу, а похідні потрібні лише коли панель відкрита і
-    коментар справді розбирали.
+    A separate endpoint, not a field in `GET /api/comments`: the card's list is read
+    on every click on the badge, while derivatives are needed only when the panel is open
+    and the comment was really analyzed.
     """
     c = svc.get(_db(), comment_id)
     if not c:
@@ -255,6 +255,6 @@ def derived(comment_id):
 def restore(comment_id):
     if not svc.restore(_db(), comment_id):
         return jsonify({'success': False, 'error': tr('knowledge.comments.err.nothing_to_restore')}), 404
-    # Відновлений коментар має повернутись і в пошук, а не лише на картку.
+    # A restored comment must return to search too, not only to the card.
     return jsonify({'success': True, 'id': comment_id,
                     'index_status': _schedule_index(comment_id, _db())})

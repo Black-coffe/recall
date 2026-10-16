@@ -1,59 +1,58 @@
-"""Telegram у графі сутностей (Волна 4.5.3).
+"""Telegram in the entity graph (Wave 4.5.3).
 
-**Проблема.** Telegram — переважна більшість архіву і майже відсутній у графі: 154 записи з
-3951. Через це зріз по проєкту, `list_stale_topics` і понедільний звід сліпі
-до основної маси архіву — вони бачать лише дзвінки й документи.
+**The problem.** Telegram is the vast majority of the archive and almost absent from the graph: some records. Because of this the project slice, `list_stale_topics` and the Monday digest are blind
+to the bulk of the archive — they see only calls and documents.
 
-**Лікуємо без моделі.** Граф уже знає сутностей із дзвінків. Витягувати
-сутності з TG заново локальною 7B — значить наплодити дублів («Акме»,
-«Acmecorp», «акмекорп») у графі, де дедуплікація і так невирішена. Тому TG не
-збагачуємо, а **звʼязуємо з тим, що вже відоме**: шукаємо в тексті згадки
-канонічних назв і аліасів.
+**We cure it without a model.** The graph already knows entities from calls. Extracting
+entities from TG anew with a local 7B would mean breeding duplicates («Акме»,
+«Acmecorp», «акмекорп») in a graph where dedup is unsolved anyway. So TG is not
+enriched, it is **linked to what is already known**: we look in the text for mentions
+of canonical names and aliases.
 
-**Чому наївний збіг не годиться.** Збагачення записало в аліаси звичайні
-слова, і на живих даних це давало сміття:
+**Why a naive match does not work.** Enrichment wrote ordinary
+words into the aliases, and on live data this produced junk:
 
-    [project] «Стратегія розвитку Волинської області» ← аліас «документ»
-    [project] «Договір для Миколи/Адама»              ← аліас «договір»
-    [person]  «Том»                                   ← аліас «Тому» (144 збіги
-                                                        на слові «тому»)
+    [project] «Стратегія розвитку Волинської області» ← alias «документ»
+    [project] «Договір для Миколи/Адама»              ← alias «договір»
+    [person]  «Том»                                   ← alias «Тому» (144 matches
+                                                        on the word «тому»)
 
-**Частота теж не рятує.** Заміряно по всьому архіву: серед імен, що трапляються
-частіше за частина записів, вперемішку і сміття («документ» 5.5%, «модель» 7.5%), і
-ключові люди («адам» 7.0%, «андрій» 6.4%). Поріг за частотою вирізав би саме
-те, заради чого граф і потрібен.
+**Frequency does not save us either.** Measured over the whole archive: among the names occurring
+in more than a share of the records there is a mix of junk («документ» 5.5%, «модель» 7.5%) and
+key people («адам» 7.0%, «андрій» 6.4%). A frequency threshold would cut out exactly
+what the graph is needed for.
 
-**Що працює — доказ із місця вживання.** Згадка зараховується, лише якщо в
-самому повідомленні вона написана як власна назва: з великої літери і не на
-початку речення (велика літера після крапки нічого не доводить). «документ» у
-реченні пишуть з малої, «Адам» — з великої. Заміряно: сміття з топу зникає
-повністю, а Ковальчука — той самий випадок, заради якого волна робилась, — стає
-видимою з 43 згадками.
+**What works is evidence from the place of use.** A mention counts only if in
+the message itself it is written as a proper name: with a capital letter and not at the
+start of a sentence (a capital after a period proves nothing). «документ» in a
+sentence is written lowercase, «Адам» — capitalized. Measured: the junk disappears from the top
+completely, and «Ковальчука» — the same case the wave was made for — becomes
+visible with 43 mentions.
 
-Ціна — нижча повнота (частина повідомлень проти 40% наївно), але звʼязок у графі
-живе довго і псує зрізи назавжди, тож точність тут важливіша за повноту.
+The price is lower recall (a share of the messages versus 40% naive), but a link in the graph
+lives long and spoils slices forever, so precision matters more than recall here.
 
-**Звʼязок ставимо на ПОВІДОМЛЕННЯ, де згадка, а не на всю нитку.** Спокуса
-була протилежна — «назва звучить раз, а рішення в сусідніх репліках» — але
-розширення до нитки ВЖЕ зроблено в 4.5.1a (`scope._expand_to_threads`), і воно
-працює від `tg_thread_id`, не від графа. Дублювати його тут — зіпсувати
-статистику заради того, що й так є: заміряно, нитки тягнуть до сутностей
-кожна (медіана 3, p90 19), і звʼязок «кожне повідомлення × кожна сутність
-нитки» дав би 43 482 рядки проти 10 441 наявних. Тоді `entities.meeting_count`
-сказав би «Адам згадується у записів», а `list_stale_topics` вважав би
-кожну сутність нитки згаданою в день останнього повідомлення — тобто зробив би
-свіжим те, про що не говорили місяцями.
+**We put the link on the MESSAGE with the mention, not on the whole thread.** The temptation
+was the opposite — "the name sounds once, and the decision is in the neighboring replies" — but
+the expansion to the thread is ALREADY done in 4.5.1a (`scope._expand_to_threads`), and it
+works from `tg_thread_id`, not from the graph. Duplicating it here would spoil
+the statistics for the sake of something that exists anyway: measured, threads pull many entities
+each (median 3, p90 19), and a "every message × every entity of the
+thread" link would give 43 482 rows against 10 441 existing. Then `entities.meeting_count`
+would say "Адам is mentioned in records", and `list_stale_topics` would consider
+every entity of a thread mentioned on the day of the last message — i.e. it would make
+fresh what had not been talked about for months.
 
-Два механізми складаються: граф відповідає «де САМЕ згадано», нитка —
-«що навколо цього говорили».
+The two mechanisms add up: the graph answers "where EXACTLY it is mentioned", the thread —
+"what was said around it".
 
-**Звʼязування живе на інжесті, а не лише в CLI.** Прохід по всьому архіву —
-разова операція, і поки він був єдиним способом, кожне нове повідомлення
-лишалось поза графом до наступного ручного запуску. Тепер `link_message`
-викликається з того ж job'а, що ставить ембединги (`_submit_embed_only`), одразу
-після розкладання по нитках. Повний прохід лишається — він потрібен після змін
-у графі (злиття/розділення сутностей додає написання, за якими старі
-повідомлення тепер знаходяться).
+**Linking lives on ingest, not only in the CLI.** A pass over the whole archive is
+a one-off operation, and while it was the only way, every new message
+stayed outside the graph until the next manual run. Now `link_message`
+is called from the same job that sets the embeddings (`_submit_embed_only`), right
+after the split into threads. The full pass remains — it is needed after changes
+in the graph (entity merges/splits add spellings by which old
+messages are now found).
 
 CLI:
     python -m app.services.tg_entities link --dry-run
@@ -78,32 +77,32 @@ from app.db.connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-#: Провенанс звʼязків, які ставить цей модуль (meeting_entities.source).
+#: Provenance of the links this module sets (meeting_entities.source).
 SOURCE = "thread_match"
 
-#: Провенанс звʼязків морфологічного матчера (історія 03) — ОКРЕМЕ значення
-#: від `SOURCE`: точна словоформа і згадка лише за основою слова — різні за
-#: надійністю докази, і `entity_dedup.py`/`comments.py` читають саме `SOURCE`,
-#: тож морфо-звʼязки не повинні підмінювати його значення.
+#: Provenance of the morphological matcher links (story 03) — a SEPARATE value
+#: from `SOURCE`: an exact word form and a mention by the word stem alone are evidence of
+#: different reliability, and `entity_dedup.py`/`comments.py` read exactly `SOURCE`,
+#: so morph links must not substitute its value.
 SOURCE_MORPH = "thread_morph"
 
-#: Вимикач морфо-матчера. Дефолт "0" — вимкнено: мердж цієї історії сам собою
-#: не змінює поведінку системи, доки власник свідомо не увімкне прапорець
-#: (після розбору блокерів історії 02). Читається функцією, а не одноразовою
-#: константою модуля (як `rag.py:33`), щоб прапорець можна було перемикати між
-#: викликами (тести, повторний запуск CLI) без перезапуску процесу.
+#: Switch of the morph matcher. Default "0" — off: the merge of this story by itself does not
+#: change the system's behavior until the owner deliberately turns the flag on
+#: (after working through the blockers of story 02). Read by a function, not a one-off
+#: module constant (like `rag.py:33`), so the flag can be toggled between
+#: calls (tests, a repeated CLI run) without restarting the process.
 def _morph_enabled() -> bool:
     return os.environ.get("TG_ENTITIES_MORPH_ENABLED", "0").strip() in ("1", "true", "True")
 
-#: 'topic' навмисно поза грою: 2153 сутності вільним текстом («планування»,
-#: «бюджет») зловлять половину архіву і нічого не означатимуть. Граф-зрізи
-#: будуються на людях, проєктах і організаціях.
+#: 'topic' is deliberately out of play: 2153 free-text entities («планування»,
+#: «бюджет») would catch half the archive and mean nothing. Graph slices
+#: are built on people, projects and organizations.
 LINKABLE_TYPES = ("person", "project", "org")
 
-#: Коротші імена ловлять сміття («Ок», «БХ») і не дають користі.
+#: Shorter names catch junk («Ок», «БХ») and are of no use.
 MIN_NAME_LEN = 4
 
-#: Скільки слів може містити назва (довші не шукаємо — це вже не імʼя).
+#: How many words a name may contain (we do not search for longer ones — that is no longer a name).
 MAX_NAME_WORDS = 6
 
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -115,30 +114,30 @@ def _norm(text: str) -> str:
 
 
 def _key(text: str) -> str:
-    """Ключ пошуку: слова через один пробіл, без пунктуації і регістру."""
+    """Search key: words separated by a single space, without punctuation and case."""
     return " ".join(_WORD.findall(_norm(text)))
 
 
-#: Суфікси відмінків (укр./рос.), які згортаємо перед порівнянням основ —
-#: власне рішення без залежностей (pymorphy/snowball/nltk заборонені планом
-#: історії, див. Non-goals): не морфологія, а грубе зрізання закінчень,
-#: достатнє, щоб «Юлією»/«Тетяни»/«Промприладом» зійшлися з базовою формою
-#: («Юлія»/«Тетяна»/«Промприлад»). Найдовші перевіряються першими, щоб не
-#: зрізати лише частину довшого закінчення як коротшого.
+#: Case suffixes (Ukr./Rus.) that we fold before comparing stems —
+#: our own dependency-free solution (pymorphy/snowball/nltk are forbidden by the story
+#: plan, see Non-goals): not morphology but a crude stripping of endings,
+#: enough for «Юлією»/«Тетяни»/«Промприладом» to meet the base form
+#: («Юлія»/«Тетяна»/«Промприлад»). The longest are checked first, so as not to
+#: strip only part of a longer ending as a shorter one.
 _CASE_SUFFIXES = tuple(sorted({
     "ями", "ами", "еві", "єві", "ові",
     "ою", "ею", "єю", "ом", "ем", "єм", "ів", "им", "ім", "ий", "ій",
     "а", "я", "у", "ю", "і", "и", "е", "о", "й",
 }, key=len, reverse=True))
 
-#: Скільки літер має лишитись після зрізання суфікса — коротший залишок
-#: частіше збігається випадково, ніж по суті (напр. «ти» → «т»).
+#: How many letters must remain after stripping a suffix — a shorter remainder
+#: matches by accident more often than on substance (e.g. «ти» → «т»).
 _STEM_MIN_LEN = 3
 
 
 def _stem(word: str) -> str:
-    """Груба основа слова для морфологічного зіставлення (очікує вже
-    згорнутий регістр/NFKC, як `lowered`/ключі `names`)."""
+    """A crude word stem for morphological matching (expects already
+    case-folded/NFKC text, like `lowered`/the keys of `names`)."""
     for suf in _CASE_SUFFIXES:
         if word.endswith(suf) and len(word) - len(suf) >= _STEM_MIN_LEN:
             return word[:-len(suf)]
@@ -146,9 +145,9 @@ def _stem(word: str) -> str:
 
 
 def _build_stems(names: dict[str, int]) -> dict[str, set[int]]:
-    """Основа → множина entity_id серед ОДНОСЛІВНИХ назв/аліасів. Багатослівні
-    ключі (`names` містить і їх) морфологія не чіпає — відмінювання
-    словосполук виходить за межі простого суфіксного згортання."""
+    """Stem → set of entity_id among SINGLE-WORD names/aliases. Multi-word
+    keys (`names` contains them too) are not touched by morphology — the inflection of
+    phrases is beyond plain suffix folding."""
     stems: dict[str, set[int]] = {}
     for key, eid in names.items():
         if " " in key:
@@ -158,9 +157,9 @@ def _build_stems(names: dict[str, int]) -> dict[str, set[int]]:
 
 
 def load_names(db_path: str) -> dict[str, int]:
-    """Канонічні назви + аліаси → entity_id. Канонічна назва має пріоритет:
-    той самий рядок може бути аліасом іншої сутності, і тоді точна назва
-    правдивіша за варіант написання."""
+    """Canonical names + aliases → entity_id. The canonical name has priority:
+    the same string may be an alias of another entity, and then the exact name
+    is truer than a spelling variant."""
     names: dict[str, int] = {}
     ph = ",".join("?" * len(LINKABLE_TYPES))
     with get_db_connection(db_path) as conn:
@@ -180,21 +179,21 @@ def load_names(db_path: str) -> dict[str, int]:
 
 def _mentions_core(text: Optional[str], names: dict[str, int],
                     stems: dict[str, set[int]]) -> dict[int, str]:
-    """entity_id → провенанс (`SOURCE`/`SOURCE_MORPH`). `stems` порожній —
-    морфо-гілка не запускається взагалі (прапорець вимкнений, див.
+    """entity_id → provenance (`SOURCE`/`SOURCE_MORPH`). An empty `stems` means
+    the morph branch does not run at all (the flag is off, see
     `_find_mentions_detailed`/`stems_for`).
 
-    Вимога великої літери не на початку речення — єдине, що відділяє «Адам»
-    від «документ» і «Том» від «тому» (див. модульний docstring). Це не
-    евристика заради економії: без неї топ згадок на живому архіві складається
-    зі сміття, і граф стає гіршим, ніж був.
+    The requirement of a capital letter not at the start of a sentence is the only thing that separates «Адам»
+    from «документ» and «Том» from «тому» (see the module docstring). This is not
+    a heuristic to save effort: without it the top of mentions in the live archive consists
+    of junk, and the graph becomes worse than it was.
 
-    Три гарди морфо-гілки (історія 03): (1) точна словоформа на позиції
-    вирішує все — морфо-гілка на цій позиції не запускається, навіть якщо за
-    основою слово вказує на ІНШУ сутність; (2) основа мусить вказувати рівно
-    на одну сутність — «Русланою» при наявних «Руслан» і «Руслана» неоднозначна
-    і відкидається (одну згадку не можна зарахувати двом); (3) той самий
-    `written_as_proper_noun`, що й для точних збігів — ALL-CAPS не доказ.
+    Three guards of the morph branch (story 03): (1) the exact word form at a position
+    decides everything — the morph branch does not run at that position, even if by
+    stem the word points to ANOTHER entity; (2) a stem must point to exactly
+    one entity — «Русланою» with existing «Руслан» and «Руслана» is ambiguous
+    and rejected (one mention cannot be credited to two); (3) the same
+    `written_as_proper_noun` as for exact matches — ALL-CAPS is not evidence.
     """
     result: dict[int, str] = {}
     if not text:
@@ -210,11 +209,11 @@ def _mentions_core(text: Optional[str], names: dict[str, int],
             entity_id = names.get(" ".join(lowered[i:i + size]))
             if entity_id is None:
                 continue
-            # Гард 1 працює на РІВНІ ТОКЕНА, не збігу: усі слова, спожиті
-            # цим точним збігом (не лише перше), закриваються для морфо-гілки
-            # — інакше слово всередині багатослівної назви лишається
-            # відкритим і морфо-гілка може зарахувати його ІНШІЙ сутності
-            # (одне написання не можна зараховувати двом).
+            # Guard 1 works at the TOKEN level, not the match: all words consumed
+            # by this exact match (not only the first) are closed to the morph branch
+            # — otherwise a word inside a multi-word name stays
+            # open and the morph branch could credit it to ANOTHER entity
+            # (one spelling cannot be credited to two).
             exact_word_positions.update(range(i, i + size))
             if entity_id in result:
                 continue
@@ -225,102 +224,102 @@ def _mentions_core(text: Optional[str], names: dict[str, int],
     if stems:
         for i, (word, pos) in enumerate(tokens):
             if i in exact_word_positions:
-                continue  # Гард 1: точна словоформа на позиції вже вирішила
+                continue  # Guard 1: the exact word form at the position has already decided
             candidates = stems.get(_stem(lowered[i]))
             if not candidates or len(candidates) != 1:
-                continue  # Гард 2: основа мусить вказувати рівно на одну сутність
+                continue  # Guard 2: a stem must point to exactly one entity
             entity_id = next(iter(candidates))
             if entity_id in result:
                 continue
-            if written_as_proper_noun(text, word, pos):  # Гард 3: не капс-шапка
+            if written_as_proper_noun(text, word, pos):  # Guard 3: not an all-caps header
                 result[entity_id] = SOURCE_MORPH
     return result
 
 
 def _find_mentions_detailed(text: Optional[str], names: dict[str, int]) -> dict[int, str]:
-    """`_mentions_core`, що сама рахує основи (для чистих викликів без
-    db_path — CLI/`find_mentions`/тести). Основи рахуються лише коли прапорець
-    увімкнений: коли вимкнений, морфо-гілка гарантовано не запускається."""
+    """`_mentions_core` that computes the stems itself (for plain calls without
+    db_path — CLI/`find_mentions`/tests). Stems are computed only when the flag is
+    on: when it is off, the morph branch is guaranteed not to run."""
     stems = _build_stems(names) if _morph_enabled() else {}
     return _mentions_core(text, names, stems)
 
 
 def find_mentions(text: Optional[str], names: dict[str, int]) -> set[int]:
-    """entity_id, згадані в тексті ЯК ВЛАСНІ НАЗВИ (точно чи, за увімкненого
-    прапорця, за основою слова — див. `_mentions_core`)."""
+    """entity_ids mentioned in the text AS PROPER NAMES (exactly or, with the flag
+    on, by word stem — see `_mentions_core`)."""
     return set(_find_mentions_detailed(text, names))
 
 
 def find_exact_mentions(text: Optional[str], names: dict[str, int]) -> set[int]:
-    """`find_mentions`, що НІКОЛИ не запускає морфо-гілку — незалежно від
-    `TG_ENTITIES_MORPH_ENABLED`. Для споживачів, чий замір бачить лише точний
-    матчер (`comments.link_entities`): вмикання прапорця для інжесту TG не має
-    тихо змінювати те, що пише інша підсистема."""
+    """`find_mentions` that NEVER runs the morph branch — regardless of
+    `TG_ENTITIES_MORPH_ENABLED`. For consumers whose measurement sees only the exact
+    matcher (`comments.link_entities`): turning the flag on for TG ingest must not
+    silently change what another subsystem writes."""
     return set(_mentions_core(text, names, {}))
 
 
 def is_shouting(text: str, pos: int) -> bool:
-    """Чи набраний рядок навколо позиції ВЕЛИКИМИ ЛІТЕРАМИ суцільно.
+    """Whether the line around the position is typed entirely in CAPITAL LETTERS.
 
-    У шапці договору («ЩОДО ТЕКСТІВ СТАТЕЙ У РОЗДІЛ WHAT WE DO») з великої
-    написані всі слова підряд, тож велика літера там не відрізняє власну назву
-    від загального слова — а саме на цій відмінності стоїть увесь модуль.
+    In a contract header («ЩОДО ТЕКСТІВ СТАТЕЙ У РОЗДІЛ WHAT WE DO») all words are
+    capitalized in a row, so a capital letter there does not distinguish a proper name
+    from a common word — and the whole module rests on that distinction.
     """
     start = text.rfind("\n", 0, pos) + 1
     end = text.find("\n", pos)
     line = text[start:end if end != -1 else len(text)]
     letters = [ch for ch in line if ch.isalpha()]
-    if len(letters) < 8:                       # надто коротко, щоб робити висновок
+    if len(letters) < 8:                       # too short to draw a conclusion
         return False
     return sum(1 for ch in letters if ch.isupper()) / len(letters) >= 0.8
 
 
 def written_as_proper_noun(text: str, word: str, pos: int) -> bool:
-    """Чи написане слово в цьому місці як власна назва.
+    """Whether the word is written as a proper name at this place.
 
-    Одне визначення на два шари: `find_mentions` ставить за ним звʼязки, а
-    аудит написань (`entity_dedup.find_junk_aliases`) за ним же рахує докази
-    «це таки імʼя». Розійшовшись, вони починають суперечити один одному:
-    аудит радив зняти написання, яке саме зараз дає звʼязки.
+    One definition for two layers: `find_mentions` sets links by it, and
+    the spelling audit (`entity_dedup.find_junk_aliases`) counts by it the evidence
+    "it is a name after all". Once they diverge, they start contradicting each other:
+    the audit advised removing a spelling that is producing links right now.
     """
     if not word[:1].isupper():
         return False
     before = text[:pos]
-    # Велика літера на початку рядка чи речення нічого не доводить:
-    # «Документ надіслано» — це не назва проєкту.
+    # A capital letter at the start of a line or sentence proves nothing:
+    # «Документ надіслано» is not a project name.
     if not before.strip() or _SENTENCE_END.search(before):
         return False
     return not is_shouting(text, pos)
 
 
-#: Скільки секунд тримаємо словник назв між повідомленнями. Кеш потрібен, бо
-#: на інжесті `load_names` — це 6200 рядків на КОЖНЕ повідомлення, а граф за
-#: секунди не змінюється. Термін короткий свідомо: нова сутність із дзвінка або
-#: злиття мають почати ловитись самі, без перезапуску застосунку.
+#: How many seconds we keep the names dictionary between messages. The cache is needed because
+#: on ingest `load_names` is 6200 rows for EVERY message, while the graph does not change in
+#: seconds. The term is deliberately short: a new entity from a call or a merge
+#: should start being caught on their own, without restarting the app.
 _NAMES_TTL = float(os.environ.get("TG_ENTITIES_NAMES_TTL", "300"))
 
 _names_lock = threading.Lock()
-#: (timestamp, назви, основи, стан прапорця під яким основи побудовано).
-#: Основи рахуються разом із назвами й живуть у тому самому кеші/TTL —
-#: reset_names_cache() скидає обидва одним рухом. Четвертий елемент існує,
-#: бо прапорець може перемкнутись МІЖ прогрівом і читанням кешу (тести,
-#: увімкнення на живому процесі без рестарту): прогрів під OFF лишає слот
-#: `{}` порожнім, і без цієї перевірки він віддавався б і під ON — морфо-
-#: прохід тоді видаляє свої рядки і не має чим їх переписати.
+#: (timestamp, names, stems, the flag state under which the stems were built).
+#: Stems are computed together with the names and live in the same cache/TTL —
+#: reset_names_cache() drops both in one move. The fourth element exists
+#: because the flag can be toggled BETWEEN warm-up and cache read (tests,
+#: turning it on in a live process without a restart): a warm-up under OFF leaves the slot
+#: `{}` empty, and without this check it would be served under ON too — the morph
+#: pass then deletes its rows and has nothing to rewrite them with.
 _names_cache: dict[str, tuple[float, dict[str, int], dict[str, set[int]], bool]] = {}
 
 
 def names_for(db_path: str, *, force: bool = False) -> dict[str, int]:
-    """Словник назв із коротким кешем (див. `_NAMES_TTL`)."""
+    """The names dictionary with a short cache (see `_NAMES_TTL`)."""
     now = time.monotonic()
     morph_now = _morph_enabled()
     with _names_lock:
         hit = _names_cache.get(db_path)
         if hit and not force and (now - hit[0]) < _NAMES_TTL and hit[3] == morph_now:
             return hit[1]
-    names = load_names(db_path)          # поза локом: читання БД може бути довгим
-    # Основи рахуємо лише за увімкненого прапорця — вимкнений матчер не
-    # платить за них нічого, навіть на прогріві кешу.
+    names = load_names(db_path)          # outside the lock: reading the DB can be long
+    # Stems are computed only with the flag on — a disabled matcher
+    # pays nothing for them, even on a cache warm-up.
     stems = _build_stems(names) if morph_now else {}
     with _names_lock:
         _names_cache[db_path] = (now, names, stems, morph_now)
@@ -328,30 +327,30 @@ def names_for(db_path: str, *, force: bool = False) -> dict[str, int]:
 
 
 def stems_for(db_path: str, *, force: bool = False) -> dict[str, set[int]]:
-    """Основи слів для морфо-матчера — той самий кеш, що й `names_for`
-    (прогріває/оновлює його за потреби)."""
+    """Word stems for the morph matcher — the same cache as `names_for`
+    (warms/refreshes it if needed)."""
     names_for(db_path, force=force)
     with _names_lock:
         return _names_cache[db_path][2]
 
 
 def reset_names_cache() -> None:
-    """Забути кеш назв і основ. Потрібне тестам і після масових змін у графі."""
+    """Forget the cache of names and stems. Needed by tests and after bulk changes in the graph."""
     with _names_lock:
         _names_cache.clear()
 
 
 def link_message(db_path: str, transcription_id: int) -> dict:
-    """Звʼязати ОДНЕ повідомлення з графом — крок інжесту.
+    """Link ONE message to the graph — an ingest step.
 
-    Ідемпотентно: свої звʼязки цього запису переписуються, чужі (від
-    Claude-збагачення, `source IS NULL`) не чіпаються. Викликається після
-    правки повідомлення так само, як після першої появи: текст змінився —
-    згадки могли зʼявитись або зникнути.
+    Idempotent: this record's own links are rewritten, foreign ones (from
+    Claude enrichment, `source IS NULL`) are not touched. Called after a
+    message edit the same as after the first appearance: the text changed —
+    mentions could have appeared or disappeared.
 
-    Нитка тут НЕ потрібна (на відміну від повного проходу): згадка доводиться
-    текстом самого повідомлення, а не тим, до якої розмови його віднесли. Якщо
-    розкладання по нитках не спрацювало, запис усе одно потрапляє в граф.
+    The thread is NOT needed here (unlike the full pass): a mention is proven by
+    the text of the message itself, not by which conversation it was assigned to. If
+    the split into threads did not work, the record still gets into the graph.
     """
     names = names_for(db_path)
     if not names:
@@ -372,8 +371,8 @@ def link_message(db_path: str, transcription_id: int) -> dict:
         conn.execute("DELETE FROM meeting_entities WHERE source = ? AND transcription_id = ?",
                      (SOURCE, transcription_id))
         if morph_on:
-            # Морфо-прохід чіпає лише свої рядки — точний SOURCE прибирається
-            # окремим DELETE вище і морфо-гілки не стосується.
+            # The morph pass touches only its own rows — the exact SOURCE is removed
+            # by the separate DELETE above and does not concern the morph branch.
             conn.execute("DELETE FROM meeting_entities WHERE source = ? AND transcription_id = ?",
                          (SOURCE_MORPH, transcription_id))
         written = 0
@@ -390,13 +389,13 @@ def link_message(db_path: str, transcription_id: int) -> dict:
 
 def link_threads(db_path: str, *, chat_id: Optional[int] = None,
                  dry_run: bool = True) -> dict:
-    """Звʼязати нитки Telegram із наявними сутностями графа.
+    """Link Telegram threads to the existing graph entities.
 
-    Ідемпотентно: звʼязки з нашим провенансом переписуються, чужі (від
-    Claude-збагачення, source IS NULL) не чіпаються — вони надійніші."""
+    Idempotent: links with our provenance are rewritten, foreign ones (from
+    Claude enrichment, source IS NULL) are not touched — they are more reliable."""
     names = load_names(db_path)
     if not names:
-        return {"error": "у графі немає сутностей для звʼязування"}
+        return {"error": "there are no entities in the graph to link"}
 
     morph_on = _morph_enabled()
     stems = _build_stems(names) if morph_on else {}
@@ -412,8 +411,8 @@ def link_threads(db_path: str, *, chat_id: Optional[int] = None,
             f"SELECT id, tg_thread_id, transcript_text FROM transcriptions "
             f"WHERE {' AND '.join(where)}", params).fetchall()
 
-        # Згадка — там, де вона написана. Розширення до нитки живе окремо
-        # (scope._expand_to_threads) і не має дублюватись у графі.
+        # A mention is where it is written. Expansion to the thread lives separately
+        # (scope._expand_to_threads) and must not be duplicated in the graph.
         per_message: dict[int, dict[int, str]] = {}
         threads_seen: set[int] = set()
         threads_touched: set[int] = set()
@@ -432,9 +431,9 @@ def link_threads(db_path: str, *, chat_id: Optional[int] = None,
         if dry_run:
             return {"dry_run": True, **result}
 
-        # Свої звʼязки прибираємо перед перезаписом; чужі лишаються. Точний і
-        # морфо-провенанс приберемо окремими DELETE — морфо-прохід чіпає лише
-        # свої рядки, коли прапорець вимкнений SOURCE_MORPH навіть не чіпаємо.
+        # We remove our own links before the rewrite; foreign ones stay. The exact and
+        # morph provenances are removed by separate DELETEs — the morph pass touches only
+        # its own rows; when the flag is off we do not even touch SOURCE_MORPH.
         own_sources = (SOURCE, SOURCE_MORPH) if morph_on else (SOURCE,)
         tids = [r["id"] for r in rows]
         for i in range(0, len(tids), 500):
@@ -448,8 +447,8 @@ def link_threads(db_path: str, *, chat_id: Optional[int] = None,
         written = 0
         for tid, entity_map in per_message.items():
             for eid, src in entity_map.items():
-                # INSERT OR IGNORE: якщо звʼязок уже поставив Claude —
-                # лишаємо його версію (вона з salience і роллю).
+                # INSERT OR IGNORE: if Claude has already set the link —
+                # we keep its version (it has salience and a role).
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO meeting_entities "
                     "(transcription_id, entity_id, mention_count, source) "
@@ -499,13 +498,13 @@ def main(argv: Optional[list] = None) -> int:
     default_db = str(Config.BASE_DIR / Config.DATABASE)
 
     p = argparse.ArgumentParser(prog="tg_entities",
-                                description="Telegram у графі сутностей (Волна 4.5.3).")
+                                description="Telegram in the entity graph (Wave 4.5.3).")
     p.add_argument("--db", default=default_db)
     sub = p.add_subparsers(dest="command", required=True)
-    l = sub.add_parser("link", help="Звʼязати нитки з наявними сутностями")
+    l = sub.add_parser("link", help="Link threads to the existing entities")
     l.add_argument("--dry-run", action="store_true")
     l.add_argument("--chat", type=int, default=None)
-    sub.add_parser("stats", help="Покриття графа")
+    sub.add_parser("stats", help="Graph coverage")
 
     args = p.parse_args(argv)
     if args.command == "link":

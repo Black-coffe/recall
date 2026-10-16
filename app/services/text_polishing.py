@@ -1,18 +1,18 @@
-"""Claude API сервис для постпроцессинга транскриптов (Phase 4.4).
+"""Claude API service for post-processing transcripts (Phase 4.4).
 
-Берёт «сырой» текст после Whisper и улучшает: расставляет пунктуацию,
-исправляет опечатки, разбивает на абзацы. Сохраняет смысл и язык оригинала.
+Takes the "raw" text after Whisper and improves it: adds punctuation,
+fixes typos, splits into paragraphs. Preserves the meaning and language of the original.
 
 Architecture (per Anthropic's claude-api skill):
 - Default model: app.services.models.get_default_model() (claude-opus-4-8,
-  override via CLAUDE_MODEL env) — єдина точка правди, T6.2.
-- Adaptive thinking: model сам решает когда и сколько думать.
-- Effort: medium — баланс качества и стоимости для редактуры.
-- Prompt caching на system prompt — система одинаковая для всех вызовов,
-  cache_read стоит ~10% от полной цены input.
-- Streaming для длинных транскриптов (избегает SDK HTTP timeout).
-- Retry: транзиентні помилки (429/5xx/timeout) повторюються через
-  app.services.claude_retry (T6.3); увесь виклик заново, без резюме стріму.
+  override via CLAUDE_MODEL env) — the single source of truth, T6.2.
+- Adaptive thinking: the model decides itself when and how much to think.
+- Effort: medium — a balance of quality and cost for editing.
+- Prompt caching on the system prompt — the system is the same for all calls,
+  cache_read costs ~10% of the full input price.
+- Streaming for long transcripts (avoids the SDK HTTP timeout).
+- Retry: transient errors (429/5xx/timeout) are repeated via
+  app.services.claude_retry (T6.3); the whole call anew, without resuming the stream.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import os
 import threading
 from typing import Optional
 
+from app.core.i18n import tr
 from app.services.claude_retry import call_with_retry
 from app.services.models import get_default_model, supports_adaptive_thinking
 
@@ -28,7 +29,7 @@ from app.services.models import get_default_model, supports_adaptive_thinking
 logger = logging.getLogger(__name__)
 
 
-# Lazy import — anthropic не критичная зависимость, без ключа модуль не падает.
+# Lazy import — anthropic is not a critical dependency, without a key the module does not fail.
 _client = None
 _client_lock = threading.Lock()
 
@@ -43,31 +44,28 @@ def _get_client():
         import anthropic  # lazy
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY не встановлено. Створіть .env у корені проекту "
-                "з рядком ANTHROPIC_API_KEY=sk-ant-... та перезапустіть сервер."
-            )
+            raise RuntimeError(tr("svc_llm.polish.no_key"))
         _client = anthropic.Anthropic(api_key=api_key)
         return _client
 
 
 def is_available() -> bool:
-    """Чи налаштований API-ключ. Використовується в /api/health та UI."""
+    """Whether the API key is configured. Used in /api/health and the UI."""
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def _stream_with_retry(client, timeout: float, request_kwargs: dict, what: str = "polish"):
-    """messages.stream(**request_kwargs) → get_final_message(), з retry на
-    транзиентних помилках (429/5xx/timeout). Увесь виклик повторюється
-    заново на кожній спробі (T6.3) — стрім НЕ резюмиться з середини."""
+    """messages.stream(**request_kwargs) → get_final_message(), with retry on
+    transient errors (429/5xx/timeout). The whole call is repeated
+    anew on every attempt (T6.3) — the stream is NOT resumed from the middle."""
     def _do():
         with client.with_options(timeout=timeout).messages.stream(**request_kwargs) as stream:
             return stream.get_final_message()
     return call_with_retry(_do, what=what)
 
 
-# System prompt — стабильный, кешируется.
-# Phrasing нейтральный для трёх языков (UK/RU/EN), без жёстких "MUST".
+# System prompt — stable, cached.
+# Phrasing neutral for three languages (UK/RU/EN), without rigid "MUST".
 _POLISH_SYSTEM_PROMPT = """Ты — редактор автоматических транскриптов аудиозаписей.
 
 Твоя задача — взять «сырой» текст, который выдал speech-to-text движок (Whisper),
@@ -174,23 +172,23 @@ def polish_diarized_transcript(
     model: Optional[str] = None,
     timeout: float = 300.0,
 ) -> dict:
-    """Покращити транскрипт зі збереженням speaker-розмітки (Phase 10.7).
+    """Improve the transcript while keeping the speaker markup (Phase 10.7).
 
     Args:
-        segments: список dict'ів з полями {start, end, text, speaker}.
-            speaker — raw_label типу 'SPEAKER_00' / 'self' / 'SPEAKER_UNKNOWN'.
-        speaker_map: {raw_label: display_name}. Якщо raw_label немає у мапі —
-            використовується fallback ("Ви", "Спікер N", "?").
+        segments: list of dicts with the fields {start, end, text, speaker}.
+            speaker — a raw_label like 'SPEAKER_00' / 'self' / 'SPEAKER_UNKNOWN'.
+        speaker_map: {raw_label: display_name}. If raw_label is not in the map —
+            the fallback is used ("Ви", "Спікер N", "?").
         model: override ANTHROPIC model id; default — models.get_default_model().
-        timeout: HTTP timeout у секундах.
+        timeout: HTTP timeout in seconds.
 
     Returns:
-        Тот самий формат що polish_transcript: {polished_text, model,
+        The same format as polish_transcript: {polished_text, model,
         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens}.
 
     Raises:
-        RuntimeError якщо ANTHROPIC_API_KEY відсутній.
-        anthropic.APIError при помилці API.
+        RuntimeError if ANTHROPIC_API_KEY is missing.
+        anthropic.APIError on an API error.
     """
     formatted = _format_diarized_input(segments, speaker_map)
     if not formatted.strip():
@@ -252,12 +250,12 @@ def polish_transcript(
     model: Optional[str] = None,
     timeout: float = 300.0,
 ) -> dict:
-    """Улучшить транскрипт через Claude API.
+    """Improve the transcript via the Claude API.
 
     Returns:
         {
-            "polished_text": str,   # улучшенный текст
-            "model": str,           # фактически использованная модель
+            "polished_text": str,   # the improved text
+            "model": str,           # the model actually used
             "input_tokens": int,    # uncached input tokens (full price)
             "output_tokens": int,
             "cache_read_tokens": int,
@@ -265,8 +263,8 @@ def polish_transcript(
         }
 
     Raises:
-        RuntimeError при отсутствии ANTHROPIC_API_KEY.
-        anthropic.APIError при ошибке API.
+        RuntimeError when ANTHROPIC_API_KEY is absent.
+        anthropic.APIError on an API error.
     """
     text = (text or "").strip()
     if not text:
@@ -282,8 +280,8 @@ def polish_transcript(
         f"<transcript>\n{text}\n</transcript>"
     )
 
-    # Streaming: для длинных транскриптов max_tokens может быть высоким.
-    # Используем messages.stream + .get_final_message() — единый таймаут на всё.
+    # Streaming: for long transcripts max_tokens can be high.
+    # We use messages.stream + .get_final_message() — a single timeout for everything.
     request_kwargs = dict(
         model=model,
         max_tokens=64000,
@@ -296,7 +294,7 @@ def polish_transcript(
     )
 
     # Adaptive thinking + effort: only on Opus 4.6 / 4.7 / Sonnet 4.6.
-    # На других моделях параметры либо проигнорируются, либо упадут с 400 — пропускаем.
+    # On other models the parameters are either ignored or fail with a 400 — skipping.
     if supports_adaptive_thinking(model):
         request_kwargs["thinking"] = {"type": "adaptive"}
         request_kwargs["output_config"] = {"effort": "medium"}
@@ -305,7 +303,7 @@ def polish_transcript(
 
     result = _stream_with_retry(client, timeout, request_kwargs)
 
-    # Текстовая часть результата
+    # Text part of the result
     polished = "".join(b.text for b in result.content if b.type == "text").strip()
 
     usage = result.usage
@@ -363,11 +361,11 @@ def summarize_transcript(
     model: Optional[str] = None,
     timeout: float = 300.0,
 ) -> dict:
-    """Згенерувати summary + key points + action items для транскрипту.
+    """Generate summary + key points + action items for a transcript.
 
     Args:
-        text: сирий транскрипт (fallback якщо немає diarized).
-        diarized_text: текст у форматі 'Імʼя: репліка\\n\\nІмʼя: репліка' якщо є.
+        text: raw transcript (fallback if there is no diarized).
+        diarized_text: text in the format 'Імʼя: репліка\\n\\nІмʼя: репліка' if available.
         model: model override.
 
     Returns:
@@ -418,7 +416,7 @@ def summarize_transcript(
     result = _stream_with_retry(client, timeout, request_kwargs)
 
     raw = "".join(b.text for b in result.content if b.type == "text").strip()
-    # Захист — model може повернути ```json ... ``` навіть з prompt-protection.
+    # Protection — the model may return ```json ... ``` even with prompt-protection.
     if raw.startswith("```"):
         raw = raw.strip("`")
         if raw.lower().startswith("json"):
@@ -428,7 +426,7 @@ def summarize_transcript(
         parsed = _json.loads(raw)
     except _json.JSONDecodeError as e:
         logger.error(f"[summarize] JSON parse failed: {e}; raw={raw[:200]!r}")
-        raise RuntimeError("Claude повернув некоректний JSON. Спробуйте ще раз.") from e
+        raise RuntimeError(tr("svc_llm.polish.bad_json")) from e
 
     usage = result.usage
     return {
@@ -480,12 +478,12 @@ def translate_transcript(
     model: Optional[str] = None,
     timeout: float = 300.0,
 ) -> dict:
-    """Перекласти транскрипт на цільову мову через Claude.
+    """Translate the transcript into the target language via Claude.
 
     Args:
-        text: сирий текст (fallback).
+        text: raw text (fallback).
         target_lang: 'en' / 'uk' / 'ru' / etc.
-        diarized_text: 'Імʼя: текст' формат якщо доступний.
+        diarized_text: 'Імʼя: текст' format if available.
         model: model override.
 
     Returns:
@@ -573,7 +571,7 @@ def extract_topics(
     model: Optional[str] = None,
     timeout: float = 180.0,
 ) -> dict:
-    """Витягнути topic tags для transcript.
+    """Extract topic tags for a transcript.
 
     Returns: {"topics": list[str], "model": str, ...token usage}
     """
@@ -590,8 +588,8 @@ def extract_topics(
     client = _get_client()
     model = model or get_default_model()
 
-    # Truncate щоб не передавати весь giant transcript — теми зазвичай видно з
-    # перших 8000 символів + якщо коротший — повний. Це economiт tokens.
+    # Truncate so as not to pass the whole giant transcript — topics are usually visible from
+    # the first 8000 characters + if shorter — the full one. This saves tokens.
     sample = body if len(body) <= 8000 else (body[:6000] + "\n\n[…]\n\n" + body[-2000:])
 
     user_message = (
@@ -611,7 +609,7 @@ def extract_topics(
     )
     if supports_adaptive_thinking(model):
         request_kwargs["thinking"] = {"type": "adaptive"}
-        request_kwargs["output_config"] = {"effort": "low"}  # короткий reply
+        request_kwargs["output_config"] = {"effort": "low"}  # short reply
 
     logger.info(f"[topics] Starting: model={model}, len={len(sample)}")
     result = _stream_with_retry(client, timeout, request_kwargs)
@@ -676,7 +674,7 @@ def analyze_sentiment(
     model: Optional[str] = None,
     timeout: float = 180.0,
 ) -> dict:
-    """Sentiment analysis per speaker. Потребує diarized_text у форматі
+    """Sentiment analysis per speaker. Requires diarized_text in the format
     'Імʼя: текст\\n\\nІмʼя: текст'.
     """
     import json as _json
@@ -691,7 +689,7 @@ def analyze_sentiment(
     client = _get_client()
     model = model or get_default_model()
 
-    # Truncate щоб не передавати весь giant transcript
+    # Truncate so as not to pass the whole giant transcript
     sample = diarized_text if len(diarized_text) <= 12000 else (
         diarized_text[:9000] + "\n\n[…]\n\n" + diarized_text[-3000:])
 
@@ -743,16 +741,16 @@ def analyze_sentiment(
 
 
 # ============================================================
-# Phase 13: Meeting card — комбінований екстрактор для авто-збагачення
+# Phase 13: Meeting card — a combined extractor for auto-enrichment
 # ============================================================
 #
-# ОДИН Claude-виклик повертає summary + key_points + action_items +
-# people/projects/orgs + topics. Чому об'єднано, а не reuse
-# summarize_transcript + extract_topics + окремий extract_entities:
-# при авто-збагаченні КОЖНОГО мітингу домінантний term вартості — це input
-# tokens транскрипту (унікальний на кожен виклик, НЕ кешується між мітингами).
-# Три окремі виклики = 3× транскрипту = ~3× ціна. Один виклик = 1×.
-# System prompt кешується (cache_control ephemeral) — стабільний для всіх.
+# ONE Claude call returns summary + key_points + action_items +
+# people/projects/orgs + topics. Why combined, rather than reusing
+# summarize_transcript + extract_topics + a separate extract_entities:
+# when auto-enriching EVERY meeting the dominant cost term is the input
+# tokens of the transcript (unique per call, NOT cached between meetings).
+# Three separate calls = 3× the transcript = ~3× the price. One call = 1×.
+# The system prompt is cached (cache_control ephemeral) — stable for all.
 
 _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає транскрипт зустрічі/дзвінка і будує структуровану "картку мітингу" для архіву корпоративної памʼяті.
 
@@ -799,7 +797,7 @@ _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає тр
 
 
 def _strip_json_fence(raw: str) -> str:
-    """Прибрати ```json ... ``` обгортку якщо модель її додала."""
+    """Strip the ```json ... ``` wrapper if the model added it."""
     raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
@@ -809,32 +807,32 @@ def _strip_json_fence(raw: str) -> str:
     return raw
 
 
-# Стеля довжини входу extract_meeting_card (production-rag-wave-b-03). До цієї
-# правки стелі не було взагалі — увесь транскрипт/документ ішов у промпт як є
-# (на відміну від extract_topics/analyze_sentiment вище, де truncate вже був).
-# Ризик — не JSON-збій (у нього окремий except), а помилка САМОГО API на
-# запиті, що перевищує контекстне вікно моделі: `_enrich_card` ловить її
-# широким except і лишає запис у "retry_needed" НАЗАВЖДИ (повторний backfill
-# знову шле той самий задовгий текст і знову отримує ту саму помилку). Це
-# нова експозиція саме для backfill-cards CLI — він бере і документи (Волна
-# 16E), а не лише дзвінки, і документи (розпарсені xlsx/pdf) бувають на
-# порядки довшими за стенограму дзвінка.
-# Голова 3/4 + хвіст 1/4 (не 50/50): відкриття зустрічі/документа задає
-# контекст (учасники/тема), а завершення — підсумки/рішення/дедлайни; середина
-# найдовших записів губиться, це свідомий компроміс, а не побічний ефект.
+# Input length ceiling of extract_meeting_card (production-rag-wave-b-03). Before this
+# fix there was no ceiling at all — the whole transcript/document went into the prompt as is
+# (unlike extract_topics/analyze_sentiment above, where truncate already existed).
+# The risk is not a JSON failure (it has a separate except), but an error of the API ITSELF on
+# a request that exceeds the model's context window: `_enrich_card` catches it with
+# a broad except and leaves the record in "retry_needed" FOREVER (a repeated backfill
+# sends the same overlong text again and gets the same error again). This is
+# a new exposure specifically for the backfill-cards CLI — it takes documents too (Wave
+# 16E), not only calls, and documents (parsed xlsx/pdf) can be
+# orders of magnitude longer than a call transcript.
+# Head 3/4 + tail 1/4 (not 50/50): the opening of a meeting/document sets the
+# context (participants/topic), while the ending holds the outcomes/decisions/deadlines; the middle
+# of the longest records is lost, this is a deliberate compromise, not a side effect.
 _MAX_CARD_CHARS = 200_000
 
 
 def _truncate_card_body(body: str) -> str:
-    """Обрізати текст під стелю extract_meeting_card. `body` вже непорожній
-    (перевірка порожнечі — у виклику раніше)."""
+    """Truncate the text to the extract_meeting_card ceiling. `body` is already non-empty
+    (the emptiness check is earlier, in the caller)."""
     if len(body) <= _MAX_CARD_CHARS:
         return body
     head_len = _MAX_CARD_CHARS * 3 // 4
     tail_len = _MAX_CARD_CHARS - head_len
     logger.warning(
-        "[meeting-card] текст задовгий (%d символів > стеля %d) — обрізано "
-        "голова+хвіст (%d/%d)", len(body), _MAX_CARD_CHARS, head_len, tail_len,
+        "[meeting-card] text too long (%d chars > ceiling %d) — truncated "
+        "head+tail (%d/%d)", len(body), _MAX_CARD_CHARS, head_len, tail_len,
     )
     return body[:head_len] + "\n\n[…]\n\n" + body[-tail_len:]
 
@@ -848,22 +846,22 @@ def extract_meeting_card(
     meeting_date: Optional[str] = None,
     tag_vocabulary: Optional[list[str]] = None,
 ) -> dict:
-    """Комбінований екстрактор картки мітингу (Phase 13) — один Claude-виклик.
+    """Combined meeting card extractor (Phase 13) — one Claude call.
 
     Args:
-        text: сирий транскрипт (fallback).
-        diarized_text: 'Імʼя: текст\\n\\nІмʼя: текст' формат якщо є (краще).
+        text: raw transcript (fallback).
+        diarized_text: 'Імʼя: текст\\n\\nІмʼя: текст' format if available (better).
         model: override ANTHROPIC model id; default — models.get_default_model().
-        effort: 'low'|'medium'|'high' — для масового backfill 'low' ×3 швидше/
-            дешевше (структурований витяг JSON не потребує глибокого thinking).
-        meeting_date: дата зустрічі 'YYYY-MM-DD' — точка відліку для дедлайнів
-            (Трек 1). Без неї модель не може порахувати «завтра» в абсолютну
-            дату, і `due_date` лишиться null (парсер добере на стороні БД).
-        tag_vocabulary: наявні назви тегів (`categories.list_tags`, лише
-            "name") — модель бере теги звідси, нову назву пропонує лише якщо
-            жодна не підходить (історія 06). Динамічний словник іде в
-            повідомлення користувача, а не в system prompt, щоб не рвати
-            prompt-caching статичного system prompt.
+        effort: 'low'|'medium'|'high' — for a mass backfill 'low' is ×3 faster/
+            cheaper (structured JSON extraction does not need deep thinking).
+        meeting_date: meeting date 'YYYY-MM-DD' — the reference point for deadlines
+            (Track 1). Without it the model cannot compute "завтра" into an absolute
+            date, and `due_date` stays null (the parser finishes it on the DB side).
+        tag_vocabulary: existing tag names (`categories.list_tags`, only
+            "name") — the model takes tags from here and proposes a new name only if
+            none fits (story 06). The dynamic vocabulary goes into the
+            user message, not the system prompt, so as not to break the
+            prompt caching of the static system prompt.
 
     Returns:
         {
@@ -880,7 +878,7 @@ def extract_meeting_card(
         }
 
     Raises:
-        RuntimeError якщо ANTHROPIC_API_KEY відсутній або Claude повернув не-JSON.
+        RuntimeError if ANTHROPIC_API_KEY is missing or Claude returned non-JSON.
     """
     import json as _json
 
@@ -935,7 +933,7 @@ def extract_meeting_card(
         parsed = _json.loads(raw)
     except _json.JSONDecodeError as e:
         logger.error(f"[meeting-card] JSON parse failed: {e}; raw={raw[:200]!r}")
-        raise RuntimeError("Claude повернув некоректний JSON. Спробуйте ще раз.") from e
+        raise RuntimeError(tr("svc_llm.polish.bad_json")) from e
 
     def _list(key):
         v = parsed.get(key)
@@ -960,20 +958,20 @@ def extract_meeting_card(
 
 
 # ============================================================
-# Волна 3: розбір коментаря власника
+# Wave 3: parsing the owner's comment
 # ============================================================
 #
-# ЧОМУ ОКРЕМИЙ ЕКСТРАКТОР, А НЕ extract_meeting_card. Коментар — це два речення,
-# а не транскрипт. Просити в моделі summary, key_points і 3-8 topics з двох
-# речень означає платити за переказ того самого тексту і отримати «теми», які
-# ловитимуть пів архіву. Тут потрібні рівно дві речі, яких у коментарі справді
-# може не бути в самому записі: ЗАДАЧА і НАЗВАНІ ЛЮДИ/ПРОЄКТИ.
+# WHY A SEPARATE EXTRACTOR, NOT extract_meeting_card. A comment is two sentences,
+# not a transcript. Asking the model for a summary, key_points and 3-8 topics out of two
+# sentences means paying for a retelling of the same text and getting "topics" that
+# would catch half the archive. Exactly two things are needed here, which a comment really
+# may not have in the record itself: a TASK and NAMED PEOPLE/PROJECTS.
 #
-# Друга відмінність — статус тексту. Транскрипт це стенограма; коментар —
-# твердження власника. Тому «власник» тут дефолтний виконавець, коли задача
-# сформульована без імені («треба надіслати договір»), і про це сказано в
-# промпті прямо: інакше модель ставить owner=null там, де відповідальний
-# очевидний із того, ХТО це пише.
+# The second difference is the status of the text. A transcript is a verbatim record; a comment is
+# the owner's statement. So the "owner" here is the default assignee when a task
+# is phrased without a name ("треба надіслати договір"), and the prompt
+# says so directly: otherwise the model puts owner=null where the responsible
+# person is obvious from WHO is writing.
 
 _COMMENT_ITEMS_SYSTEM_PROMPT = """Ти розбираєш КОМЕНТАР, який власник архіву написав про свій запис (дзвінок, документ, переписку). Це не стенограма — це його власне уточнення, виправлення чи акцент, написане вже після запису.
 
@@ -1012,14 +1010,14 @@ def extract_comment_items(
     timeout: float = 120.0,
     effort: str = "low",
 ) -> dict:
-    """Витягти задачі й названі сутності з коментаря — один Claude-виклик.
+    """Extract tasks and named entities from a comment — one Claude call.
 
-    effort='low' за замовчуванням: вхід — два речення, структурований витяг
-    із них не потребує глибокого thinking, а розбір запускається кнопкою на
-    кожен коментар окремо, тож ціна помітна саме тут.
+    effort='low' by default: the input is two sentences, a structured extraction
+    from them does not need deep thinking, while parsing is triggered by a button on
+    each comment separately, so the cost is noticeable exactly here.
 
     Returns {"action_items", "people", "projects", "orgs", "model", *_tokens}.
-    Raises RuntimeError без ANTHROPIC_API_KEY або на некоректному JSON.
+    Raises RuntimeError without ANTHROPIC_API_KEY or on invalid JSON.
     """
     import json as _json
 
@@ -1066,7 +1064,7 @@ def extract_comment_items(
         parsed = _json.loads(raw)
     except _json.JSONDecodeError as e:
         logger.error("[comment-items] JSON parse failed: %s; raw=%r", e, raw[:200])
-        raise RuntimeError("Claude повернув некоректний JSON. Спробуйте ще раз.") from e
+        raise RuntimeError(tr("svc_llm.polish.bad_json")) from e
 
     def _list(key):
         v = parsed.get(key)
@@ -1087,13 +1085,13 @@ def extract_comment_items(
 
 
 # ============================================================
-# Phase 16C: NL-опис аркушів таблиць (Excel/CSV)
+# Phase 16C: NL description of table sheets (Excel/CSV)
 # ============================================================
 #
-# Голий дамп ячейок погано ембедиться семантично. Цей опис («про що ці дані»)
-# домішується у текст блоку аркуша → таблиця стає знаходимою через RAG. Один
-# Claude-виклик на ВЕСЬ документ (усі аркуші разом), над ЗРАЗКОМ кожного аркуша
-# (не повний обсяг) — дешево. Опційно: без ключа цей крок просто пропускається.
+# A bare dump of cells embeds badly in meaning. This description ("what this data is about")
+# is mixed into the text of the sheet block → the table becomes findable via RAG. One
+# Claude call for the WHOLE document (all sheets together), over a SAMPLE of each sheet
+# (not the full volume) — cheap. Optional: without a key this step is simply skipped.
 
 _TABLE_DESCRIBE_SYSTEM_PROMPT = """Ти — аналітик даних. Тобі дають кілька аркушів (sheets) з таблиць (Excel/CSV): назву, приблизний розмір і зразок рядків кожного.
 
@@ -1113,19 +1111,19 @@ def describe_sheets(
     model: Optional[str] = None,
     timeout: float = 180.0,
 ) -> dict:
-    """NL-опис кожного аркуша таблиці (Phase 16C) — один Claude-виклик.
+    """NL description of each table sheet (Phase 16C) — one Claude call.
 
     Args:
         sheets: [{"name": str, "rows": int|None, "cols": int|None, "preview": str}]
-            preview — зразок markdown-таблиці (заголовок + перші рядки).
+            preview — a sample markdown table (header + first rows).
         model: override; default — models.get_default_model().
 
     Returns:
-        {"descriptions": list[str] (вирівняні з sheets за порядком),
-         "model", token usage}. Порожній список якщо аркушів немає.
+        {"descriptions": list[str] (aligned with sheets by order),
+         "model", token usage}. An empty list if there are no sheets.
 
     Raises:
-        RuntimeError якщо ANTHROPIC_API_KEY відсутній (виклик гейтиться caller'ом).
+        RuntimeError if ANTHROPIC_API_KEY is missing (the call is gated by the caller).
     """
     import json as _json
 
@@ -1188,15 +1186,15 @@ def describe_sheets(
 
 
 # ============================================================
-# Волна 5.1: зобовʼязання з нитки переписки
+# Wave 5.1: commitments from a correspondence thread
 # ============================================================
 #
-# Чому окремий екстрактор, а не extract_meeting_card. Картка мітингу будує
-# ЩЕ Й граф сутностей (people/projects/orgs/topics), а для TG це вже зроблено
-# інакше — звіркою з наявним графом (Волна 4.5.3, `tg_entities`). Пустити сюди
-# картку означало б другий, конкуруючий механізм наповнення графа: рівно ті
-# дублі «Поларіс/Polaris/поларис», яких волна 4.5.3 навмисно уникала.
-# Тут потрібне вузьке: хто що кому пообіцяв і до якого числа.
+# Why a separate extractor, not extract_meeting_card. The meeting card also builds
+# the entity graph (people/projects/orgs/topics), while for TG that has already been done
+# differently — by reconciling with the existing graph (Wave 4.5.3, `tg_entities`). Letting the card
+# in here would mean a second, competing mechanism of graph population: exactly those
+# duplicates "Поларіс/Polaris/поларис" that wave 4.5.3 deliberately avoided.
+# What is needed here is narrow: who promised what to whom and by what date.
 
 _CHAT_TASKS_SYSTEM_PROMPT = """Ти читаєш нитку робочої переписки в месенджері і витягуєш з неї зобовʼязання.
 
@@ -1236,20 +1234,20 @@ def extract_chat_tasks(
     timeout: float = 180.0,
     effort: str = "low",
 ) -> dict:
-    """Витягти зобовʼязання з нитки переписки (Волна 5.1) — один Claude-виклик.
+    """Extract commitments from a correspondence thread (Wave 5.1) — one Claude call.
 
     Args:
         messages: [{"n": int, "sender": str, "date": "YYYY-MM-DD", "text": str}]
-            у хронологічному порядку; ``n`` — номер, на який модель посилається
-            в полі ``msg`` (звідти потім береться конкретне повідомлення архіву).
-        chat_title / thread_label: контекст нитки для промпта.
-        effort: 'low' — витяг структури, глибокий thinking тут не окупається.
+            in chronological order; ``n`` is the number the model refers to
+            in the ``msg`` field (the specific archive message is then taken from there).
+        chat_title / thread_label: thread context for the prompt.
+        effort: 'low' — structure extraction, deep thinking does not pay off here.
 
     Returns:
         {"tasks": [{"task","owner","due","due_date","msg"}], "model", token usage}.
 
     Raises:
-        RuntimeError якщо ANTHROPIC_API_KEY відсутній або Claude повернув не-JSON.
+        RuntimeError if ANTHROPIC_API_KEY is missing or Claude returned non-JSON.
     """
     import json as _json
 
@@ -1299,7 +1297,7 @@ def extract_chat_tasks(
         parsed = _json.loads(raw)
     except _json.JSONDecodeError as e:
         logger.error("[chat-tasks] JSON parse failed: %s; raw=%r", e, raw[:200])
-        raise RuntimeError("Claude повернув некоректний JSON. Спробуйте ще раз.") from e
+        raise RuntimeError(tr("svc_llm.polish.bad_json")) from e
 
     tasks = parsed.get("tasks") if isinstance(parsed, dict) else None
     tasks = [t for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []

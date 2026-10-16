@@ -1,6 +1,6 @@
-"""Тести для app.services.whisper_preload (Фикс 2, 03.07.2026).
+"""Tests for app.services.whisper_preload (Fix 2, 03.07.2026).
 
-Офлайн, без реального WhisperManager — мок з методом load_model().
+Offline, without a real WhisperManager — a mock with a load_model() method.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def test_preload_enabled_false_when_flag_is_0(monkeypatch):
 
 
 def test_resolve_preload_model_defaults_to_frontend_default():
-    # Дзеркалить DEFAULT_MODEL з static/js/recall/views/{upload,record,...}.js
+    # Mirrors DEFAULT_MODEL from static/js/recall/views/{upload,record,...}.js
     assert whisper_preload.resolve_preload_model() == 'large-v3-turbo'
 
 
@@ -90,7 +90,7 @@ def test_start_background_preload_swallows_exceptions_and_logs_warning(caplog):
         assert thread is not None
         thread.join(timeout=5)  # must not raise / propagate to the joiner
     assert manager.calls == ['medium']
-    assert any('не вдалося прогріти' in r.message for r in caplog.records)
+    assert any('failed to warm up' in r.message for r in caplog.records)
 
 
 def test_start_background_preload_does_not_block_caller():
@@ -105,15 +105,15 @@ def test_start_background_preload_does_not_block_caller():
 
 
 # ============================================================
-# config-registry-fix-r3-01: start_tracked_preload — детермінований доказ
-# порядку станів loading -> ready|failed|disabled (без полінгу дочірнього
-# процесу). Фейк блокується на threading.Event, `_models` — dict, як у
-# реальному ModernWhisperManager.
+# config-registry-fix-r3-01: start_tracked_preload — a deterministic proof
+# of the order of states loading -> ready|failed|disabled (without polling a child
+# process). The fake blocks on a threading.Event, `_models` is a dict, as in
+# the real ModernWhisperManager.
 # ============================================================
 
 class _GatedFakeManager:
-    """`load_model` не повертається, поки тест сам не відпустить `_event`
-    (`.release()`) — дає змогу спостерігати стан 'loading' детерміновано."""
+    """`load_model` does not return until the test itself releases `_event`
+    (`.release()`) — this makes it possible to observe the 'loading' state deterministically."""
 
     def __init__(self, raise_error: Exception | None = None):
         self._models: dict = {}
@@ -138,7 +138,7 @@ def test_start_tracked_preload_reports_loading_then_ready(monkeypatch):
 
     watcher = whisper_preload.start_tracked_preload(manager, робота)
     assert watcher is not None
-    # ДО відпускання події load_model ще не повернувся - стан лишається 'loading'.
+    # BEFORE the event is released load_model has not returned yet - the state stays 'loading'.
     assert робота['whisper'] == {'preload': 'loading', 'model': 'medium'}
 
     manager.release()
@@ -181,9 +181,9 @@ def test_preload_enabled_false_values(monkeypatch, value):
 
 
 def test_preload_enabled_garbage_value_is_now_false_documented_flip(monkeypatch):
-    """config-registry-fix-r3-01: старий парсер (`not in ('0','false','no')`)
-    трактував будь-яке нерозпізнане значення як True; після переходу на
-    `settings.env_bool` воно тепер False. Перевертання задокументоване в
-    `## Implementation notes` цієї історії — тест фіксує його явно."""
+    """config-registry-fix-r3-01: the old parser (`not in ('0','false','no')`)
+    treated any unrecognized value as True; after the move to
+    `settings.env_bool` it is now False. The flip is documented in
+    `## Implementation notes` of that story — the test pins it explicitly."""
     monkeypatch.setenv('RECALL_PRELOAD_WHISPER', 'ага')
     assert whisper_preload.preload_enabled() is False

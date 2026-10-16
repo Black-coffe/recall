@@ -26,7 +26,7 @@ Depends on: enrichment, retrieval, rag, embeddings, categories, commitments.
   `ask*` `project=` is resolved by `categories.resolve_node` BEFORE rag: several matches → 409
   `{error:"ambiguous",candidates}`, rag is not called.
 - `GET /entities` (:883), `/entities/<eid>` (:964), `GET /action-items` (:1039), `GET /stats` (:1241).
-- `PATCH /action-items/<aid>` (:1220, K5 4.15.0) `{status: open|done|cancelled}`: anything else → 400 `Невірний статус`, missing
+- `PATCH /action-items/<aid>` (:1220, K5 4.15.0) `{status: open|done|cancelled}`: anything else → 400 `tr('knowledge.memory.err.status_bad')`, missing
   → 404 (`LookupError`), 200 `{success:true}`; writes `commitments.apply_action(..., source='web', actor='web')` —
   the same path as the brief buttons, with an event in `action_item_events`. Postponing a deadline from the web is not exposed.
 - Gotchas: entity `min_meetings=2` if there is no `q`; a category name is unique casefold AMONG SIBLINGS (v47); action-items

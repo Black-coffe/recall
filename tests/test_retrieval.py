@@ -1,8 +1,8 @@
-"""Тести гібридного retrieval (Phase 15A): свіжість + диверсифікація.
+"""Tests for hybrid retrieval (Phase 15A): recency + diversification.
 
-Embeddings мокаються (EMBED_DIM=4, фіксований query-вектор) — реальна модель
-e5-large (2GB) не вантажиться. FTS5 — справжній (триггери chunks_ai наповнюють
-chunks_fts при INSERT у chunks).
+Embeddings are mocked (EMBED_DIM=4, a fixed query vector) -- the real e5-large
+model (2GB) is not loaded. FTS5 is real (the chunks_ai triggers fill
+chunks_fts on INSERT into chunks).
 """
 import math
 import sqlite3
@@ -30,7 +30,7 @@ def db(tmp_path):
 
 @pytest.fixture
 def mock_embeddings(monkeypatch):
-    """is_available()=True, EMBED_DIM=4, embed_query → фіксований [1,0,0,0]."""
+    """is_available()=True, EMBED_DIM=4, embed_query -> a fixed [1,0,0,0]."""
     monkeypatch.setattr(embeddings, "EMBED_DIM", 4)
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_query",
@@ -41,10 +41,10 @@ def mock_embeddings(monkeypatch):
 def _add_tx(path, source_name, meeting_date=None, category_id=None,
             source_type="file", transcript="x",
             embedding_model=None, embedding_version=None):
-    """embedding_model/embedding_version дефолтять на ПОТОЧНУ пару
-    (embeddings.EMBED_MODEL/EMBED_VERSION) — саме її й вимагає новий фільтр
-    епохи у retrieval._vector_search (production-rag-wave-b-04). Явно передати
-    іншу пару — щоб перевірити, що чужа епоха не потрапляє у vector-хіти."""
+    """embedding_model/embedding_version default to the CURRENT pair
+    (embeddings.EMBED_MODEL/EMBED_VERSION) -- exactly what the new epoch filter in
+    retrieval._vector_search (production-rag-wave-b-04) requires. Pass a different
+    pair explicitly to check that a foreign epoch does not get into vector hits."""
     if embedding_model is None:
         embedding_model = embeddings.EMBED_MODEL
     if embedding_version is None:
@@ -64,7 +64,7 @@ def _add_tx(path, source_name, meeting_date=None, category_id=None,
 
 
 def _add_chunk(path, tid, idx, text, vec):
-    """vec — список float (буде нормалізовано); None → без embedding (тільки FTS)."""
+    """vec -- a list of floats (will be normalized); None -> no embedding (FTS only)."""
     blob = _unit(vec).tobytes() if vec is not None else None
     conn = sqlite3.connect(path)
     conn.execute(
@@ -97,7 +97,7 @@ def test_recency_factor_unknown_is_zero():
 
 
 # ============================================================
-# Базова поведінка
+# Base behaviour
 # ============================================================
 
 def test_empty_query_returns_empty(db, mock_embeddings):
@@ -106,30 +106,30 @@ def test_empty_query_returns_empty(db, mock_embeddings):
 
 
 def test_no_results_returns_empty(db, mock_embeddings):
-    # Жодного чанка в БД
+    # No chunk in the DB
     res = retrieval.search(db, "zzznotfoundzzz")
     assert res["chunks"] == []
     assert res["vector_available"] is True
 
 
 # ============================================================
-# Диверсифікація: один митинг не з'їдає весь топ
+# Diversification: one meeting does not eat the whole top
 # ============================================================
 
 def test_per_meeting_cap_limits_domination(db, mock_embeddings):
     big = _add_tx(db, "Великий мітинг")
     small = _add_tx(db, "Інший мітинг")
-    q = [1.0, 0, 0, 0]  # усі чанки максимально релевантні (cosine 1)
+    q = [1.0, 0, 0, 0]  # all chunks are maximally relevant (cosine 1)
     for i in range(5):
         _add_chunk(db, big, i, f"alpha beta gamma {i}", q)
     _add_chunk(db, small, 0, "alpha beta gamma small", q)
 
-    # Запит-слово відсутнє в тексті → FTS порожній, працює лише вектор
+    # The query word is absent from the text -> FTS is empty, only the vector works
     res = retrieval.search(db, "qqqzzz", top_k=4, max_per_meeting=2, recency_weight=0)
     tids = [c["transcription_id"] for c in res["chunks"]]
     assert len(res["chunks"]) == 4
-    assert tids.count(big) <= 2 + 2  # кеп=2, недобір дозволено добити; але small має бути
-    assert small in tids, "малий мітинг мусить потрапити завдяки диверсифікації"
+    assert tids.count(big) <= 2 + 2  # cap=2, the shortfall may be topped up; but small must be present
+    assert small in tids, "the small meeting must get in thanks to diversification"
     assert len(set(tids)) >= 2
 
 
@@ -143,31 +143,31 @@ def test_no_cap_lets_one_meeting_dominate(db, mock_embeddings):
 
     res = retrieval.search(db, "qqqzzz", top_k=4, max_per_meeting=0, recency_weight=0)
     tids = [c["transcription_id"] for c in res["chunks"]]
-    assert tids == [big, big, big, big]  # без кепу великий мітинг займає всі слоти
+    assert tids == [big, big, big, big]  # without the cap the big meeting takes all slots
 
 
 # ============================================================
-# Свіжість: при рівній релевантності виграє новіший
+# Recency: at equal relevance the newer one wins
 # ============================================================
 
 def test_recency_promotes_newer(db, mock_embeddings):
     old = _add_tx(db, "Старий", meeting_date="2020-01-01")
     new = _add_tx(db, "Новий", meeting_date=datetime.now().strftime("%Y-%m-%d"))
-    # OLD трохи релевантніший (cosine 1.0), NEW трохи менше (cosine 0.95)
+    # OLD is slightly more relevant (cosine 1.0), NEW slightly less (cosine 0.95)
     _add_chunk(db, old, 0, "alpha", [1.0, 0, 0, 0])
     _add_chunk(db, new, 0, "alpha", [0.95, math.sqrt(1 - 0.95 ** 2), 0, 0])
 
-    # Без свіжості перемагає релевантніший OLD
+    # Without recency the more relevant OLD wins
     res0 = retrieval.search(db, "qqqzzz", top_k=2, recency_weight=0)
     assert res0["chunks"][0]["transcription_id"] == old
 
-    # Зі свіжістю NEW (сьогодні) обганяє OLD попри трохи нижчу релевантність
+    # With recency NEW (today) overtakes OLD despite slightly lower relevance
     res1 = retrieval.search(db, "qqqzzz", top_k=2, recency_weight=0.25)
     assert res1["chunks"][0]["transcription_id"] == new
 
 
 # ============================================================
-# FTS-fallback: працює без embeddings
+# FTS fallback: works without embeddings
 # ============================================================
 
 def test_fts_only_when_embeddings_unavailable(db, monkeypatch):
@@ -183,7 +183,7 @@ def test_fts_only_when_embeddings_unavailable(db, monkeypatch):
 
 
 # ============================================================
-# Фільтр напрямку (category_id)
+# Direction filter (category_id)
 # ============================================================
 
 def test_category_filter(db, mock_embeddings):
@@ -209,11 +209,11 @@ def test_category_none_filter(db, mock_embeddings):
 
 
 # ============================================================
-# T6.8: м'який FTS relevance-cutoff (довгі запити, мінімум 2 збіги термів)
+# T6.8: soft FTS relevance cutoff (long queries, at least 2 term matches)
 # ============================================================
 
 def test_fts_short_query_keeps_single_word_match(db, monkeypatch):
-    """1-2-слівний запит НЕ фільтрується — єдиний збіг сам є сигналом."""
+    """A 1-2 word query is NOT filtered -- the single match is itself the signal."""
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
     tid = _add_tx(db, "Короткий запит")
     _add_chunk(db, tid, 0, "тут згадується бюджет фонду", None)
@@ -224,14 +224,14 @@ def test_fts_short_query_keeps_single_word_match(db, monkeypatch):
 
 
 def test_fts_long_query_filters_single_term_overlap(db, monkeypatch):
-    """Запит з 3+ слів: чанк з ОДНИМ спільним словом відкидається, чанк з
-    2+ спільними словами лишається — recall не обнуляється, шум прибирається."""
+    """A query of 3+ words: a chunk with ONE shared word is dropped, a chunk with
+    2+ shared words stays -- recall is not zeroed, noise is removed."""
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
     weak = _add_tx(db, "Слабкий збіг")
     strong = _add_tx(db, "Сильний збіг")
-    # weak: лише слово "бюджет" спільне з запитом
+    # weak: only the word "бюджет" is shared with the query
     _add_chunk(db, weak, 0, "бюджет випадковий текст без стосунку", None)
-    # strong: усі три слова запиту присутні
+    # strong: all three words of the query are present
     _add_chunk(db, strong, 0, "бюджет проєкту команди обговорили сьогодні", None)
 
     res = retrieval.search(db, "бюджет проєкту команди")
@@ -241,43 +241,43 @@ def test_fts_long_query_filters_single_term_overlap(db, monkeypatch):
 
 
 def test_fts_long_query_soft_fallback_when_filter_empties_results(db, monkeypatch):
-    """Якщо cutoff-фільтр з'їдає ВСІ хіти (жоден чанк не має 2+ збігів) —
-    відкатуємось на нефільтрований список: recall НЕ обнуляється."""
+    """If the cutoff filter eats ALL hits (no chunk has 2+ matches) --
+    fall back to the unfiltered list: recall is NOT zeroed."""
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
     tid = _add_tx(db, "Єдиний слабкий збіг")
     _add_chunk(db, tid, 0, "бюджет це все що тут є", None)
 
     res = retrieval.search(db, "бюджет проєкту команди")
     tids = {c["transcription_id"] for c in res["chunks"]}
-    assert tid in tids, "фільтр не мусить обнулити ЄДИНИЙ (хай і слабкий) хіт"
+    assert tid in tids, "the filter must not zero out the SINGLE (even if weak) hit"
 
 
 # ============================================================
-# T6.4: rerank=False (за замовчуванням) НЕ чіпає reranker
+# T6.4: rerank=False (default) does NOT touch the reranker
 # ============================================================
 
 def test_rerank_default_off_does_not_call_reranker(db, mock_embeddings, monkeypatch):
     def _boom(*a, **kw):
-        raise AssertionError("reranker.rerank НЕ мусить викликатись, коли rerank=False")
+        raise AssertionError("reranker.rerank must NOT be called when rerank=False")
     monkeypatch.setattr(reranker, "rerank", _boom)
 
     tid = _add_tx(db, "Мітинг")
     _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
 
-    res = retrieval.search(db, "qqqzzz")  # rerank не переданий -> дефолт False
+    res = retrieval.search(db, "qqqzzz")  # rerank not passed -> default False
     assert len(res["chunks"]) == 1
     assert "rerank_score" not in res["chunks"][0]
 
 
 # ============================================================
-# T6.4: rerank=True переранжовує пул за скором мока
+# T6.4: rerank=True reranks the pool by the mock's score
 # ============================================================
 
 def test_rerank_true_reorders_pool_and_tags_score(db, mock_embeddings, monkeypatch):
-    """3 чанки з однаковою векторною релевантністю (cosine 1.0) — RRF+recency
-    їх не розрізняє (порядок довільний/стабільний), але мок-reranker явно
-    віддає перевагу chunk з текстом "c" — і фінальний порядок мусить це
-    відобразити."""
+    """3 chunks with the same vector relevance (cosine 1.0) -- RRF+recency
+    does not tell them apart (the order is arbitrary/stable), but the mock reranker explicitly
+    prefers the chunk with the text "c" -- and the final order must
+    reflect that."""
     tid = _add_tx(db, "Мітинг")
     q = [1.0, 0, 0, 0]
     _add_chunk(db, tid, 0, "a", q)
@@ -302,8 +302,8 @@ def test_rerank_true_reorders_pool_and_tags_score(db, mock_embeddings, monkeypat
 
 
 def test_rerank_true_tail_beyond_pool_untouched(db, mock_embeddings, monkeypatch):
-    """Пул обмежений rerank_pool_size — кандидати за межами пулу лишаються у
-    вихідному RRF+recency порядку (reranker.rerank взагалі не бачить хвіст)."""
+    """The pool is limited by rerank_pool_size -- candidates outside the pool stay in the
+    original RRF+recency order (reranker.rerank does not see the tail at all)."""
     tid = _add_tx(db, "Мітинг")
     q = [1.0, 0, 0, 0]
     for i in range(4):
@@ -312,18 +312,18 @@ def test_rerank_true_tail_beyond_pool_untouched(db, mock_embeddings, monkeypatch
     seen_texts = []
     def _tracking_rerank(query, candidates, text_key="text"):
         seen_texts.extend(c[text_key] for c in candidates)
-        return candidates  # без змін порядку
+        return candidates  # order unchanged
     monkeypatch.setattr(reranker, "rerank", _tracking_rerank)
 
     res = retrieval.search(db, "qqqzzz", top_k=4, max_per_meeting=0,
                            rerank=True, rerank_pool_size=2)
-    assert len(seen_texts) == 2, "reranker мусить бачити лише пул (2), не всі 4 кандидати"
-    assert len(res["chunks"]) == 4  # хвіст все одно повертається (просто не реранжований)
+    assert len(seen_texts) == 2, "the reranker must see only the pool (2), not all 4 candidates"
+    assert len(res["chunks"]) == 4  # the tail is still returned (just not reranked)
 
 
 def test_rerank_graceful_degradation_via_real_reranker(db, mock_embeddings, monkeypatch):
-    """Наскрізний шлях (search -> reranker.rerank), reranker недоступний —
-    результат ідентичний rerank=False (не валить пошук, не губить кандидатів)."""
+    """End-to-end path (search -> reranker.rerank), reranker unavailable --
+    the result is identical to rerank=False (does not break the search, does not lose candidates)."""
     monkeypatch.setattr(reranker, "is_available", lambda: False)
     tid = _add_tx(db, "Мітинг")
     _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
@@ -334,7 +334,7 @@ def test_rerank_graceful_degradation_via_real_reranker(db, mock_embeddings, monk
 
 
 # ============================================================
-# Волна 4: диверсифікація — для Telegram джерело це ЧАТ, а не запис
+# Wave 4: diversification -- for Telegram the source is the CHAT, not the record
 # ============================================================
 
 def _row(source_type, tid, chat_id=None):
@@ -342,12 +342,12 @@ def _row(source_type, tid, chat_id=None):
 
 
 def test_group_key_uses_chat_for_telegram():
-    """У TG запис = одне повідомлення, тож кеп «3 на транскрипт» не спрацьовував
-    НІКОЛИ: вісім повідомлень з одного чату займали всі вісім слотів, витісняючи
-    дзвінки й документи."""
+    """In TG a record = one message, so the cap "3 per transcript" NEVER
+    worked: eight messages from one chat took all eight slots, pushing out
+    calls and documents."""
     a = retrieval._group_key(_row("telegram", 100, -1001234567890))
     b = retrieval._group_key(_row("telegram", 101, -1001234567890))
-    assert a == b, "два повідомлення одного чату — одне джерело"
+    assert a == b, "two messages of one chat -- one source"
 
 
 def test_group_key_keeps_transcript_for_others():
@@ -364,13 +364,13 @@ def test_diversify_caps_telegram_by_chat():
     ranked = [1, 2, 3, 4, 5]
     groups = {cid: ("tg", -100) for cid in ranked}
     picked = retrieval._diversify(ranked, groups, top_k=5, max_per_meeting=2)
-    # кеп лишає 2, решту добираємо переповненням — але порядок показує, що
-    # обмеження спрацювало (раніше воно не спрацьовувало взагалі)
+    # the cap leaves 2, the rest is topped up by overflow -- but the order shows that the
+    # limit worked (earlier it did not work at all)
     assert picked[:2] == [1, 2]
 
 
 # ============================================================
-# Волна 4.5: джерело — НИТКА, і зшивання нитки при видачі
+# Wave 4.5: the source is the THREAD, and stitching the thread on output
 # ============================================================
 
 def _tg_row(tid, chat_id=-100, thread_id=None):
@@ -379,11 +379,11 @@ def _tg_row(tid, chat_id=-100, thread_id=None):
 
 
 def test_group_key_prefers_thread_over_chat():
-    """У фонд-чаті одночасно йдуть кілька проєктів. Кеп по чату душив би їх
-    одне одним, хоча це різні розмови."""
+    """Several projects go on in a fund chat at once. A per-chat cap would choke them
+    against each other, though these are different conversations."""
     a = retrieval._group_key(_tg_row(100, thread_id=7))
     b = retrieval._group_key(_tg_row(101, thread_id=8))
-    assert a != b, "різні нитки одного чату — різні джерела"
+    assert a != b, "different threads of one chat -- different sources"
 
 
 def test_group_key_same_thread_is_one_source():
@@ -393,7 +393,7 @@ def test_group_key_same_thread_is_one_source():
 
 
 def test_group_key_falls_back_to_chat_before_threads_exist():
-    """Поки нитки не розкладені, поведінка має лишатись як у Волні 4."""
+    """While threads are not laid out, the behaviour must stay as in Wave 4."""
     a = retrieval._group_key(_tg_row(100, thread_id=None))
     b = retrieval._group_key(_tg_row(101, thread_id=None))
     assert a == b == ("tg", -100)
@@ -415,15 +415,15 @@ def _seed_thread(path, msgs, thread_id=1, chat_id=-100):
 
 
 def test_thread_context_brings_the_answer_with_the_question(db):
-    """Живий провал, заради якого волна й робилась: знахідка — ПИТАННЯ, а
-    відповідь наступною реплікою, і спільних слів із запитом у неї немає."""
+    """The live failure the wave was made for: the finding is a QUESTION, and the
+    answer is the next reply, with no words in common with the query."""
     _seed_thread(db, [(1, "Юля", "Давайте в четвер о 10:00? Чи всім зручно?"),
                       (2, "Настя", "чт – з 09:00 до 11:00, після 16:45")])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 1,
                "text": "Давайте в четвер о 10:00? Чи всім зручно?"}]
     retrieval.attach_thread_context(db, chunks)
     texts = [m["text"] for m in chunks[0]["thread"]["messages"]]
-    assert any("09:00 до 11:00" in t for t in texts), "відповідь має приїхати з питанням"
+    assert any("09:00 до 11:00" in t for t in texts), "the answer must arrive together with the question"
 
 
 def test_thread_context_marks_which_message_was_found(db):
@@ -442,19 +442,19 @@ def test_thread_context_window_is_centred_on_the_hit(db):
     retrieval.attach_thread_context(db, chunks, max_msgs=4)
     ids = [m["tg_message_id"] for m in chunks[0]["thread"]["messages"]]
     assert len(ids) == 4
-    assert 8 in ids, "вікно має містити саму знахідку, а не початок нитки"
+    assert 8 in ids, "the window must contain the finding itself, not the start of the thread"
 
 
 def test_thread_context_noop_without_threads(db):
-    """Записи без нитки лишаються як були — це не помилка, а стан «ще не
-    розкладено»."""
+    """Records without a thread stay as they were -- that is not an error but the state "not
+    laid out yet"."""
     chunks = [{"source_type": "telegram", "tg_thread_id": None, "text": "x"}]
     retrieval.attach_thread_context(db, chunks)
     assert "thread" not in chunks[0]
 
 
 def test_thread_context_skips_single_message_thread(db):
-    """Нитка з одного повідомлення нічого не додає — не роздуваємо промпт."""
+    """A thread of one message adds nothing -- we do not bloat the prompt."""
     _seed_thread(db, [(1, "Юля", "одне повідомлення")])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 1,
                "text": "одне повідомлення"}]
@@ -463,7 +463,7 @@ def test_thread_context_skips_single_message_thread(db):
 
 
 def test_thread_context_truncates_long_neighbor_message(db):
-    """Сусід довше RAG_THREAD_MSG_CHARS ріжеться із суфіксом, коротший — ні."""
+    """A neighbour longer than RAG_THREAD_MSG_CHARS is cut with a suffix, a shorter one is not."""
     long_neighbor = "а" * 3000
     _seed_thread(db, [(1, "Юля", long_neighbor), (2, "Настя", "коротка відповідь")])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 2,
@@ -477,7 +477,7 @@ def test_thread_context_truncates_long_neighbor_message(db):
 
 
 def test_thread_context_caps_total_chars_of_stitching(db):
-    """Сума len(text) усіх повідомлень нитки не перевищує RAG_THREAD_CHARS."""
+    """The sum of len(text) of all thread messages does not exceed RAG_THREAD_CHARS."""
     huge_hit = "б" * 156000
     _seed_thread(db, [(1, "Юля", "звичайне повідомлення"), (2, "Настя", huge_hit),
                       (3, "Юля", "ще одне звичайне")])
@@ -496,7 +496,7 @@ def test_thread_context_caps_total_chars_of_stitching(db):
 
 
 def test_thread_context_hit_budget_never_smaller_than_neighbours(db):
-    """Хіт із довгим текстом за дефолтів отримує 4000, сусіди — не більше 1500."""
+    """A hit with a long text under the defaults gets 4000, neighbours -- no more than 1500."""
     huge = "в" * 156000
     _seed_thread(db, [(1, "Юля", huge), (2, "Настя", huge), (3, "Юля", huge)])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 2,
@@ -516,7 +516,7 @@ def test_thread_context_hit_budget_never_smaller_than_neighbours(db):
 @pytest.mark.parametrize("thread_chars", [1000, 8000])
 def test_thread_context_window_sum_never_exceeds_ceiling(db, monkeypatch, stitch,
                                                           msg_chars, thread_chars):
-    """Для будь-якої комбінації STITCH/MSG/THREAD сума вікна <= THREAD."""
+    """For any combination of STITCH/MSG/THREAD the window sum is <= THREAD."""
     monkeypatch.setenv("RAG_THREAD_MSG_CHARS", str(msg_chars))
     monkeypatch.setenv("RAG_THREAD_CHARS", str(thread_chars))
     huge = "г" * 156000
@@ -534,7 +534,7 @@ def test_thread_context_window_sum_never_exceeds_ceiling(db, monkeypatch, stitch
 
 
 def test_thread_context_stitch_eight_partial_neighbour_and_dropped(db):
-    """STITCH=8 за дефолтів: хіт 4000, найближчі сусіди по 1500, далі частковий і dropped."""
+    """STITCH=8 under the defaults: the hit 4000, the nearest neighbours 1500 each, then a partial one and dropped."""
     huge = "д" * 156000
     _seed_thread(db, [(i, "A", huge) for i in range(1, 10)])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 5,
@@ -549,7 +549,7 @@ def test_thread_context_stitch_eight_partial_neighbour_and_dropped(db):
 
 
 def test_thread_context_short_messages_untouched_by_repair(db):
-    """Коротке вікно вміщується цілком — без обрізки і без dropped."""
+    """A short window fits whole -- without truncation and without dropped."""
     _seed_thread(db, [(1, "Юля", "коротке"), (2, "Настя", "теж коротке")])
     chunks = [{"source_type": "telegram", "tg_thread_id": 1, "tg_message_id": 1,
                "text": "коротке"}]
@@ -563,7 +563,7 @@ def test_thread_context_short_messages_untouched_by_repair(db):
 
 
 # ============================================================
-# Дублі аудіо: duplicate_of виключає запис із видачі (Хвиля A)
+# Audio duplicates: duplicate_of excludes a record from the output (Wave A)
 # ============================================================
 
 def _mark_duplicate(path, tid, original_id):
@@ -575,7 +575,7 @@ def _mark_duplicate(path, tid, original_id):
 
 
 def test_duplicate_excluded_from_vector_branch(db, mock_embeddings):
-    """Копія з duplicate_of не спливає у видачі — лишається лише оригінал."""
+    """A copy with duplicate_of does not surface in the output -- only the original stays."""
     orig = _add_tx(db, "Дзвінок")
     copy = _add_tx(db, "Дзвінок (перезалив)")
     q = [1.0, 0, 0, 0]
@@ -591,7 +591,7 @@ def test_duplicate_excluded_from_vector_branch(db, mock_embeddings):
 
 
 def test_duplicate_excluded_from_fts_branch(db, mock_embeddings):
-    """Те саме для лексичної гілки: слово з тексту дубля нічого не витягує."""
+    """The same for the lexical branch: a word from the duplicate's text pulls out nothing."""
     orig = _add_tx(db, "Дзвінок")
     copy = _add_tx(db, "Дзвінок (перезалив)")
     _add_chunk(db, orig, 0, "барселона бюджет", None)
@@ -603,14 +603,14 @@ def test_duplicate_excluded_from_fts_branch(db, mock_embeddings):
 
 
 # ============================================================
-# production-rag-wave-b-04: епоха ембедингів (embedding_model, embedding_version)
+# production-rag-wave-b-04: embedding epoch (embedding_model, embedding_version)
 # ============================================================
 
 def test_other_embedding_version_excluded_from_vector_branch_but_kept_in_fts(db, mock_embeddings):
-    """Vector-хіти рахуються ЛИШЕ по чанках поточної пари (модель, версія) —
-    запис іншої епохи (напр. ще не переембеджений після зміни EMBED_VERSION)
-    не мусить брати участь у косинусах з поточним запитом. FTS5 моделі не
-    знає взагалі — той самий запис лишається лексично знаходимим."""
+    """Vector hits are computed ONLY over chunks of the current pair (model, version) --
+    a record of another epoch (e.g. not yet re-embedded after an EMBED_VERSION change)
+    must not take part in cosines with the current query. FTS5 knows
+    nothing about the model -- the same record stays lexically findable."""
     current = _add_tx(db, "Поточна епоха")
     stale = _add_tx(db, "Стара епоха",
                     embedding_version=embeddings.EMBED_VERSION + 1)
@@ -620,11 +620,11 @@ def test_other_embedding_version_excluded_from_vector_branch_but_kept_in_fts(db,
 
     res = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
     tids = {c["transcription_id"] for c in res["chunks"]}
-    assert tids == {current}, "чанк іншої версії не мусить зʼявитись у vector-хітах"
+    assert tids == {current}, "a chunk of another version must not appear in vector hits"
 
     fts_res = retrieval.search(db, "унікальний термін", top_k=5, recency_weight=0)
     fts_tids = {c["transcription_id"] for c in fts_res["chunks"]}
-    assert stale in fts_tids, "FTS-гілка епохи не знає — запис лишається знаходимим"
+    assert stale in fts_tids, "the FTS branch knows no epoch -- the record stays findable"
 
 
 def test_other_embedding_model_excluded_from_vector_branch(db, mock_embeddings):
@@ -636,46 +636,46 @@ def test_other_embedding_model_excluded_from_vector_branch(db, mock_embeddings):
 
 
 def test_vector_dim_mismatch_logs_error_not_silent(db, mock_embeddings, monkeypatch, caplog):
-    """Розбіжність виміру BLOB'а й EMBED_DIM більше НЕ пропускається мовчки —
-    у лозі мусить лишитись слід (id чанка, розмір, EMBED_DIM)."""
+    """A mismatch of the BLOB dimension and EMBED_DIM is NO LONGER skipped silently --
+    a trace must remain in the log (chunk id, size, EMBED_DIM)."""
     tid = _add_tx(db, "Пошкоджений вектор")
     _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
-    # Підмінюємо EMBED_DIM НАЖИВО (уже після вставки чанка розміром 4) —
-    # імітує розсинхрон виміру без порушення фільтра (embedding_model,
-    # embedding_version), який і мав звузити рядки до сумісних.
+    # We substitute EMBED_DIM LIVE (after inserting a chunk of size 4) --
+    # it imitates a dimension desync without violating the (embedding_model,
+    # embedding_version) filter, which was supposed to narrow rows to the compatible ones.
     monkeypatch.setattr(embeddings, "EMBED_DIM", 8)
     with caplog.at_level("ERROR"):
         res = retrieval.search(db, "qqqzzz", top_k=5, recency_weight=0)
     assert res["chunks"] == []
-    assert any("розмір вектора" in r.message for r in caplog.records)
+    assert any("vector size" in r.message for r in caplog.records)
 
 
 # ============================================================
-# production-rag-wave-b-07: переписування запиту (rewrite=)
+# production-rag-wave-b-07: query rewriting (rewrite=)
 # ============================================================
 
 def test_rewrite_default_off_does_not_call_rewrite_query(db, mock_embeddings, monkeypatch):
     from app.services import query_rewrite
 
     def _boom(*a, **kw):
-        raise AssertionError("rewrite_query НЕ мусить викликатись, коли rewrite вимкнено")
+        raise AssertionError("rewrite_query must NOT be called when rewrite is disabled")
     monkeypatch.setattr(query_rewrite, "rewrite_query", _boom)
     monkeypatch.delenv("RAG_QUERY_REWRITE", raising=False)
 
     tid = _add_tx(db, "Мітинг")
     _add_chunk(db, tid, 0, "альфа бета", [1.0, 0, 0, 0])
 
-    res = retrieval.search(db, "qqqzzz")  # rewrite не переданий -> env вимкнено -> False
+    res = retrieval.search(db, "qqqzzz")  # rewrite not passed -> env disabled -> False
     assert len(res["chunks"]) == 1
 
 
 def test_rewrite_false_matches_env_off_default(db, mock_embeddings, monkeypatch):
-    """production-rag-wave-b-08 (Minor 19): доводить те, що дійсно
-    порівнюється — `rewrite=False` (явно) і виклик без прапорця під вимкненим
-    env дають ІДЕНТИЧНУ видачу (обидва шляхи ведуть у той самий пост-історійний
-    код). Що `rewrite_query` при цьому НЕ викликається — доводить сусідній
-    `_boom`-тест (`test_rewrite_default_off_does_not_call_rewrite_query`), тут
-    не дублюється."""
+    """production-rag-wave-b-08 (Minor 19): proves what is actually
+    compared -- `rewrite=False` (explicit) and a call without the flag under a disabled
+    env give an IDENTICAL output (both paths lead to the same post-story
+    code). That `rewrite_query` is NOT called is proven by the neighbouring
+    `_boom` test (`test_rewrite_default_off_does_not_call_rewrite_query`), not
+    duplicated here."""
     monkeypatch.delenv("RAG_QUERY_REWRITE", raising=False)
     tid = _add_tx(db, "Мітинг")
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч", [1.0, 0, 0, 0])
@@ -686,9 +686,9 @@ def test_rewrite_false_matches_env_off_default(db, mock_embeddings, monkeypatch)
 
 
 def test_rewrite_true_merges_variant_fts_hit_via_rrf(db, mock_embeddings, monkeypatch):
-    """rewrite=True: варіант знаходить чанк, якого оригінальний запит НЕ знаходить
-    ЖОДНОЮ гілкою (вектор вимкнено — ізолюємо ефект до FTS) — і той усе одно
-    зʼявляється у видачі завдяки RRF-злиттю з підзапитом варіанта."""
+    """rewrite=True: a variant finds a chunk that the original query does NOT find
+    by ANY branch (vector disabled -- isolating the effect to FTS) -- and it still
+    appears in the output thanks to RRF fusion with the variant's sub-query."""
     from app.services import query_rewrite
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
 
@@ -701,11 +701,11 @@ def test_rewrite_true_merges_variant_fts_hit_via_rrf(db, mock_embeddings, monkey
                         lambda q, **kw: ["унікальнийтермінваріанта"])
 
     baseline = retrieval.search(db, "qqqzzz", top_k=5)
-    assert baseline["chunks"] == [], "оригінальний запит не мусить знаходити жодного чанка"
+    assert baseline["chunks"] == [], "the original query must not find a single chunk"
 
     res = retrieval.search(db, "qqqzzz", top_k=5, rewrite=True)
     tids = {c["transcription_id"] for c in res["chunks"]}
-    assert tids == {other}, "чанк, знайдений лише варіантом, мусить потрапити у видачу"
+    assert tids == {other}, "a chunk found only by the variant must get into the output"
 
 
 def test_rewrite_true_no_variants_behaves_like_off(db, mock_embeddings, monkeypatch):
@@ -736,8 +736,8 @@ def test_rewrite_explain_rewrites_lists_variants_when_enabled(db, mock_embedding
 
 
 def test_rewrite_env_flag_enables_call_without_explicit_param(db, mock_embeddings, monkeypatch):
-    """RAG_QUERY_REWRITE=1 у env + rewrite не переданий -> search кличе
-    rewrite_query — саме так гейт (evals/gate.py) міряє ефект без зміни коду."""
+    """RAG_QUERY_REWRITE=1 in env + rewrite not passed -> search calls
+    rewrite_query -- exactly how the gate (evals/gate.py) measures the effect without a code change."""
     from app.services import query_rewrite
     called = []
     monkeypatch.setattr(query_rewrite, "rewrite_query",
@@ -752,9 +752,9 @@ def test_rewrite_env_flag_enables_call_without_explicit_param(db, mock_embedding
 
 
 def test_rewrite_true_survives_missing_comment_index(db, mock_embeddings, monkeypatch):
-    """Opus UNASKED 6: стара БД без міграції v37 (індекс коментарів) не мусить
-    мовчки викидати підзапити варіантів разом із комент-списками — фолбек
-    відкидає ЛИШЕ комент-списки, а не позиційний зріз `[:2]`."""
+    """Opus UNASKED 6: an old DB without migration v37 (comment index) must not
+    silently throw out the variants' sub-queries together with the comment lists -- the fallback
+    drops ONLY the comment lists, not the positional slice `[:2]`."""
     from app.services import query_rewrite
 
     conn = sqlite3.connect(db)
@@ -774,11 +774,11 @@ def test_rewrite_true_survives_missing_comment_index(db, mock_embeddings, monkey
 
     res = retrieval.search(db, "qqqzzz", top_k=5, rewrite=True)
     tids = {c["transcription_id"] for c in res["chunks"]}
-    assert tids == {other}, "хіт варіанта мусить лишитись у видачі й без індексу коментарів"
+    assert tids == {other}, "the variant's hit must stay in the output even without the comment index"
 
 
 # ============================================================
-# editable-title-description-03: title/display_name у видачі
+# editable-title-description-03: title/display_name in the output
 # ============================================================
 
 def test_search_result_carries_title_and_display_name(db, mock_embeddings):
@@ -791,7 +791,7 @@ def test_search_result_carries_title_and_display_name(db, mock_embeddings):
     _add_chunk(db, tid, 0, "домовились про кошторис на жовтень", [1, 0, 0, 0])
 
     hit = retrieval.search(db, "кошторис", top_k=3)["chunks"][0]
-    assert hit["source_name"] == "rec_2026-09-17_final.mp3"   # провенанс не змінився
+    assert hit["source_name"] == "rec_2026-09-17_final.mp3"   # provenance unchanged
     assert hit["title"] == "Планерка Фонду"
     assert hit["display_name"] == "Планерка Фонду"
     assert "why" in hit
@@ -807,11 +807,11 @@ def test_search_display_name_falls_back_to_source_name(db, mock_embeddings):
 
 
 # ============================================================
-# directions-projects-tags-03: дерево напрямків, теги, період
+# directions-projects-tags-03: directions tree, tags, period
 # ============================================================
 
 def _node(path, name, parent_id=None):
-    """id вузла дерева за назвою (частину назв init_database уже засіяв)."""
+    """id of a tree node by name (some of the names init_database has already seeded)."""
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT id FROM categories WHERE name_norm = ?",
@@ -839,7 +839,7 @@ def _tids(res):
 
 
 def test_direction_expands_into_its_projects_in_both_branches(db, mock_embeddings):
-    """id напрямку = він сам + його проєкти, і однаково в обох гілках."""
+    """direction id = itself + its projects, and the same in both branches."""
     fond = _node(db, "Фонд Робота")
     acmecorp = _node(db, "Акмекорп", parent_id=fond)
     own = _add_tx(db, "Планерка фонду", category_id=fond)
@@ -866,7 +866,7 @@ def test_project_id_returns_only_its_own_records(db, mock_embeddings):
 
 
 def test_scope_tids_still_narrows_alongside_tree(db, mock_embeddings):
-    """Другий шар скоупу (Трек 2) від дерева не постраждав."""
+    """The second scope layer (Track 2) was not hurt by the tree."""
     fond = _node(db, "Фонд Робота")
     acmecorp = _node(db, "Акмекорп", parent_id=fond)
     own = _add_tx(db, "Планерка фонду", category_id=fond)
@@ -916,8 +916,8 @@ def test_tag_with_category_is_and(db, mock_embeddings):
 
 
 def test_unknown_tag_returns_nothing_not_everything(db, mock_embeddings):
-    """Невідома назва звужує видачу до порожньої — «фільтр проігноровано»
-    означало б, що фільтр мовчки протікає."""
+    """An unknown name narrows the output to empty -- "filter ignored"
+    would mean the filter silently leaks."""
     a = _add_tx(db, "З тегом")
     _add_chunk(db, a, 0, "спільне слово альфа", [1.0, 0, 0, 0])
     _tag(db, a, "AI")
@@ -952,15 +952,15 @@ def _comment(path, tid, body):
 
 @pytest.fixture
 def mock_comment_index(monkeypatch):
-    """index_comment кодує текст коментаря — без фейка сюди приїхала б реальна
-    модель (2 ГБ). Той самий вектор для всіх: тест міряє ФІЛЬТР, не косинус."""
+    """index_comment encodes the comment text -- without a fake the real
+    model (2 GB) would arrive here. The same vector for all: the test measures the FILTER, not the cosine."""
     monkeypatch.setattr(embeddings, "embed_texts",
                         lambda texts, batch_size=32: np.stack(
                             [_unit([1.0, 0.0, 0.0, 0.0]) for _ in texts]))
 
 
 def test_comments_follow_the_same_tag_and_date_axes(db, mock_embeddings, mock_comment_index):
-    """Коментар до чужого запису відсікається тими самими осями, що й запис."""
+    """A comment on a foreign record is cut off by the same axes as the record."""
     a = _add_tx(db, "Свій", meeting_date="2026-09-10")
     b = _add_tx(db, "Чужий", meeting_date="2026-09-20")
     _tag(db, a, "AI")
@@ -990,14 +990,14 @@ def test_comments_of_a_project_survive_direction_filter(db, mock_embeddings, moc
 
 
 # ============================================================
-# fts-filter-pushdown: фільтр записів не проштовхується у FTS5
+# fts-filter-pushdown: the record filter is not pushed into FTS5
 # ============================================================
-# Форма `rowid IN (SELECT …)` віддає FTS5 список rowid як обмеження віртуальної
-# таблиці (план `INDEX …:=M…`), і FTS5 ганяє MATCH окремо на кожен id: на знімку
-# живої БД 14 с на запит проти 0.03 с, коли фільтр лишається поза FTS5.
+# The form `rowid IN (SELECT ...)` hands FTS5 a list of rowids as a constraint of the virtual
+# table (plan `INDEX ...:=M...`), and FTS5 runs MATCH separately for each id: on a snapshot of the
+# live DB 14 s per query vs 0.03 s when the filter stays outside FTS5.
 
 def _vtab_plan(path, sql):
-    """Рядки EXPLAIN QUERY PLAN про віртуальну таблицю для SQL, що реально виконався."""
+    """EXPLAIN QUERY PLAN rows about the virtual table for the SQL that actually ran."""
     conn = sqlite3.connect(path)
     try:
         return [r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql)
@@ -1007,8 +1007,8 @@ def _vtab_plan(path, sql):
 
 
 def _fts_rowid_pushed(plan_lines):
-    """`INDEX 32:=M2` — rowid-обмеження у FTS5; `INDEX 32:M2` — лише MATCH.
-    `=`, `<`, `>` в idxStr FTS5 — обмеження по rowid, де б вони не стояли."""
+    """`INDEX 32:=M2` is a rowid constraint in FTS5; `INDEX 32:M2` is MATCH only.
+    `=`, `<`, `>` in the FTS5 idxStr are a rowid constraint wherever they stand."""
     import re
     out = []
     for line in plan_lines:
@@ -1035,7 +1035,7 @@ def test_fts_search_keeps_record_filter_out_of_fts5(db, monkeypatch):
 
     monkeypatch.setattr(retrieval, "get_db_connection", tracing)
     hits = retrieval._fts_search(db, "договір Тарас", 10)
-    assert {h[0] for h in hits}, "фікстура мусить знаходитись"
+    assert {h[0] for h in hits}, "the fixture must be findable"
     sql = next(s for s in seen if "chunks_fts MATCH" in s)
     plan = _vtab_plan(db, sql)
     assert plan and not _fts_rowid_pushed(plan), plan
@@ -1055,3 +1055,14 @@ def test_research_candidates_keep_record_filter_out_of_fts5(db):
     sql = next(s for s in seen if "transcriptions_fts MATCH" in s)
     plan = _vtab_plan(db, sql)
     assert plan and not _fts_rowid_pushed(plan), plan
+
+
+# ============================================================
+# svc_retrieval catalog: comment target labels
+# ============================================================
+
+def test_comment_target_labels_are_translated():
+    from app.core.i18n import tr
+    assert tr("svc_retrieval.comment.target_record", lang="en", id=5) == "Record #5"
+    assert tr("svc_retrieval.comment.target_audio", lang="en", id=5) == "Audio #5"
+    assert tr("svc_retrieval.comment.target_record", lang="uk", id=5) == "Запис #5"

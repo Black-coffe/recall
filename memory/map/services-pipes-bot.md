@@ -1,6 +1,6 @@
 # services — scheduled pipes and the Telegram bot
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 Part of `app/services/*`; hub — [services.md](services.md). K4 4.13.0, K5 4.14.0/4.15.0.
 **Language (english-i18n, 4.16.0):** the service strings of the brief and the buttons take their language from the setting, not from the request:
@@ -30,7 +30,7 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
   (run → stdout, `trigger='manual'`). `list_runs` is read by MCP.
 - **pipes_cards.py** — the message is assembled by CODE; HTML (`parse_mode=HTML`) only `b|i|a`. `render(title, data, *, db_path,
   today, base_url, headline, missing, hidden, words, buttons)` (`:297`) → `(html, leaked_words)`; a non-empty `leaked` = do not send.
-  Tasks in blocks by ROOT direction (`_Dirs`, without a direction → `Без напрямку`), ≤`MAX_CARDS=5` per block, the rest →
+  Tasks in blocks by ROOT direction (`_Dirs`, without a direction → `_t("noDir")` = `telegram.brief.noDir`), ≤`MAX_CARDS=5` per block, the rest →
   `ще N →` to `{base}/tasks?category_id=`. A card: what · who · due · source; link `/transcript/<tid>?task=<id>`.
   Sections: 📌 tasks (`overdue|this_week|no_date`), 🕳 dropped, ❓ questions, 💤 topics, ✏️ corrections, coverage.
   `_Guard` on EVERY field: mask (`pipes_privacy.mask`) → stop words → truncation → `html.escape`. `clean_headline` (≤2 lines).
@@ -45,7 +45,7 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
 - **brief_actions.py** — the buttons "done / not relevant / postpone" under the brief. `keyboard(item_ids)` →
   `{inline_keyboard}` (a row per task; `None` if empty). `callback_data` (≤64 B, stateless):
   `a:<n>:<id>:<done|cancelled|postpone:1|7|30>`, `p|b:<n>:<id>` (deadline/back), `u:<n>:<event>` (undo), `x`.
-  `handle(cq, *, db_path, transport)` (`:75`): chat ≠ `tg_bot._chat_id()` → `Немає доступу`; the change ONLY via
+  `handle(cq, *, db_path, transport)` (`:75`): chat ≠ `tg_bot._chat_id()` → `_t("noAccess", lang)` (`telegram.btn.noAccess`); the change ONLY via
   `commitments.apply_action/undo_action(source='bot', actor='tg:<id> @user')`; `LookupError|ValueError` → text in
   `answerCallbackQuery`. The row is looked up by NUMBER (`_row_number`), the base is the last keyboard in `_KEYBOARDS` (LRU 200;
   presses after the PC sleeps arrive in a batch), otherwise `msg.reply_markup`.

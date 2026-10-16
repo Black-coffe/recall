@@ -1,4 +1,4 @@
-"""Каталог: серверні тексти Бібліотеки, Аудіотеки й Документів (audio_library, documents)."""
+"""Catalog: server texts of the Library, the Audio library and Documents (audio_library, documents)."""
 
 
 def _m(uk: str, en: str) -> dict:

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Микро-бенчмарк WhisperManager: сравнение faster vs openai backend.
+"""Micro-benchmark of WhisperManager: faster vs openai backend.
 
-Запуск:
+Usage:
     cd E:\\Projects\\Whisper
     .venv\\Scripts\\python.exe tools\\benchmark_whisper.py [audio_path] [model]
 
-Параметры (опц.):
-    audio_path  путь к аудиофайлу (по умолчанию /tmp/bench_60s.mp3)
-    model       имя модели (по умолчанию base)
+Parameters (optional):
+    audio_path  path to the audio file (default /tmp/bench_60s.mp3)
+    model       model name (default base)
 """
 import sys
 import time
@@ -26,13 +26,13 @@ def bench(backend_name, audio_path, model_name, language="uk"):
     os.environ["WHISPER_BACKEND"] = backend_name
     m = ModernWhisperManager(backend=backend_name)
 
-    # Загрузка модели (не учитываем во времени)
+    # Model loading (not counted in the timing)
     t0 = time.time()
     m.load_model(model_name)
     load_t = time.time() - t0
     print(f"load: {load_t:.2f}s")
 
-    # Транскрипция
+    # Transcription
     t0 = time.time()
     result = m.transcribe_with_progress(audio_path, model_name, language)
     elapsed = time.time() - t0
@@ -44,7 +44,7 @@ def bench(backend_name, audio_path, model_name, language="uk"):
     duration = m.get_audio_duration(audio_path)
     rtf = duration / max(elapsed, 0.001)
     text_preview = result["text"][:120].replace("\n", " ")
-    # Windows console может не уметь в UTF-8: фолбэк на ASCII
+    # The Windows console may not handle UTF-8: fall back to ASCII
     safe_preview = text_preview.encode("ascii", errors="replace").decode("ascii")
     print(f"transcribe: {elapsed:.2f}s  ({rtf:.1f}x realtime)")
     print(f"segments: {len(result['segments'])}, lang: {result['language']}")

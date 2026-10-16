@@ -1,4 +1,4 @@
-"""Тести для app.services.recording.finalize (Phase 9.4)."""
+"""Tests for app.services.recording.finalize (Phase 9.4)."""
 from __future__ import annotations
 
 import math
@@ -34,7 +34,7 @@ def _generate_sine_pcm(
     channels: int = CHANNELS,
     amplitude: float = 0.3,
 ) -> bytes:
-    """Генерує синусоїду в int16 LE PCM. Працює і для моно, і для stereo."""
+    """Generates a sine wave in int16 LE PCM. Works for both mono and stereo."""
     n = int(duration_sec * sample_rate)
     samples = []
     for i in range(n):
@@ -50,7 +50,7 @@ def _generate_sine_pcm(
 def test_pcm_to_wav_creates_valid_wav(tmp_path: Path):
     pcm = tmp_path / 'test.pcm'
     wav = tmp_path / 'test.wav'
-    pcm.write_bytes(_generate_sine_pcm(0.5))  # 0.5 сек
+    pcm.write_bytes(_generate_sine_pcm(0.5))  # 0.5 sec
 
     frames = pcm_to_wav(pcm, wav, SAMPLE_RATE, CHANNELS)
     assert frames == int(0.5 * SAMPLE_RATE)
@@ -78,22 +78,22 @@ def test_pcm_to_wav_missing_pcm_creates_empty_wav(tmp_path: Path):
 
 
 def test_pcm_to_wav_truncates_partial_frame(tmp_path: Path):
-    """Якщо PCM довжина не кратна frame_size — хвіст ігнорується."""
+    """If the PCM length is not a multiple of frame_size — the tail is ignored."""
     pcm = tmp_path / 'partial.pcm'
     wav = tmp_path / 'partial.wav'
-    # 4 frames + 1 байт зайвий
+    # 4 frames + 1 extra byte
     pcm.write_bytes(_generate_sine_pcm(0.0001) + b'\xFF')
     frames = pcm_to_wav(pcm, wav, SAMPLE_RATE, CHANNELS)
-    # Перевірка що результат валідний WAV з усіченими байтами
+    # Check that the result is a valid WAV with the truncated bytes
     with wave.open(str(wav), 'rb') as wf:
         assert wf.getnframes() == frames
-        # Розмір файлу = 44-байтний хедер + frames * frame_size
+        # File size = 44-byte header + frames * frame_size
         expected_data = frames * CHANNELS * SAMPLE_WIDTH
         assert wf.getnframes() * CHANNELS * SAMPLE_WIDTH == expected_data
 
 
 def test_pcm_to_wav_streaming_large_file(tmp_path: Path):
-    """Перевіряємо що великий PCM (5 MB) не падає та коректно записується."""
+    """Check that a large PCM (5 MB) does not fail and is written correctly."""
     pcm = tmp_path / 'big.pcm'
     wav = tmp_path / 'big.wav'
     big_data = _generate_sine_pcm(0.5)  # ~94KB
@@ -108,7 +108,7 @@ def test_pcm_to_wav_streaming_large_file(tmp_path: Path):
 
 @pytest.fixture
 def sine_wavs(tmp_path: Path) -> tuple[Path, Path]:
-    """Створює два WAV: 440Hz mic + 880Hz system, по 1 секунді."""
+    """Creates two WAVs: 440Hz mic + 880Hz system, 1 second each."""
     mic_pcm = tmp_path / 'mic.pcm'
     sys_pcm = tmp_path / 'system.pcm'
     mic_pcm.write_bytes(_generate_sine_pcm(1.0, freq_hz=440))
@@ -127,7 +127,7 @@ def test_mix_two_wavs_to_mp3(sine_wavs: tuple[Path, Path], tmp_path: Path):
     result = mix_streams(mic_wav, sys_wav, out, bitrate='128k')
     assert result == out
     assert out.is_file()
-    assert out.stat().st_size > 1000  # MP3 має бути ненульовим
+    assert out.stat().st_size > 1000  # the MP3 must be non-empty
 
 
 def test_mix_only_mic(sine_wavs: tuple[Path, Path], tmp_path: Path):
@@ -161,7 +161,7 @@ def test_mix_with_gain(sine_wavs: tuple[Path, Path], tmp_path: Path):
 
 @pytest.fixture
 def store_with_session(tmp_path: Path):
-    """Створює SessionStore + 1 сесію з реальним PCM на диску."""
+    """Creates a SessionStore + 1 session with a real PCM on disk."""
     store = SessionStore(tmp_path / 'sessions')
     sid = 'rec_test_finalize'
     store.create(sid, sample_rate=SAMPLE_RATE, channels=CHANNELS,
@@ -208,12 +208,12 @@ def test_finalize_session_keeps_pcm_when_flag_set(store_with_session):
 
 
 def test_finalize_session_removes_wav_by_default(store_with_session):
-    """Проміжні mic.wav/system.wav видаляються після final.mp3 (інакше
-    накопичуються ~1 ГБ/сесію)."""
+    """The intermediate mic.wav/system.wav are deleted after final.mp3 (otherwise
+    ~1 GB/session accumulates)."""
     store, sid = store_with_session
     result = finalize_session(sid, store, bitrate='128k')
     session_dir = store.session_dir(sid)
-    assert Path(result['final_mp3_path']).is_file()      # mp3 лишається
+    assert Path(result['final_mp3_path']).is_file()      # the mp3 stays
     assert not (session_dir / 'mic.wav').exists()
     assert not (session_dir / 'system.wav').exists()
 
@@ -237,7 +237,7 @@ def test_finalize_session_mic_only(tmp_path: Path):
     result = finalize_session(sid, store, bitrate='128k')
     assert result['status'] == STATUS_FINALIZED
     assert Path(result['final_mp3_path']).is_file()
-    # system stream відсутній — тільки mic у streams_finalized
+    # the system stream is absent — only mic in streams_finalized
     assert STREAM_MIC in result['streams']
     assert STREAM_SYSTEM not in result['streams']
 
@@ -247,7 +247,7 @@ def test_finalize_session_empty_streams_marks_finalized_with_no_mp3(tmp_path: Pa
     sid = 'rec_empty'
     store.create(sid, SAMPLE_RATE, CHANNELS, mic_device_name='Mic',
                  system_device_name='Sys')
-    # Нічого не пишемо в .pcm — обидва порожні
+    # We write nothing to the .pcm — both are empty
 
     result = finalize_session(sid, store, bitrate='128k')
     assert result['status'] == STATUS_FINALIZED
@@ -262,48 +262,48 @@ def test_finalize_session_missing_manifest_raises(tmp_path: Path):
 
 
 def test_finalize_uses_per_stream_native_rate(tmp_path: Path):
-    """Phase 9.10 fix: якщо stream має native rate ≠ top-level
-    (mic FOX 88200/1 vs target 48000/2), pcm_to_wav повинен
-    використовувати per-stream rate. Це гарантує що WAV-хедер
-    співпадає з реальним PCM payload'ом."""
+    """Phase 9.10 fix: if a stream has a native rate ≠ top-level
+    (mic FOX 88200/1 vs target 48000/2), pcm_to_wav must
+    use the per-stream rate. This guarantees that the WAV header
+    matches the real PCM payload."""
     store = SessionStore(tmp_path / 'sessions')
     sid = 'rec_ps_test'
     store.create(sid, sample_rate=48000, channels=2,
                  mic_device_name='FOX', system_device_name='Loopback')
-    # Симулюємо реальний сценарій: mic native = 88200/1, system = 48000/2
+    # Simulate the real scenario: mic native = 88200/1, system = 48000/2
     store.set_stream_params(sid, STREAM_MIC, sample_rate=88200, channels=1)
     store.set_stream_params(sid, STREAM_SYSTEM, sample_rate=48000, channels=2)
 
-    # Mic PCM = 1 секунда mono 88200Hz int16 = 88200 * 2 = 176400 bytes
+    # Mic PCM = 1 second mono 88200Hz int16 = 88200 * 2 = 176400 bytes
     mic_pcm = store.pcm_path(sid, STREAM_MIC)
     mic_pcm.write_bytes(_generate_sine_pcm(1.0, freq_hz=440, sample_rate=88200, channels=1))
 
-    # System PCM = 1 секунда stereo 48000Hz int16 = 48000 * 4 = 192000 bytes
+    # System PCM = 1 second stereo 48000Hz int16 = 48000 * 4 = 192000 bytes
     sys_pcm = store.pcm_path(sid, STREAM_SYSTEM)
     sys_pcm.write_bytes(_generate_sine_pcm(1.0, freq_hz=880, sample_rate=48000, channels=2))
 
     store.update_stream_bytes(sid, STREAM_MIC, mic_pcm.stat().st_size)
     store.update_stream_bytes(sid, STREAM_SYSTEM, sys_pcm.stat().st_size)
 
-    # keep_wav=True — тест читає mic.wav/system.wav назад для перевірки хедера
+    # keep_wav=True — the test reads mic.wav/system.wav back to check the header
     result = finalize_session(sid, store, bitrate='128k', keep_wav=True)
 
-    # Verify mic.wav has correct 88200/1 header (НЕ 48000/2 як top-level)
+    # Verify mic.wav has the correct 88200/1 header (NOT 48000/2 like top-level)
     import wave
     mic_wav_path = result['streams'][STREAM_MIC]['wav_path']
     with wave.open(mic_wav_path, 'rb') as wf:
-        assert wf.getnchannels() == 1, "mic.wav має бути mono"
-        assert wf.getframerate() == 88200, "mic.wav має native 88200Hz, не 48000"
+        assert wf.getnchannels() == 1, "mic.wav must be mono"
+        assert wf.getframerate() == 88200, "mic.wav must have native 88200Hz, not 48000"
         assert abs(wf.getnframes() / wf.getframerate() - 1.0) < 0.01, \
             "duration ~ 1.0s"
 
-    # System.wav має 48000/2
+    # System.wav has 48000/2
     sys_wav_path = result['streams'][STREAM_SYSTEM]['wav_path']
     with wave.open(sys_wav_path, 'rb') as wf:
         assert wf.getnchannels() == 2
         assert wf.getframerate() == 48000
 
-    # streams info містить per-stream rate/channels
+    # the streams info contains the per-stream rate/channels
     assert result['streams'][STREAM_MIC]['sample_rate'] == 88200
     assert result['streams'][STREAM_MIC]['channels'] == 1
     assert result['streams'][STREAM_SYSTEM]['sample_rate'] == 48000
@@ -311,13 +311,13 @@ def test_finalize_uses_per_stream_native_rate(tmp_path: Path):
 
 
 def test_finalize_falls_back_to_top_level_for_legacy_manifest(tmp_path: Path):
-    """Backward compat: старі manifest'и без per-stream sample_rate/channels
-    повинні фінілізуватись з top-level params."""
+    """Backward compat: old manifests without per-stream sample_rate/channels
+    must finalize with the top-level params."""
     store = SessionStore(tmp_path / 'sessions')
     sid = 'rec_legacy'
     store.create(sid, sample_rate=SAMPLE_RATE, channels=CHANNELS,
                  mic_device_name='Old')
-    # Симулюємо legacy manifest: видаляємо per-stream params з диска
+    # Simulate a legacy manifest: remove the per-stream params from disk
     def _strip(mf):
         mf['streams'][STREAM_MIC].pop('sample_rate', None)
         mf['streams'][STREAM_MIC].pop('channels', None)
@@ -326,18 +326,18 @@ def test_finalize_falls_back_to_top_level_for_legacy_manifest(tmp_path: Path):
     mic_pcm = store.pcm_path(sid, STREAM_MIC)
     mic_pcm.write_bytes(_generate_sine_pcm(0.5))
 
-    # Не має падати
+    # Must not fail
     result = finalize_session(sid, store, bitrate='128k')
     assert result['status'] == STATUS_FINALIZED
-    # Fallback на top-level (48000/2)
+    # Fallback to top-level (48000/2)
     assert result['streams'][STREAM_MIC]['sample_rate'] == SAMPLE_RATE
     assert result['streams'][STREAM_MIC]['channels'] == CHANNELS
 
 
-# ------------------------------------------------- ffmpeg-гілка mix'у (великі файли)
+# ------------------------------------------------- the ffmpeg branch of the mix (large files)
 
 def _rms_db(path: Path) -> float:
-    """RMS у дБ через pydub — спільна лінійка для обох гілок mix'у."""
+    """RMS in dB through pydub — a common yardstick for both mix branches."""
     from pydub import AudioSegment
     seg = AudioSegment.from_file(str(path))
     samples = seg.get_array_of_samples()
@@ -358,19 +358,19 @@ def _write_sine_wav(path: Path, freq: float, rate: int, channels: int,
 
 
 @pytest.mark.parametrize('mic_rate,mic_ch,sys_rate,sys_ch', [
-    (44100, 1, 48000, 2),   # реальна конфігурація: моно-мікрофон + stereo loopback
+    (44100, 1, 48000, 2),   # a real configuration: mono microphone + stereo loopback
     (48000, 2, 48000, 2),
     (44100, 1, 44100, 1),
 ])
 def test_ffmpeg_mix_matches_pydub_levels(tmp_path: Path, mic_rate, mic_ch,
                                          sys_rate, sys_ch):
-    """ffmpeg-гілка мусить звучати ІДЕНТИЧНО pydub-гілці.
+    """The ffmpeg branch must sound IDENTICAL to the pydub branch.
 
-    Регресія на дві тихі пастки, які видно лише вимірюванням:
-    - ``amix`` без ``normalize=0`` ділив би кожен вхід на N (−6 дБ);
-    - ``aformat=channel_layouts=stereo`` на МОНО-вході тихішає на 3 дБ
-      (rematrix-нормалізація swresample), тоді як pydub дублює канал 1:1.
-      Б'є саме по mic-доріжці — найтихішій і найважливішій.
+    A regression on two silent traps that are visible only by measurement:
+    - ``amix`` without ``normalize=0`` would divide every input by N (−6 dB);
+    - ``aformat=channel_layouts=stereo`` on a MONO input gets 3 dB quieter
+      (swresample rematrix normalization), whereas pydub duplicates the channel 1:1.
+      It hits precisely the mic track — the quietest and the most important.
     """
     from app.services.recording.finalize import _mix_via_ffmpeg
 
@@ -381,15 +381,15 @@ def test_ffmpeg_mix_matches_pydub_levels(tmp_path: Path, mic_rate, mic_ch,
 
     via_ffmpeg = tmp_path / 'ff.mp3'
     _mix_via_ffmpeg(mic, sysw, via_ffmpeg, '128k', 0.0, 0.0)
-    via_pydub = tmp_path / 'py.mp3'          # малі файли → pydub-гілка
+    via_pydub = tmp_path / 'py.mp3'          # small files → the pydub branch
     mix_streams(mic, sysw, via_pydub, bitrate='128k')
 
     assert abs(_rms_db(via_ffmpeg) - _rms_db(via_pydub)) < 0.2
 
 
 def test_large_input_takes_ffmpeg_branch(tmp_path: Path, monkeypatch):
-    """Поріг реально перемикає гілку — інакше багатогодинна сесія
-    підняла б гігабайти в RAM просто на старті застосунку."""
+    """The threshold really switches the branch — otherwise a multi-hour session
+    would raise gigabytes in RAM right at application start."""
     from app.services.recording import finalize as finalize_mod
 
     mic = tmp_path / 'mic.wav'
@@ -411,7 +411,7 @@ def test_large_input_takes_ffmpeg_branch(tmp_path: Path, monkeypatch):
 
 
 def test_ffmpeg_mix_failure_falls_back_to_pydub(tmp_path: Path, monkeypatch):
-    """Збій ffmpeg не має валити finalize — відкіт на pydub."""
+    """An ffmpeg failure must not fail finalize — fall back to pydub."""
     from app.services.recording import finalize as finalize_mod
 
     mic = tmp_path / 'mic.wav'
@@ -419,7 +419,7 @@ def test_ffmpeg_mix_failure_falls_back_to_pydub(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(finalize_mod, 'FFMPEG_MIX_THRESHOLD_BYTES', 1)
     monkeypatch.setattr(
         finalize_mod, '_mix_via_ffmpeg',
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('ffmpeg впав')),
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('ffmpeg crashed')),
     )
     out = tmp_path / 'fallback.mp3'
     finalize_mod.mix_streams(mic, None, out, bitrate='128k')

@@ -1,24 +1,24 @@
 #!/usr/bin/env python
-"""Чернетка golden-set для action-items (eval-gate, C7) — під ручну правду.
+"""Draft golden-set for action-items (eval-gate, C7) - for manual truth labelling.
 
-Бере СТРАТИФІКОВАНУ вибірку `action_items` зі знімка БД — за (`source`
-IS NULL / `'tg_thread'`) × (чи є сира фраза дедлайну `due`) — і кладе кожен
-рядок як `status="unlabeled"` з порожнім `truth`. `commitments.tg_tasks`
-(SOURCE="tg_thread") — це задачі, витягнуті з переписки; NULL — успадковані
-з Claude-карток дзвінків. `action_items.source='comment'` (провенанс
-коментарів власника) СВІДОМО і ПОСТІЙНО не потрапляє у вибірку (D14,
-знахідка 24 review-round-1.md) — буквальне читання C7 (`"source":
-null|"tg_thread"`), не тимчасовий недогляд; розширювати на 'comment' —
-окреме рішення власника, не мовчазний side-effect цього файлу.
+Takes a STRATIFIED sample of `action_items` from a DB snapshot - by (`source`
+IS NULL / `'tg_thread'`) x (whether a raw deadline phrase `due` exists) - and puts each
+row as `status="unlabeled"` with an empty `truth`. `commitments.tg_tasks`
+(SOURCE="tg_thread") are tasks extracted from chat history; NULL are inherited
+from Claude call cards. `action_items.source='comment'` (the provenance of
+owner comments) is DELIBERATELY and PERMANENTLY excluded from the sample (D14,
+finding 24 of review-round-1.md): a literal reading of C7 (`"source":
+null|"tg_thread"`), not a temporary oversight; extending it to 'comment' is
+a separate owner decision, not a silent side effect of this file.
 
-Кожен вибраний рядок несе `db_snapshot` — груба ознака ідентичності знімка
-(імʼя файлу + розмір), з якого його взято (D7): `evals/tasks_eval.py`
-звіряє її з `--db`, яким міряє, і виключає пункт зі рахунку, якщо вони не
-збігаються — реінджест перестворює `action_items`, і без цього
-`owner_accuracy`/`due_accuracy` тихо стають беззмістовними (знахідка 11).
+Each picked row carries `db_snapshot`, a rough identity marker of the snapshot
+(file name + size) it was taken from (D7): `evals/tasks_eval.py`
+checks it against the `--db` it measures with and excludes the item from the count if they do not
+match; re-ingest recreates `action_items`, and without this
+`owner_accuracy`/`due_accuracy` silently become meaningless (finding 11).
 
-Ані `due_date`, ані `owner_entity_id` тут не рахуються і не звіряються —
-це робить `evals/tasks_eval.py` окремо, на будь-якому знімку.
+Neither `due_date` nor `owner_entity_id` is computed or checked here;
+`evals/tasks_eval.py` does that separately, on any snapshot.
 
 CLI:
     python -m evals.build_tasks_golden --db evals/snapshots/x.db
@@ -42,26 +42,26 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from evals.graph_links import is_live_db, open_readonly  # noqa: E402
-from evals.golden_io import read_jsonl  # noqa: E402 — спільний читач (D13), пишеться історією 05
+from evals.golden_io import read_jsonl  # noqa: E402 - shared reader (D13), written by story 05
 
-#: A2-аналог для action-items (C7): ціль розмітки, не критерій прийняття коду.
+#: A2 analogue for action-items (C7): a labelling target, not a code acceptance criterion.
 TASKS_TARGET = 30
 
-#: (source, чи є due-фраза) — чотири страти, рівний розподіл.
+#: (source, whether a due phrase exists) - four strata, even distribution.
 _STRATA = [(None, True), (None, False), ("tg_thread", True), ("tg_thread", False)]
 
 
 # ============================================================
-# Стратифікована вибірка (read-only — ADR-003, не мутуємо знімок)
+# Stratified sample (read-only - ADR-003, we do not mutate the snapshot)
 # ============================================================
 
 def sample_action_items(conn, n: int, *, seed: int = 0) -> list[dict]:
-    """Стратифікована вибірка `action_items` зі знімка. Детермінована
-    (`seed=0`) — той самий знімок дає той самий набір при повторному прогоні."""
+    """Stratified sample of `action_items` from the snapshot. Deterministic
+    (`seed=0`): the same snapshot gives the same set on a repeated run."""
     rows = conn.execute(
-        # C7 несе лише "source": null|"tg_thread" — 'comment' (провенанс
-        # коментарів власника) виключений СВІДОМО і ПОСТІЙНО (D14), не
-        # переглядати цей WHERE без окремого рішення власника.
+        # C7 carries only "source": null|"tg_thread"; 'comment' (the provenance
+        # of owner comments) is excluded DELIBERATELY and PERMANENTLY (D14), do not
+        # revisit this WHERE without a separate owner decision.
         "SELECT ai.id, ai.transcription_id, ai.task, ai.owner_name, ai.due, ai.source, "
         "COALESCE(t.meeting_date, substr(t.created_at, 1, 10)) AS meeting_date "
         "FROM action_items ai LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
@@ -96,23 +96,23 @@ def sample_action_items(conn, n: int, *, seed: int = 0) -> list[dict]:
 
 
 def _snapshot_identity(db_path: str) -> dict:
-    """Груба ознака ідентичності знімка (D7): базове імʼя файлу + розмір.
-    Не хеш (315 МБ на кожен прогін — задорого) — та сама копія, що
-    `evals/tasks_eval.py` (не тягнемо приватну назву сусіднього модуля через
-    межу файлів)."""
+    """Rough snapshot identity marker (D7): file base name + size.
+    Not a hash (315 MB on every run is too expensive); the same copy as in
+    `evals/tasks_eval.py` (we do not pull a neighbouring module's private name across the
+    file boundary)."""
     st = os.stat(db_path)
     return {"path": os.path.basename(db_path), "size": st.st_size}
 
 
 # ============================================================
-# JSONL (читає evals.golden_io.read_jsonl — D13; пише свій запис, бо
-# golden_io пише лише C1-набір retrieval-гейта, не C7)
+# JSONL (read by evals.golden_io.read_jsonl - D13; writes its own record, because
+# golden_io writes only the C1 set of the retrieval gate, not C7)
 # ============================================================
 
 def _existing_items(path: str) -> list[dict]:
-    """Наявний `--out`, якщо він є (перший прогін — файлу ще нема, це не
-    помилка). Нечитний/невалідний файл — `read_jsonl` кидає, `main` мапить
-    у exit 2 (D3)."""
+    """The existing `--out`, if there is one (first run: no file yet, not an
+    error). An unreadable/invalid file: `read_jsonl` raises, `main` maps it
+    to exit 2 (D3)."""
     if not os.path.exists(path):
         return []
     return read_jsonl(path)
@@ -127,16 +127,16 @@ def _write_jsonl(path: str, items: list[dict]) -> None:
             f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
 
-#: `task-0001`, ... — той самий формат, що видає `_make_item`.
+#: `task-0001`, ... - the same format that `_make_item` emits.
 _ID_RE = re.compile(r"^task-(\d+)$")
 
 
 def _next_index(existing: list[dict]) -> int:
-    """Наступний вільний номер id — НЕ `len(existing) + 1` (знахідка 16):
-    ручне видалення одного рядка з файлу зсуває довжину, і `len+1` реіснує
-    номер, який усе ще належить ІНШОМУ пункту нижче в списку. Максимум
-    зайнятого номера + 1 такого зіткнення дати не може — множина зайнятих
-    номерів лише росте."""
+    """The next free id number - NOT `len(existing) + 1` (finding 16):
+    manually deleting one row from the file shifts the length, and `len+1` re-issues a
+    number that still belongs to ANOTHER item further down the list. The maximum
+    taken number + 1 cannot produce such a collision: the set of taken
+    numbers only grows."""
     used = set()
     for it in existing:
         m = _ID_RE.match(str(it.get("id") or ""))
@@ -164,8 +164,8 @@ def _make_item(idx: int, row: dict, db_snapshot: dict) -> dict:
 def print_stats(items: list[dict]) -> None:
     labeled = sum(1 for it in items if it.get("status") == "labeled")
     deficit = max(0, TASKS_TARGET - labeled)
-    print(f"[build_tasks_golden] labeled={labeled} ціль={TASKS_TARGET} "
-          f"дефіцит={deficit} (усього={len(items)})")
+    print(f"[build_tasks_golden] labeled={labeled} target={TASKS_TARGET} "
+          f"deficit={deficit} (total={len(items)})")
 
 
 # ============================================================
@@ -174,25 +174,25 @@ def print_stats(items: list[dict]) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--db", default="whisper_history.db", help="Шлях до ЗНІМКА БД")
-    parser.add_argument("--n", type=int, default=60, help="Скільки задач вибрати сумарно (default: 60)")
+    parser.add_argument("--db", default="whisper_history.db", help="Path to the DB SNAPSHOT")
+    parser.add_argument("--n", type=int, default=60, help="How many tasks to pick in total (default: 60)")
     parser.add_argument("--out", default="evals/tasks_golden.local.jsonl",
-                         help="Куди писати JSONL (default: evals/tasks_golden.local.jsonl)")
+                         help="Where to write the JSONL (default: evals/tasks_golden.local.jsonl)")
     parser.add_argument("--merge", action="store_true",
-                         help="Додати лише нові action_item_id до наявного --out "
-                              "(без цього прапорця --out ПЕРЕЗАПИСУЄТЬСЯ свіжою вибіркою)")
-    parser.add_argument("--stats", action="store_true", help="Надрукувати labeled проти цілі")
-    parser.add_argument("--seed", type=int, default=0, help="Насіння детермінованої вибірки (default: 0)")
+                         help="Add only new action_item_id to the existing --out "
+                              "(without this flag --out is OVERWRITTEN with a fresh sample)")
+    parser.add_argument("--stats", action="store_true", help="Print labeled against the target")
+    parser.add_argument("--seed", type=int, default=0, help="Seed of the deterministic sample (default: 0)")
     parser.add_argument("--yes-live", action="store_true",
-                         help="Дозволити відкрити файл, що збігається з Config.DATABASE")
+                         help="Allow opening the file that matches Config.DATABASE")
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.db):
-        print(f"[build_tasks_golden] БД не знайдено: {args.db}", file=sys.stderr)
+        print(f"[build_tasks_golden] DB not found: {args.db}", file=sys.stderr)
         return 2
     if is_live_db(args.db) and not args.yes_live:
-        print(f"[build_tasks_golden] Відмова: {args.db!r} — це бойова БД (Config.DATABASE). "
-              "Ця оснастка працює на ЗНІМКУ. Якщо це свідомий вибір — додайте --yes-live.",
+        print(f"[build_tasks_golden] Refused: {args.db!r} is the live DB (Config.DATABASE). "
+              "This tooling works on a SNAPSHOT. If this is a deliberate choice, add --yes-live.",
               file=sys.stderr)
         return 2
 
@@ -202,11 +202,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             prior = _existing_items(args.out)
             lost = sum(1 for it in prior if it.get("status") == "labeled")
             if lost:
-                print(f"[build_tasks_golden] УВАГА: {args.out} перезаписується без --merge — "
-                      f"{lost} розмічених пунктів буде втрачено. Додайте --merge, щоб зберегти їх.",
+                print(f"[build_tasks_golden] WARNING: {args.out} is overwritten without --merge - "
+                      f"{lost} labeled items will be lost. Add --merge to keep them.",
                       file=sys.stderr)
     except (OSError, ValueError) as exc:
-        print(f"[build_tasks_golden] {args.out} нечитний: {exc}", file=sys.stderr)
+        print(f"[build_tasks_golden] {args.out} unreadable: {exc}", file=sys.stderr)
         return 2
 
     existing_ids = {it.get("action_item_id") for it in existing}
@@ -229,16 +229,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     items = existing + new_items
 
-    # Дублі id не згортаються мовчки (знахідка 16) — за побудовою `_next_index`
-    # їх тут бути не повинно; це остання лінія оборони проти пошкодженого
-    # `--out`, який хтось редагував руками.
+    # Duplicate ids are not silently collapsed (finding 16): by construction of `_next_index`
+    # there should be none here; this is the last line of defence against a corrupted
+    # `--out` that someone edited by hand.
     dupe_ids = sorted({i for i, n in Counter(it.get("id") for it in items).items() if n > 1})
     if dupe_ids:
-        print(f"[build_tasks_golden] Дублі id у {args.out} (не згортаються мовчки): {dupe_ids}", file=sys.stderr)
+        print(f"[build_tasks_golden] Duplicate ids in {args.out} (not silently collapsed): {dupe_ids}", file=sys.stderr)
         return 2
 
     _write_jsonl(args.out, items)
-    print(f"[build_tasks_golden] {args.out}: збережено={len(existing)} нових={len(new_items)} усього={len(items)}")
+    print(f"[build_tasks_golden] {args.out}: kept={len(existing)} new={len(new_items)} total={len(items)}")
 
     if args.stats:
         print_stats(items)

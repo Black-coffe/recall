@@ -1,37 +1,37 @@
-"""Офлайн re-embed архіву на ЗНІМКУ (Волна B, історія 05, контракт C5).
+"""Offline re-embed of the archive on a SNAPSHOT (Wave B, story 05, contract C5).
 
-**Навіщо окремий модуль.** Бекфіл через HTTP (`enrichment.backfill` →
-`job_queue`) тягне з собою картку Claude, черги й живий процес застосунку.
-Перехід на іншу пару (модель, версія) ембедингів — операція іншого роду:
-локальна, довга, без грошей і без API, і робиться вона на ЗНІМКУ бойової БД
-(`VACUUM INTO` — `scripts/backup_db.ps1`), щоб порівняти пошук «до» і «після»
-гейтом (`evals/gate.py`) ПЕРЕД тим, як чіпати живий архів.
+**Why a separate module.** A backfill over HTTP (`enrichment.backfill` ->
+`job_queue`) drags in the Claude card, queues and the live application process.
+Moving to another (model, version) pair of embeddings is an operation of a different kind:
+local, long, no money and no API, and it is done on a SNAPSHOT of the live DB
+(`VACUUM INTO`, `scripts/backup_db.ps1`) so that search "before" and "after" can be compared
+with the gate (`evals/gate.py`) BEFORE touching the live archive.
 
-**Що робить.** Бере записи, чия пара (`embedding_model`, `embedding_version`)
-не збігається з поточною (`embeddings.EMBED_MODEL`/`EMBED_VERSION` — обидві з
-env, історія 04), і переембеджує кожен через `chunk_and_embed_transcription` —
-тобто новою нарізкою, новою моделлю і з контекстним префіксом чанка
-(`build_context_prefix`) одним проходом. У кінці — `optimize_chunk_index()`:
-без нього масовий DELETE+INSERT по `chunks` кришить `chunks_fts` на сегменти і
-пошук деградує 9с → 64с (заміряно на T6.5).
+**What it does.** Takes records whose pair (`embedding_model`, `embedding_version`)
+does not match the current one (`embeddings.EMBED_MODEL`/`EMBED_VERSION`, both from
+env, story 04) and re-embeds each through `chunk_and_embed_transcription`,
+i.e. with the new cutting, the new model and the chunk context prefix
+(`build_context_prefix`) in one pass. At the end `optimize_chunk_index()`:
+without it a mass DELETE+INSERT over `chunks` shatters `chunks_fts` into segments and
+search degrades 9s -> 64s (measured on T6.5).
 
-**Чого НЕ робить.** Не чіпає коментарі — у них власний індекс і власний
-інструмент (`python -m app.services.comments reindex`), про що друкує
-нагадування. Не запускається на бойовій БД без явного `--yes-live`.
+**What it does NOT do.** Does not touch comments: they have their own index and their own
+tool (`python -m app.services.comments reindex`), and a reminder about it is printed.
+Does not run on the live DB without an explicit `--yes-live`.
 
-**Звідки береться пара.** `EMBED_MODEL`/`EMBED_VERSION` читаються з ОТОЧЕННЯ
-ПРОЦЕСУ на імпорті `embeddings` (історія 04), а не з `.env` цього виклику —
-`.env` вантажить `app.py`, і робити те саме тут означало б тихо міняти
-константи іншого модуля в кожному тесті, що імпортує цей. Тому пару для
-прогону на знімку задає сам виклик, а прохід ДРУКУЄ її на початку і в підсумку
-— розбіжність видно, а не вгадується:
+**Where the pair comes from.** `EMBED_MODEL`/`EMBED_VERSION` are read from the PROCESS
+ENVIRONMENT at the import of `embeddings` (story 04), not from the `.env` of this call:
+`.env` is loaded by `app.py`, and doing the same here would silently change
+constants of another module in every test that imports this one. So the pair for
+a run on a snapshot is set by the caller, and the pass PRINTS it at the start and in the summary,
+so a mismatch is visible rather than guessed:
 
     $env:EMBED_MODEL="Qwen/Qwen3-Embedding-0.6B"; $env:EMBED_VERSION="N"
 
-де N — номер СТРОГО вище будь-якої пари, яку тримає БД (`epoch-check` покаже
-перелік пар і вердикт). Номер, який у БД уже є, змішав би два формати
-контекстного префікса в одній епосі — тому прохід на такій парі відмовляється
-стартувати (`embeddings.epoch_status`, ADR-017).
+where N is a number STRICTLY above any pair the DB holds (`epoch-check` shows
+the list of pairs and the verdict). A number that already exists in the DB would mix two formats
+of the context prefix in one epoch, so a pass on such a pair refuses
+to start (`embeddings.epoch_status`, ADR-017).
 
 CLI:
     python -m app.services.reembed run --db snapshot.db --dry-run
@@ -58,23 +58,23 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Гард бойової БД (зразок — evals/graph_links.py)
+# Live DB guard (pattern: evals/graph_links.py)
 # ============================================================
 
 def _live_db_path() -> Optional[str]:
-    """Абсолютний шлях бойової БД (`Config.DATABASE`). Окрема функція — тести
-    підміняють її, не чіпаючи справжній `config.py`/файлову систему."""
+    """Absolute path of the live DB (`Config.DATABASE`). A separate function: tests
+    replace it without touching the real `config.py`/file system."""
     try:
         from config import Config
-    except Exception:  # noqa: BLE001 — конфіг може бути недоступний у CI/venv без .env
-        logger.debug("[reembed] config.Config недоступний — гард живої БД вимкнено",
+    except Exception:  # noqa: BLE001 - config may be unavailable in CI/venv without .env
+        logger.debug("[reembed] config.Config unavailable; live DB guard disabled",
                      exc_info=True)
         return None
     return str((Config.BASE_DIR / Config.DATABASE).resolve())
 
 
 def is_live_db(db_path: str) -> bool:
-    """Чи збігається `db_path` з бойовою БД за абсолютним шляхом."""
+    """Whether `db_path` matches the live DB by absolute path."""
     live = _live_db_path()
     if live is None:
         return False
@@ -82,16 +82,16 @@ def is_live_db(db_path: str) -> bool:
 
 
 # ============================================================
-# Вибірка застарілих записів
+# Selecting stale records
 # ============================================================
 
-#: Запис потрапляє в роботу, якщо його пара (модель, версія) не збігається з
-#: поточною. `IS NOT ?` замість `<> ?` — бо NULL (ембеджено до того, як пару
-#: взагалі почали писати) це теж «застаріло», а `<>` на NULL дає NULL.
-#: Видалені й дублі не переембеджуються — їх немає в пошуку (Волна A), тож
-#: рахувати за них GPU-час нема сенсу. Порожній текст відсіюємо тут, а не
-#: лічильником skipped: інакше такі записи лишались би «застарілими» вічно і
-#: повторний прохід ніколи не давав би нуля.
+#: A record goes into the work if its (model, version) pair does not match the
+#: current one. `IS NOT ?` instead of `<> ?` because NULL (embedded before the pair
+#: was written at all) is also "stale", while `<>` on NULL gives NULL.
+#: Deleted records and duplicates are not re-embedded: they are not in search (Wave A), so
+#: spending GPU time on them is pointless. Empty text is filtered out here, not by a
+#: skipped counter: otherwise such records would stay "stale" forever and
+#: a repeated pass would never give zero.
 _STALE_WHERE = (
     "deleted_at IS NULL AND duplicate_of IS NULL "
     "AND (embedding_model IS NOT ? OR embedding_version IS NOT ?) "
@@ -105,7 +105,7 @@ def _stale_params() -> list:
 
 
 def stale_ids(db_path: str, limit: Optional[int] = None) -> list[int]:
-    """id записів, чия пара (модель, версія) не збігається з поточною."""
+    """ids of records whose (model, version) pair does not match the current one."""
     sql = f"SELECT id FROM transcriptions WHERE {_STALE_WHERE} ORDER BY id"
     params = _stale_params()
     if limit:
@@ -116,11 +116,11 @@ def stale_ids(db_path: str, limit: Optional[int] = None) -> list[int]:
 
 
 def plan(db_path: str, limit: Optional[int] = None) -> dict:
-    """Скільки записів і символів чекає на re-embed (для `--dry-run`).
+    """How many records and characters wait for re-embed (for `--dry-run`).
 
-    Символи — довжина того самого тексту, який піде в нарізку
-    (`polished_text`, інакше `transcript_text`): це єдина доступна наперед
-    оцінка обсягу GPU-роботи — чанки рахуються вже під час проходу."""
+    Characters are the length of the very text that goes into cutting
+    (`polished_text`, otherwise `transcript_text`): this is the only estimate of the
+    volume of GPU work available in advance; chunks are counted only during the pass."""
     ids = stale_ids(db_path, limit)
     chars = 0
     if ids:
@@ -142,21 +142,21 @@ def plan(db_path: str, limit: Optional[int] = None) -> dict:
 
 
 def run(db_path: str, limit: Optional[int] = None, dry_run: bool = False) -> dict:
-    """Переембедити застарілі записи. Ідемпотентно: повторний запуск після
-    успішного проходу не знаходить роботи (пара збережена на кожному записі).
+    """Re-embed stale records. Idempotent: a repeated run after a
+    successful pass finds no work (the pair is saved on every record).
 
-    `optimize_chunk_index` викликається РІВНО один раз і тільки якщо щось
-    справді переписано — на нульовому проході він зайвий.
+    `optimize_chunk_index` is called EXACTLY once and only if something
+    was actually rewritten; on a zero pass it is redundant.
 
-    Історія 17: якщо поточну епоху вже будував ІНШИЙ формат префікса, прохід
-    не стартує взагалі (навіть `--dry-run`) — на такій парі `stale_ids` віддав
-    би 0, а запис нових префіксів поруч зі старими змішав би два формати в
-    одній вибірці `retrieval.search`."""
+    Story 17: if the current epoch was already built by ANOTHER prefix format, the pass
+    does not start at all (even `--dry-run`): on such a pair `stale_ids` would give
+    0, and writing new prefixes next to old ones would mix two formats in
+    one `retrieval.search` selection."""
     with get_db_connection(db_path) as conn:
         epoch = embeddings.epoch_status(conn)
     if not epoch["ok"]:
         msg = embeddings.epoch_mismatch_message(epoch)
-        logger.error("[reembed] прохід не стартував: %s", msg)
+        logger.error("[reembed] pass did not start: %s", msg)
         return {"status": "epoch_mismatch", "reason": epoch["reason"],
                 "message": msg, "pair": epoch["pair"], "db_format": epoch["db_format"],
                 "total": 0, "done": 0, "skipped": 0, "failed": 0}
@@ -174,15 +174,15 @@ def run(db_path: str, limit: Optional[int] = None, dry_run: bool = False) -> dic
     for tid in ids:
         try:
             res = embeddings.chunk_and_embed_transcription(db_path, tid)
-        except Exception:  # noqa: BLE001 — один поганий запис не має валити прохід
+        except Exception:  # noqa: BLE001 - one bad record must not fail the pass
             failed += 1
-            logger.exception("[reembed] tx=%s: не вдалось переембедити", tid)
+            logger.exception("[reembed] tx=%s: re-embed failed", tid)
             continue
         if res.get("status") == "embedded":
             done += 1
         else:
             skipped += 1
-            logger.debug("[reembed] tx=%s пропущено: %s", tid, res.get("status"))
+            logger.debug("[reembed] tx=%s skipped: %s", tid, res.get("status"))
 
     if done:
         optimize_chunk_index(db_path)
@@ -191,69 +191,69 @@ def run(db_path: str, limit: Optional[int] = None, dry_run: bool = False) -> dic
               "failed": failed, "seconds": round(time.time() - t0, 1),
               "optimized": bool(done), "model": embeddings.EMBED_MODEL,
               "version": embeddings.EMBED_VERSION}
-    logger.info("[reembed] завершено: %s", result)
+    logger.info("[reembed] finished: %s", result)
     return result
 
 
 # ============================================================
-# Точковий re-embed ОДНОГО запису (історія 03)
+# Single-record re-embed (story 03)
 # ============================================================
 #
-# Навіщо окремо від `run`. Після правки назви/опису (`PATCH /api/history/<id>`)
-# застаріває рівно один запис: пара (модель, версія) у нього та сама, тому
-# `stale_ids` його не бачить взагалі, а прохід по всьому архіву заради одного
-# запису — години GPU. Тут — `chunk_and_embed_transcription(force=True)` на
-# один id у фоновій черзі; `optimize_chunk_index` НЕ кличеться (десяток
-# DELETE+INSERT сегментацію FTS не кришить, а сам optimize коштує хвилини).
+# Why separate from `run`. After an edit of title/description (`PATCH /api/history/<id>`)
+# exactly one record goes stale: its (model, version) pair is the same, so
+# `stale_ids` does not see it at all, and a pass over the whole archive for one
+# record is hours of GPU. Here it is `chunk_and_embed_transcription(force=True)` on
+# one id in a background queue; `optimize_chunk_index` is NOT called (a dozen
+# DELETE+INSERT do not shatter FTS segmentation, and optimize itself costs minutes).
 
-#: Через скільки перевіряти знову, якщо в цей момент триває живий запис.
+#: How long to wait before checking again if a live recording is in progress at the moment.
 _DEFER_SECONDS = 30.0
 
-#: id, які чекають на вікно без запису. Набір (а не лічильник) згортає серію
-#: правок однієї картки в одну майбутню задачу: користувач править назву,
-#: потім опис — переембеджувати треба один раз, і вже з обома значеннями.
+#: ids waiting for a window without recording. A set (not a counter) collapses a series of
+#: edits of one card into one future task: the user edits the title,
+#: then the description, and re-embedding is needed once, with both values.
 _pending_lock = threading.Lock()
 _pending_ids: set[int] = set()
 
 
 def _recording_active() -> bool:
-    """Чи триває просто зараз хоч один живий запис. Прапорець — `active_session_ids()`
-    сервісу запису (те саме джерело, що й `GET /api/recordings/active`):
-    `active_session_id` при двох записах дає None і пустив би переембеджинг."""
+    """Whether at least one live recording is in progress right now. The flag is the recording service's
+    `active_session_ids()` (the same source as `GET /api/recordings/active`):
+    `active_session_id` returns None with two recordings and would let re-embedding through."""
     try:
         from app import state
         service = getattr(state, "recording_service", None)
         return bool(service is not None and service.active_session_ids())
-    except Exception:  # noqa: BLE001 — нема сервісу/стану = запису нема
-        logger.debug("[reembed] стан запису недоступний — вважаємо, що запису нема",
+    except Exception:  # noqa: BLE001 - no service/state = no recording
+        logger.debug("[reembed] recording state unavailable; assuming no recording",
                      exc_info=True)
         return False
 
 
 def _record_reembed_job(job, transcription_id: int, db_path: str) -> dict:
-    """Тіло фонової задачі. `force=True` обовʼязковий: `embedded_at` у запису
-    стоїть, пара (модель, версія) не змінилась — без force прохід вважав би
-    роботу зробленою і новий префікс ніколи б не доїхав у вектори.
+    """Body of the background task. `force=True` is mandatory: the record's `embedded_at`
+    is set and the (model, version) pair did not change; without force the pass would consider
+    the work done and the new prefix would never reach the vectors.
 
-    Id знімається з `_pending_ids` САМЕ ТУТ, на старті тіла — до читання рядка.
-    Якби його знімав планувальник одразу після `submit`, виклик, що встиг
-    отримати `"pending"`, покладався б на задачу, яка вже прочитала рядок зі
-    старою метою, і його правка не доїхала б у вектори взагалі."""
+    The id is removed from `_pending_ids` RIGHT HERE, at the start of the body, before the row is read.
+    If the scheduler removed it right after `submit`, a call that managed to
+    get `"pending"` would rely on a task that had already read the row with the
+    old meta, and its edit would not reach the vectors at all."""
     with _pending_lock:
         _pending_ids.discard(int(transcription_id))
     res = embeddings.chunk_and_embed_transcription(db_path, transcription_id, force=True)
-    logger.info("[reembed] точковий re-embed tx=%s: %s", transcription_id, res.get("status"))
+    logger.info("[reembed] single re-embed tx=%s: %s", transcription_id, res.get("status"))
     return res
 
 
 def _submit_record_reembed(transcription_id: int, db_path: str) -> str:
-    """Поставити задачу в чергу або відкласти, поки триває запис."""
+    """Queue the task or defer it while a recording is in progress."""
     if _recording_active():
         timer = threading.Timer(_DEFER_SECONDS, _retry_record_reembed,
                                 args=(transcription_id, db_path))
         timer.daemon = True
         timer.start()
-        logger.info("[reembed] tx=%s відкладено на %sс — триває запис",
+        logger.info("[reembed] tx=%s deferred for %ss: recording in progress",
                     transcription_id, _DEFER_SECONDS)
         return "deferred"
 
@@ -262,7 +262,7 @@ def _submit_record_reembed(transcription_id: int, db_path: str) -> str:
     if queue is None:
         with _pending_lock:
             _pending_ids.discard(transcription_id)
-        logger.info("[reembed] tx=%s не переембеджено: черги задач немає", transcription_id)
+        logger.info("[reembed] tx=%s not re-embedded: no job queue", transcription_id)
         return "skipped"
 
     queue.submit("reembed_record", _record_reembed_job, transcription_id, db_path,
@@ -272,45 +272,45 @@ def _submit_record_reembed(transcription_id: int, db_path: str) -> str:
 
 
 def _retry_record_reembed(transcription_id: int, db_path: str) -> None:
-    """Повтор із таймера: якщо запис і далі триває — ще один таймер."""
+    """Retry from the timer: if the recording is still going, one more timer."""
     try:
         _submit_record_reembed(transcription_id, db_path)
-    except Exception:  # noqa: BLE001 — таймер у фоні, падіння нікому не долетить
+    except Exception:  # noqa: BLE001 - timer in the background, a failure would reach nobody
         with _pending_lock:
             _pending_ids.discard(transcription_id)
-        logger.exception("[reembed] tx=%s: повтор точкового re-embed зірвався",
+        logger.exception("[reembed] tx=%s: retry of single re-embed failed",
                          transcription_id)
 
 
 def schedule_record_reembed(transcription_id: int, *, db_path: str) -> str:
-    """Переембедити чанки ОДНОГО запису у фоні. Повертає що сталося:
+    """Re-embed the chunks of ONE record in the background. Returns what happened:
 
-    - ``"queued"``    — задача стала в `job_queue`;
-    - ``"deferred"``  — триває живий запис, повтор через `_DEFER_SECONDS`
-      (слот черги при цьому НЕ займається — інакше очікування зʼїло б один із
-      двох воркерів пулу);
-    - ``"pending"``   — цей id уже чекає свого вікна, другої задачі не буде;
-    - ``"skipped"``   — переембеджувати нічим (немає torch/моделі або черги).
+    - ``"queued"``    - the task was put into `job_queue`;
+    - ``"deferred"``  - a live recording is in progress, retry in `_DEFER_SECONDS`
+      (the queue slot is NOT taken meanwhile, otherwise waiting would eat one of the
+      two pool workers);
+    - ``"pending"``   - this id is already waiting for its window, there will be no second task;
+    - ``"skipped"``   - nothing to re-embed with (no torch/model or queue).
 
-    `db_path` — обовʼязковий keyword БЕЗ дефолту: дефолт «`None` = бойова БД»
-    означав би, що будь-який виклик із тестової/тимчасової БД мовчки переписує
-    чанки бойового архіву. Шлях завжди приходить явно від того, хто відкрив
-    зʼєднання (у PATCH — `current_app.config["DATABASE"]`).
+    `db_path` is a mandatory keyword WITHOUT a default: the default "`None` = live DB"
+    would mean that any call from a test/temporary DB silently rewrites
+    the chunks of the live archive. The path always comes explicitly from whoever opened
+    the connection (in PATCH, `current_app.config["DATABASE"]`).
     """
     tid = int(transcription_id)
     if not embeddings.is_available():
-        logger.info("[reembed] tx=%s не переембеджено: %s", tid,
+        logger.info("[reembed] tx=%s not re-embedded: %s", tid,
                     embeddings.unavailability_reason())
         return "skipped"
 
     if not db_path:
-        logger.info("[reembed] tx=%s не переембеджено: невідомий шлях до БД", tid)
+        logger.info("[reembed] tx=%s not re-embedded: unknown DB path", tid)
         return "skipped"
     path = str(db_path)
 
     with _pending_lock:
         if tid in _pending_ids:
-            logger.debug("[reembed] tx=%s уже чекає на re-embed", tid)
+            logger.debug("[reembed] tx=%s is already waiting for re-embed", tid)
             return "pending"
         _pending_ids.add(tid)
 
@@ -318,27 +318,27 @@ def schedule_record_reembed(transcription_id: int, *, db_path: str) -> str:
 
 
 # ============================================================
-# Точковий re-embed СПИСКУ записів (спека directions-projects-tags, C3)
+# Single re-embed of a LIST of records (spec directions-projects-tags, C3)
 # ============================================================
 #
-# Напрямок, проєкт і теги їдуть у контекстний префікс чанка так само, як назва
-# й опис, тож кожна їх зміна застарює вектори. Але тут зміна буває масовою:
-# bulk-розмітка напрямку, reparent вузла з сотнями записів, ретроактивна
-# привʼязка тега до TG-чату. Ставити по задачі на запис у чергу з двома
-# воркерами означало б забити її на годину; тому від _BATCH_THRESHOLD записів
-# іде ОДНА задача, яка в кінці робить `optimize_chunk_index` рівно раз (масовий
-# DELETE+INSERT по chunks кришить chunks_fts — заміряно 9с → 64с на T6.5).
+# Direction, project and tags travel into the chunk context prefix just like the title
+# and description, so every change of them makes vectors stale. But here the change can be mass:
+# bulk direction labelling, reparenting a node with hundreds of records, retroactive
+# attaching of a tag to a TG chat. Queueing one task per record in a queue with two
+# workers would clog it for an hour; so from _BATCH_THRESHOLD records
+# ONE task goes, which at the end runs `optimize_chunk_index` exactly once (a mass
+# DELETE+INSERT over chunks shatters chunks_fts; measured 9s -> 64s on T6.5).
 
-#: Від скількох живих id переходимо з N точкових задач на одну батчеву.
+#: From how many live ids we switch from N single tasks to one batch task.
 _BATCH_THRESHOLD = 20
 
 
 def _live_and_stale(db_path: str, ids: list[int]) -> tuple[list[int], list[int]]:
-    """Розділити id на «в поточній епосі» і «застарілі».
+    """Split ids into "in the current epoch" and "stale".
 
-    Застарілий запис (інша пара `(модель, версія)` або взагалі без чанків) у
-    точковий re-embed не йде: його перебудує масовий прохід `run` цілком і за
-    новою нарізкою, а точкова задача зробила б ту саму роботу раніше й дарма.
+    A stale record (another `(model, version)` pair or no chunks at all) does not go
+    into single re-embed: the mass `run` pass will rebuild it whole and with the
+    new cutting, and a single task would do the same work earlier and for nothing.
     """
     if not ids:
         return [], []
@@ -353,25 +353,25 @@ def _live_and_stale(db_path: str, ids: list[int]) -> tuple[list[int], list[int]]
 
 
 def _batch_reembed_job(job, ids: list[int], db_path: str, reason: str) -> dict:
-    """Тіло батчевої задачі: переембедити список і один раз оптимізувати індекс.
+    """Body of the batch task: re-embed the list and optimise the index once.
 
-    Кожен id знімається з `_pending_ids` ПЕРЕД читанням свого рядка — з тієї ж
-    причини, що й у точковій задачі: виклик, який отримав «уже заплановано»,
-    має спиратись на задачу, що прочитає рядок ПІСЛЯ його правки.
+    Each id is removed from `_pending_ids` BEFORE its row is read, for the same
+    reason as in the single task: a call that got "already scheduled"
+    must rely on a task that will read the row AFTER its edit.
 
-    `remaining` — id, які цикл ще НЕ встиг відвідати; рахується від повного
-    списку ДО циклу, щоб пережити навіть виняток із самої ітерації (не з
-    `chunk_and_embed_transcription` — той ловиться нижче й батчу не зупиняє).
-    `finally` відпускає з `_pending_ids` хвіст, що лишився при `break`
-    (скасування) або будь-якому винятку, який вийшов із циклу — інакше ці id
-    застрягли б у `_pending_ids` до рестарту процесу й `schedule_record_reembed`
-    для них назавжди повертав би `"pending"`.
+    `remaining` are the ids the loop has NOT yet visited; it is computed from the full
+    list BEFORE the loop, to survive even an exception from the iteration itself (not from
+    `chunk_and_embed_transcription`; that one is caught below and does not stop the batch).
+    `finally` releases from `_pending_ids` the tail that was left on `break`
+    (cancellation) or on any exception that left the loop; otherwise these ids
+    would be stuck in `_pending_ids` until the process restarts and `schedule_record_reembed`
+    would return `"pending"` for them forever.
 
-    Історія 17 (мінор 7): цей хвіст друкується `WARNING`-ом СПИСКОМ id і
-    причиною — скасування не повертає id у чергу (скасування це скасування),
-    тож лог — єдиний слід того, що саме лишилось непереембедженим. Id, на якому
-    цикл зупинився (скасування або виняток механіки), у цей список повертається:
-    він теж не переембеджений."""
+    Story 17 (minor 7): this tail is printed as a `WARNING` with the LIST of ids and the
+    reason: cancellation does not put ids back in the queue (cancellation is cancellation),
+    so the log is the only trace of what exactly stayed un-re-embedded. The id on which the
+    loop stopped (cancellation or a mechanics exception) is put back in this list:
+    it is not re-embedded either."""
     done = skipped = failed = 0
     items = list(ids)
     remaining = {int(tid) for tid in items}
@@ -385,26 +385,26 @@ def _batch_reembed_job(job, ids: list[int], db_path: str, reason: str) -> dict:
             with _pending_lock:
                 _pending_ids.discard(tid)
             if job is not None and job.is_cancelled():
-                logger.info("[reembed] батч %s скасовано на tx=%s", reason, tid)
-                # id, на якому спіймали скасування, теж НЕ оброблений — у лог
-                # він має потрапити разом із рештою хвоста (з `_pending_ids`
-                # його вже зняв рядок вище, повторне зняття нешкідливе).
+                logger.info("[reembed] batch %s cancelled at tx=%s", reason, tid)
+                # The id on which cancellation was caught is also NOT processed; it must
+                # get into the log together with the rest of the tail (the line above already removed
+                # it from `_pending_ids`, a repeated removal is harmless).
                 remaining.add(tid)
                 stop_reason = "cancelled"
                 break
             try:
                 res = embeddings.chunk_and_embed_transcription(db_path, tid, force=True)
-            except Exception:  # noqa: BLE001 — один поганий запис не валить батч
+            except Exception:  # noqa: BLE001 - one bad record does not fail the batch
                 failed += 1
-                logger.exception("[reembed] батч %s: tx=%s не вдалось переембедити", reason, tid)
+                logger.exception("[reembed] batch %s: tx=%s re-embed failed", reason, tid)
                 continue
             if res.get("status") == "embedded":
                 done += 1
             else:
                 skipped += 1
-                logger.debug("[reembed] батч %s: tx=%s пропущено (%s)", reason, tid,
+                logger.debug("[reembed] batch %s: tx=%s skipped (%s)", reason, tid,
                              res.get("status"))
-    except BaseException as exc:   # noqa: BLE001 — лише щоб назвати причину в лозі
+    except BaseException as exc:   # noqa: BLE001 - only to name the reason in the log
         stop_reason = type(exc).__name__
         if current is not None:
             remaining.add(current)
@@ -413,26 +413,26 @@ def _batch_reembed_job(job, ids: list[int], db_path: str, reason: str) -> dict:
         if remaining:
             with _pending_lock:
                 _pending_ids.difference_update(remaining)
-            logger.warning("[reembed] батч %s: %d id лишились непереембедженими "
-                           "(%s), у чергу не повертаються: %s",
+            logger.warning("[reembed] batch %s: %d ids stayed un-re-embedded "
+                           "(%s), not returned to the queue: %s",
                            reason, len(remaining), stop_reason or "unknown",
                            sorted(remaining))
     if done:
         optimize_chunk_index(db_path)
     result = {"status": "ok", "total": len(ids), "done": done, "skipped": skipped,
               "failed": failed, "optimized": bool(done), "reason": reason}
-    logger.info("[reembed] батч %s завершено: %s", reason, result)
+    logger.info("[reembed] batch %s finished: %s", reason, result)
     return result
 
 
 def _submit_batch_reembed(ids: list[int], db_path: str, reason: str) -> str:
-    """Поставити батч у чергу або відкласти, поки триває живий запис."""
+    """Queue the batch or defer it while a live recording is in progress."""
     if _recording_active():
         timer = threading.Timer(_DEFER_SECONDS, _retry_batch_reembed,
                                 args=(ids, db_path, reason))
         timer.daemon = True
         timer.start()
-        logger.info("[reembed] батч %s (%s записів) відкладено на %sс — триває запис",
+        logger.info("[reembed] batch %s (%s records) deferred for %ss: recording in progress",
                     reason, len(ids), _DEFER_SECONDS)
         return "deferred"
 
@@ -442,7 +442,7 @@ def _submit_batch_reembed(ids: list[int], db_path: str, reason: str) -> str:
         with _pending_lock:
             for tid in ids:
                 _pending_ids.discard(int(tid))
-        logger.info("[reembed] батч %s не поставлено: черги задач немає", reason)
+        logger.info("[reembed] batch %s not queued: no job queue", reason)
         return "skipped"
 
     queue.submit("reembed_batch", _batch_reembed_job, list(ids), db_path, reason,
@@ -453,46 +453,46 @@ def _submit_batch_reembed(ids: list[int], db_path: str, reason: str) -> str:
 def _retry_batch_reembed(ids: list[int], db_path: str, reason: str) -> None:
     try:
         _submit_batch_reembed(ids, db_path, reason)
-    except Exception:  # noqa: BLE001 — таймер у фоні, падіння нікому не долетить
+    except Exception:  # noqa: BLE001 - timer in the background, a failure would reach nobody
         with _pending_lock:
             for tid in ids:
                 _pending_ids.discard(int(tid))
-        logger.exception("[reembed] батч %s: повтор зірвався", reason)
+        logger.exception("[reembed] batch %s: retry failed", reason)
 
 
 def schedule_records_reembed(ids, *, db_path: str, reason: str) -> dict:
-    """Запланувати точковий re-embed СПИСКУ записів.
+    """Schedule a single re-embed of a LIST of records.
 
-    Повертає `{"mode": "point"|"batch"|"none", "count": …, "stale": …}`:
+    Returns `{"mode": "point"|"batch"|"none", "count": ..., "stale": ...}`:
 
-    - ``point`` — ≤ `_BATCH_THRESHOLD` живих id, по задачі на запис
-      (`schedule_record_reembed`, з усіма його гарантіями: дедуп по
-      `_pending_ids`, відкладення під час живого запису);
-    - ``batch`` — більше, одна задача `reembed_batch` з `optimize_chunk_index`
-      у кінці;
-    - ``none``  — планувати нема чого або нічим (порожній список, немає
-      torch/моделі, невідомий `db_path`).
+    - ``point`` - <= `_BATCH_THRESHOLD` live ids, one task per record
+      (`schedule_record_reembed`, with all its guarantees: dedup by
+      `_pending_ids`, deferral during a live recording);
+    - ``batch`` - more, one `reembed_batch` task with `optimize_chunk_index`
+      at the end;
+    - ``none``  - nothing to schedule or nothing to schedule with (empty list, no
+      torch/model, unknown `db_path`).
 
-    `stale` — скільки id відсіяно як «не в поточній епосі» (їх візьме масовий
-    `run`). `db_path` — обовʼязковий keyword без дефолту з тієї ж причини, що
-    й у `schedule_record_reembed`: дефолт «бойова БД» означав би, що виклик із
-    тимчасової БД переписує чанки бойового архіву.
+    `stale` is how many ids were filtered out as "not in the current epoch" (the mass
+    `run` will take them). `db_path` is a mandatory keyword without a default, for the same reason
+    as in `schedule_record_reembed`: the default "live DB" would mean a call from
+    a temporary DB rewrites the chunks of the live archive.
     """
     ids = sorted({int(i) for i in (ids or [])})
     if not ids:
         return {"mode": "none", "count": 0, "stale": 0}
     if not embeddings.is_available():
-        logger.info("[reembed] %s: %s записів не переембеджено (%s)", reason, len(ids),
+        logger.info("[reembed] %s: %s records not re-embedded (%s)", reason, len(ids),
                     embeddings.unavailability_reason())
         return {"mode": "none", "count": 0, "stale": 0}
     if not db_path:
-        logger.info("[reembed] %s: %s записів не переембеджено — невідомий шлях до БД",
+        logger.info("[reembed] %s: %s records not re-embedded: unknown DB path",
                     reason, len(ids))
         return {"mode": "none", "count": 0, "stale": 0}
 
     live, stale = _live_and_stale(str(db_path), ids)
     if stale:
-        logger.info("[reembed] %s: %s id поза поточною епохою — їх візьме `run`",
+        logger.info("[reembed] %s: %s ids outside the current epoch; `run` will take them",
                     reason, len(stale))
     if not live:
         return {"mode": "none", "count": 0, "stale": len(stale)}
@@ -506,8 +506,8 @@ def schedule_records_reembed(ids, *, db_path: str, reason: str) -> dict:
         to_submit = [tid for tid in live if tid not in _pending_ids]
         _pending_ids.update(to_submit)
     if not to_submit:
-        # Усі живі id уже чекають на точкову задачу — дублю не потрібен, вона
-        # й так прочитає актуальний рядок на виконанні.
+        # All live ids are already waiting for a single task; a duplicate is not needed, it
+        # will read the current row on execution anyway.
         return {"mode": "none", "count": 0, "stale": len(stale)}
     _submit_batch_reembed(to_submit, str(db_path), reason)
     return {"mode": "batch", "count": len(to_submit), "stale": len(stale)}
@@ -518,41 +518,41 @@ def schedule_records_reembed(ids, *, db_path: str, reason: str) -> dict:
 # ============================================================
 
 def _ro_uri(db_path: str) -> str:
-    """URI для `sqlite3.connect(..., uri=True)` у режимі `mode=ro` — SQLite
-    фізично забороняє запис (зразок — `evals/snapshot.py`)."""
+    """URI for `sqlite3.connect(..., uri=True)` in `mode=ro`: SQLite
+    physically forbids writing (model - `evals/snapshot.py`)."""
     return Path(db_path).resolve().as_uri() + "?mode=ro"
 
 
 def epoch_check(db_path: Optional[str] = None) -> int:
-    """Крок 1 рунбука міграції: чи можна писати поточний формат префікса в
-    поточну епоху — ДО рестарту застосунку і БЕЗ жодного запису.
+    """Step 1 of the migration runbook: whether the current prefix format may be written into the
+    current epoch, BEFORE the application restart and WITHOUT any write.
 
-    Друкує пари `(модель, версія)` архіву, памʼять БД про формат кожної епохи
-    (`embedding_epochs`, v46), поточну пару коду з `PREFIX_FORMAT` і вердикт.
-    Код виходу: 0 — `ok`/`new_epoch`, 1 — `format_mismatch`, 2 — БД не знайдено.
-    `--yes-live` не потрібен: зʼєднання відкривається `mode=ro`.
+    Prints the archive's `(model, version)` pairs, the DB's memory of each epoch's format
+    (`embedding_epochs`, v46), the code's current pair with `PREFIX_FORMAT` and the verdict.
+    Exit code: 0 for `ok`/`new_epoch`, 1 for `format_mismatch`, 2 if the DB is not found.
+    `--yes-live` is not needed: the connection is opened `mode=ro`.
     """
     path = db_path or _live_db_path()
     if not path:
-        print("[reembed] не вказано --db і не вдалось визначити бойову БД",
+        print("[reembed] --db not given and the live DB could not be determined",
               file=sys.stderr)
         return 2
     if not os.path.exists(path):
-        print(f"[reembed] БД не знайдено: {path}", file=sys.stderr)
+        print(f"[reembed] DB not found: {path}", file=sys.stderr)
         return 2
 
     conn = sqlite3.connect(_ro_uri(path), uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        print(f"[epoch-check] БД: {path} (лише читання)")
+        print(f"[epoch-check] DB: {path} (read-only)")
         rows = conn.execute(
             "SELECT embedding_model AS m, embedding_version AS v, COUNT(*) AS n "
             "FROM transcriptions WHERE embedding_model IS NOT NULL "
             "GROUP BY 1, 2 ORDER BY 2, 1").fetchall()
-        print("[epoch-check] пари в transcriptions:"
-              + ("" if rows else " немає (порожній архів)"))
+        print("[epoch-check] pairs in transcriptions:"
+              + ("" if rows else " none (empty archive)"))
         for r in rows:
-            print(f"    {r['m']} / v{r['v']} — {r['n']} записів")
+            print(f"    {r['m']} / v{r['v']} - {r['n']} records")
 
         try:
             epochs = conn.execute(
@@ -561,27 +561,27 @@ def epoch_check(db_path: Optional[str] = None) -> int:
         except sqlite3.OperationalError:
             epochs = None
         if epochs is None:
-            print("[epoch-check] embedding_epochs: таблиці немає (БД нижче v46) — "
-                  "наявні пари рахуються форматом 1, як їх стемплює міграція")
+            print("[epoch-check] embedding_epochs: no table (DB below v46); "
+                  "existing pairs count as format 1, as the migration stamps them")
         else:
             print("[epoch-check] embedding_epochs:"
-                  + ("" if epochs else " порожня"))
+                  + ("" if epochs else " empty"))
             for r in epochs:
-                print(f"    {r['model']} / v{r['version']} — формат {r['prefix_format']}")
+                print(f"    {r['model']} / v{r['version']} - format {r['prefix_format']}")
 
         status = embeddings.epoch_status(conn)
         model, version = status["pair"]
-        print(f"[epoch-check] код: {model} / v{version}, "
+        print(f"[epoch-check] code: {model} / v{version}, "
               f"PREFIX_FORMAT={embeddings.PREFIX_FORMAT}")
         if status["reason"] == "format_mismatch":
-            print(f"[epoch-check] ВЕРДИКТ format_mismatch: "
+            print(f"[epoch-check] VERDICT format_mismatch: "
                   f"{embeddings.epoch_mismatch_message(status)}", file=sys.stderr)
             return 1
         if status["reason"] == "new_epoch":
-            print("[epoch-check] ВЕРДИКТ new_epoch: епохи ще немає — формат вільний, "
-                  "можна рестартувати і робити прохід.")
+            print("[epoch-check] VERDICT new_epoch: the epoch does not exist yet; the format is free, "
+                  "you can restart and run the pass.")
         else:
-            print("[epoch-check] ВЕРДИКТ ok: епоху побудовано цим самим форматом.")
+            print("[epoch-check] VERDICT ok: the epoch was built with this very format.")
         return 0
     finally:
         conn.close()
@@ -589,57 +589,57 @@ def epoch_check(db_path: Optional[str] = None) -> int:
 
 def _print_result(res: dict) -> None:
     if res.get("status") == "epoch_mismatch":
-        print(f"[reembed] Відмова: {res['message']}", file=sys.stderr)
+        print(f"[reembed] Refusal: {res['message']}", file=sys.stderr)
         return
     if res.get("dry_run"):
-        print(f"[reembed] dry-run: {res['total']} записів, {res['chars']} символів "
-              f"→ пара {res['model']} / v{res['version']}")
-        print("[reembed] нічого не записано.")
+        print(f"[reembed] dry-run: {res['total']} records, {res['chars']} characters "
+              f"-> pair {res['model']} / v{res['version']}")
+        print("[reembed] nothing written.")
         return
     if res.get("status") == "unavailable":
-        print(f"[reembed] embeddings недоступні: {res.get('reason')}")
+        print(f"[reembed] embeddings unavailable: {res.get('reason')}")
         return
-    print(f"[reembed] готово: done={res['done']} skipped={res['skipped']} "
-          f"failed={res['failed']} за {res['seconds']}с "
+    print(f"[reembed] done: done={res['done']} skipped={res['skipped']} "
+          f"failed={res['failed']} in {res['seconds']}s "
           f"({res['model']} / v{res['version']})")
-    print(f"[reembed] chunks_fts optimize: {'виконано' if res['optimized'] else 'не потрібен'}")
-    print("[reembed] нагадування: шар коментарів має власний індекс — "
+    print(f"[reembed] chunks_fts optimize: {'performed' if res['optimized'] else 'not needed'}")
+    print("[reembed] reminder: the comments layer has its own index: "
           "`python -m app.services.comments reindex`")
 
 
 def main(argv: Optional[list] = None) -> int:
     p = argparse.ArgumentParser(
         prog="reembed",
-        description="Re-embed архіву на ЗНІМКУ під поточну пару (EMBED_MODEL, EMBED_VERSION).")
-    # --dry-run має рятувати з будь-якого місця рядка (як у dedup_audio):
-    # підпарсер із тим самим dest переписав би батьківський namespace своїм
-    # дефолтом False, тому верхній флаг іде в окремий dest, а фінальне
-    # значення — OR обох.
+        description="Re-embed the archive on a SNAPSHOT under the current pair (EMBED_MODEL, EMBED_VERSION).")
+    # --dry-run must work from any place in the command line (as in dedup_audio):
+    # a subparser with the same dest would overwrite the parent namespace with its own
+    # default False, so the top-level flag goes into a separate dest and the final
+    # value is the OR of both.
     p.add_argument("--dry-run", dest="dry_run_pre", action="store_true",
-                   help="Нічого не писати в БД — лише кількість і символи")
+                   help="Write nothing to the DB: only the count and characters")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", required=True,
-                        help="Шлях до ЗНІМКА БД (VACUUM INTO — scripts/backup_db.ps1)")
+                        help="Path to a DB SNAPSHOT (VACUUM INTO - scripts/backup_db.ps1)")
     common.add_argument("--dry-run", action="store_true",
-                        help="Нічого не писати в БД — лише кількість і символи")
+                        help="Write nothing to the DB: only the count and characters")
     common.add_argument("--limit", type=int, default=None,
-                        help="Обробити не більше N записів (обкатка проходу)")
+                        help="Process no more than N records (trial of the pass)")
     common.add_argument("--yes-live", action="store_true",
-                        help="Дозволити файл, що збігається з Config.DATABASE "
-                             "(за замовчуванням заборонено — цей прохід для знімка)")
+                        help="Allow a file that matches Config.DATABASE "
+                             "(forbidden by default: this pass is for a snapshot)")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("run", parents=[common],
-                   help="Переембедити записи, чия пара (модель, версія) застаріла")
-    # epoch-check НЕ бере `common`: він нічого не пише (`mode=ro`), тож ні
-    # --yes-live, ні --limit, ні --dry-run йому не потрібні, а --db тут
-    # опційний — без нього дивимось бойову БД.
+                   help="Re-embed records whose (model, version) pair is stale")
+    # epoch-check does NOT take `common`: it writes nothing (`mode=ro`), so neither
+    # --yes-live, nor --limit, nor --dry-run is needed, and --db is optional
+    # here: without it we look at the live DB.
     ep = sub.add_parser("epoch-check",
-                        help="Чи можна писати поточний формат префікса в поточну "
-                             "епоху (лише читання; крок 1 рунбука міграції)")
+                        help="Whether the current prefix format may be written into the current "
+                             "epoch (read-only; step 1 of the migration runbook)")
     ep.add_argument("--db", default=None,
-                    help="Шлях до БД (за замовчуванням — бойова Config.DATABASE)")
+                    help="Path to the DB (default: the live Config.DATABASE)")
 
     args = p.parse_args(argv)
 
@@ -649,17 +649,17 @@ def main(argv: Optional[list] = None) -> int:
     args.dry_run = args.dry_run or args.dry_run_pre
 
     if not os.path.exists(args.db):
-        print(f"[reembed] БД не знайдено: {args.db}", file=sys.stderr)
+        print(f"[reembed] DB not found: {args.db}", file=sys.stderr)
         return 2
 
     if is_live_db(args.db) and not args.yes_live:
-        print(f"[reembed] Відмова: {args.db!r} — це бойова БД (Config.DATABASE). "
-              "Прохід переписує ВСІ чанки архіву; робіть його на ЗНІМКУ "
-              "(VACUUM INTO — scripts/backup_db.ps1). Якщо це свідомий вибір — "
-              "додайте --yes-live.", file=sys.stderr)
+        print(f"[reembed] Refusal: {args.db!r} is the live DB (Config.DATABASE). "
+              "The pass rewrites ALL chunks of the archive; do it on a SNAPSHOT "
+              "(VACUUM INTO - scripts/backup_db.ps1). If this is a deliberate choice, "
+              "add --yes-live.", file=sys.stderr)
         return 2
 
-    print(f"[reembed] поточна пара: {embeddings.EMBED_MODEL} / v{embeddings.EMBED_VERSION}")
+    print(f"[reembed] current pair: {embeddings.EMBED_MODEL} / v{embeddings.EMBED_VERSION}")
     res = run(args.db, limit=args.limit, dry_run=args.dry_run)
     _print_result(res)
     if res.get("status") == "unavailable":

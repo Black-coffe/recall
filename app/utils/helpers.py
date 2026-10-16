@@ -1,5 +1,5 @@
 """
-Вспомогательные функции
+Helper functions
 """
 
 import os
@@ -19,20 +19,20 @@ logger = get_logger(__name__)
 
 def generate_secure_filename(original_filename: str, prefix: str = None) -> str:
     """
-    Генерирует безопасное имя файла с временной меткой
+    Generates a safe file name with a timestamp
     """
     if not original_filename:
         original_filename = "file"
     
-    # Получаем расширение
+    # Get the extension
     ext = Path(original_filename).suffix.lower()
     
-    # Создаем безопасное имя файла
+    # Create a safe file name
     safe_name = secure_filename(Path(original_filename).stem)
     if not safe_name:
         safe_name = "file"
     
-    # Добавляем временную метку
+    # Add a timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
     
     if prefix:
@@ -45,7 +45,7 @@ def generate_secure_filename(original_filename: str, prefix: str = None) -> str:
 
 def format_duration(seconds: int) -> str:
     """
-    Форматирует продолжительность в читаемый вид
+    Formats a duration into a readable form
     """
     if not seconds or seconds < 0:
         return "0:00"
@@ -61,7 +61,7 @@ def format_duration(seconds: int) -> str:
 
 def format_file_size(size_bytes: int) -> str:
     """
-    Форматирует размер файла в читаемый вид
+    Formats a file size into a readable form
     """
     if size_bytes == 0:
         return "0 B"
@@ -79,7 +79,7 @@ def format_file_size(size_bytes: int) -> str:
 
 def cleanup_old_files(directory: str, max_age_days: int = 7, pattern: str = "*") -> int:
     """
-    Очищает старые файлы в директории
+    Cleans up old files in a directory
     """
     if not os.path.exists(directory):
         return 0
@@ -94,16 +94,16 @@ def cleanup_old_files(directory: str, max_age_days: int = 7, pattern: str = "*")
                 if file_mtime < cutoff_time:
                     file_path.unlink()
                     deleted_count += 1
-                    logger.info(f"Удален старый файл: {file_path}")
+                    logger.info(f"Removed old file: {file_path}")
     except Exception as e:
-        logger.error(f"Ошибка очистки файлов в {directory}: {e}")
+        logger.error(f"Error cleaning up files in {directory}: {e}")
     
     return deleted_count
 
 
 def check_ffmpeg_availability() -> bool:
     """
-    Проверяет доступность FFmpeg в системе
+    Checks whether FFmpeg is available on the system
     """
     try:
         result = subprocess.run(
@@ -120,7 +120,7 @@ def check_ffmpeg_availability() -> bool:
 
 def save_json_file(data: Dict[str, Any], filepath: str) -> bool:
     """
-    Сохраняет данные в JSON файл
+    Saves data to a JSON file
     """
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -130,13 +130,13 @@ def save_json_file(data: Dict[str, Any], filepath: str) -> bool:
         
         return True
     except Exception as e:
-        logger.error(f"Ошибка сохранения JSON файла {filepath}: {e}")
+        logger.error(f"Error saving JSON file {filepath}: {e}")
         return False
 
 
 def load_json_file(filepath: str) -> Optional[Dict[str, Any]]:
     """
-    Загружает данные из JSON файла
+    Loads data from a JSON file
     """
     try:
         if not os.path.exists(filepath):
@@ -146,37 +146,37 @@ def load_json_file(filepath: str) -> Optional[Dict[str, Any]]:
             return json.load(f)
     
     except Exception as e:
-        logger.error(f"Ошибка загрузки JSON файла {filepath}: {e}")
+        logger.error(f"Error loading JSON file {filepath}: {e}")
         return None
 
 
 def create_temp_file(suffix: str = None, prefix: str = None, dir: str = None) -> str:
     """
-    Создает временный файл и возвращает путь к нему
+    Creates a temporary file and returns its path
     """
     fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=dir)
-    os.close(fd)  # Закрываем файловый дескриптор
+    os.close(fd)  # Close the file descriptor
     return temp_path
 
 
 def safe_remove_file(filepath: str) -> bool:
     """
-    Безопасно удаляет файл
+    Safely deletes a file
     """
     try:
         if filepath and os.path.exists(filepath):
             os.remove(filepath)
-            logger.debug(f"Удален файл: {filepath}")
+            logger.debug(f"Removed file: {filepath}")
             return True
         return False
     except Exception as e:
-        logger.error(f"Ошибка удаления файла {filepath}: {e}")
+        logger.error(f"Error removing file {filepath}: {e}")
         return False
 
 
 def calculate_eta(start_time: datetime, current_progress: float) -> Optional[str]:
     """
-    Вычисляет примерное время завершения
+    Computes the approximate completion time
     """
     if current_progress <= 0 or current_progress >= 100:
         return None
@@ -196,7 +196,7 @@ def calculate_eta(start_time: datetime, current_progress: float) -> Optional[str
 
 def truncate_text(text: str, max_length: int = 100, suffix: str = "...") -> str:
     """
-    Обрезает текст до указанной длины
+    Truncates text to the given length
     """
     if not text or len(text) <= max_length:
         return text
@@ -206,12 +206,12 @@ def truncate_text(text: str, max_length: int = 100, suffix: str = "...") -> str:
 
 def normalize_text(text: str) -> str:
     """
-    Нормализует текст (удаляет лишние пробелы, переносы строк)
+    Normalizes text (removes extra spaces and line breaks)
     """
     if not text:
         return ""
     
-    # Удаляем лишние пробелы и переносы строк
+    # Remove extra spaces and line breaks
     normalized = " ".join(text.split())
     
     return normalized.strip()
@@ -219,7 +219,7 @@ def normalize_text(text: str) -> str:
 
 def batch_items(items: List[Any], batch_size: int) -> List[List[Any]]:
     """
-    Разбивает список на батчи заданного размера
+    Splits a list into batches of the given size
     """
     batches = []
     for i in range(0, len(items), batch_size):

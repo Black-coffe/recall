@@ -1,23 +1,23 @@
-"""Адаптивний відбір ключових кадрів відеозапису (spec video-visual-timeline, історія 01).
+"""Adaptive selection of keyframes of a video recording (spec video-visual-timeline, story 01).
 
-Задача: мінімальний набір кадрів, що покриває кожну зміну картинки з точністю до
-1 с. Два методи (обидва заміряні, цифри — docs/video-timeline.md):
+The task: a minimal set of frames that covers every change of picture to within
+1 s. Two methods (both measured, numbers in docs/video-timeline.md):
 
-* ``thumbs`` (дефолт) — ОДИН прохід декодування 1 fps у мініатюри 160×90 grayscale
-  через ffmpeg rawvideo-пайп. Кожна мініатюра порівнюється з ЯКОРЕМ поточного
-  відрізка (першою мініатюрою відрізка), а не лише з попередньою — так ловиться і
-  різка зміна, і повільний дрейф (прокрутка), і A→B→A коротше кроку.
-* ``bisect`` — опорні кадри кожні ``step`` с через seek (``-ss`` перед ``-i``),
-  інтервал із різними кінцями ділиться навпіл до ``min_res``. Дешевший на дуже
-  статичному відео, але пропускає A→B→A, коротше ``step`` (концi інтервалу
-  збігаються) — це задокументована межа методу.
+* ``thumbs`` (default) — ONE decoding pass at 1 fps into 160×90 grayscale thumbnails
+  through an ffmpeg rawvideo pipe. Each thumbnail is compared with the ANCHOR of the current
+  segment (the segment's first thumbnail), not only with the previous one — this catches both
+  a sharp change, and slow drift (scrolling), and A→B→A shorter than the step.
+* ``bisect`` — anchor frames every ``step`` s via seek (``-ss`` before ``-i``),
+  an interval with different ends is halved down to ``min_res``. Cheaper on a very
+  static video, but misses A→B→A shorter than ``step`` (the interval's ends
+  coincide) — this is a documented limit of the method.
 
-Порівняння ``diff_score(a, b, mask)``: частка пікселів маски, що змінились більше ніж
-на ``PIX_DELTA`` (з 255). Маска = ``ignore_regions`` (частки кадру) мінус авто-маска
-пікселів, що мерехтять постійно (годинник у треї, плитки вебкамер, курсор).
+Comparison ``diff_score(a, b, mask)``: the share of mask pixels that changed by more than
+``PIX_DELTA`` (out of 255). Mask = ``ignore_regions`` (fractions of the frame) minus an auto-mask
+of pixels that flicker constantly (tray clock, webcam tiles, cursor).
 
-Зображення кадрів НЕ зберігаються: ``grab_frame`` ріже кадр з відео на запит.
-Модуль не знає про БД — це робить ``video_analysis``.
+Frame images are NOT stored: ``grab_frame`` cuts a frame from the video on demand.
+The module knows nothing about the DB — ``video_analysis`` does that.
 """
 from __future__ import annotations
 
@@ -38,20 +38,20 @@ logger = logging.getLogger(__name__)
 ALGO_VERSION = 1
 
 THUMB_W, THUMB_H = 160, 90
-PIX_DELTA = 12                 # |Δ| яскравості, з якої піксель вважається зміненим
-DEFAULT_THRESHOLD = 0.02       # частка змінених пікселів маски (замір на живих даних, docs/video-timeline.md)
+PIX_DELTA = 12                 # |Δ| of brightness from which a pixel counts as changed
+DEFAULT_THRESHOLD = 0.02       # share of changed mask pixels (measured on 6 recordings, docs/video-timeline.md)
 DEFAULT_STEP = 10.0
 DEFAULT_MIN_RES = 1.0
 DEFAULT_MAX_FRAMES = 1500
 DEFAULT_METHOD = 'thumbs'
-DEFAULT_SETTLE = 2.0           # серія змін частіше ніж раз на 2 с (набір, прокрутка) — один відрізок
-FLICKER_SHARE = 0.4            # піксель, змінений у >40 % пар, — шум, не зміст
-REP_OFFSET = 0.7               # представник відрізка: +0.7 с від початку
-BLANK_STD = 4.0                # std мініатюри нижче — порожній кадр
+DEFAULT_SETTLE = 2.0           # a series of changes more often than every 2 s (typing, scrolling) — one segment
+FLICKER_SHARE = 0.4            # a pixel changed in >40 % of pairs is noise, not content
+REP_OFFSET = 0.7               # segment representative: +0.7 s from the start
+BLANK_STD = 4.0                # thumbnail std below this — blank frame
 
 
 class NoVideoError(Exception):
-    """Файл не має відеодоріжки (або не читається як відео)."""
+    """The file has no video track (or is not readable as video)."""
 
 
 @dataclass
@@ -59,9 +59,9 @@ class Segment:
     start: float
     end: float
     frame_time: float
-    change_score: float          # оцінка зміни, що ВІДКРИЛА відрізок (0 для першого)
-    std: float = 0.0             # контраст мініатюри представника (для типу blank)
-    dhash: str = ''              # 64-біт dHash представника (hex) — для повторів
+    change_score: float          # score of the change that OPENED the segment (0 for the first)
+    std: float = 0.0             # contrast of the representative's thumbnail (for the blank type)
+    dhash: str = ''              # 64-bit dHash of the representative (hex) — for repeats
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -78,7 +78,7 @@ def _ffmpeg(ffmpeg: Optional[str] = None) -> str:
         from app.services.recording.video_probe import ffmpeg_path
         return ffmpeg_path()
     except Exception:
-        logger.debug("ffmpeg_path() недоступний, беру ffmpeg з PATH", exc_info=True)
+        logger.debug("ffmpeg_path() unavailable, taking ffmpeg from PATH", exc_info=True)
         return 'ffmpeg'
 
 
@@ -88,9 +88,9 @@ def _ffprobe(ff: str) -> str:
 
 
 def probe(video_path: str, ffmpeg: Optional[str] = None) -> dict:
-    """Тривалість, розмір і fps першої відеодоріжки. Нема відео → NoVideoError."""
+    """Duration, size and fps of the first video track. No video → NoVideoError."""
     if not os.path.isfile(video_path):
-        raise NoVideoError(f'файл не знайдено: {video_path}')
+        raise NoVideoError(f'file not found: {video_path}')
     ff = _ffmpeg(ffmpeg)
     try:
         r = subprocess.run(
@@ -101,20 +101,20 @@ def probe(video_path: str, ffmpeg: Optional[str] = None) -> dict:
         )
         data = json.loads(r.stdout or '{}')
     except Exception as e:
-        raise NoVideoError(f'ffprobe не прочитав файл: {e}') from e
+        raise NoVideoError(f'ffprobe could not read the file: {e}') from e
     streams = data.get('streams') or []
     if not streams:
-        raise NoVideoError('у файлі немає відеодоріжки')
+        raise NoVideoError('the file has no video track')
     s = streams[0]
     try:
         num, den = (s.get('avg_frame_rate') or '0/1').split('/')
         fps = float(num) / float(den) if float(den) else 0.0
     except Exception:
-        logger.debug("avg_frame_rate не розібрано: %r", s.get('avg_frame_rate'), exc_info=True)
+        logger.debug("avg_frame_rate not parsed: %r", s.get('avg_frame_rate'), exc_info=True)
         fps = 0.0
     duration = float((data.get('format') or {}).get('duration') or 0.0)
     if duration <= 0:
-        raise NoVideoError('тривалість відео невідома або нульова')
+        raise NoVideoError('video duration is unknown or zero')
     return {'duration': duration, 'width': int(s.get('width') or 0),
             'height': int(s.get('height') or 0), 'fps': fps}
 
@@ -128,7 +128,7 @@ def _run_raw(cmd: list, timeout: float) -> bytes:
 
 def grab_small(video_path: str, t: float, *, w: int = THUMB_W, h: int = THUMB_H,
                ffmpeg: Optional[str] = None) -> Optional[np.ndarray]:
-    """Один кадр у момент ``t`` як grayscale-масив h×w (швидкий seek). None — кадру нема."""
+    """One frame at moment ``t`` as a grayscale h×w array (fast seek). None — there is no frame."""
     ff = _ffmpeg(ffmpeg)
     raw = _run_raw([ff, '-v', 'error', '-ss', f'{max(t, 0):.3f}', '-i', video_path,
                     '-frames:v', '1', '-vf', f'scale={w}:{h}:flags=area,format=gray',
@@ -140,7 +140,7 @@ def grab_small(video_path: str, t: float, *, w: int = THUMB_W, h: int = THUMB_H,
 
 def grab_frame(video_path: str, t: float, *, max_width: Optional[int] = None,
                ffmpeg: Optional[str] = None):
-    """Кадр у момент ``t`` як PIL.Image (RGB). Нічого не пишеться на диск."""
+    """Frame at moment ``t`` as PIL.Image (RGB). Nothing is written to disk."""
     from PIL import Image
     ff = _ffmpeg(ffmpeg)
     vf = f"scale='min({int(max_width)},iw)':-2" if max_width else 'null'
@@ -148,7 +148,7 @@ def grab_frame(video_path: str, t: float, *, max_width: Optional[int] = None,
                     '-frames:v', '1', '-vf', vf, '-f', 'image2pipe', '-vcodec', 'png', '-'],
                    timeout=60)
     if not raw:
-        raise NoVideoError(f'кадр на {t:.1f} с не декодувався')
+        raise NoVideoError(f'frame at {t:.1f} s could not be decoded')
     img = Image.open(BytesIO(raw))
     img.load()
     return img.convert('RGB')
@@ -157,7 +157,7 @@ def grab_frame(video_path: str, t: float, *, max_width: Optional[int] = None,
 def thumbs_pass(video_path: str, duration: float, *, fps: float = 1.0,
                 ffmpeg: Optional[str] = None,
                 progress: Optional[Callable[[float], None]] = None) -> np.ndarray:
-    """Один прохід декодування: мініатюри (N, THUMB_H, THUMB_W) uint8, мініатюра i = момент i/fps."""
+    """One decoding pass: thumbnails (N, THUMB_H, THUMB_W) uint8, thumbnail i = moment i/fps."""
     ff = _ffmpeg(ffmpeg)
     frame_bytes = THUMB_W * THUMB_H
     cmd = [ff, '-v', 'error', '-i', video_path,
@@ -183,17 +183,17 @@ def thumbs_pass(video_path: str, duration: float, *, fps: float = 1.0,
     data = b''.join(chunks)
     n = len(data) // frame_bytes
     if n == 0:
-        raise NoVideoError('ffmpeg не віддав жодного кадру')
+        raise NoVideoError('ffmpeg returned no frames')
     return np.frombuffer(data[:n * frame_bytes], dtype=np.uint8).reshape(n, THUMB_H, THUMB_W)
 
 
 # ---------------------------------------------------------------------------
-# порівняння і маски
+# comparison and masks
 # ---------------------------------------------------------------------------
 
 def region_mask(ignore_regions: Optional[Sequence[Sequence[float]]],
                 h: int = THUMB_H, w: int = THUMB_W) -> np.ndarray:
-    """True = піксель бере участь у порівнянні. Регіони — частки кадру [x, y, w, h]."""
+    """True = the pixel takes part in the comparison. Regions are fractions of the frame [x, y, w, h]."""
     mask = np.ones((h, w), dtype=bool)
     for reg in ignore_regions or ():
         x, y, rw, rh = (float(v) for v in reg)
@@ -204,7 +204,7 @@ def region_mask(ignore_regions: Optional[Sequence[Sequence[float]]],
 
 
 def flicker_mask(thumbs: np.ndarray, share: float = FLICKER_SHARE) -> np.ndarray:
-    """False для пікселів, що змінюються в більш ніж ``share`` сусідніх пар (шум, не зміст)."""
+    """False for pixels that change in more than ``share`` of neighbouring pairs (noise, not content)."""
     if len(thumbs) < 3:
         return np.ones(thumbs.shape[1:], dtype=bool)
     changed = np.zeros(thumbs.shape[1:], dtype=np.int32)
@@ -214,7 +214,7 @@ def flicker_mask(thumbs: np.ndarray, share: float = FLICKER_SHARE) -> np.ndarray
 
 
 def diff_score(a: np.ndarray, b: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
-    """Частка пікселів маски, змінених більше ніж на PIX_DELTA."""
+    """Share of mask pixels changed by more than PIX_DELTA."""
     d = np.abs(a.astype(np.int16) - b.astype(np.int16)) > PIX_DELTA
     if mask is not None:
         n = int(mask.sum())
@@ -228,7 +228,7 @@ def same(a: np.ndarray, b: np.ndarray, mask: Optional[np.ndarray] = None,
 
 
 def dhash(img: np.ndarray) -> str:
-    """64-бітний dHash (9×8) — для повторів за змістом між несусідніми відрізками."""
+    """64-bit dHash (9×8) — for repeats by content between non-adjacent segments."""
     from PIL import Image
     small = np.asarray(Image.fromarray(img).resize((9, 8), Image.BILINEAR), dtype=np.int16)
     bits = (small[:, 1:] > small[:, :-1]).flatten()
@@ -240,19 +240,19 @@ def hamming(h1: str, h2: str) -> int:
 
 
 def sharpness(img: np.ndarray) -> float:
-    """Дисперсія дискретного Лапласіана — більша = різкіше."""
+    """Variance of the discrete Laplacian — larger = sharper."""
     f = img.astype(np.float32)
     lap = (f[1:-1, :-2] + f[1:-1, 2:] + f[:-2, 1:-1] + f[2:, 1:-1] - 4 * f[1:-1, 1:-1])
     return float(lap.var())
 
 
 # ---------------------------------------------------------------------------
-# відбір
+# selection
 # ---------------------------------------------------------------------------
 
 def _settle(bounds: list[tuple[float, float]], settle: float) -> list[tuple[float, float, float]]:
-    """Серія змін, що йдуть частіше ніж раз на ``settle`` с (набір тексту, прокрутка),
-    — один відрізок. → [(початок, оцінка, момент, коли серія вляглась)]."""
+    """A series of changes coming more often than every ``settle`` s (typing, scrolling)
+    — one segment. → [(start, score, moment, when the series settled)]."""
     out: list[tuple[float, float, float]] = []
     for t, score in bounds:
         if out and settle > 0 and score > 0 and t - out[-1][2] < settle:
@@ -265,10 +265,10 @@ def _settle(bounds: list[tuple[float, float]], settle: float) -> list[tuple[floa
 
 def _segments_from_boundaries(bounds: list[tuple[float, float]], duration: float,
                               settle: float = 0.0) -> list[Segment]:
-    """bounds — [(момент зміни, оцінка)], перший (0, 0). → відрізки до наступної межі.
+    """bounds — [(change moment, score)], the first (0, 0). → segments up to the next boundary.
 
-    Межа відрізка — момент ПЕРШОЇ зміни серії (точність ``min_res``), представник —
-    кадр після ОСТАННЬОЇ зміни серії, тобто вже усталений екран."""
+    A segment boundary is the moment of the series' FIRST change (accuracy ``min_res``), the representative is
+    the frame after the series' LAST change, i.e. an already settled screen."""
     runs = _settle(bounds, settle)
     segs: list[Segment] = []
     for i, (t, score, settled) in enumerate(runs):
@@ -285,7 +285,7 @@ def select_thumbs(thumbs: np.ndarray, duration: float, *, fps: float = 1.0,
                   threshold: float = DEFAULT_THRESHOLD,
                   mask: Optional[np.ndarray] = None,
                   settle: float = DEFAULT_SETTLE) -> list[Segment]:
-    """Відрізки за мініатюрами: нова межа, коли кадр відрізняється від ЯКОРЯ відрізка."""
+    """Segments from thumbnails: a new boundary when the frame differs from the segment's ANCHOR."""
     bounds: list[tuple[float, float]] = [(0.0, 0.0)]
     anchor = thumbs[0]
     for i in range(1, len(thumbs)):
@@ -306,7 +306,7 @@ def select_bisect(video_path: str, duration: float, *, step: float = DEFAULT_STE
                   mask: Optional[np.ndarray] = None, ffmpeg: Optional[str] = None,
                   progress: Optional[Callable[[float], None]] = None,
                   settle: float = DEFAULT_SETTLE) -> list[Segment]:
-    """Бісекція: опори кожні ``step`` с, різні кінці → ділимо навпіл до ``min_res``."""
+    """Bisection: anchors every ``step`` s, different ends → halve down to ``min_res``."""
     cache: dict[float, np.ndarray] = {}
 
     def frame(t: float) -> np.ndarray:
@@ -346,7 +346,7 @@ def select_bisect(video_path: str, duration: float, *, step: float = DEFAULT_STE
 
 
 def cap_segments(segs: list[Segment], max_frames: int) -> tuple[list[Segment], bool]:
-    """Понад ``max_frames`` — зливаємо найкоротший відрізок із сусідом (захист від «мигаючого» відео)."""
+    """Beyond ``max_frames`` — merge the shortest segment with a neighbour (protection against a "blinking" video)."""
     if len(segs) <= max_frames:
         return segs, False
     segs = list(segs)
@@ -361,7 +361,7 @@ def cap_segments(segs: list[Segment], max_frames: int) -> tuple[list[Segment], b
 
 
 def mark_duplicates(segs: list[Segment], max_bits: int = 4) -> list[Optional[int]]:
-    """Для кожного відрізка — індекс першого НЕсусіднього відрізка з тим самим екраном, або None."""
+    """For each segment — the index of the first NON-adjacent segment with the same screen, or None."""
     out: list[Optional[int]] = [None] * len(segs)
     for i, s in enumerate(segs):
         if not s.dhash:
@@ -374,7 +374,7 @@ def mark_duplicates(segs: list[Segment], max_bits: int = 4) -> list[Optional[int
 
 
 def pick_sharpest(video_path: str, seg: Segment, *, ffmpeg: Optional[str] = None) -> float:
-    """Відрізок ≥ 3 с: найрізкіший з 3 кандидатів (+0.7 с, +1.5 с, середина)."""
+    """Segment ≥ 3 s: the sharpest of 3 candidates (+0.7 s, +1.5 s, the middle)."""
     if seg.end - seg.start < 3.0:
         return seg.frame_time
     cands = [seg.start + REP_OFFSET, seg.start + 1.5, (seg.start + seg.end) / 2]
@@ -398,10 +398,10 @@ def select_keyframes(video_path: str, *, method: str = DEFAULT_METHOD,
                      cache_dir: Optional[str] = None,
                      ffmpeg: Optional[str] = None,
                      progress: Optional[Callable[[float], None]] = None) -> dict:
-    """Головний вхід. Повертає {'segments': [Segment], 'duration', 'capped', 'method'}.
+    """Main entry. Returns {'segments': [Segment], 'duration', 'capped', 'method'}.
 
-    ``cache_dir`` — тека для кешу мініатюр (``thumbs.npz``): повторний виклик із
-    іншим порогом не декодує відео вдруге."""
+    ``cache_dir`` — a directory for the thumbnail cache (``thumbs.npz``): a repeated call with
+    a different threshold does not decode the video a second time."""
     info = probe(video_path, ffmpeg)
     duration = info['duration']
     rmask = region_mask(ignore_regions)
@@ -415,12 +415,12 @@ def select_keyframes(video_path: str, *, method: str = DEFAULT_METHOD,
         if cache and os.path.isfile(cache):
             try:
                 with np.load(cache) as z:
-                    # кеш дійсний лише для тієї самої тривалості І частоти декодування
+                    # the cache is valid only for the same duration AND decoding frequency
                     if (float(z['duration']) == duration and 'fps' in z.files
                             and float(z['fps']) == 1.0 / min_res):
                         thumbs = z['thumbs']
             except Exception:
-                logger.warning("кеш мініатюр %s пошкоджений — декодую заново", cache, exc_info=True)
+                logger.warning("thumbnail cache %s is corrupted — decoding again", cache, exc_info=True)
         if thumbs is None:
             thumbs = thumbs_pass(video_path, duration, fps=1.0 / min_res, ffmpeg=ffmpeg,
                                  progress=progress)
@@ -429,14 +429,14 @@ def select_keyframes(video_path: str, *, method: str = DEFAULT_METHOD,
                     os.makedirs(cache_dir, exist_ok=True)
                     np.savez_compressed(cache, thumbs=thumbs, duration=duration, fps=1.0 / min_res)
                 except Exception:
-                    logger.warning("кеш мініатюр не записано: %s", cache, exc_info=True)
+                    logger.warning("thumbnail cache not written: %s", cache, exc_info=True)
         elif progress:
             progress(1.0)
         mask = rmask & flicker_mask(thumbs)
         segs = select_thumbs(thumbs, duration, fps=1.0 / min_res, threshold=threshold, mask=mask,
                              settle=settle)
     else:
-        raise ValueError(f'невідомий метод: {method}')
+        raise ValueError(f'unknown method: {method}')
     segs, capped = cap_segments(segs, max_frames)
     return {'segments': segs, 'duration': duration, 'capped': capped, 'method': method,
             'width': info['width'], 'height': info['height']}
@@ -444,11 +444,11 @@ def select_keyframes(video_path: str, *, method: str = DEFAULT_METHOD,
 
 def classify(seg: Segment, *, ocr_chars: int, ocr_lines: int, mean_word_h: float,
              frame_h: int, min_res: float = DEFAULT_MIN_RES, ocr_ran: bool = True) -> str:
-    """Евристичний тип кадру (без моделі). Відомі похибки — docs/video-timeline.md.
+    """Heuristic frame type (without a model). Known errors — docs/video-timeline.md.
 
-    ``ocr_ran=False`` (OCR вимкнено або недоступний): тексту не знаємо, тож кадр не
-    оголошується «лише камерою» — інакше стрічка за замовчуванням ховала б усе."""
-    if seg.std < BLANK_STD and ocr_chars < 15:     # з текстом кадр не порожній
+    ``ocr_ran=False`` (OCR disabled or unavailable): the text is unknown, so the frame is not
+    declared "camera only" — otherwise the timeline would hide everything by default."""
+    if seg.std < BLANK_STD and ocr_chars < 15:     # with text the frame is not blank
         return 'blank'
     if seg.end - seg.start < 2 * min_res and seg.change_score > 0:
         return 'transition'

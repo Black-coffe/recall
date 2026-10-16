@@ -1,34 +1,34 @@
 #!/usr/bin/env python
-"""Ремонт шляхів до медіа після переїзду/перейменування кореня проєкту.
+"""Repair of media paths after the project root was moved/renamed.
 
-Коли корінь проєкту переїжджає (як `E:\\Projects\\Whisper` → `E:\\Projects\\Recall`
-у 2026), у БД лишаються АБСОЛЮТНІ шляхи на старе місце, а на диску — манифести
-сесій зі старим коренем усередині. Усі споживачі гейтяться `os.path.isfile(...)`
-і **мовчки** відвалюються: «оригінальний файл» не віддається, re-transcribe б'ється
-об мертвий шлях, програвання не працює. Транскрипт при цьому цілий — тому поломку
-не видно ніде, крім порожньої кнопки.
+When the project root moves (as `E:\\Projects\\Whisper` -> `E:\\Projects\\Recall`
+in 2026), the DB keeps ABSOLUTE paths to the old place, and on disk there are session
+manifests with the old root inside. All consumers are gated by `os.path.isfile(...)`
+and fall away **silently**: the "original file" is not served, re-transcribe hits
+a dead path, playback does not work. The transcript stays intact, so the breakage
+is visible nowhere except an empty button.
 
-Boot-reconcile (`app/services/recording/reconcile.py`) лікує лише
-`source_type='recording'`; рядки youtube/file не покриті ніким — саме вони й
-простоюють роками. Цей скрипт закриває решту.
+Boot-reconcile (`app/services/recording/reconcile.py`) only heals
+`source_type='recording'`; youtube/file rows are covered by nobody - and they are the ones
+that have been idle for years. This script covers the rest.
 
-ЯК ЧИНИТЬ (єдине правило, детерміноване):
-    шлях розбирається на компоненти, шукається перша медіа-тека проєкту
-    (`uploads`, `youtube_downloads`, `recordings`, …), і хвіст від неї
-    перебудовується від ПОТОЧНОГО кореня проєкту. Заміна приймається, лише якщо
-    отриманий файл РЕАЛЬНО існує. Старий корінь ніде не зашитий — працює для
-    будь-якого переїзду, включно зі зміною букви диска.
+HOW IT FIXES (a single deterministic rule):
+    the path is split into components, the first project media dir is found
+    (`uploads`, `youtube_downloads`, `recordings`, ...), and the tail from it is
+    rebuilt from the CURRENT project root. A replacement is accepted only if
+    the resulting file REALLY exists. The old root is hardcoded nowhere - works for
+    any move, including a change of drive letter.
 
-ЧОГО НЕ РОБИТЬ СВІДОМО — пошуку за іменем файлу. У `recordings/sessions/*/final.mp3`
-всі файли звуться однаково (141 штука), тож збіг за basename підставив би
-транскрипту ЧУЖУ сесію. Що не зійшлось підміною кореня — іде у звіт, руками.
+WHAT IT DELIBERATELY DOES NOT DO - search by file name. In `recordings/sessions/*/final.mp3`
+all files are named the same (141 of them), so a basename match would substitute
+a FOREIGN session for the transcript. What does not match by root substitution goes to the report, by hand.
 
-За замовчуванням DRY-RUN. `--apply` пише в БД (з авто-бекапом у `db_backups/`)
-і переписує манифести (оригінал поруч, `.bak-pathfix`).
+DRY-RUN by default. `--apply` writes to the DB (with an auto-backup in `db_backups/`)
+and rewrites the manifests (the original stays alongside, `.bak-pathfix`).
 
-Приклади:
-    .venv/Scripts/python.exe scripts/repair_paths.py                # звіт
-    .venv/Scripts/python.exe scripts/repair_paths.py --apply        # ремонт
+Examples:
+    .venv/Scripts/python.exe scripts/repair_paths.py                # report
+    .venv/Scripts/python.exe scripts/repair_paths.py --apply        # repair
     .venv/Scripts/python.exe scripts/repair_paths.py --apply --no-backup
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# (таблиця, колонка) — усі місця, де зберігається шлях до файлу на диску
+# (table, column) - every place that stores a path to a file on disk
 TARGETS = [
     ('transcriptions', 'file_path'),
     ('audio_downloads', 'file_path'),
@@ -55,7 +55,7 @@ TARGETS = [
     ('video_keyframes', 'image_path'),
 ]
 
-# медіа-теки проєкту — точки, від яких перебудовується хвіст шляху
+# project media dirs - the anchors from which the path tail is rebuilt
 MEDIA_DIRS = ('uploads', 'youtube_downloads', 'recordings', 'telegram_media',
               'documents', 'transcripts', 'downloads')
 
@@ -63,12 +63,12 @@ _SPLIT = re.compile(r'[\\/]+')
 
 
 def resolve(fp: str) -> str:
-    """Абсолютний шлях так, як його побачить застосунок (cwd = корінь проєкту)."""
+    """Absolute path as the app will see it (cwd = project root)."""
     return fp if os.path.isabs(fp) else str(PROJECT_ROOT / fp)
 
 
 def rebuild(fp: str) -> str | None:
-    """Перебудувати шлях від поточного кореня. None — якщо файл так і не знайдено."""
+    """Rebuild a path from the current root. None if the file is still not found."""
     parts = [p for p in _SPLIT.split(fp) if p]
     for i, part in enumerate(parts):
         if part.lower() not in MEDIA_DIRS:
@@ -80,7 +80,7 @@ def rebuild(fp: str) -> str | None:
 
 
 def _under_root(fp: str) -> bool:
-    """Чи вказує шлях усередину поточного кореня проєкту."""
+    """Whether the path points inside the current project root."""
     try:
         return os.path.normcase(os.path.abspath(resolve(fp))).startswith(
             os.path.normcase(str(PROJECT_ROOT)) + os.sep)
@@ -89,17 +89,17 @@ def _under_root(fp: str) -> bool:
 
 
 def plan(fp: str) -> tuple[str, str | None]:
-    """-> ('ok' | 'fix' | 'lost', новий_шлях | None)"""
+    """-> ('ok' | 'fix' | 'lost', new_path | None)"""
     if os.path.isfile(resolve(fp)):
         return 'ok', None
     new = rebuild(fp)
     return ('fix', new) if new else ('lost', None)
 
 
-# --------------------------------------------------------------------------- БД
+# --------------------------------------------------------------------------- DB
 
 def backup_db(db_path: str) -> str:
-    """Консистентний знімок БД засобами SQLite (не копія файлу — є WAL)."""
+    """Consistent DB snapshot via SQLite itself (not a file copy - there is a WAL)."""
     out_dir = PROJECT_ROOT / 'db_backups'
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -110,7 +110,7 @@ def backup_db(db_path: str) -> str:
         src.backup(dst)
         state = dst.execute('PRAGMA integrity_check').fetchone()[0]
         if state != 'ok':
-            raise RuntimeError(f'бекап не пройшов integrity_check: {state}')
+            raise RuntimeError(f'backup failed integrity_check: {state}')
     finally:
         dst.close()
         src.close()
@@ -131,7 +131,7 @@ def repair_db(db_path: str, apply: bool, examples: int) -> int:
                 f'WHERE {col} IS NOT NULL AND {col} != ""'
             ).fetchall()
         except sqlite3.OperationalError as e:
-            print(f'  {table}.{col}: пропущено ({e})')
+            print(f'  {table}.{col}: skipped ({e})')
             continue
         stats = Counter()
         for r in rows:
@@ -142,23 +142,23 @@ def repair_db(db_path: str, apply: bool, examples: int) -> int:
                 updates.append((table, col, r['id'], r['fp'], new))
             elif status == 'lost':
                 lost.append((table, r['id'], r['fp']))
-        print(f'  {table:<24}{col:<20}всього={len(rows):<6}{dict(stats)}')
+        print(f'  {table:<24}{col:<20}total={len(rows):<6}{dict(stats)}')
 
-    print(f'\n  ПІДСУМОК: {dict(grand)}')
+    print(f'\n  TOTAL: {dict(grand)}')
 
     for t, c, i, old, new in updates[:examples]:
-        print(f'\n  {t}#{i}\n     було:  {old}\n     стане: {new}')
+        print(f'\n  {t}#{i}\n     was:  {old}\n     will be: {new}')
     if len(updates) > examples:
-        print(f'\n  … ще {len(updates) - examples} шляхів')
+        print(f'\n  ... {len(updates) - examples} more paths')
 
     if lost:
-        print(f'\n  ВТРАЧЕНІ (файла нема на диску): {len(lost)} — НЕ чіпаємо, '
-              f'транскрипт цінний сам по собі')
+        print(f'\n  LOST (file is not on disk): {len(lost)} - NOT touching, '
+              f'the transcript is valuable on its own')
         by_dir = Counter()
         for t, _i, fp in lost:
             by_dir[(t, os.path.basename(os.path.dirname(fp)) or '?')] += 1
         for (t, parent), n in by_dir.most_common(10):
-            print(f'    {t:<24}тека {parent:<22}{n}')
+            print(f'    {t:<24}dir {parent:<22}{n}')
 
     if not apply or not updates:
         con.close()
@@ -167,23 +167,23 @@ def repair_db(db_path: str, apply: bool, examples: int) -> int:
     cur = con.cursor()
     written = 0
     for t, c, i, _old, new in updates:
-        if os.path.isfile(new):  # повторна перевірка перед записом
+        if os.path.isfile(new):  # re-check before writing
             cur.execute(f'UPDATE {t} SET {c} = ? WHERE id = ?', (new, i))
             written += cur.rowcount
     con.commit()
-    print(f'\n  ОНОВЛЕНО рядків: {written}')
+    print(f'\n  ROWS UPDATED: {written}')
     print(f'  integrity_check: {con.execute("PRAGMA integrity_check").fetchone()[0]}')
     con.close()
     return written
 
 
-# -------------------------------------------------------------------- манифести
+# -------------------------------------------------------------------- manifests
 
 def repair_json(dirs: list[str], apply: bool) -> int:
-    """Перебудувати шляхи всередині json-манифестів сесій.
+    """Rebuild the paths inside the sessions' json manifests.
 
-    Манифест лікується live у `SessionStore.read`, але НА ДИСКУ лишається старим —
-    тож будь-який інший споживач манифеста впирається в мертвий шлях.
+    A manifest is healed live in `SessionStore.read`, but stays old ON DISK -
+    so any other consumer of the manifest runs into a dead path.
     """
     files: list[Path] = []
     for d in dirs:
@@ -200,7 +200,7 @@ def repair_json(dirs: list[str], apply: bool) -> int:
             txt = f.read_text(encoding='utf-8')
             data = json.loads(txt)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            print(f'  ! не прочитано {f}: {e}')
+            print(f'  ! not read {f}: {e}')
             continue
 
         new_txt = txt
@@ -209,19 +209,19 @@ def repair_json(dirs: list[str], apply: bool) -> int:
                 continue
             new = rebuild(old)
             if not new:
-                # Шлях уже під поточним коренем — ремонтувати нічого, файлу
-                # просто нема (finalize штатно прибирає проміжні WAV після
-                # мікшування). Це НЕ поломка шляху, тому окремий лічильник:
-                # інакше звіт після кожного переїзду лякає сотнями «втрачених».
+                # The path is already under the current root - nothing to repair, the file
+                # is simply gone (finalize routinely removes the intermediate WAVs after
+                # mixing). This is NOT a path breakage, hence a separate counter:
+                # otherwise the report after every move scares with hundreds of "lost".
                 if _under_root(old):
                     absent += 1
                 else:
                     lost += 1
                 continue
-            # У json-тексті слеші екрановані, тож міняємо в json-представленні.
-            # Кирилиця може бути записана і літерально (ensure_ascii=False, як
-            # пише session_store), і як \uXXXX — пробуємо обидва варіанти й
-            # відповідь підставляємо ТИМ САМИМ стилем, щоб не змішати їх у файлі.
+            # In json text the slashes are escaped, so we replace in the json representation.
+            # Cyrillic may be written literally (ensure_ascii=False, as
+            # session_store writes it) or as \uXXXX - we try both variants and
+            # substitute the answer in THE SAME style so as not to mix them in a file.
             for ascii_only in (False, True):
                 a = json.dumps(old, ensure_ascii=ascii_only)[1:-1]
                 if a in new_txt:
@@ -230,23 +230,23 @@ def repair_json(dirs: list[str], apply: bool) -> int:
                     fixed += 1
                     break
             else:
-                # шлях є в структурі, але не знайшовся в тексті — мовчки
-                # пропустити не можна, інакше ремонт «успішний» і неповний
+                # the path is in the structure but was not found in the text - cannot
+                # be silently skipped, otherwise the repair is "successful" and incomplete
                 unmatched += 1
-                print(f'  ! не знайдено в тексті {f.name}: {old}')
+                print(f'  ! not found in the text of {f.name}: {old}')
         if new_txt != txt:
-            json.loads(new_txt)  # перевірка, що json лишився валідним
+            json.loads(new_txt)  # check that the json is still valid
             changed.append((f, new_txt))
 
-    print(f'  переглянуто json: {len(files)}')
-    print(f'  файлів зі старими шляхами: {len(changed)} '
-          f'(шляхів перебудовано: {fixed}, зі старим коренем не знайдено: {lost})')
+    print(f'  json reviewed: {len(files)}')
+    print(f'  files with old paths: {len(changed)} '
+          f'(paths rebuilt: {fixed}, old root not found: {lost})')
     if absent:
-        print(f'  довідково: {absent} шляхів уже під поточним коренем, але файлу '
-              f'нема — це не поломка (finalize прибирає проміжні WAV)')
+        print(f'  note: {absent} paths are already under the current root, but the file '
+              f'is gone - not a breakage (finalize removes the intermediate WAVs)')
     if unmatched:
-        print(f'  УВАГА: {unmatched} шляхів не вдалося знайти в тексті файлу — '
-              f'перевір вручну, ремонт неповний')
+        print(f'  WARNING: {unmatched} paths could not be found in the file text - '
+              f'check by hand, the repair is incomplete')
 
     if not apply or not changed:
         return len(changed)
@@ -254,12 +254,12 @@ def repair_json(dirs: list[str], apply: bool) -> int:
     for f, new_txt in changed:
         shutil.copy2(f, f.with_suffix(f.suffix + '.bak-pathfix'))
         f.write_text(new_txt, encoding='utf-8')
-    print(f'  ПЕРЕПИСАНО файлів: {len(changed)} (оригінали поруч, .bak-pathfix)')
+    print(f'  FILES REWRITTEN: {len(changed)} (originals alongside, .bak-pathfix)')
     return len(changed)
 
 
 def _iter_paths(node):
-    """Усі рядки-значення, схожі на шлях до файлу."""
+    """All string values that look like a path to a file."""
     if isinstance(node, dict):
         for v in node.values():
             yield from _iter_paths(v)
@@ -273,41 +273,41 @@ def _iter_paths(node):
 # --------------------------------------------------------------------------- cli
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description='Ремонт шляхів до медіа після переїзду кореня.')
+    ap = argparse.ArgumentParser(description='Repair of media paths after the root was moved.')
     ap.add_argument('--db', default=str(PROJECT_ROOT / 'whisper_history.db'))
     ap.add_argument('--json-dirs', nargs='+', default=['recordings'],
-                    help='Де шукати json-манифести (default: recordings).')
+                    help='Where to look for json manifests (default: recordings).')
     ap.add_argument('--apply', action='store_true',
-                    help='ВИКОНАТИ ремонт. Без прапора — лише звіт (dry-run).')
+                    help='PERFORM the repair. Without the flag - report only (dry-run).')
     ap.add_argument('--no-backup', action='store_true',
-                    help='Не робити авто-бекап БД перед записом (не рекомендується).')
-    ap.add_argument('--skip-json', action='store_true', help='Не чіпати манифести.')
+                    help='Do not auto-backup the DB before writing (not recommended).')
+    ap.add_argument('--skip-json', action='store_true', help='Do not touch the manifests.')
     ap.add_argument('--limit-examples', type=int, default=5)
     args = ap.parse_args(argv)
 
     if not os.path.isfile(args.db):
-        print(f'БД не знайдено: {args.db}', file=sys.stderr)
+        print(f'DB not found: {args.db}', file=sys.stderr)
         return 2
 
-    mode = 'APPLY (запис)' if args.apply else 'DRY-RUN (лише звіт)'
-    print(f'=== Ремонт шляхів — {mode} ===')
-    print(f'корінь проєкту: {PROJECT_ROOT}')
-    print(f'БД: {args.db}\n')
+    mode = 'APPLY (write)' if args.apply else 'DRY-RUN (report only)'
+    print(f'=== Path repair - {mode} ===')
+    print(f'project root: {PROJECT_ROOT}')
+    print(f'DB: {args.db}\n')
 
     if args.apply and not args.no_backup:
-        print(f'бекап БД: {backup_db(args.db)}\n')
+        print(f'DB backup: {backup_db(args.db)}\n')
 
-    print('- БД -')
+    print('- DB -')
     n_db = repair_db(args.db, args.apply, args.limit_examples)
 
     n_json = 0
     if not args.skip_json:
-        print('\n- МАНИФЕСТИ -')
+        print('\n- MANIFESTS -')
         n_json = repair_json(args.json_dirs, args.apply)
 
     if not args.apply:
-        print(f'\n[dry-run] Полагодилось би: {n_db} шляхів у БД'
-              f' + {n_json} файлів манифестів. Запусти з --apply.')
+        print(f'\n[dry-run] Would fix: {n_db} paths in the DB'
+              f' + {n_json} manifest files. Run with --apply.')
     return 0
 
 

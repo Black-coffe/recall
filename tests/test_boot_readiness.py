@@ -1,14 +1,14 @@
-"""config-registry-fix-04: whisper-робота (знахідка 8) і коментар про
-SECRET_KEY (знахідка 14) в app.py — плюс узгодження `migrations` з контрактом
-робота-contract-03 (знахідка 9, історія 03).
+"""config-registry-fix-04: whisper робота (finding 8) and the comment about
+SECRET_KEY (finding 14) in app.py — plus reconciling `migrations` with the
+робота-contract-03 contract (finding 9, story 03).
 
-Офлайн, без важкого імпорту `app.py` (torch/Flask boot — той самий мотив, що
-й у `tests/test_json_logs.py`/`tests/test_auth_gate.py`): критерії 5-7
-перевіряються або на реальних, легких модулях (`whisper_manager_new.py`,
-`app/state.py`), або статично на джерельному тексті `app.py` — там, де сама
-логіка лишається inline-кодом усередині модуля, який імпортувати цілком дорого.
+Offline, without a heavy import of `app.py` (torch/Flask boot — the same motive as
+in `tests/test_json_logs.py`/`tests/test_auth_gate.py`): criteria 5-7
+are checked either on real, light modules (`whisper_manager_new.py`,
+`app/state.py`), or statically on the source text of `app.py` — where the logic
+itself stays inline code inside a module that is expensive to import whole.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest -q tests/test_boot_робота.py
 """
 from __future__ import annotations
@@ -26,8 +26,8 @@ APP_PY_SOURCE = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
 
 
 class FakeBackend:
-    """Мінімальний фейк-бекенд (той самий протокол, що в
-    tests/test_whisper_manager.py) — не торкається GPU/файлової системи."""
+    """Minimal fake backend (the same protocol as in
+    tests/test_whisper_manager.py) — does not touch the GPU/file system."""
 
     name = "fake"
 
@@ -45,41 +45,41 @@ class FakeBackend:
 def manager():
     m = ModernWhisperManager(force_cpu=True)
     m._backend = FakeBackend()
-    m._cache_size = 3  # той самий дефолт, що WHISPER_MODEL_CACHE_SIZE у проді
+    m._cache_size = 3  # the same default as WHISPER_MODEL_CACHE_SIZE in prod
     return m
 
 
 # ============================================================
-# Критерій 5 (знахідка 8): whisper.preload не пришпилюється до 503 назавжди
+# Criterion 5 (finding 8): whisper.preload is not pinned to 503 forever
 # ============================================================
 
 class TestWhisperPreloadRaceFix:
-    """`app.py::_watch_whisper_preload` звіряється один раз, одразу після
-    join() потоку прогріву. Стара логіка (`current_model_name == _m`) хибно
-    трактувала успішний прогрів як провал, щойно ХТОСЬ ІНШИЙ паралельно
-    завантажував іншу модель (типово — конкурентна транскрипція) — бо
-    `current_model_name` це "останній використаний" покажчик, а не ознака
-    того, що прогріта модель досі доступна."""
+    """`app.py::_watch_whisper_preload` checks once, right after
+    join() of the warm-up thread. The old logic (`current_model_name == _m`) wrongly
+    treated a successful warm-up as a failure as soon as SOMEONE ELSE in parallel
+    loaded another model (typically a concurrent transcription) — because
+    `current_model_name` is a "last used" pointer, not a sign
+    that the warmed-up model is still available."""
 
     def test_old_pointer_check_is_fooled_by_concurrent_load(self, manager):
-        """Відтворює саму знахідку 8: прогрів моделі A завершується, потім (до
-        того, як робота-спостерігач встиг перевірити) паралельна
-        транскрипція вантажить модель B — старий критерій `current_model_name
-        == 'A'` після цього хибно каже "провал"."""
-        manager.load_model("small")   # прогрів (preload) моделі A
-        manager.load_model("medium")  # паралельна транскрипція — інша модель
+        """Reproduces finding 8 itself: the warm-up of model A finishes, then (before
+        the робота watcher managed to check) a parallel
+        transcription loads model B — the old criterion `current_model_name
+        == 'A'` after that wrongly says "failure"."""
+        manager.load_model("small")   # warm-up (preload) of model A
+        manager.load_model("medium")  # parallel transcription — another model
 
         old_check_ok = manager.current_model_name == "small"
         assert old_check_ok is False, (
-            "якщо це не так — сценарій знахідки 8 більше не відтворюється "
-            "на цій версії ModernWhisperManager, тест застарів"
+            "if this is not so — the scenario of finding 8 is no longer reproduced "
+            "on this version of ModernWhisperManager, the test is outdated"
         )
 
     def test_cache_membership_check_survives_concurrent_load(self, manager):
-        """Новий критерій (app.py, `_m in whisper_manager._models`) лишається
-        істинним у тому самому сценарії — LRU-кеш (дефолт розміром 3) тримає
-        обидві моделі одночасно, тож звичайний конкурентний трафік більше не
-        топить прогрів."""
+        """The new criterion (app.py, `_m in whisper_manager._models`) stays
+        true in the same scenario — the LRU cache (default size 3) holds
+        both models at once, so ordinary concurrent traffic no longer
+        drowns the warm-up."""
         manager.load_model("small")
         manager.load_model("medium")
 
@@ -87,23 +87,23 @@ class TestWhisperPreloadRaceFix:
         assert new_check_ok is True
 
     def test_real_eviction_still_reports_failed(self, manager):
-        """Якщо прогріту модель реально витіснено з кешу (не просто змінився
-        "останній використаний" покажчик) — новий критерій чесно каже
-        "недоступна", а не самолікується/поллить (Non-goal історії)."""
+        """If the warmed-up model was really evicted from the cache (not merely the
+        "last used" pointer changed) — the new criterion honestly says
+        "unavailable", and does not self-heal/poll (a story Non-goal)."""
         manager._cache_size = 1
         manager.load_model("small")
-        manager.load_model("medium")  # витісняє "small" за розміром кешу 1
+        manager.load_model("medium")  # evicts "small" at cache size 1
 
         assert "small" not in manager._models
 
     def test_app_py_uses_cache_membership_not_pointer_equality(self):
-        """Статична перевірка, що виправлений критерій дійсно використовується
-        (а не лишень тест дублює правильну логіку окремо від коду).
+        """Static check that the fixed criterion is really used
+        (and not just the test duplicating the correct logic apart from the code).
 
-        config-registry-fix-r3-01: сам блок переїхав із app.py у
-        `app/services/whisper_preload.py::start_tracked_preload` — перевіряємо
-        джерело за новою адресою, а в app.py лишень статично впевнюємось, що
-        інлайновий спостерігач звідти зник (нема повторної копії логіки)."""
+        config-registry-fix-r3-01: the block itself moved from app.py into
+        `app/services/whisper_preload.py::start_tracked_preload` — we check
+        the source at the new address, and in app.py we only statically make sure that
+        the inline watcher is gone from there (no duplicate copy of the logic)."""
         preload_source = (PROJECT_ROOT / "app" / "services" / "whisper_preload.py").read_text(
             encoding="utf-8"
         )
@@ -113,30 +113,30 @@ class TestWhisperPreloadRaceFix:
 
 
 # ============================================================
-# Критерій 6 (знахідка 14): коментар про SECRET_KEY не бреше
+# Criterion 6 (finding 14): the SECRET_KEY comment does not lie
 # ============================================================
 
 def test_secret_key_comment_describes_lazy_check():
-    """`_finalize_secret_key()` (config.py) виконується ЛІНИВО з першого
-    `get_config()` (config-registry-profiles S3) — не одразу при `import
-    config`, як досі стверджував коментар в app.py:319-322 (знахідка 14)."""
-    idx = APP_PY_SOURCE.index("SECRET_KEY тепер ЄДИНА")
+    """`_finalize_secret_key()` (config.py) runs LAZILY from the first
+    `get_config()` (config-registry-profiles S3) — not immediately on `import
+    config`, as the comment in app.py:319-322 used to claim (finding 14)."""
+    idx = APP_PY_SOURCE.index("SECRET_KEY check is now SINGLE")
     snippet = APP_PY_SOURCE[idx: idx + 700]
-    assert "одразу при" not in snippet, (
-        "коментар досі стверджує, що перевірка виконується одразу при import config"
+    assert "immediately on" not in snippet, (
+        "the comment still claims the check runs immediately on import config"
     )
     assert "get_config()" in snippet
-    assert "ліни" in snippet.lower()  # "лінива"/"ліниво"
+    assert "lazil" in snippet.lower()  # "lazy"/"lazily"
 
 
 def test_secret_key_check_is_not_module_level_in_config():
-    """Крос-перевірка проти config.py (лише читання, не наш файл): виклик
-    `_finalize_secret_key()` дійсно лежить під функцією, а не на рівні
-    модуля — коментар в app.py описує реальність, не вигадку."""
+    """Cross-check against config.py (read only, not our file): the call to
+    `_finalize_secret_key()` really sits under a function, not at
+    module level — the comment in app.py describes reality, not fiction."""
     config_source = (PROJECT_ROOT / "config.py").read_text(encoding="utf-8")
-    # Єдиний виклик `_finalize_secret_key()` (без def) має бути всередині
-    # `_initialize_dynamic_config`, яку викликає `get_config()` — не на
-    # верхньому рівні модуля.
+    # The only call of `_finalize_secret_key()` (without def) must be inside
+    # `_initialize_dynamic_config`, which `get_config()` calls — not at the
+    # module top level.
     call_matches = [
         m.start() for m in re.finditer(r"(?<!def )_finalize_secret_key\(\)", config_source)
     ]
@@ -148,8 +148,8 @@ def test_secret_key_check_is_not_module_level_in_config():
 
 
 # ============================================================
-# Критерій 7 (знахідка 9, половина цієї історії): `migrations` узгоджений
-# з контрактом, який лишила історія 03
+# Criterion 7 (finding 9, half of this story): `migrations` is reconciled
+# with the contract left by story 03
 # ============================================================
 
 def test_app_py_does_not_assign_migrations_робота():
@@ -157,8 +157,8 @@ def test_app_py_does_not_assign_migrations_робота():
 
 
 # ============================================================
-# Критерій N4 (config-registry-fix-r3-01): RECALL_BIND_ALL читається одним
-# парсером (settings.env_bool), а не власним інлайновим у app.py.
+# Criterion N4 (config-registry-fix-r3-01): RECALL_BIND_ALL is read by one
+# parser (settings.env_bool), not by its own inline one in app.py.
 # ============================================================
 
 def test_app_py_reads_bind_all_via_env_bool():
@@ -167,9 +167,9 @@ def test_app_py_reads_bind_all_via_env_bool():
 
 
 def test_state_contract_has_no_migrations_key():
-    """Крос-перевірка проти app/state.py (не наш файл, лише читання):
-    історія 03 вилучила `migrations` з контракту робота — наша половина
-    (не писати туди значення) узгоджена з тим, що там лишилось."""
+    """Cross-check against app/state.py (not our file, read only):
+    story 03 removed `migrations` from the робота contract — our half
+    (not writing a value there) is consistent with what is left there."""
     from app import state as state_module
 
     assert "migrations" not in state_module.робота

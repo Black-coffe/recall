@@ -1,4 +1,4 @@
-"""K4 story 03: бот доставки труб."""
+"""K4 story 03: the pipes delivery bot."""
 from __future__ import annotations
 
 import json
@@ -57,7 +57,7 @@ def test_not_configured_does_not_call(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     monkeypatch.setenv("TELEGRAM_BOT_CHAT_ID", "")
     f = Fake()
-    with pytest.raises(BotError, match="не налаштований"):
+    with pytest.raises(BotError, match="not configured"):
         tg_bot.send("текст", transport=f)
     assert f.calls == []
 
@@ -87,7 +87,7 @@ def test_whoami_cli_without_token(monkeypatch, capsys):
 
 
 def test_reply_markup_goes_only_on_last_part(configured):
-    """K5: кнопки брифінгу — під останньою частиною, щоб нумерація читалась над ними."""
+    """K5: the brief buttons go under the last part, so the numbering reads above them."""
     f = Fake()
     kb = {"inline_keyboard": [[{"text": "1 ✅", "callback_data": "a:1:5:done"}]]}
     text = "\n\n".join(f"🏷 <b>Блок {i}</b>\n" + "задача Олени " * 60 for i in range(12))
@@ -99,7 +99,7 @@ def test_reply_markup_goes_only_on_last_part(configured):
 
 
 def test_whoami_asks_for_messages_despite_button_filter(configured):
-    """Слухач кнопок просить лише callback_query, Telegram це запамʼятовує — whoami скидає фільтр."""
+    """The button listener asks only for callback_query, Telegram remembers that — whoami resets the filter."""
     f = Fake(reply={"ok": True, "result": []})
     tg_bot.whoami(transport=f)
     _, params = f.calls[0]

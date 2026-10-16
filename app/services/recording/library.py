@@ -1,21 +1,21 @@
-"""Реєстрація фіналізованого запису в Audio Library (audio_downloads).
+"""Registration of a finalized recording in the Audio Library (audio_downloads).
 
-Спільний хелпер для двох викликачів:
+A shared helper for two callers:
 
-- **серверний finalize-callback** (``app.py``) — авто-реєстрація одразу після
-  finalize, у т.ч. при recovery-фіналізації осиротілих сесій. Не залежить від
-  фронтенду: запис з'являється в бібліотеці навіть якщо вкладку закрито,
-  ``/save`` віддав 504 на довгому записі, або stop прийшов з іншого клієнта.
-- **HTTP-endpoint** ``POST /api/recording/<sid>/save`` — ручне «зберегти +
-  назвати + (опц.) транскрибувати».
+- **the server finalize callback** (``app.py``) — auto-registration right after
+  finalize, including recovery finalization of orphaned sessions. It does not depend on the
+  frontend: the recording appears in the library even if the tab is closed,
+  ``/save`` returned 504 on a long recording, or stop came from another client.
+- **the HTTP endpoint** ``POST /api/recording/<sid>/save`` — manual «save +
+  name + (optionally) transcribe».
 
-Раніше insert у ``audio_downloads`` жив ТІЛЬКИ в ``/save`` — будь-який розрив
-між finalize і фронтенд-раунд-тріпом лишав запис «сиротою» (фіналізований на
-диску, але невидимий у UI). Цей хелпер робить реєстрацію частиною серверного
-finalize, а ``/save`` лишається лише зручністю.
+Previously the insert into ``audio_downloads`` lived ONLY in ``/save`` — any break
+between finalize and the frontend round trip left the recording an "orphan" (finalized on
+disk but invisible in the UI). This helper makes registration part of the server
+finalize, and ``/save`` remains only a convenience.
 
-Ідемпотентний за ``youtube_id = f'recording_{session_id}'`` (UNIQUE-колонка),
-тому повторний finalize / save / recovery не плодять дублів.
+Idempotent by ``youtube_id = f'recording_{session_id}'`` (a UNIQUE column),
+so a repeated finalize / save / recovery does not produce duplicates.
 """
 from __future__ import annotations
 
@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 def _lookup_category(conn, session_id: str) -> Optional[int]:
-    """Напрямок запису — з copilot-сесії, привʼязаної до цього recording'у.
+    """The direction of a recording — from the copilot session bound to this recording.
 
-    Юзер задає напрямок при старті запису (зберігається у
-    ``copilot_sessions.category_id``). Беремо його, щоб recording-рядок мав
-    власну категорію ще до транскрипції (фільтр по напрямку в бібліотеці).
-    М'яко: якщо copilot_sessions немає / нема привʼязки — повертаємо None.
+    The user sets the direction at the start of the recording (stored in
+    ``copilot_sessions.category_id``). We take it so that the recording row has
+    its own category even before transcription (the filter by direction in the library).
+    Soft: if there is no copilot_sessions row / no binding — return None.
     """
     try:
         row = conn.execute(
@@ -50,11 +50,11 @@ def _lookup_category(conn, session_id: str) -> Optional[int]:
 
 
 def _find_existing(c, session_id: str, youtube_id: str):
-    """Рядок audio_downloads цього запису (за sid або youtube_id), або None.
+    """The audio_downloads row of this recording (by sid or youtube_id), or None.
 
-    Викликається двічі: до INSERT (швидкий шлях) і після програної гонки
-    вставки (auto-register при finalize vs ручний /save приходять з різних
-    потоків з розривом у мілісекунди — див. ON CONFLICT у register_recording).
+    Called twice: before the INSERT (fast path) and after a lost insert
+    race (auto-register at finalize vs manual /save come from different
+    threads milliseconds apart — see ON CONFLICT in register_recording).
     """
     return c.execute(
         'SELECT id, title, description, category_id, has_video FROM audio_downloads '
@@ -71,40 +71,40 @@ def register_recording(
     name: Optional[str] = None,
     category_id: Optional[int] = None,
 ) -> Optional[dict]:
-    """Ідемпотентно вписати фіналізований запис у ``audio_downloads``.
+    """Idempotently write a finalized recording into ``audio_downloads``.
 
     Args:
-        db_path: шлях до SQLite (``app.config['DATABASE']``).
-        session_id: ``rec_...`` sid сесії.
-        manifest: прочитаний manifest сесії (мусить мати ``final_mp3_path``).
-        name: явна назва. Якщо порожня — береться ``manifest.name`` →
+        db_path: path to SQLite (``app.config['DATABASE']``).
+        session_id: the ``rec_...`` sid of the session.
+        manifest: the read session manifest (must have ``final_mp3_path``).
+        name: explicit name. If empty — ``manifest.name`` is used →
             ``auto_name`` → fallback ``Запис <sid[:8]>``.
-        category_id: явний напрямок. Якщо None — підтягуємо з copilot-сесії
-            запису (``copilot_sessions.category_id``).
+        category_id: explicit direction. If None — taken from the recording's
+            copilot session (``copilot_sessions.category_id``).
 
     Returns:
         ``{download_id, name, created, file_path, duration_sec, file_size,
-        category_id}`` — ``created=True`` якщо рядок щойно вставлено, ``False``
-        якщо вже існував (інший викликач/попередній finalize/recovery). ``None``
-        якщо ``final.mp3`` відсутній (порожній запис) — реєструвати нічого.
+        category_id}`` — ``created=True`` if the row was just inserted, ``False``
+        if it already existed (another caller/an earlier finalize/recovery). ``None``
+        if ``final.mp3`` is missing (an empty recording) — nothing to register.
 
     Idempotency:
-        Ключ — ``youtube_id = 'recording_' + session_id`` (UNIQUE). Перед
-        insert'ом перевіряємо існуючий рядок за ``recording_session_id`` АБО
-        ``youtube_id``. Якщо існує і передали явну ``name`` — оновлюємо ``title``
-        (ручний save важливіший за авто-назву); порожню ``category_id`` теж
-        дозаповнюємо.
+        The key is ``youtube_id = 'recording_' + session_id`` (UNIQUE). Before the
+        insert we check for an existing row by ``recording_session_id`` OR
+        ``youtube_id``. If it exists and an explicit ``name`` was passed, we update ``title``
+        (a manual save outranks the auto name); an empty ``category_id`` is also
+        back-filled.
 
-        Race-safe: SELECT-перевірка не атомарна (auto-register при finalize і
-        ручний /save приходять з різних потоків з розривом у мілісекунди —
-        обидва бачать «рядка нема»), тому INSERT іде з ``ON CONFLICT(youtube_id)
-        DO NOTHING``: хто програв гонку — не падає з IntegrityError, а повторно
-        читає рядок переможця і йде existing-гілкою (``created=False``).
+        Race-safe: the SELECT check is not atomic (auto-register at finalize and
+        manual /save come from different threads milliseconds apart —
+        both see "no row"), so the INSERT goes with ``ON CONFLICT(youtube_id)
+        DO NOTHING``: whoever lost the race does not fail with IntegrityError, but re-reads
+        the winner's row and takes the existing branch (``created=False``).
     """
     final_mp3 = manifest.get('final_mp3_path')
     if not final_mp3 or not Path(final_mp3).is_file():
         logger.info(
-            "register_recording: final.mp3 відсутній для %s — нічого реєструвати",
+            "register_recording: final.mp3 is missing for %s — nothing to register",
             session_id,
         )
         return None
@@ -116,9 +116,9 @@ def register_recording(
         or manifest.get('auto_name')
         or f'Запис {session_id[:8]}'
     )
-    # editable-title-description-02: опис несе manifest (немає окремого
-    # аргумента, як у `name` — форма стоп-екрана пише його прямо в manifest
-    # через SessionStore.set_description() до виклику register_recording()).
+    # editable-title-description-02: the description is carried by the manifest (there is no separate
+    # argument like `name` — the stop-screen form writes it straight into the manifest
+    # via SessionStore.set_description() before register_recording() is called).
     manifest_description = manifest.get('description') or None
     duration = float(manifest.get('total_duration_sec', 0.0) or 0.0)
     file_size = Path(final_mp3).stat().st_size
@@ -137,11 +137,11 @@ def register_recording(
 
         download_id = None
         if existing is None:
-            # Вставка race-safe: auto-register при finalize і ручний /save
-            # можуть прийти з різних потоків з розривом у мілісекунди — обидва
-            # проходять SELECT вище як "нема рядка". ON CONFLICT DO NOTHING
-            # гарантує, що той хто програв гонку не падає з IntegrityError,
-            # а переходить на існуючий рядок (гілка existing нижче).
+            # The insert is race-safe: auto-register at finalize and manual /save
+            # may come from different threads milliseconds apart — both
+            # pass the SELECT above as "no row". ON CONFLICT DO NOTHING
+            # guarantees that the one who lost the race does not fail with IntegrityError,
+            # but moves to the existing row (the existing branch below).
             c.execute(
                 '''INSERT INTO audio_downloads
                      (youtube_url, youtube_id, title, description, author, duration,
@@ -173,8 +173,8 @@ def register_recording(
             conn.commit()
             if c.rowcount == 0:
                 logger.info(
-                    "register_recording: програно гонку вставки для %s "
-                    "(auto-finalize vs /save) — переходжу на існуючий рядок",
+                    "register_recording: lost the insert race for %s "
+                    "(auto-finalize vs /save) — switching to the existing row",
                     session_id,
                 )
                 existing = _find_existing(c, session_id, youtube_id)
@@ -182,9 +182,9 @@ def register_recording(
                 download_id = c.lastrowid
 
         if existing is not None:
-            # Вже зареєстровано. Якщо прийшла явна назва і вона інша —
-            # оновимо (ручний /save має пріоритет над авто-реєстрацією).
-            # Категорію дозаповнюємо, якщо її ще нема.
+            # Already registered. If an explicit name came and it differs —
+            # we update it (a manual /save takes priority over auto-registration).
+            # The category is back-filled if it is not there yet.
             sets, vals = [], []
             if explicit and existing['title'] != explicit:
                 sets.append('title = ?'); vals.append(explicit)
@@ -199,9 +199,9 @@ def register_recording(
             existing_has_video = existing['has_video'] if 'has_video' in existing.keys() else None
             if has_video and not existing_has_video:
                 sets.append('has_video = ?'); vals.append(has_video)
-            # primary_video_path стає відомий лише після finalize_video (це другий
-            # register, коли has_video вже =1) — тож бекфілимо незалежно від
-            # переходу has_video, інакше шлях ніколи не запишеться.
+            # primary_video_path becomes known only after finalize_video (this is the second
+            # register, when has_video is already =1) — so we backfill regardless of the
+            # has_video transition, otherwise the path would never be written.
             if primary:
                 sets.append('primary_video_path = ?'); vals.append(primary)
             if sets:
@@ -269,7 +269,7 @@ def register_recording(
             conn.commit()
 
     logger.info(
-        "Recording %s зареєстровано в бібліотеці: download_id=%s, name=%r, category=%s",
+        "Recording %s registered in the library: download_id=%s, name=%r, category=%s",
         session_id, download_id, resolved_name, category_id,
     )
     return {
@@ -284,16 +284,16 @@ def register_recording(
 
 
 # ============================================================
-# Одна назва запису в Бібліотеці, Медіатеці і сесії (recording-meta-suggest-02)
+# A single recording name in the Library, the Media library and the session (recording-meta-suggest-02)
 # ============================================================
 
 def linked_recording(conn, *, transcription_id: Optional[int] = None,
                      audio_id: Optional[int] = None) -> Optional[dict]:
-    """Звʼязка запису: ``{audio_id, session_id, transcription_ids}`` або None.
+    """The link of a recording: ``{audio_id, session_id, transcription_ids}`` or None.
 
-    None — це не запис (YouTube, файл, TG, документ): тоді PATCH поводиться,
-    як раніше. Аудіо ↔ транскрипт звʼязані за ``file_path`` (так само їх
-    зводить список Медіатеки), аудіо ↔ сесія — за ``recording_session_id``.
+    None means it is not a recording (YouTube, file, TG, document): then PATCH behaves
+    as before. Audio ↔ transcript are linked by ``file_path`` (the same way the Media library
+    list joins them), audio ↔ session — by ``recording_session_id``.
     """
     if transcription_id is not None:
         tx = conn.execute(
@@ -331,24 +331,24 @@ def linked_recording(conn, *, transcription_id: Optional[int] = None,
 
 
 def sync_recording_meta(conn, link: dict, updates: dict, *, store=None) -> list[int]:
-    """Розкласти вже нормалізовані ``title``/``description`` на всі боки запису.
+    """Spread the already normalized ``title``/``description`` over all sides of a recording.
 
-    ``updates`` — лише ті ключі, що прийшли в PATCH. ``audio_downloads.title``
-    — NOT NULL: порожня назва з Бібліотеки його не чіпає (там лишається
-    авто-імʼя), а ``manifest.name`` стає ``None`` (→ ``auto_name``).
-    Повертає id транскриптів, чия мета реально змінилась (для re-embed).
-    Збій manifest-а (сесію видалено, store вимкнено) логується і не валить PATCH:
-    база вже узгоджена, а manifest вторинний.
+    ``updates`` holds only the keys that came in the PATCH. ``audio_downloads.title``
+    is NOT NULL: an empty name from the Library does not touch it (the
+    auto name stays there), and ``manifest.name`` becomes ``None`` (→ ``auto_name``).
+    Returns the ids of transcripts whose meta really changed (for re-embed).
+    A manifest failure (session deleted, store disabled) is logged and does not fail the PATCH:
+    the DB is already consistent, and the manifest is secondary.
     """
     audio_set = {k: v for k, v in updates.items()
                  if k == 'description' or (k == 'title' and v)}
     if 'title' in updates and not updates['title'] and store is not None:
-        # Назву в Бібліотеці прибрали: у Медіатеці теж повертаємо авто-імʼя
-        # сесії, а не лишаємо стару власну (NOT NULL не дає поставити NULL).
+        # The name was removed in the Library: in the Media library we also restore the session's
+        # auto name, rather than keep the old custom one (NOT NULL does not allow setting NULL).
         try:
             auto = (store.read(link['session_id']) or {}).get('auto_name')
-        except Exception:  # noqa: BLE001 — нема manifest-а: лишаємо як є
-            logger.warning('sync_recording_meta: %s — manifest не прочитано',
+        except Exception:  # noqa: BLE001 — no manifest: leave as is
+            logger.warning('sync_recording_meta: %s — manifest could not be read',
                            link['session_id'], exc_info=True)
             auto = None
         if auto:
@@ -366,7 +366,7 @@ def sync_recording_meta(conn, link: dict, updates: dict, *, store=None) -> list[
             changed.append(tid)
 
     if store is None:
-        logger.info('sync_recording_meta: %s — store недоступний, manifest не оновлено',
+        logger.info('sync_recording_meta: %s — store unavailable, manifest not updated',
                     link['session_id'])
         return changed
     try:
@@ -374,7 +374,7 @@ def sync_recording_meta(conn, link: dict, updates: dict, *, store=None) -> list[
             store.set_name(link['session_id'], updates['title'])
         if 'description' in updates:
             store.set_description(link['session_id'], updates['description'])
-    except Exception:  # noqa: BLE001 — manifest вторинний, БД уже узгоджена
-        logger.warning('sync_recording_meta: %s — manifest не оновлено',
+    except Exception:  # noqa: BLE001 — the manifest is secondary, the DB is already consistent
+        logger.warning('sync_recording_meta: %s — manifest not updated',
                        link['session_id'], exc_info=True)
     return changed

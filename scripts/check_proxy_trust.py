@@ -1,11 +1,11 @@
-"""Карточка docs/defects/proxied-access-trusted-as-local.md: проксі не робить чужий вузол «локальним».
+"""Defect card docs/defects/proxied-access-trusted-as-local.md: a proxy does not make a foreign node "local".
 
-Використання: check_proxy_trust.py <auth.py> — вантажить файл як модуль гейта на мінімальному
-Flask-застосунку і грає запити так, як їх приводить `tailscale serve` (REMOTE_ADDR 127.0.0.1 +
-X-Forwarded-For tailnet-IP + Tailscale-User-Login власника). exit 1, якщо:
-  A. сервер vps-prod отримав /api/* без налаштувань (порожній RECALL_PROXY_ALLOWED_IPS);
-  B. vps-prod отримав /api/*, коли дозволено лише телефон;
-  C. зламано звичайний шлях: прямий localhost або дозволений телефон отримали 401.
+Usage: check_proxy_trust.py <auth.py> - loads the file as the gate module on a minimal
+Flask app and replays requests the way `tailscale serve` delivers them (REMOTE_ADDR 127.0.0.1 +
+X-Forwarded-For tailnet IP + the owner's Tailscale-User-Login). exit 1 if:
+  A. server vps-prod got /api/* with no settings (empty RECALL_PROXY_ALLOWED_IPS);
+  B. vps-prod got /api/* when only the phone is allowed;
+  C. the normal path is broken: direct localhost or the allowed phone got 401.
 """
 from __future__ import annotations
 
@@ -47,12 +47,12 @@ def main(argv: list[str]) -> int:
     client = _app(target)
     bad = []
     if _code(client, VPS) != 401:
-        bad.append("A: vps-prod через serve без налаштувань пройшов")
+        bad.append("A: vps-prod through serve got in with no settings")
     os.environ["RECALL_PROXY_ALLOWED_IPS"] = PHONE
     if _code(client, VPS) != 401:
-        bad.append("B: vps-prod пройшов, коли дозволено лише телефон")
+        bad.append("B: vps-prod got in when only the phone is allowed")
     if _code(client) != 200 or _code(client, PHONE) != 200:
-        bad.append("C: прямий localhost або дозволений телефон отримав відмову")
+        bad.append("C: direct localhost or the allowed phone was refused")
     for b in bad:
         print(f"{target}: {b}")
     return 1 if bad else 0

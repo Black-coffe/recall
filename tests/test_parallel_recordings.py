@@ -1,13 +1,13 @@
-"""Дві записи наскрізь, офлайн (parallel-recordings-app-audio-09).
+"""Two recordings end to end, offline (parallel-recordings-app-audio-09).
 
-Справжній `RecordingService` (фейкові recorder / app-source / writer, тимчасовий
-`SessionStore`) під справжніми блюпринтами recording + copilot + transcription на
-Flask test client, справжній `CopilotService` на тимчасовій БД і `mcp_server` з
-`_api`, спрямованим у той самий test client. Сценарій власника в мініатюрі:
-конференція (системний звук без мікрофона) + робочий дзвінок (мікрофон + система
-без Zoom). Без WASAPI, без torch, без живої БД, без імпорту app.py.
+A real `RecordingService` (fake recorder / app-source / writer, a temporary
+`SessionStore`) under the real recording + copilot + transcription blueprints on a
+Flask test client, a real `CopilotService` on a temporary DB, and `mcp_server` with
+`_api` pointed at the same test client. The owner's scenario in miniature:
+a conference (system audio without a microphone) + a work call (microphone + system
+without Zoom). No WASAPI, no torch, no live DB, no import of app.py.
 
-Сесії тут позначені як A/B у текстах; справжні sid — `rec_<hex>` від сервісу.
+The sessions here are marked A/B in the texts; the real sids are `rec_<hex>` from the service.
 """
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ from app.services.copilot.service import CopilotService
 from app.services.metrics import MetricsRegistry
 from app.services.recording.service import RecordingService
 from app.services.recording.session_store import STATUS_FINALIZED, SessionStore
-# Фейки й autouse-фікстури з тестів сервісу (reset_fakes скидає лічильники
-# інстансів, fake_device_params підміняє WASAPI-запит параметрів девайса).
-from tests.test_recording_service import (  # noqa: F401 — фікстури реєструються імпортом
+# Fakes and autouse fixtures from the service tests (reset_fakes resets the instance
+# counters, fake_device_params replaces the WASAPI request for device parameters).
+from tests.test_recording_service import (  # noqa: F401 — fixtures are registered by the import
     FakeAppSource,
     FakeRecorder,
     FakeWriter,
@@ -43,15 +43,15 @@ from tests.test_recording_service import (  # noqa: F401 — фікстури р
 )
 
 
-SYS_IDX = 7   # loopback-ендпоінт конференції (A)
-MIC_IDX = 3   # мікрофон робочого дзвінка (B)
+SYS_IDX = 7   # the conference loopback endpoint (A)
+MIC_IDX = 3   # the work call microphone (B)
 LEGACY_CODES = ('WRONG_SESSION', 'SESSION_CONFLICT')
 
 
 # ---------------------------------------------------------------- fakes
 
 class _Broker:
-    """SSE-брокер, що лише запамʼятовує публікації."""
+    """An SSE broker that only remembers publications."""
 
     def __init__(self):
         self.published: list[tuple[str, str, dict]] = []
@@ -64,7 +64,7 @@ class _Broker:
 
 
 class _LiveWorker:
-    """LiveTranscribeWorker без whisper: start/stop/is_active/get_preview."""
+    """LiveTranscribeWorker without whisper: start/stop/is_active/get_preview."""
 
     def __init__(self):
         self.started: list[tuple[str, str]] = []
@@ -113,7 +113,7 @@ class _Whisper:
 
 
 class _RecordingClient:
-    """Test client, що зберігає текст кожної відповіді (перевірка legacy-кодів)."""
+    """A test client that keeps the text of every response (a check for legacy codes)."""
 
     def __init__(self, client):
         self._c = client
@@ -168,13 +168,13 @@ def env(tmp_path: Path, monkeypatch):
     ):
         monkeypatch.setattr(state, name, value)
 
-    # Звучать зараз: Zoom і Chrome (C3), без pycaw.
+    # Sounding now: Zoom and Chrome (C3), without pycaw.
     monkeypatch.setattr(
         'app.services.recording.app_audio._default_enumerate_sessions',
         lambda: [(4242, 'active', 'Speakers', 'zoom.exe'),
                  (4343, 'active', 'Speakers', 'chrome.exe')],
     )
-    # live-ask: без Ollama, лише лічильник звернень.
+    # live-ask: without Ollama, just a call counter.
     asks: list[dict] = []
 
     def fake_ask(db, question, **kw):
@@ -182,7 +182,7 @@ def env(tmp_path: Path, monkeypatch):
         return {'available': True, 'answer': 'ok'}
 
     monkeypatch.setattr(cp_bp.live_ask, 'ask_local', fake_ask)
-    # Діаризація для source_type=recording — вимкнена, pyannote не чіпаємо.
+    # Diarization for source_type=recording is off, we do not touch pyannote.
     from app.services import diarization_service as ds
     off = SimpleNamespace(is_available=lambda: False, unavailability_reason=lambda: 'test')
     monkeypatch.setattr(ds.DiarizationService, 'get_instance', classmethod(lambda cls: off))
@@ -194,7 +194,7 @@ def env(tmp_path: Path, monkeypatch):
         app.register_blueprint(bp)
     client = _RecordingClient(app.test_client())
 
-    # MCP → той самий Flask-процес; розбір відповіді — справжній _handle_resp.
+    # MCP → the same Flask process; response parsing is the real _handle_resp.
     mcp_calls: list[tuple[str, str]] = []
     hooks: dict = {}
 
@@ -253,13 +253,13 @@ def _wait_for(pred, timeout=2.0):
 def _no_legacy_codes(env):
     for body in env.client.bodies:
         for code in LEGACY_CODES:
-            assert code not in body, f'{code} у відповіді: {body[:300]}'
+            assert code not in body, f'{code} in the response: {body[:300]}'
 
 
 # ---------------------------------------------------------------- scenario
 
 def test_owner_scenario_two_recordings_end_to_end(env):
-    # --- A: конференція — лише системний звук (all на ендпоінті), з копілотом.
+    # --- A: the conference — system audio only (all on the endpoint), with the copilot.
     ra = _start(env, system_device_index=SYS_IDX, copilot={})
     assert ra.status_code == 200
     A = ra.get_json()['session_id']
@@ -267,7 +267,7 @@ def test_owner_scenario_two_recordings_end_to_end(env):
     a_orig = [r for r in FakeRecorder.instances if r.device_index == SYS_IDX]
     assert len(a_orig) == 1
 
-    # --- B стартує, поки A пише: мікрофон + система без Zoom, теж просить копілот.
+    # --- B starts while A is recording: microphone + system without Zoom, also asks for the copilot.
     rb = _start(env, mic_device_index=MIC_IDX,
                 system_source={'mode': 'exclude', 'apps': ['zoom.exe']}, copilot={})
     assert rb.status_code == 200
@@ -278,14 +278,14 @@ def test_owner_scenario_two_recordings_end_to_end(env):
     assert env.service.active_session_ids() == [A, B]
     assert _copilot_rows(env.db) == {A: 'active'}
 
-    # --- хто пише Zoom: лише A (B його виключив).
+    # --- who records Zoom: only A (B excluded it).
     apps = env.client.get('/api/recording/apps').get_json()
     assert apps['available'] is True
     by_exe = {a['exe']: a for a in apps['apps']}
     assert by_exe['zoom.exe']['recorded_by'] == [A]
     assert by_exe['chrome.exe']['recorded_by'] == [A, B]
 
-    # --- A звужується до Zoom на льоту.
+    # --- A narrows to Zoom on the fly.
     r = env.client.post(f'/api/recording/{A}/system-source',
                         json={'mode': 'include', 'apps': ['zoom.exe']})
     assert r.status_code == 200, r.get_json()
@@ -299,13 +299,13 @@ def test_owner_scenario_two_recordings_end_to_end(env):
     a_src = FakeAppSource.app_instances[-1]
     assert a_src.spec.mode == 'include' and a_src.spec.apps == ('zoom.exe',)
 
-    # --- копілот переїжджає A → B.
+    # --- the copilot moves A → B.
     r = env.client.post('/api/copilot/move', json={'from_session_id': A, 'to_session_id': B})
     assert r.status_code == 200 and r.get_json()['success'] is True
     assert _copilot_rows(env.db) == {A: 'ended', B: 'active'}
     assert env.cworker.stopped == [A] and env.cworker.started[-1] == B
 
-    # --- стоп B; під час стопу (під lock'ом B) A мусить і далі писати кадри.
+    # --- stop B; during the stop (under B's lock) A must keep recording frames.
     a_writer = env.writers[str(env.store.pcm_path(A, 'system'))]
     b_mic = next(r for r in FakeRecorder.instances if r.device_index == MIC_IDX)
     seen_during_b_stop = {}
@@ -320,13 +320,13 @@ def test_owner_scenario_two_recordings_end_to_end(env):
     b_mic.close = slow_close
     r = env.client.post(f'/api/recording/{B}/stop', json={})
     assert r.status_code == 200 and r.get_json()['status'] == 'stopping'
-    assert seen_during_b_stop == {'grew': True}, "flush-потік A стояв, поки зупинявся B"
+    assert seen_during_b_stop == {'grew': True}, "A's flush thread stood still while B was stopping"
     assert env.store.read(B)['status'] == 'stopping'
     st_a = env.client.get(f'/api/recording/{A}/state').get_json()['state']
     assert st_a['status'] == 'recording' and st_a['is_active'] is True
     assert env.service.active_session_ids() == [A]
 
-    # --- Zoom закрився → UI повертає A на весь системний звук.
+    # --- Zoom closed → the UI returns A to the whole system audio.
     n_rec = len(FakeRecorder.instances)
     r = env.client.post(f'/api/recording/{A}/system-source',
                         json={'mode': 'all', 'reason': 'auto_restore'})
@@ -391,7 +391,7 @@ def test_two_live_recordings_mcp_never_guesses(env):
     assert ask['error_code'] == 'AMBIGUOUS_SESSION'
     assert [s['session_id'] for s in ask['sessions']] == [A, B]
 
-    # Сервер сам теж не вгадує: live-ask без session_id при двох записах → 409.
+    # The server does not guess either: live-ask without a session_id with two recordings → 409.
     direct = m._api('POST', '/api/copilot/live-ask', body={'question': 'q', 'session_id': None})
     assert direct['status_code'] == 409 and direct['error_code'] == 'AMBIGUOUS_SESSION'
     assert env.asks == []
@@ -399,8 +399,8 @@ def test_two_live_recordings_mcp_never_guesses(env):
 
 
 def test_ask_live_passes_server_ambiguity_through(env):
-    """Гонка: на момент резолву записів нуль (MCP шле session_id=None), до
-    live-ask стартують два — 409 сервера доходить до агента як AMBIGUOUS_SESSION."""
+    """A race: at the moment of resolving the recordings there are zero (MCP sends session_id=None), by the time of
+    live-ask two have started — the server's 409 reaches the agent as AMBIGUOUS_SESSION."""
     ids: list[str] = []
 
     def two_start():
@@ -429,8 +429,8 @@ def test_ask10_stop_waits_only_own_live_feed_and_transcribe_not_refused(env, mon
 
     assert int(by_name()['WHISPER_MAX_PARALLEL'].default) == 1
 
-    # B фіналізовано (finalize-pipeline тут не крутиться) — повна транскрипція
-    # стартує одразу, поки A ще пише.
+    # B is finalized (the finalize pipeline does not run here) — the full transcription
+    # starts at once, while A is still recording.
     mp3 = env.tmp / 'b_final.mp3'
     mp3.write_bytes(b'fake mp3')
 
@@ -444,7 +444,7 @@ def test_ask10_stop_waits_only_own_live_feed_and_transcribe_not_refused(env, mon
     assert r.status_code == 200, r.get_data(as_text=True)[:300]
     assert r.get_json().get('transcription_id')
     assert env.whisper.calls == [str(mp3)]
-    assert env.whisper.decode_options == [{}], 'K1: шлях запису передає опції, прапори вимкнені'
+    assert env.whisper.decode_options == [{}], 'K1: the recording path passes options, the flags are off'
     assert env.service.active_session_ids() == [A]
     _no_legacy_codes(env)
 

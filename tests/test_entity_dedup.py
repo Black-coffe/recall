@@ -1,18 +1,18 @@
-"""Юніт-тести offline fuzzy-dedup сутностей (app/services/entity_dedup.py) — T6.7.
+"""Unit tests of offline fuzzy dedup of entities (app/services/entity_dedup.py) — T6.7.
 
-Офлайн, реальна (tmp_path) SQLite БД через init_database (той самий патерн, що
-tests/test_enrichment.py) — БЕЗ Claude API/мережі і БЕЗ реальної e5-моделі:
-embeddings.embed_texts підмінюється (monkeypatch) детермінованими векторами,
-щоб перевірити логіку пошуку кандидатів/порогу без завантаження torch/e5.
+Offline, a real (tmp_path) SQLite DB via init_database (the same pattern as
+tests/test_enrichment.py) — WITHOUT the Claude API/network and WITHOUT the real e5 model:
+embeddings.embed_texts is replaced (monkeypatch) with deterministic vectors,
+to check the logic of candidate search/threshold without loading torch/e5.
 
-Покриває:
-  - find_merge_candidates: пари понад поріг, поділ за type, поріг фільтрує,
-    RuntimeError коли embeddings недоступні.
-  - merge_entities: перенесення aliases/meeting_entities (сумування при
-    конфлікті)/action_items/role/description/speaker_id, аудит-слід
-    metadata_json, видалення merge_id, перерахунок агрегатів keep_id,
-    type-mismatch/keep==merge/not_found помилки, ідемпотентність повторного
-    merge (вже видаленого merge_id).
+Covers:
+  - find_merge_candidates: pairs above the threshold, split by type, the threshold filters,
+    RuntimeError when embeddings are unavailable.
+  - merge_entities: transfer of aliases/meeting_entities (summing on
+    conflict)/action_items/role/description/speaker_id, the metadata_json
+    audit trail, deletion of merge_id, recomputation of keep_id aggregates,
+    type-mismatch/keep==merge/not_found errors, idempotence of a repeated
+    merge (of an already deleted merge_id).
 """
 from __future__ import annotations
 
@@ -109,15 +109,15 @@ def _insert_action_item(db_path: str, tid: int, task: str, owner_entity_id=None,
 
 
 def _fake_embed_factory(vec_map: dict[str, list[float]], dim: int = 4):
-    """Повертає fake embed_texts(names) -> np.ndarray[N, dim], L2-нормалізовані,
-    за заданим name -> raw vector словником (невідомі імена -> ортогональний
-    випадковий вектор за хешем імені, щоб не колізувати з мапою)."""
+    """Returns a fake embed_texts(names) -> np.ndarray[N, dim], L2-normalized,
+    from the given name -> raw vector dict (unknown names -> an orthogonal
+    pseudo-random vector by the name hash, so as not to collide with the map)."""
     def _fake_embed_texts(names, batch_size=32):
         rows = []
         for n in names:
             raw = vec_map.get(n)
             if raw is None:
-                # детермінований "унікальний" вектор для невідомого імені
+                # a deterministic "unique" vector for an unknown name
                 h = abs(hash(n)) % 1000
                 raw = [0.0] * dim
                 raw[h % dim] = 1.0
@@ -140,8 +140,8 @@ def test_find_merge_candidates_pairs_similar_names(db_path, monkeypatch):
 
     vec_map = {
         "Олена Петренко": [1.0, 0.0, 0.0, 0.0],
-        "Олена": [0.95, 0.05, 0.0, 0.0],          # висока схожість з "Олена Петренко"
-        "Іван Коваль": [0.0, 0.0, 1.0, 0.0],       # ортогональний, не кандидат
+        "Олена": [0.95, 0.05, 0.0, 0.0],          # high similarity with "Олена Петренко"
+        "Іван Коваль": [0.0, 0.0, 1.0, 0.0],       # orthogonal, not a candidate
     }
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_factory(vec_map))
@@ -164,12 +164,12 @@ def test_find_merge_candidates_threshold_filters(db_path, monkeypatch):
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_factory(vec_map))
 
-    # Поріг вище фактичної схожості -> нема кандидатів.
+    # Threshold above the actual similarity -> no candidates.
     assert entity_dedup.find_merge_candidates(db_path, etype="person", threshold=0.999) == []
 
 
 def test_find_merge_candidates_separates_by_type(db_path, monkeypatch):
-    # Однакові вектори, але РІЗНІ типи -> не повинні зіставлятись одне з одним.
+    # Identical vectors, but DIFFERENT types -> must not be matched with each other.
     _insert_entity(db_path, "person", "Ромашка")
     _insert_entity(db_path, "org", "Ромашка")
     vec_map = {"Ромашка": [1.0, 0.0, 0.0, 0.0]}
@@ -186,8 +186,8 @@ def test_find_merge_candidates_sorted_desc_and_limit(db_path, monkeypatch):
     _insert_entity(db_path, "person", "C")
     vec_map = {
         "A": [1.0, 0.0, 0.0, 0.0],
-        "B": [0.99, 0.01, 0.0, 0.0],   # A-B дуже схожі
-        "C": [0.90, 0.10, 0.0, 0.0],   # A-C менш схожі (але й досі > поріг)
+        "B": [0.99, 0.01, 0.0, 0.0],   # A-B very similar
+        "C": [0.90, 0.10, 0.0, 0.0],   # A-C less similar (but still > threshold)
     }
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_factory(vec_map))
@@ -204,7 +204,7 @@ def test_find_merge_candidates_sorted_desc_and_limit(db_path, monkeypatch):
 
 def test_find_merge_candidates_raises_when_embeddings_unavailable(db_path, monkeypatch):
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
-    monkeypatch.setattr(embeddings, "unavailability_reason", lambda: "torch не встановлено")
+    monkeypatch.setattr(embeddings, "unavailability_reason", lambda: "torch is not installed")
     with pytest.raises(RuntimeError):
         entity_dedup.find_merge_candidates(db_path)
 
@@ -249,10 +249,10 @@ def test_merge_entities_full_roundtrip(db_path):
 
     t1 = _insert_transcription(db_path, source_name="call1.mp3")
     t2 = _insert_transcription(db_path, source_name="call2.mp3")
-    # t1: обидві сутності згадані у ТОМУ Ж мітингу -> конфлікт при переносі, сумуємо.
+    # t1: both entities mentioned in THE SAME meeting -> a conflict on transfer, we sum.
     _insert_meeting_entity(db_path, t1, keep, mentions=2, salience=0.4)
     _insert_meeting_entity(db_path, t1, merge, mentions=3, salience=0.7)
-    # t2: лише merge -> просте перенесення entity_id.
+    # t2: only merge -> a plain entity_id transfer.
     _insert_meeting_entity(db_path, t2, merge, mentions=1, salience=0.2)
 
     ai_id = _insert_action_item(db_path, t1, "Підготувати звіт", owner_entity_id=merge)
@@ -263,22 +263,22 @@ def test_merge_entities_full_roundtrip(db_path):
     assert res["merge_id"] == merge
 
     with get_db_connection(db_path) as conn:
-        # merge-сутність видалена
+        # the merge entity is deleted
         assert conn.execute("SELECT id FROM entities WHERE id = ?", (merge,)).fetchone() is None
 
         keep_row = conn.execute("SELECT * FROM entities WHERE id = ?", (keep,)).fetchone()
-        assert keep_row["role"] == "ПМ"                 # успадковано, бо в keep було порожньо
+        assert keep_row["role"] == "ПМ"                 # inherited, because keep was empty
         assert keep_row["description"] == "коротко"
         meta = json.loads(keep_row["metadata_json"])
         assert meta["merged_from"][0]["id"] == merge
 
-        # aliases: canonical "Олена" + "О. Петренко" тепер aliases keep
+        # aliases: canonical "Олена" + "О. Петренко" are now aliases of keep
         aliases = {r["normalized_alias"] for r in conn.execute(
             "SELECT normalized_alias FROM entity_aliases WHERE entity_id = ?", (keep,))}
         assert _normalize("Олена") in aliases
         assert _normalize("О. Петренко") in aliases
 
-        # meeting_entities: t1 — сумовано (2+3=5), t2 — перенесено
+        # meeting_entities: t1 — summed (2+3=5), t2 — transferred
         me_t1 = conn.execute(
             "SELECT mention_count, salience FROM meeting_entities "
             "WHERE transcription_id = ? AND entity_id = ?", (t1, keep)).fetchone()
@@ -288,18 +288,18 @@ def test_merge_entities_full_roundtrip(db_path):
             "SELECT mention_count FROM meeting_entities "
             "WHERE transcription_id = ? AND entity_id = ?", (t2, keep)).fetchone()
         assert me_t2["mention_count"] == 1
-        # жодних залишкових рядків на видалений merge_id
+        # no leftover rows on the deleted merge_id
         leftover = conn.execute(
             "SELECT COUNT(*) AS n FROM meeting_entities WHERE entity_id = ?", (merge,)
         ).fetchone()["n"]
         assert leftover == 0
 
-        # action_items: owner переприязано
+        # action_items: the owner is reassigned
         ai_row = conn.execute("SELECT owner_entity_id FROM action_items WHERE id = ?",
                               (ai_id,)).fetchone()
         assert ai_row["owner_entity_id"] == keep
 
-        # агрегати перераховані: meeting_count по meeting_entities keep = 2 (t1,t2),
+        # aggregates recomputed: meeting_count by keep's meeting_entities = 2 (t1,t2),
         # mention_count = 5 + 1 = 6
         assert keep_row["meeting_count"] == 2
         assert keep_row["mention_count"] == 6
@@ -328,7 +328,7 @@ def test_merge_entities_is_idempotent_on_repeat(db_path):
     first = entity_dedup.merge_entities(db_path, keep, merge)
     assert first["status"] == "merged"
 
-    # Повторний merge вже неіснуючого merge_id -> not_found, без падіння/побічних ефектів.
+    # A repeated merge of an already nonexistent merge_id -> not_found, no crash/side effects.
     second = entity_dedup.merge_entities(db_path, keep, merge)
     assert second["status"] == "not_found"
 
@@ -338,11 +338,11 @@ def test_merge_entities_is_idempotent_on_repeat(db_path):
 
 
 # ============================================================
-# Кросс-типове злиття (12.08.2026)
+# Cross-type merge (12.08.2026)
 # ============================================================
 
 def test_cross_type_merge_is_refused_by_default(db_path):
-    """Заборона лишається за замовчуванням: для ембединг-кандидатів вона слушна."""
+    """The ban stays by default: it is right for embedding candidates."""
     a = _insert_entity(db_path, "person", "Хтось")
     b = _insert_entity(db_path, "org", "Хтось Інк")
 
@@ -352,11 +352,11 @@ def test_cross_type_merge_is_refused_by_default(db_path):
 
 
 def test_cross_type_merge_joins_one_thing_written_twice(db_path):
-    """Головний клас дублів архіву: одна річ заведена і як project, і як org.
+    """The main class of archive duplicates: one thing registered both as project and as org.
 
-    Збагачення створює сутність окремо в кожному типі, тому «Acmecorp» жив як
-    project (114 звʼязків) і як org (78) — 133 такі групи зі 152. Тип лишається
-    від `keep_id`, звʼязки й задачі переїжджають, merge-рядок зникає.
+    Enrichment creates the entity separately in each type, so «Acmecorp» lived as
+    project (114 links) and as org (78) — 133 such groups out of 152. The type stays
+    from `keep_id`, links and tasks move over, the merge row disappears.
     """
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "AcmeCorp", role="портфельна компанія")
@@ -373,8 +373,8 @@ def test_cross_type_merge_joins_one_thing_written_twice(db_path):
     with get_db_connection(db_path) as conn:
         row = conn.execute("SELECT type, meeting_count FROM entities WHERE id = ?",
                            (keep,)).fetchone()
-        assert row["type"] == "project"                     # тип від keep
-        assert row["meeting_count"] == 2                    # обидві зустрічі
+        assert row["type"] == "project"                     # type from keep
+        assert row["meeting_count"] == 2                    # both meetings
         assert conn.execute("SELECT COUNT(*) FROM entities WHERE id = ?",
                             (gone,)).fetchone()[0] == 0
         assert conn.execute("SELECT owner_entity_id FROM action_items WHERE id = ?",
@@ -384,15 +384,15 @@ def test_cross_type_merge_joins_one_thing_written_twice(db_path):
         assert {"AcmeCorp", "Acme Corp"} <= aliases
         meta = json.loads(conn.execute("SELECT metadata_json FROM entities WHERE id = ?",
                                        (keep,)).fetchone()[0])
-        assert meta["merged_from"][0]["type"] == "org"      # слід типу, що зник
+        assert meta["merged_from"][0]["type"] == "org"      # trace of the type that vanished
 
 
 def test_cross_type_merge_does_not_double_count_shared_meeting(db_path):
-    """Спільна зустріч: ті самі згадки, на які дивляться два рядки графа.
+    """A shared meeting: the same mentions seen by two graph rows.
 
-    Однотипний merge складає mention_count — там дві РІЗНІ назви («Олена
-    Петренко» і «Олена»), і сума осмислена. У кросс-типовому це одне написання,
-    тож сума рахувала б ті самі слова двічі: беремо MAX.
+    A same-type merge sums mention_count — there are two DIFFERENT names («Олена Петренко»
+    and «Олена»), and the sum is meaningful. In a cross-type one it is one spelling,
+    so a sum would count the same words twice: we take MAX.
     """
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "AcmeCorp")
@@ -405,13 +405,13 @@ def test_cross_type_merge_does_not_double_count_shared_meeting(db_path):
     with get_db_connection(db_path) as conn:
         assert conn.execute("SELECT mention_count FROM meeting_entities "
                             "WHERE entity_id = ? AND transcription_id = ?",
-                            (keep, t)).fetchone()[0] == 6      # MAX, не 10
+                            (keep, t)).fetchone()[0] == 6      # MAX, not 10
         assert conn.execute("SELECT meeting_count FROM entities WHERE id = ?",
                             (keep,)).fetchone()[0] == 1
 
 
 def test_same_type_merge_still_sums_mentions(db_path):
-    """Стара поведінка в межах типу не змінилась."""
+    """The old behavior within a type has not changed."""
     keep = _insert_entity(db_path, "person", "Олена Петренко")
     gone = _insert_entity(db_path, "person", "Олена")
     t = _insert_transcription(db_path, source_name="shared.mp3")
@@ -427,14 +427,14 @@ def test_same_type_merge_still_sums_mentions(db_path):
 
 
 def test_merge_survives_the_next_enrichment(db_path):
-    """Злиття має «прилипати»: наступний enrich не сміє відтворити злитий рядок.
+    """A merge must "stick": the next enrich must not recreate the merged row.
 
-    `_find_entity` шукав аліас із перевіркою типу, а `normalized_alias`
-    унікальний глобально. Тому після злиття org→project написання належало
-    project, org-гілка не знаходила нічого і створювала рядок НАНОВО — причому
-    з нулем аліасів (усі `INSERT OR IGNORE` спотикались об глобальний UNIQUE).
-    Тобто масовий прохід по 133 групах відкотився б сам, а воскреслі рядки
-    стали б недосяжними для пошуку за псевдонімом.
+    `_find_entity` looked up an alias with a type check, and `normalized_alias` is
+    unique globally. So after an org→project merge the spelling belonged to
+    project, the org branch found nothing and created the row ANEW — and
+    with zero aliases (all `INSERT OR IGNORE` stumbled on the global UNIQUE).
+    I.e. the mass pass over the 133 groups would have rolled itself back, and the resurrected rows
+    would have become unreachable for search by alias.
     """
     from app.services import enrichment
 
@@ -451,12 +451,12 @@ def test_merge_survives_the_next_enrichment(db_path):
         conn.commit()
         types = [r["type"] for r in c.execute("SELECT type FROM entities")]
 
-    assert again == keep                       # знайшлась злита, а не створилась нова
+    assert again == keep                       # the merged one was found, not a new one created
     assert types == ["project"]
 
 
 def test_person_and_non_person_never_merge(db_path):
-    """«Ткачук» — і людина, і агентство. Прапорець на це права не дає."""
+    """«Ткачук» is both a person and an agency. The flag gives no right to this."""
     person = _insert_entity(db_path, "person", "Ткачук")
     org = _insert_entity(db_path, "org", "Ткачук")
 
@@ -470,11 +470,11 @@ def test_person_and_non_person_never_merge(db_path):
 
 
 def test_cross_type_with_different_names_still_sums(db_path):
-    """MAX вирішує ЗБІГ НАПИСАННЯ, а не різниця типів.
+    """MAX is decided by a SPELLING MATCH, not by a difference of types.
 
-    «Acmecorp» і «Acmecorp Ltd» — різні рядки, які Клод рахував окремо на тій
-    самій зустрічі. Якби MAX вмикався від самого факту різних типів, згадки
-    занижувались би, а вони тягнуть ранжування і фільтри «від N згадок».
+    «Acmecorp» and «Acmecorp Ltd» are different rows that Claude counted separately on the same
+    meeting. If MAX switched on from the mere fact of different types, mentions
+    would be understated, and they drive ranking and "from N mentions" filters.
     """
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "Acmecorp Ltd")
@@ -491,11 +491,11 @@ def test_cross_type_with_different_names_still_sums(db_path):
 
 
 def test_merge_carries_link_provenance(db_path):
-    """`source` їде разом зі звʼязком: інакше рядок стає привидом для tg_entities.
+    """`source` travels with the link: otherwise the row becomes a ghost for tg_entities.
 
-    Чистка телеграмних звʼязків іде запитом `DELETE … WHERE source = ?`, тож
-    звʼязок, що втратив походження, переживає перебудову, а `stats()` зараховує
-    його Клоду. В архіві, де 88% — Telegram, це не дрібниця.
+    The cleanup of Telegram links goes by the query `DELETE … WHERE source = ?`, so
+    a link that lost its origin survives a rebuild, and `stats()` credits
+    it to Claude. In an archive where 88% is Telegram, this is not a small thing.
     """
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "AcmeCorp")
@@ -514,7 +514,7 @@ def test_merge_carries_link_provenance(db_path):
 
 
 def test_twins_finder_surfaces_what_the_flag_exists_for(db_path):
-    """Кросс-типові пари має бути видно інструментом, а не лише руками в SQL."""
+    """Cross-type pairs must be visible to the tool, not only by hand in SQL."""
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "AcmeCorp")
     _insert_entity(db_path, "person", "Ткачук")
@@ -525,18 +525,18 @@ def test_twins_finder_surfaces_what_the_flag_exists_for(db_path):
 
     groups = entity_dedup.find_cross_type_twins(db_path)
 
-    assert len(groups) == 1                                  # person-пара прихована
-    assert groups[0]["keep"]["id"] == keep                   # keep — за звʼязками
+    assert len(groups) == 1                                  # the person pair is hidden
+    assert groups[0]["keep"]["id"] == keep                   # keep — by links
     assert [m["id"] for m in groups[0]["merge"]] == [gone]
     assert len(entity_dedup.find_cross_type_twins(db_path, include_person=True)) == 2
 
 
 def test_stickiness_does_not_swallow_pairs_left_unmerged(db_path):
-    """Липкість працює лише там, де злиття справді було.
+    """Stickiness works only where a merge really happened.
 
-    Спокуслива правка — шукати аліас без перевірки типу взагалі. Тоді org
-    «Ткачук» знайшов би людину Ткачук, і 8 пар, які власник свідомо лишив
-    нерозділеними, схлопнулись би самі, без жодного merge.
+    A tempting edit is to look up an alias with no type check at all. Then the org
+    «Ткачук» would find the person «Ткачук», and the 8 pairs the owner deliberately left
+    unmerged would collapse on their own, without any merge.
     """
     from app.services import enrichment
 
@@ -546,7 +546,7 @@ def test_stickiness_does_not_swallow_pairs_left_unmerged(db_path):
         conn.commit()
 
         found = enrichment._find_entity(c, "org", "ткачук")
-        assert found is None                       # людина не віддається як org
+        assert found is None                       # a person is not handed out as an org
 
         org = enrichment._upsert_entity(c, "org", "Ткачук")
         conn.commit()
@@ -555,12 +555,12 @@ def test_stickiness_does_not_swallow_pairs_left_unmerged(db_path):
 
 
 def test_keep_is_chosen_by_type_not_by_link_count(db_path):
-    """Тип вирішує видимість, тож `topic` не може стати головним над `project`.
+    """Type decides visibility, so `topic` cannot become the primary over `project`.
 
-    `scope.resolve_scope` бере project|org|person і не бачить topic. Коли keep
-    обирався за звʼязками, сім проєктів живого архіву поглинулись темами і
-    зникли зі зрізу за проєктом — при тому, що звʼязки й так переїжджають на
-    keep, тобто вибір за типом нічого не втрачає.
+    `scope.resolve_scope` takes project|org|person and does not see topic. When keep
+    was chosen by links, seven projects of the live archive were absorbed by topics and
+    vanished from the project slice — although links move to
+    keep anyway, i.e. choosing by type loses nothing.
     """
     topic = _insert_entity(db_path, "topic", "task tracker")
     project = _insert_entity(db_path, "project", "Task Tracker")
@@ -568,7 +568,7 @@ def test_keep_is_chosen_by_type_not_by_link_count(db_path):
     t2 = _insert_transcription(db_path, source_name="b.mp3")
     t3 = _insert_transcription(db_path, source_name="c.mp3")
     for t in (t1, t2, t3):
-        _insert_meeting_entity(db_path, t, topic)      # у теми звʼязків більше
+        _insert_meeting_entity(db_path, t, topic)      # the topic has more links
     _insert_meeting_entity(db_path, t1, project)
 
     group = entity_dedup.find_cross_type_twins(db_path)[0]
@@ -578,7 +578,7 @@ def test_keep_is_chosen_by_type_not_by_link_count(db_path):
 
 
 def test_person_in_group_does_not_hide_the_mergeable_rest(db_path):
-    """{person, org, project} під одним іменем: пару org+project видно."""
+    """{person, org, project} under one name: the org+project pair is visible."""
     _insert_entity(db_path, "person", "Ткачук")
     org = _insert_entity(db_path, "org", "Ткачук")
     project = _insert_entity(db_path, "project", "Ткачук")
@@ -601,8 +601,8 @@ def _rowcount(db_path: str, table: str) -> int:
 # ============================================================
 
 def test_alias_cross_type_finds_wynn_dubai(db_path):
-    """«WYNN Дубай» — аліас org #670 і водночас канонічна назва project #2301
-    (наскрізний трейсер-кейс з історії)."""
+    """«WYNN Дубай» is an alias of org #670 and at the same time the canonical name of project #2301
+    (the end-to-end tracer case from the story)."""
     org = _insert_entity(db_path, "org", "Wynn Casino Las Vegas")
     _insert_alias(db_path, org, "WYNN Дубай")
     project = _insert_entity(db_path, "project", "WYNN Дубай")
@@ -613,20 +613,20 @@ def test_alias_cross_type_finds_wynn_dubai(db_path):
     g = groups[0]
     assert not g.get("ambiguous")
     assert g["evidence"] == {"alias_of": org, "alias": "WYNN Дубай"}
-    assert g["keep"]["id"] == project          # project вище org у _TYPE_RANK
+    assert g["keep"]["id"] == project          # project is above org in _TYPE_RANK
     assert [m["id"] for m in g["merge"]] == [org]
 
 
 def test_alias_cross_type_ignores_own_alias(db_path):
-    """Аліас, що збігається з ВЛАСНИМ канонічним іменем сутності — не колізія."""
+    """An alias that matches the entity's OWN canonical name is not a collision."""
     e = _insert_entity(db_path, "org", "Робота Fund")
-    _insert_alias(db_path, e, "робота fund")  # той самий фолд-ключ, та сама сутність
+    _insert_alias(db_path, e, "робота fund")  # the same fold key, the same entity
 
     assert entity_dedup.find_alias_cross_type_collisions(db_path) == []
 
 
 def test_alias_cross_type_same_type_is_not_our_class(db_path):
-    """Аліас org == канонічна назва ІНШОГО org — не кросс-типовий клас цієї функції."""
+    """An org alias == the canonical name of ANOTHER org is not this function's cross-type class."""
     a = _insert_entity(db_path, "org", "Alpha")
     _insert_alias(db_path, a, "Beta")
     _insert_entity(db_path, "org", "Beta")
@@ -635,8 +635,8 @@ def test_alias_cross_type_same_type_is_not_our_class(db_path):
 
 
 def test_alias_cross_type_three_referents_are_ambiguous(db_path):
-    """Одне написання не можна зарахувати двом: три різні сутності — ambiguous,
-    жодна не потрапляє в пропозицію злиття."""
+    """One spelling cannot be credited to two: three different entities — ambiguous,
+    none gets into the merge proposal."""
     org = _insert_entity(db_path, "org", "Робота Fund")
     _insert_alias(db_path, org, "Робота")
     project = _insert_entity(db_path, "project", "Робота")
@@ -664,8 +664,8 @@ def test_alias_cross_type_person_excluded_by_default(db_path):
 
 
 def test_alias_cross_type_folds_cyrillic_case_not_via_sqlite_lower(db_path):
-    """Згортання — `_fold_name`/Python `casefold`, кирилична пара, яку SQLite
-    LOWER не звужує."""
+    """Folding is `_fold_name`/Python `casefold`, a Cyrillic pair that SQLite
+    LOWER does not narrow."""
     org = _insert_entity(db_path, "org", "СВІТЛО")
     _insert_alias(db_path, org, "Світло Груп")
     project = _insert_entity(db_path, "project", "світло груп")
@@ -721,7 +721,7 @@ def test_twins_cli_without_flag_is_byte_identical(db_path, capsys):
 
 
 def test_fold_key_decides_max_the_same_way_the_finder_groups(db_path):
-    """«Acme Corp» і «AcmeCorp» — одне написання для шукача, отже й MAX для згадок."""
+    """«Acme Corp» and «AcmeCorp» are one spelling for the finder, hence MAX for mentions too."""
     keep = _insert_entity(db_path, "project", "Acme Corp")
     gone = _insert_entity(db_path, "org", "AcmeCorp")
     t = _insert_transcription(db_path, source_name="shared.mp3")
@@ -736,11 +736,11 @@ def test_fold_key_decides_max_the_same_way_the_finder_groups(db_path):
 
 
 def test_claude_link_keeps_its_provenance(db_path):
-    """`source IS NULL` — це «звʼязок від Клода», а не «невідомо».
+    """`source IS NULL` is "a link from Claude", not "unknown".
 
-    `tg_entities` такі рядки свідомо не чіпає як надійніші. Якби злиття
-    перезаписало NULL на 'telegram', наступна перебудова видалила б рядок і
-    відтворила голим — без salience, ролі й накопичених згадок.
+    `tg_entities` deliberately does not touch such rows as more reliable. If a merge
+    overwrote NULL with 'telegram', the next rebuild would delete the row and
+    recreate it bare — without salience, role and accumulated mentions.
     """
     keep = _insert_entity(db_path, "project", "Acmecorp")
     gone = _insert_entity(db_path, "org", "AcmeCorp")
@@ -762,7 +762,7 @@ def test_claude_link_keeps_its_provenance(db_path):
 
 
 def test_stickiness_matches_the_spelling_not_just_the_type(db_path):
-    """Поглинувши один org, keep не має привласнювати БУДЬ-ЯКИЙ org зі своїх аліасів."""
+    """Having absorbed one org, keep must not appropriate ANY org from its aliases."""
     from app.services import enrichment
 
     with get_db_connection(db_path) as conn:
@@ -774,18 +774,18 @@ def test_stickiness_matches_the_spelling_not_just_the_type(db_path):
 
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
-        assert enrichment._find_entity(c, "org", "bh") is None            # чужий org
-        assert enrichment._find_entity(c, "org", "acmecorp ltd") == keep  # поглинутий
+        assert enrichment._find_entity(c, "org", "bh") is None            # someone else's org
+        assert enrichment._find_entity(c, "org", "acmecorp ltd") == keep  # the absorbed one
 
 
 # ============================================================
-# Split — зворотна беда: в одному рядку сидять різні люди
+# Split — the inverse trouble: different people sit in one row
 # ============================================================
 
 def _mixed_person(db_path: str):
-    """Рядок «Дмитро», у якому сидять двоє: Дмитро Лебідь і М.Верес.
+    """The row «Дмитро» holding two people: «Дмитро Лебідь» and «М.Верес».
 
-    Повертає (entity_id, {ключ: transcription_id}).
+    Returns (entity_id, {key: transcription_id}).
     """
     eid = _insert_entity(db_path, "person", "Дмитро", role="юрист")
     for a in ("Дмитро", "Дмитро Лебідь", "М.Верес", "Дима"):
@@ -804,7 +804,7 @@ def _mixed_person(db_path: str):
 
 
 def test_inspect_shows_which_spelling_named_itself(db_path):
-    """Докази для рішення: скільки задач назвали саме це написання і де воно в тексті."""
+    """Evidence for the decision: how many tasks named exactly this spelling and where it is in the text."""
     eid, tids = _mixed_person(db_path)
     _insert_action_item(db_path, tids["moved"], "звірити ставку", eid, owner_name="М.Верес")
     _insert_action_item(db_path, tids["both"], "готувати звіт", eid, owner_name="Дмитро Лебідь")
@@ -816,8 +816,8 @@ def test_inspect_shows_which_spelling_named_itself(db_path):
 
     assert info["status"] == "ok"
     assert info["tasks_total"] == 4 and info["links_total"] == 3
-    assert info["tasks_ambiguous_owner"] == 1          # «X, Y» — доказом не є
-    assert info["links_short_name_only"] == 1          # текст без жодного написання
+    assert info["tasks_ambiguous_owner"] == 1          # «X, Y» is not evidence
+    assert info["links_short_name_only"] == 1          # a text with no spelling at all
     per = {a["alias"]: a for a in info["aliases"]}
     assert per["М.Верес"]["tasks"] == 1 and per["М.Верес"]["texts"] == 2
     assert per["Дмитро Лебідь"]["tasks"] == 1 and per["Дмитро Лебідь"]["texts"] == 1
@@ -829,7 +829,7 @@ def test_inspect_not_found(db_path):
 
 
 def test_split_is_a_dry_run_until_asked(db_path):
-    """Спершу числа, потім правка: без --apply нічого не змінюється."""
+    """Numbers first, then the edit: without --apply nothing changes."""
     eid, tids = _mixed_person(db_path)
     _insert_action_item(db_path, tids["moved"], "звірити", eid, owner_name="М.Верес")
 
@@ -845,10 +845,10 @@ def test_split_is_a_dry_run_until_asked(db_path):
 
 
 def test_split_moves_only_what_the_text_proves(db_path):
-    """Переїжджає доказане: задача за owner_name, звʼязок, де видно лише відчеплене.
+    """What is proven moves: a task by owner_name, a link where only the detached one is visible.
 
-    Спільний текст (видно обох) КОПІЮЄТЬСЯ, а не рухається; текст, де жодного
-    довгого написання немає, лишається джерелу — довести нічим.
+    A shared text (both visible) is COPIED, not moved; a text with no
+    long spelling stays with the source — there is nothing to prove with.
     """
     eid, tids = _mixed_person(db_path)
     mine = _insert_action_item(db_path, tids["moved"], "звірити", eid, owner_name="М.Верес")
@@ -873,9 +873,9 @@ def test_split_moves_only_what_the_text_proves(db_path):
             "SELECT id, mention_count, meeting_count FROM entities")}
 
     assert set(links) == {tids["moved"], tids["both"]}
-    assert tids["moved"] not in src_links                      # переїхав
-    assert {tids["both"], tids["neither"]} <= src_links        # копія + недоказане
-    # Перенесений рядок несе свої числа; копія рахує ВЛАСНІ згадки, а не чужі 5.
+    assert tids["moved"] not in src_links                      # moved over
+    assert {tids["both"], tids["neither"]} <= src_links        # a copy + the unproven
+    # The moved row carries its own numbers; the copy counts its OWN mentions, not the other's 5.
     assert links[tids["moved"]]["mention_count"] == 3
     assert links[tids["moved"]]["salience"] == 0.7
     assert links[tids["moved"]]["role_in_meeting"] == "вирішував"
@@ -883,19 +883,19 @@ def test_split_moves_only_what_the_text_proves(db_path):
     assert owners[mine] == new_id and owners[theirs] == eid
     assert alias_owner["М.Верес"] == new_id
     assert alias_owner["Дмитро Лебідь"] == eid
-    assert agg[new_id] == (4, 2)                               # 3 + 1, дві зустрічі
-    # У спільній зустрічі джерело віддало ту саму одну згадку, яку забрала копія:
-    # 5 - 1 = 4, плюс 1 у недоказаній. Сума архіву стала (9), а не 10 — згадку не
-    # можна порахувати двічі так само, як не можна зарахувати її двом рядкам.
+    assert agg[new_id] == (4, 2)                               # 3 + 1, two meetings
+    # In the shared meeting the source gave up the same one mention the copy took:
+    # 5 - 1 = 4, plus 1 in the unproven one. The archive total became (9), not 10 — a mention cannot
+    # be counted twice just as it cannot be credited to two graph rows.
     assert agg[eid] == (5, 2)
 
 
 def test_the_shared_first_name_does_not_block_the_split(db_path):
-    """«Слава Гринчук» — це доказ Гринчука, а не присутності Слави.
+    """«Слава Гринчук» is evidence of «Гринчук», not of the presence of «Слава».
 
-    Коротке імʼя є частиною ПОВНОГО імені другої людини, тож без змагання за
-    позицію кожен звʼязок виглядав би «згадані обидва» — і рядок, що цілком
-    належить Гринчуку, лишався б висіти на Славі.
+    The short name is part of the second person's FULL name, so without competing for a
+    position every link would look like "both mentioned" — and a row that entirely
+    belongs to «Гринчук» would stay hanging on «Слава».
     """
     slava = _insert_entity(db_path, "person", "Слава")
     for a in ("Слава", "Слава Гринчук", "Гринчук", "Слава Верес"):
@@ -919,12 +919,12 @@ def test_the_shared_first_name_does_not_block_the_split(db_path):
 
 
 def test_the_full_name_that_stays_keeps_its_own_meeting(db_path):
-    """Дзеркальний випадок: відчеплюємо КОРОТКЕ імʼя, а повне лишається.
+    """The mirror case: we detach the SHORT name, and the full one stays.
 
-    «Юлія Бондаренка підтвердила бюджет» — доказ Бондаренкої, і зустріч має
-    лишитись їй. Затирання відчеплюваного «Юлія» (перший підхід) стерло б і
-    «Юлія Бондаренка»: доказ того, хто лишається, зник би, і чужа зустріч
-    переїхала б цілком. Тому сторони змагаються за позицію, а не затирають.
+    «Юлія Бондаренка підтвердила бюджет» is evidence of «Бондаренка», and the meeting must
+    stay with her. Erasing the detached «Юлія» (the first approach) would erase
+    «Юлія Бондаренка» too: the evidence for the one who stays would vanish, and someone else's meeting
+    would move entirely. So the sides compete for a position and do not erase.
     """
     yulia = _insert_entity(db_path, "person", "Юлія Бондаренка")
     for a in ("Юлія Бондаренка", "Юлія"):
@@ -949,20 +949,20 @@ def test_the_full_name_that_stays_keeps_its_own_meeting(db_path):
         copies = {r["transcription_id"]: r["mention_count"] for r in c.execute(
             "SELECT transcription_id, mention_count FROM meeting_entities "
             "WHERE entity_id = ?", (new_id,))}
-    assert src == {hers, shared}          # обидві лишились джерелу
-    assert copies == {shared: 1}          # копії — одна ВЛАСНА згадка, а не чужі 6
+    assert src == {hers, shared}          # both stayed with the source
+    assert copies == {shared: 1}          # the copy — one OWN mention, not the other's 6
 
 
 def test_inspect_counts_the_canonical_name_without_an_alias_row(db_path):
-    """Канонічне імʼя — теж написання, і рядка в `entity_aliases` для нього може не бути.
+    """The canonical name is a spelling too, and there may be no row in `entity_aliases` for it.
 
-    `_upsert_entity` заводить його через INSERT OR IGNORE проти глобального
-    UNIQUE, тож коли написання вже забрала чужа сутність, аліас не завівся. Без
-    нього власна задача виглядала б як «власник поза аліасами», хоч split усе
-    одно рахує канонічне серед тих, хто лишається.
+    `_upsert_entity` creates it via INSERT OR IGNORE against the global
+    UNIQUE, so when another entity has already taken the spelling, the alias was not created. Without
+    it the row's own task would look like "owner outside the aliases", although split
+    counts the canonical one among those who stay anyway.
     """
     yulia = _insert_entity(db_path, "person", "Юлія Бондаренка")
-    _insert_alias(db_path, yulia, "Юлія")          # рядка для канонічного немає
+    _insert_alias(db_path, yulia, "Юлія")          # no row for the canonical one
     tid = _insert_transcription(
         db_path, transcript_text="Юлія Бондаренка підтвердила бюджет.")
     _insert_meeting_entity(db_path, tid, yulia, mentions=3)
@@ -974,13 +974,13 @@ def test_inspect_counts_the_canonical_name_without_an_alias_row(db_path):
 
     assert per["Юлія Бондаренка"]["tasks"] == 1
     assert per["Юлія Бондаренка"]["texts"] == 1
-    assert per["Юлія"]["texts"] == 0               # згадку забрало повне імʼя
+    assert per["Юлія"]["texts"] == 0               # the mention was taken by the full name
     assert info["tasks_unmatched_owner"] == []
     assert info["links_short_name_only"] == 0
 
 
 def test_short_alias_inside_a_longer_word_is_not_evidence(db_path):
-    """Аліас «Слав» сидить усередині «Ярослав» — межа слова спереду це відсікає."""
+    """The alias «Слав» sits inside «Ярослав» — the word boundary at the front cuts that off."""
     eid = _insert_entity(db_path, "person", "Слава")
     for a in ("Слава", "Слав", "Гринчук"):
         _insert_alias(db_path, eid, a)
@@ -989,10 +989,10 @@ def test_short_alias_inside_a_longer_word_is_not_evidence(db_path):
 
     info = entity_dedup.inspect_entity(db_path, eid)
     per = {a["alias"]: a for a in info["aliases"]}
-    assert per["Слав"]["texts"] == 0          # «Ярослав» доказом не є
+    assert per["Слав"]["texts"] == 0          # «Ярослав» is not evidence
     assert per["Гринчук"]["texts"] == 1
 
-    # А відмінок — є: «Гринчука» починається з написання «Гринчук».
+    # But a case form is: «Гринчука» starts with the spelling «Гринчук».
     tid2 = _insert_transcription(db_path, transcript_text="Питання до Гринчука закрите.")
     _insert_meeting_entity(db_path, tid2, eid, mentions=1)
     per2 = {a["alias"]: a for a in entity_dedup.inspect_entity(db_path, eid)["aliases"]}
@@ -1000,7 +1000,7 @@ def test_short_alias_inside_a_longer_word_is_not_evidence(db_path):
 
 
 def test_split_can_glue_a_stranger_to_the_person_who_owns_the_name(db_path):
-    """`Stepan` серед аліасів Слави — це Степан; адресат може бути існуючим рядком."""
+    """`Stepan` among the aliases of «Слава» is «Степан»; the destination can be an existing row."""
     slava = _insert_entity(db_path, "person", "Слава")
     for a in ("Слава", "Слава Верес", "Stepan"):
         _insert_alias(db_path, slava, a)
@@ -1029,7 +1029,7 @@ def test_split_can_glue_a_stranger_to_the_person_who_owns_the_name(db_path):
 
 
 def test_split_target_of_another_type_is_refused(db_path):
-    """Імʼя людини, поїхавши в project, зникає з person-індексів — та сама межа, що в merge."""
+    """A person's name, moving into project, vanishes from the person indexes — the same boundary as in merge."""
     person = _insert_entity(db_path, "person", "Джейсон")
     _insert_alias(db_path, person, "Джейсон")
     _insert_alias(db_path, person, "Генрі")
@@ -1040,7 +1040,7 @@ def test_split_target_of_another_type_is_refused(db_path):
 
 
 def test_drop_takes_garbage_out_and_leaves_no_owner(db_path):
-    """`JSON` серед аліасів Джейсона — не людина. Задача без власника честніша за чужого."""
+    """`JSON` among the aliases of «Джейсон» is not a person. A task without an owner is more honest than someone else's."""
     from app.services import enrichment
 
     eid = _insert_entity(db_path, "person", "Джейсон")
@@ -1065,15 +1065,15 @@ def test_drop_takes_garbage_out_and_leaves_no_owner(db_path):
             "SELECT transcription_id FROM meeting_entities WHERE entity_id = ?", (eid,))}
         assert tids == {real}
         assert c.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"] == 1
-        # Смітник не має воскресати: за 'json' сутності більше немає взагалі.
+        # The trash must not resurrect: for 'json' there is no entity at all any more.
         assert enrichment._find_entity(c, "person", "json") is None
 
 
 def test_split_does_not_let_the_merge_trail_pull_the_name_back(db_path):
-    """Слід злиття віддавав джерело за написанням — після відчеплення не має.
+    """The merge trail returned the source by spelling — after detaching it must not.
 
-    Інакше наступний enrich знову привʼязав би відчеплене імʼя до джерела: split
-    «не прилипав» би так само, як колись не прилипав merge.
+    Otherwise the next enrich would again bind the detached name to the source: split
+    would "not stick" just as merge once did not.
     """
     from app.services import enrichment
 
@@ -1085,7 +1085,7 @@ def test_split_does_not_let_the_merge_trail_pull_the_name_back(db_path):
     entity_dedup.merge_entities(db_path, keep, gone)
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
-        assert enrichment._find_entity(c, "person", "м.верес") == keep   # прилипло
+        assert enrichment._find_entity(c, "person", "м.верес") == keep   # it stuck
 
     entity_dedup.split_entity(db_path, keep, ["М.Верес"], drop=True, dry_run=False)
 
@@ -1094,16 +1094,16 @@ def test_split_does_not_let_the_merge_trail_pull_the_name_back(db_path):
         assert enrichment._find_entity(c, "person", "м.верес") is None
         meta = json.loads(c.execute("SELECT metadata_json FROM entities WHERE id = ?",
                                     (keep,)).fetchone()["metadata_json"])
-    assert "merged_from" not in meta          # від запису не лишилось написань
+    assert "merged_from" not in meta          # no spellings left from the record
     assert meta["split_off"][0]["dropped"] is True
 
 
 def test_split_refuses_to_rename_instead_of_splitting(db_path):
-    """Канонічне імʼя і «всі аліаси» — це перейменування, інша операція."""
+    """The canonical name and "all aliases" are a rename, a different operation."""
     eid, _ = _mixed_person(db_path)
 
     canon = entity_dedup.split_entity(db_path, eid, ["Дмитро"], new_name="Дмитро Лебідь")
-    assert canon["status"] == "error" and "канонічне" in canon["error"]
+    assert canon["status"] == "error" and "canonical" in canon["error"]
 
     everything = entity_dedup.split_entity(
         db_path, eid, ["Дмитро", "Дмитро Лебідь", "М.Верес", "Дима"], new_name="Хтось")
@@ -1122,14 +1122,14 @@ def test_split_guards_on_destination_and_unknown_spelling(db_path):
     assert entity_dedup.split_entity(db_path, 999, ["М.Верес"],
                                      drop=True)["status"] == "not_found"
     stranger = entity_dedup.split_entity(db_path, eid, ["Кого тут немає"], drop=True)
-    assert stranger["status"] == "error" and "немає в аліасах" in stranger["error"]
+    assert stranger["status"] == "error" and "among the aliases" in stranger["error"]
 
 
 def test_split_into_an_existing_name_points_at_the_row_that_holds_it(db_path):
-    """UNIQUE(type, normalized_name): нову сутність із зайнятим імʼям не створюємо.
+    """UNIQUE(type, normalized_name): we do not create a new entity with a taken name.
 
-    І прикидка мусить казати те саме, що застосування: інакше вона обіцяє split,
-    який `--apply` відхилить, а прикидка — єдина поверхня, за якою вирішують.
+    And the estimate must say the same as the application: otherwise it promises a split
+    that `--apply` rejects, while the estimate is the only surface for deciding.
     """
     eid, _ = _mixed_person(db_path)
     other = _insert_entity(db_path, "person", "М. Верес")
@@ -1143,15 +1143,15 @@ def test_split_into_an_existing_name_points_at_the_row_that_holds_it(db_path):
 
 
 def test_split_works_when_the_canonical_name_has_no_alias_row(db_path):
-    """Порожній `staying` — не перейменування: канонічне імʼя лишається завжди.
+    """An empty `staying` is not a rename: the canonical name always stays.
 
-    Рядка в `entity_aliases` для канонічного може не бути (INSERT OR IGNORE проти
-    глобального UNIQUE програв гонку чужій сутності) — і це рівно той рядок,
-    задля якого split існує. Гвардія на «відчеплюються ВСІ аліаси» відмовляла б
-    саме тут, і ні в якому іншому випадку.
+    A row in `entity_aliases` for the canonical one may be missing (INSERT OR IGNORE against the
+    global UNIQUE lost the race to another entity) — and this is exactly the row
+    split exists for. A guard on "ALL aliases are detached" would refuse
+    precisely here and in no other case.
     """
     eid = _insert_entity(db_path, "person", "Дмитро")
-    _insert_alias(db_path, eid, "М.Верес")          # канонічного рядка немає
+    _insert_alias(db_path, eid, "М.Верес")          # no canonical row
     tid = _insert_transcription(db_path, transcript_text="М.Верес підтвердив бюджет.")
     _insert_meeting_entity(db_path, tid, eid, mentions=2)
 
@@ -1165,37 +1165,37 @@ def test_split_works_when_the_canonical_name_has_no_alias_row(db_path):
         canon = conn.execute("SELECT canonical_name FROM entities "
                              "WHERE id = ?", (eid,)).fetchone()["canonical_name"]
     assert owner == res["target"]["id"]
-    assert canon == "Дмитро"                          # джерело лишилось собою
+    assert canon == "Дмитро"                          # the source stayed itself
 
 
 def test_drop_does_not_report_links_it_leaves_behind(db_path):
-    """`drop` копій не робить — спільний текст лишається джерелу і має бути в links_left.
+    """`drop` makes no copies — the shared text stays with the source and must be in links_left.
 
-    Інакше прикидка показує «нічого не лишиться» там, де зникає лише частина, а
-    вона — єдина поверхня, за якою оператор ухвалює рішення.
+    Otherwise the estimate shows "nothing will remain" where only a part disappears, and
+    it is the only surface on which the operator makes the decision.
     """
     eid, tids = _mixed_person(db_path)
 
     res = entity_dedup.split_entity(db_path, eid, ["М.Верес"], drop=True)
 
     assert res["links_moved"] == 1
-    assert res["links_copied"] == 0                   # у drop копій не буває
-    assert res["links_shared_kept"] == 1              # спільний текст лишається
-    assert res["links_left"] == 2                     # спільний + недоказаний
+    assert res["links_copied"] == 0                   # there are no copies in drop
+    assert res["links_shared_kept"] == 1              # the shared text stays
+    assert res["links_left"] == 2                     # shared + unproven
 
     entity_dedup.split_entity(db_path, eid, ["М.Верес"], drop=True, dry_run=False)
     with get_db_connection(db_path) as conn:
         left = {r["transcription_id"] for r in conn.execute(
             "SELECT transcription_id FROM meeting_entities WHERE entity_id = ?", (eid,))}
-    assert left == {tids["both"], tids["neither"]}     # рівно те, що обіцяв звіт
+    assert left == {tids["both"], tids["neither"]}     # exactly what the report promised
 
 
 def test_split_sums_mentions_when_the_target_already_saw_that_meeting(db_path):
-    """У адресата вже є рядок на цю зустріч — згадки складаються, а не беруть MAX.
+    """The target already has a row for this meeting — the mentions add up, they do not take MAX.
 
-    Те саме правило, що й у `merge_entities`: MAX лише коли написання ОДНЕ й те
-    саме. Тут адресат заробив свій рядок власним імʼям, а приходять до нього
-    згадки інших слів того ж тексту.
+    The same rule as in `merge_entities`: MAX only when the spelling is ONE and the
+    same. Here the target earned its row by its own name, and the mentions of other words
+    of the same text come to it.
     """
     eid, tids = _mixed_person(db_path)
     other = _insert_entity(db_path, "person", "М. Верес")
@@ -1209,16 +1209,16 @@ def test_split_sums_mentions_when_the_target_already_saw_that_meeting(db_path):
         got = conn.execute("SELECT mention_count FROM meeting_entities WHERE entity_id = ? "
                            "AND transcription_id = ?",
                            (other, tids["moved"])).fetchone()["mention_count"]
-    assert got == 7                                   # 4 своїх + 3 перенесених
+    assert got == 7                                   # 4 of its own + 3 moved
 
 
 def test_split_reaches_meetings_in_the_recycle_bin(db_path):
-    """Мʼяко видалену зустріч split теж розводить — її ще можуть відновити.
+    """A softly deleted meeting is split too — it can still be restored.
 
-    `POST /api/transcription/<id>/restore` повертає її в життя; якби split її
-    обійшов, після відновлення задача лишилась би за старим власником, а
-    звʼязок — без написання, що його тримало. У числах вона видна окремо: в UI
-    цієї зустрічі зараз немає.
+    `POST /api/transcription/<id>/restore` brings it back to life; if split
+    bypassed it, after the restore the task would stay with the old owner, and the
+    link would lack the spelling that held it. In the numbers it is visible separately: the UI
+    does not have this meeting right now.
     """
     eid = _insert_entity(db_path, "person", "Дмитро")
     for a in ("Дмитро", "М.Верес"):
@@ -1244,10 +1244,10 @@ def test_split_reaches_meetings_in_the_recycle_bin(db_path):
 
 
 def test_split_matches_the_spelling_the_way_the_finder_groups_it(db_path):
-    """Написання з CLI звіряється ключем згортання: крапки, пробіли й регістр не мають значення.
+    """A CLI spelling is checked by the fold key: dots, spaces and case do not matter.
 
-    Інакше відчеплення не спрацювало б саме там, де воно потрібне: «М.Верес»,
-    «М. Верес» і «м.верес » — те саме написання, набране по-різному.
+    Otherwise detaching would fail exactly where it is needed: «М.Верес»,
+    «М. Верес» and «м.верес » are the same spelling typed differently.
     """
     eid, _ = _mixed_person(db_path)
 
@@ -1261,11 +1261,11 @@ def test_split_matches_the_spelling_the_way_the_finder_groups_it(db_path):
 
 
 # ============================================================
-# allow_person: заборона знімається лише руками і лише на безпечному боці
+# allow_person: the ban is lifted only by hand and only on the safe side
 # ============================================================
 
 def test_person_merge_still_refused_without_the_flag(db_path):
-    """Дефолт не змінився: агенцію на прізвище власника треба спершу подивитись."""
+    """The default has not changed: an agency named after the owner's surname must first be looked at."""
     person = _insert_entity(db_path, "person", "Ткачук")
     org = _insert_entity(db_path, "org", "Ткачук")
 
@@ -1275,7 +1275,7 @@ def test_person_merge_still_refused_without_the_flag(db_path):
 
 
 def test_allow_person_merges_and_names_what_entered_the_person_index(db_path):
-    """Написання поглинутої не-людини стають ключами person-індексів — тож їх видно у відповіді."""
+    """The spellings of the absorbed non-person become person-index keys — so they are visible in the response."""
     person = _insert_entity(db_path, "person", "Ткачук")
     org = _insert_entity(db_path, "org", "Ткачук")
     _insert_alias(db_path, org, "Федеріва")
@@ -1292,7 +1292,7 @@ def test_allow_person_merges_and_names_what_entered_the_person_index(db_path):
 
 
 def test_allow_person_still_refuses_when_the_person_row_holds_owners(db_path):
-    """Зникає людський рядок — задачі лишились би без людини. Прапорець це НЕ дозволяє."""
+    """The person row disappears — the tasks would be left without a person. The flag does NOT allow this."""
     org = _insert_entity(db_path, "org", "Вербич")
     person = _insert_entity(db_path, "person", "Вербич")
     tid = _insert_transcription(db_path)
@@ -1301,14 +1301,14 @@ def test_allow_person_still_refuses_when_the_person_row_holds_owners(db_path):
     res = entity_dedup.merge_entities(db_path, org, person, allow_cross_type=True,
                                       allow_person=True)
 
-    assert res["status"] == "error" and "задач 1" in res["error"]
+    assert res["status"] == "error" and "has 1 tasks" in res["error"]
     with get_db_connection(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) c FROM entities WHERE id = ?",
                             (person,)).fetchone()["c"] == 1
 
 
 # ============================================================
-# alias: приписати написання, під яким річ знає інший шар
+# alias: assign a spelling under which another layer knows the thing
 # ============================================================
 
 def test_alias_is_a_dry_run_until_asked(db_path):
@@ -1322,7 +1322,7 @@ def test_alias_is_a_dry_run_until_asked(db_path):
 
 
 def test_alias_does_not_take_a_spelling_that_belongs_to_someone_else(db_path):
-    """`normalized_alias` UNIQUE глобально — чуже написання не забираємо мовчки."""
+    """`normalized_alias` is UNIQUE globally — we do not silently take someone else's spelling."""
     mine = _insert_entity(db_path, "person", "Дмитро Лебідь")
     theirs = _insert_entity(db_path, "person", "Dmytro Sh")
     _insert_alias(db_path, theirs, "Dmytro S")
@@ -1349,14 +1349,14 @@ def test_alias_is_idempotent_and_reports_what_was_already_there(db_path):
 
 
 def test_alias_sees_a_spelling_that_is_someone_elses_canonical_name(db_path):
-    """Написання може вже жити НЕ в аліасах: `split --to-name` заводить рядок без alias-рядка.
+    """A spelling may already live NOT in the aliases: `split --to-name` creates a row without an alias row.
 
-    Приписаний поверх такого канонічного імені аліас — мертвий вантаж
-    (`enrichment._find_entity` шукає спершу по канонічному), а `relink` після
-    нього ще й перевісив би задачі на ту чужу сутність.
+    An alias assigned on top of such a canonical name is dead weight
+    (`enrichment._find_entity` looks by canonical first), and `relink` after
+    it would also re-hang tasks onto that foreign entity.
     """
     mine = _insert_entity(db_path, "person", "Дмитро Лебідь")
-    theirs = _insert_entity(db_path, "person", "Dmytro Lebid")   # без рядка в aliases
+    theirs = _insert_entity(db_path, "person", "Dmytro Lebid")   # without a row in aliases
 
     res = entity_dedup.add_aliases(db_path, mine, ["Dmytro Lebid"], dry_run=False)
 
@@ -1366,35 +1366,35 @@ def test_alias_sees_a_spelling_that_is_someone_elses_canonical_name(db_path):
 
 
 def test_allow_person_refuses_when_a_first_name_twin_would_inherit_the_future(db_path):
-    """Порожній зараз рядок ще не значить, що шкоди не буде потім.
+    """A row that is empty now does not mean there will be no harm later.
 
-    Імʼя виходить із person-індексу, і наступна задача «Вербич Петренко» піде
-    фолбеком по першому токену — до однослівного тезки «Вербич».
+    The name leaves the person index, and the next task «Вербич Петренко» will go
+    through the first-token fallback — to the single-word namesake «Вербич».
     """
     org = _insert_entity(db_path, "org", "Вербич")
     gone = _insert_entity(db_path, "person", "Вербич Петренко")
-    _insert_entity(db_path, "person", "Вербич")     # тезка, якому дістанеться фолбек
+    _insert_entity(db_path, "person", "Вербич")     # the namesake who would get the fallback
 
     res = entity_dedup.merge_entities(db_path, org, gone, allow_cross_type=True,
                                       allow_person=True)
 
-    assert res["status"] == "error" and "фолбек по першому токену" in res["error"]
+    assert res["status"] == "error" and "first-token fallback" in res["error"]
 
 
 def test_allow_person_reports_only_spellings_that_really_landed_on_keep(db_path):
-    """Написання могло лишитись у третьої сутності — тоді звіт про «увійшло» був би неправдою."""
+    """A spelling could have stayed with a third entity — then a report on "entered" would be untrue."""
     person = _insert_entity(db_path, "person", "Ткачук")
-    org = _insert_entity(db_path, "org", "Ткачук")          # без власного alias-рядка
+    org = _insert_entity(db_path, "org", "Ткачук")          # without its own alias row
     _insert_alias(db_path, org, "Федеріва")
     third = _insert_entity(db_path, "person", "Хтось")
-    _insert_alias(db_path, third, "Ткачук")   # написання вже зайняте третьою
+    _insert_alias(db_path, third, "Ткачук")   # the spelling is already taken by a third
 
     res = entity_dedup.merge_entities(db_path, person, org, allow_cross_type=True,
                                       allow_person=True)
 
     assert res["status"] == "merged"
     assert res["person_index_added"] == ["Федеріва"], \
-        "«Ткачук» лишилось у третьої сутності — звітувати про нього не можна"
+        "«Ткачук» stayed with the third entity — it cannot be reported"
     with get_db_connection(db_path) as conn:
         owner = conn.execute("SELECT entity_id FROM entity_aliases WHERE alias = ?",
                              ("Ткачук",)).fetchone()["entity_id"]
@@ -1402,11 +1402,11 @@ def test_allow_person_reports_only_spellings_that_really_landed_on_keep(db_path)
 
 
 # ============================================================
-# Написання, які насправді є загальними словами
+# Spellings that are actually common words
 # ============================================================
 
 def test_junk_alias_is_found_by_lowercase_usage(db_path):
-    """«документ» як аліас проєкту: корпус пише це слово з малої літери."""
+    """«документ» as a project alias: the corpus writes this word lowercase."""
     eid = _insert_entity(db_path, "project", "Стратегія розвитку області")
     _insert_alias(db_path, eid, "документ")
     for _ in range(6):
@@ -1420,7 +1420,7 @@ def test_junk_alias_is_found_by_lowercase_usage(db_path):
 
 
 def test_real_name_survives_the_audit(db_path):
-    """Власну назву пишуть з великої і в середині речення — це не сміття."""
+    """A proper name is written with a capital in the middle of a sentence too — it is not junk."""
     eid = _insert_entity(db_path, "project", "Ковальчука")
     _insert_alias(db_path, eid, "Ковальчука")
     for _ in range(6):
@@ -1430,7 +1430,7 @@ def test_real_name_survives_the_audit(db_path):
 
 
 def test_sentence_start_is_not_evidence_of_a_name(db_path):
-    """Велика літера після крапки — пунктуація; інакше сміття виправдовує себе."""
+    """A capital after a period is punctuation; otherwise junk justifies itself."""
     eid = _insert_entity(db_path, "project", "Стратегія розвитку області")
     _insert_alias(db_path, eid, "документ")
     for _ in range(6):
@@ -1442,11 +1442,11 @@ def test_sentence_start_is_not_evidence_of_a_name(db_path):
 
 
 def test_uppercase_headings_do_not_prove_a_name(db_path):
-    """ШАПКА ДОГОВОРУ дає велику літеру всім словам підряд — і не доводить нічого.
+    """A CONTRACT HEADER gives a capital to all words in a row — and proves nothing.
 
-    А от ОДНЕ слово капсом усередині звичайного речення рахується доказом, бо
-    так само його рахує `find_mentions`: розійшовшись тут, аудит починав радити
-    зняти написання, яке саме зараз дає звʼязки.
+    But ONE all-caps word inside an ordinary sentence counts as evidence, because
+    `find_mentions` counts it the same way: diverging here, the audit began advising
+    to remove a spelling that is producing links right now.
     """
     eid = _insert_entity(db_path, "project", "Стратегія розвитку області")
     _insert_alias(db_path, eid, "договір")
@@ -1460,8 +1460,8 @@ def test_uppercase_headings_do_not_prove_a_name(db_path):
 
 
 def test_canonical_name_is_flagged_separately(db_path):
-    """Канонічне імʼя лежить і в аліасах, але зняти його аліасом — півсправи:
-    рядок лишиться в графі під тим самим загальним словом."""
+    """The canonical name lies in the aliases too, but removing it as an alias is half the job:
+    the row would stay in the graph under the same common word."""
     eid = _insert_entity(db_path, "org", "Фонд")
     _insert_alias(db_path, eid, "Фонд")
     for _ in range(6):
@@ -1472,7 +1472,7 @@ def test_canonical_name_is_flagged_separately(db_path):
 
 
 def test_rare_words_are_not_judged(db_path):
-    """Двох згадок мало, щоб назвати написання сміттям."""
+    """Two mentions are too few to call a spelling junk."""
     eid = _insert_entity(db_path, "project", "Стратегія розвитку області")
     _insert_alias(db_path, eid, "документ")
     _insert_transcription(db_path, transcript_text="надішли документ на пошту")
@@ -1481,7 +1481,7 @@ def test_rare_words_are_not_judged(db_path):
 
 
 def test_telegram_handles_are_not_judged_by_capitalisation(db_path):
-    """«@jbondarenko» пишеться з малої за домовленістю, а не тому, що це слово."""
+    """«@jbondarenko» is written lowercase by convention, not because it is a word."""
     eid = _insert_entity(db_path, "person", "jbondarenko")
     _insert_alias(db_path, eid, "@jbondarenko")
     for _ in range(6):
@@ -1491,11 +1491,11 @@ def test_telegram_handles_are_not_judged_by_capitalisation(db_path):
 
 
 def test_all_caps_name_is_not_called_junk(db_path):
-    """Регресія: аудит радив зняти написання, яке саме зараз дає звʼязки.
+    """Regression: the audit advised removing a spelling that is producing links right now.
 
-    `find_mentions` вважає «ACMECORP» у звичайному реченні назвою і ставить
-    звʼязок, а аудит ALL-CAPS не рахував узагалі — і показував caps=0 при
-    живих звʼязках, тобто пропонував знищити правильні дані.
+    `find_mentions` considers «ACMECORP» in an ordinary sentence a name and sets
+    a link, while the audit did not count ALL-CAPS at all — and showed caps=0 with
+    live links, i.e. it proposed destroying correct data.
     """
     eid = _insert_entity(db_path, "project", "Acmecorp")
     _insert_alias(db_path, eid, "Acmecorp")
@@ -1507,7 +1507,7 @@ def test_all_caps_name_is_not_called_junk(db_path):
 
 
 def test_shouting_header_still_proves_nothing(db_path):
-    """Але в суцільній шапці велика літера доказом не стає — там усі слова такі."""
+    """But in a solid header a capital letter does not become evidence — all the words there are such."""
     eid = _insert_entity(db_path, "project", "Тексти")
     _insert_alias(db_path, eid, "Тексти")
     for _ in range(6):
@@ -1520,10 +1520,10 @@ def test_shouting_header_still_proves_nothing(db_path):
 
 
 def test_canonical_name_without_alias_row_is_audited(db_path):
-    """Своя alias-строка може не завестись (глобальний UNIQUE), а звʼязки — є."""
+    """Its own alias row may not get created (the global UNIQUE), while the links exist."""
     other = _insert_entity(db_path, "org", "Нуль")
-    _insert_alias(db_path, other, "Zero")          # написання забрала чужа сутність
-    eid = _insert_entity(db_path, "org", "Zero")   # тут alias-рядка вже не буде
+    _insert_alias(db_path, other, "Zero")          # the spelling was taken by another entity
+    eid = _insert_entity(db_path, "org", "Zero")   # there will be no alias row here
     for _ in range(6):
         _insert_transcription(db_path, transcript_text="залишок zero на рахунку")
 
@@ -1532,7 +1532,7 @@ def test_canonical_name_without_alias_row_is_audited(db_path):
 
 
 def test_handle_without_at_sign_is_still_a_handle(db_path):
-    """Канонічне імʼя нікнейма приїжджає без «@» — гард має ловити і його."""
+    """The canonical name of a handle arrives without «@» — the guard must catch it too."""
     eid = _insert_entity(db_path, "person", "jbondarenko")
     _insert_alias(db_path, eid, "@jbondarenko")
     for _ in range(8):
@@ -1542,11 +1542,11 @@ def test_handle_without_at_sign_is_still_a_handle(db_path):
 
 
 # ============================================================
-# Блокери морфології — read-only звіт (entity-graph-tg-02)
+# Morphology blockers — a read-only report (entity-graph-tg-02)
 # ============================================================
 
 def test_blockers_finds_generic_canonical(db_path):
-    """«Фонд» — родова канонічна назва, аліасом не знімається."""
+    """«Фонд» is a generic canonical name, not removed as an alias."""
     eid = _insert_entity(db_path, "org", "Фонд")
     _insert_alias(db_path, eid, "Фонд")
     for _ in range(6):
@@ -1561,7 +1561,7 @@ def test_blockers_finds_generic_canonical(db_path):
 
 
 def test_blockers_finds_case_form_entity(db_path):
-    """project «Україні» — відмінок, звʼязки здебільшого від точного TG-збігу."""
+    """project «Україні» is a case form, the links are mostly from an exact TG match."""
     from app.services import tg_entities
 
     eid = _insert_entity(db_path, "project", "Україні")
@@ -1582,7 +1582,7 @@ def test_blockers_finds_case_form_entity(db_path):
 
 
 def test_blockers_ignores_case_form_when_links_are_mostly_from_enrichment(db_path):
-    """Та сама словоформа, але звʼязки в основному від Клода — не блокер."""
+    """The same word form, but the links are mostly from Claude — not a blocker."""
     from app.services import tg_entities
 
     eid = _insert_entity(db_path, "project", "Україні")
@@ -1596,11 +1596,11 @@ def test_blockers_ignores_case_form_when_links_are_mostly_from_enrichment(db_pat
 
 
 def test_blockers_ignores_short_and_multi_word_names(db_path):
-    """Коротке (<MIN_NAME_LEN) і багатослівне імʼя морфо-згортач не чіпає."""
+    """A short (<MIN_NAME_LEN) and a multi-word name are not touched by the morph folder."""
     from app.services import tg_entities
 
-    short = _insert_entity(db_path, "project", "Кий")           # 3 літери, суфікс не зрізається через довжину
-    multi = _insert_entity(db_path, "project", "Дім Данс Ігор")  # словосполука
+    short = _insert_entity(db_path, "project", "Кий")           # 3 letters, the suffix is not stripped due to length
+    multi = _insert_entity(db_path, "project", "Дім Данс Ігор")  # a phrase
     for eid in (short, multi):
         tid = _insert_transcription(db_path)
         _insert_meeting_entity(db_path, tid, eid, source=tg_entities.SOURCE)
@@ -1609,7 +1609,7 @@ def test_blockers_ignores_short_and_multi_word_names(db_path):
 
 
 def test_blockers_does_not_double_report_same_entity(db_path):
-    """Родова канонічна назва, що є ще й відмінком — рахується один раз, першим проходом."""
+    """A generic canonical name that is also a case form — counted once, by the first pass."""
     from app.services import tg_entities
 
     eid = _insert_entity(db_path, "org", "Сенсу")
@@ -1628,7 +1628,7 @@ def test_blockers_does_not_double_report_same_entity(db_path):
 
 
 def test_blockers_marks_known_disputed_names(db_path):
-    """«Місто» — з явного списку історії, лишається пропозицією лише з позначкою."""
+    """«Місто» is from the story's explicit list, stays a proposal only with a mark."""
     from app.services import tg_entities
 
     eid = _insert_entity(db_path, "project", "Місто")
@@ -1655,7 +1655,7 @@ def test_blockers_cli_json(db_path, capsys):
 
 
 # ============================================================
-# rename — перейменування канонічної назви (entity-graph-tg-02)
+# rename — renaming the canonical name (entity-graph-tg-02)
 # ============================================================
 
 def test_rename_dry_run_does_not_write(db_path):
@@ -1703,7 +1703,7 @@ def test_rename_is_idempotent(db_path):
         ent = conn.execute("SELECT metadata_json FROM entities WHERE id = ?",
                            (eid,)).fetchone()
     meta = json.loads(ent["metadata_json"])
-    assert len(meta["renamed_from"]) == 1, "повторний виклик не мав нічого дописати"
+    assert len(meta["renamed_from"]) == 1, "the repeated call was not supposed to append anything"
 
 
 def test_rename_refuses_unique_collision(db_path):
@@ -1717,7 +1717,7 @@ def test_rename_refuses_unique_collision(db_path):
     with get_db_connection(db_path) as conn:
         row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
                            (eid,)).fetchone()
-    assert row["canonical_name"] == "Фонд", "колізія не мала нічого записати"
+    assert row["canonical_name"] == "Фонд", "the collision was not supposed to write anything"
 
 
 def test_rename_not_found(db_path):
@@ -1733,7 +1733,7 @@ def test_rename_cli_apply_flag_gates_the_write(db_path, capsys):
     with get_db_connection(db_path) as conn:
         row = conn.execute("SELECT canonical_name FROM entities WHERE id = ?",
                            (eid,)).fetchone()
-    assert row["canonical_name"] == "Фонд", "без --apply CLI не мав нічого писати"
+    assert row["canonical_name"] == "Фонд", "without --apply the CLI was not supposed to write anything"
 
     entity_dedup.main(["--db", db_path, "rename", str(eid), "Фонд Розвитку", "--apply"])
     capsys.readouterr()

@@ -1,7 +1,7 @@
-"""Словник «важких» імен із графа (K1, ``app/services/vocabulary.py``).
+"""The vocabulary of "hard" names from the graph (K1, ``app/services/vocabulary.py``).
 
-Офлайн, реальна tmp-SQLite через ``init_database``; фікстури кириличні — регістр
-кирилиці SQLite ``LOWER`` не згортає, і саме на ній ламалось (памʼятка
+Offline, a real tmp SQLite via ``init_database``; the fixtures are Cyrillic — SQLite ``LOWER``
+does not fold Cyrillic case, and that is exactly what broke (memo
 ``plan-dictated-sql-ignored-own-memory``).
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from app.services.live_transcribe import LiveTranscribeWorker, MIN_BYTES_FOR_PAS
 
 
 # ============================================================
-# Фікстура графа
+# Graph fixture
 # ============================================================
 
 def _tx(conn, text, source_type="recording", model_used="large-v3-turbo"):
@@ -46,9 +46,9 @@ def _entity(conn, etype, name, aliases=(), tids=()):
 
 @pytest.fixture()
 def graph_db(tmp_path: Path) -> str:
-    """Acmecorp — 1 зустріч, два аліаси-помилки в тексті; «Адам» — 3 зустрічі, лише
-    відмінки + помилка, якої в тексті нема; Google — переклад «Гугл»; «фонд» —
-    загальновживане слово; тема з помилкою — не той тип."""
+    """Acmecorp — 1 meeting, two error aliases in the text; «Адам» — 3 meetings, only
+    case forms + an error that is not in the text; Google — the translation «Гугл»; «фонд» —
+    a common word; a topic with an error — the wrong type."""
     path = str(tmp_path / "graph.db")
     init_database(path)
     conn = sqlite3.connect(path)
@@ -57,7 +57,7 @@ def graph_db(tmp_path: Path) -> str:
                        "фонд великий, у Гугл теж. Стратегія Стратежка.")
         t2 = _tx(conn, "Адама не було. Гугл диск лежить, фонд чекає.")
         t3 = _tx(conn, "Знову Адама кличуть, фонд мовчить.")
-        # Текстове повідомлення TG — не Whisper: помилки тут не рахуються.
+        # A TG text message is not Whisper: errors are not counted here.
         t4 = _tx(conn, "Акмеедз пише в чат", source_type="telegram", model_used=None)
         _entity(conn, "project", "Acmecorp", aliases=["Акмеец", "Акмеетс", "Акмеедз"], tids=[t1, t4])
         _entity(conn, "person", "Адам", aliases=["Адаму", "Адама", "Гадам"], tids=[t1, t2, t3])
@@ -72,7 +72,7 @@ def graph_db(tmp_path: Path) -> str:
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    # Явно вимкнено: дефолти після заміру K1 увімкнені (див. test_defaults_are_measured_winners).
+    # Explicitly off: after the K1 measurement the defaults are on (see test_defaults_are_measured_winners).
     monkeypatch.setenv(vocabulary.ENV_MODE, "off")
     monkeypatch.setenv(vocabulary.ENV_MULTILINGUAL, "0")
     vocabulary.clear_cache()
@@ -81,7 +81,7 @@ def _clean(monkeypatch):
 
 
 # ============================================================
-# Аліас-помилка vs те саме імʼя
+# Error alias vs the same name
 # ============================================================
 
 @pytest.mark.parametrize("alias, canonical", [
@@ -94,7 +94,7 @@ def test_consonant_mangling_is_error(alias, canonical):
 
 
 @pytest.mark.parametrize("alias, canonical", [
-    ("Адаму", "Адам"),            # відмінок
+    ("Адаму", "Адам"),            # case form
     ("Фонд Робота", "Робота Fund"),
 ])
 def test_case_forms_and_shared_stem_are_not_errors(alias, canonical):
@@ -102,10 +102,10 @@ def test_case_forms_and_shared_stem_are_not_errors(alias, canonical):
 
 
 @pytest.mark.parametrize("alias, canonical", [
-    # Оригінальний випадок власника (08.10.2026).
+    # The owner's original case (08.10.2026).
     ("Гугл", "Google"),
     ("Телеграм", "Telegram"),
-    # Сусідні форми: ru/uk переклад, латинське j як «й», складене, відмінок перекладу.
+    # Neighbouring forms: ru/uk translation, Latin j as «й», compound, case of a translation.
     ("Олексій", "Алексей"),
     ("Julia Bondarenko", "Юлія"),
     ("гугл диск", "Google"),
@@ -121,7 +121,7 @@ def test_translation_or_transliteration_is_not_error(alias, canonical):
 def test_defect_card_check_fails_on_both_fixtures(tmp_path):
     root = Path(__file__).resolve().parent.parent / "docs" / "defects" / "fixtures"
     if not root.is_dir():
-        pytest.skip("бібліотеки дефектів нема (публічне дзеркало її не везе)")
+        pytest.skip("no defects library (the public mirror does not carry it)")
     for name in ("translation-counted-as-asr-error-original.json",
                  "translation-counted-as-asr-error-neighbour.json"):
         assert vocabulary.check_error_pairs(str(root / name)) == 1, name
@@ -133,7 +133,7 @@ def test_defect_card_check_fails_on_both_fixtures(tmp_path):
 
 
 # ============================================================
-# Ранжування
+# Ranking
 # ============================================================
 
 def test_entity_with_error_aliases_ranks_above_frequent_case_forms_only(graph_db):
@@ -143,7 +143,7 @@ def test_entity_with_error_aliases_ranks_above_frequent_case_forms_only(graph_db
 
 
 def test_translation_alias_does_not_lift_rank(graph_db):
-    # Google частіший за Acmecorp, але «Гугл» — переклад: помилок нуль.
+    # Google is more frequent than Acmecorp, but «Гугл» is a translation: zero errors.
     names = vocabulary.build_hard_names(graph_db)
     assert names.index("Acmecorp") < names.index("Google")
 
@@ -161,7 +161,7 @@ def test_limit_respected(graph_db):
 
 
 # ============================================================
-# Кеш із TTL
+# Cache with TTL
 # ============================================================
 
 def test_cache_within_ttl_skips_db_and_rebuilds_after(graph_db, monkeypatch):
@@ -175,7 +175,7 @@ def test_cache_within_ttl_skips_db_and_rebuilds_after(graph_db, monkeypatch):
     assert first and len(opened) == 1
     clock[0] += vocabulary.CACHE_TTL_S - 1
     assert vocabulary.hard_names(graph_db) == first
-    assert len(opened) == 1, "у межах TTL у БД не ходимо"
+    assert len(opened) == 1, "within the TTL we do not touch the DB"
 
     conn = sqlite3.connect(graph_db)
     _entity(conn, "project", "Zentrix", aliases=["Зентрікс"])
@@ -183,12 +183,12 @@ def test_cache_within_ttl_skips_db_and_rebuilds_after(graph_db, monkeypatch):
     conn.close()
     clock[0] += 2
     assert "Zentrix" in vocabulary.hard_names(graph_db)
-    assert len(opened) == 2, "після TTL — перебудова без рестарту"
+    assert len(opened) == 2, "after the TTL — a rebuild without a restart"
 
 
 def test_broken_db_gives_empty_vocabulary(tmp_path):
     bad = tmp_path / "empty.db"
-    sqlite3.connect(str(bad)).close()  # без міграцій: таблиць нема
+    sqlite3.connect(str(bad)).close()  # no migrations: no tables
     assert vocabulary.hard_names(str(bad)) == []
 
 
@@ -200,20 +200,20 @@ ALL_KINDS = ("file", "recording", "telegram", "live", "youtube")
 
 
 def test_defaults_are_measured_winners(graph_db, monkeypatch):
-    """Підсумок K1 (measure/report.md): словник hotwords (рішення власника), multilingual 30 с."""
+    """K1 summary (measure/report.md): vocabulary hotwords (the owner's decision), multilingual 30 s."""
     monkeypatch.delenv(vocabulary.ENV_MODE)
     monkeypatch.delenv(vocabulary.ENV_MULTILINGUAL)
     assert vocabulary.mode() == "hotwords"
     assert vocabulary.multilingual_enabled() is True
     opts = vocabulary.decode_options_for("recording", graph_db)
     assert opts["hotwords"][0] == "Acmecorp" and opts["multilingual"] is True
-    assert "chunk_length" not in opts, "вікно 10 с не прийняте — лишається 30 с"
+    assert "chunk_length" not in opts, "the 10 s window was not accepted — 30 s remains"
     assert vocabulary.decode_options_for("youtube", graph_db) == {}
 
 
 def test_flags_off_give_empty_options_without_db(graph_db, monkeypatch):
     monkeypatch.setattr(vocabulary, "_connect_ro",
-                        lambda p: pytest.fail("з вимкненими прапорами БД не читається"))
+                        lambda p: pytest.fail("with the flags off the DB is not read"))
     for kind in ALL_KINDS:
         assert vocabulary.decode_options_for(kind, graph_db) == {}
 
@@ -251,7 +251,7 @@ def test_unknown_kind_rejected(graph_db):
 
 
 # ============================================================
-# Живий шлях передає decode_options
+# The live path passes decode_options
 # ============================================================
 
 class _CaptureWhisper:

@@ -1,30 +1,30 @@
-"""Питання без відповіді (Волна 5.3).
+"""Unanswered questions (Wave 5.3).
 
-«Прийшло в Telegram і лишилось без відповіді» — остання волна роадмапу. План
-казав: «питання до мене, після якого немає мого повідомлення в треді (потребує
-`tg_reply_to`)». Замір зняв обидві опори плану і лишив третю.
+«Arrived in Telegram and left unanswered» is the last wave of the roadmap. The plan
+said: «a question to me, after which there is no message from me in the thread (needs
+`tg_reply_to`)». Measurement removed two of the plan's supports and left the third.
 
-**`tg_reply_to` не працює** — 24 записи з 3961 (0.6%), колонка forward-only з
-Волни 4. Де вона є, там їй віримо; будувати на ній не можна.
+**`tg_reply_to` does not work**: some records(0.6%), a forward-only column since
+Wave 4. Where it exists we trust it; we cannot build on it.
 
-**Локальна модель тут не суддя.** Перевірено на 14 живих питаннях: 7B назвала
-«@johndoe тобі вдасться долучитись?» — питанням НЕ до власника (вона не знає,
-що цей нік і є власник), в інших випадках вигадувала адресата («адресовано
-Julia Bondarenko», якої в нитці немає) і копіювала формулювання прямо з промпта.
-Влучань 1 з 14, причому промах саме на тому випадку, заради якого волна робилась.
-Тому адресата визначає СТРУКТУРА, а не модель: @нік власника або приватний чат.
-Групове питання без адресата (233 з 294 кандидатів) свідомо НЕ показуємо — ані
-структура, ані 7B не можуть сказати, чи чекають відповіді від власника, а
-здогадка тут коштує довіри до всього списку.
+**The local model is no judge here.** Checked on 14 live questions: the 7B called
+«@johndoe тобі вдасться долучитись?» a question NOT to the owner (it does not know
+that this handle is the owner), in other cases it invented an addressee («адресовано
+Julia Bondarenko», who is not in the thread) and copied wording straight from the prompt.
+1 hit out of 14, and the miss was exactly on the case the wave was built for.
+So the addressee is determined by STRUCTURE, not the model: the owner's @handle or a private chat.
+A group question without an addressee (233 of 294 candidates) is deliberately NOT shown: neither
+structure nor the 7B can say whether the owner is expected to answer, and
+a guess here costs trust in the whole list.
 
-**«Немає моєї репліки в нитці» — теж хибний тест.** З 10 явно адресованих питань
-у 4 власник відповів через 0.0–0.4 години, але відповідь лягла в СУСІДНЮ нитку
-(нитки розмічені моделлю). Тому присутність шукаємо в межах ЧАТУ у вікні
-`reply_window_h`: писав у чаті після питання — значить бачив. Це свідомо м'який
-критерій: назвати забутим те, на що людина відповіла, гірше, ніж пропустити.
+**«No reply from me in the thread» is also a wrong test.** Of 10 explicitly addressed questions,
+in 4 the owner answered after 0.0-0.4 hours, but the answer landed in a NEIGHBOURING thread
+(threads are labelled by the model). So we look for presence within the CHAT in the window
+`reply_window_h`: wrote in the chat after the question means saw it. This is a deliberately soft
+criterion: calling forgotten something the person answered is worse than missing it.
 
-Ціна проходу — нуль: ані Claude, ані Ollama, лише SQL. Тому нічого не
-персиститься і не протухає: список рахується на запит.
+The cost of the pass is zero: neither Claude nor Ollama, only SQL. So nothing is
+persisted and nothing goes stale: the list is computed on request.
 
 CLI:
     python -m app.services.tg_questions list
@@ -49,28 +49,28 @@ from app.db.connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-# Вікно відповіді: писав у цьому чаті протягом стількох годин після питання —
-# вважаємо, що бачив. 24 год, бо питання ввечері нормально відповісти зранку.
+# Reply window: wrote in this chat within this many hours after the question —
+# we assume they saw it. 24 h, because answering an evening question in the morning is normal.
 REPLY_WINDOW_H = float(os.environ.get("TG_QUESTIONS_WINDOW_H", "24"))
-# Вікно ширше, ніж у зводі задач (там 30 днів), бо питання без відповіді часом НЕ
-# розсмоктується: на живому архіві всі шість висять по 2–4 місяці. Список
-# короткий за побудовою (адресат має бути доведений), тож ширина його не заливає.
+# The window is wider than in the task digest (30 days there), because an unanswered question sometimes does NOT
+# resolve itself: in the live archive all six hang for 2-4 months. The list is
+# short by construction (the addressee must be proven), so its width does not flood it.
 DEFAULT_DAYS = int(os.environ.get("TG_QUESTIONS_DAYS", "90"))
 
 _SELF_CACHE = Path(__file__).resolve().parents[2] / "data" / "tg_self.local.json"
 
-# Query-рядок посилання — не питання: `?igsh=`, `?from=search` дали 77 хибних
-# кандидатів з 574, і модель слухняно судила інстаграм-лінки.
+# A link's query string is not a question: `?igsh=`, `?from=search` gave 77 false
+# candidates out of 574, and the model dutifully judged Instagram links.
 _URL_RE = re.compile(r"https?://\S+|www\.\S+|t\.me/\S+")
 _HANDLE_RE = re.compile(r"@([A-Za-z][A-Za-z0-9_]{3,31})")
 
 
 # ============================================================
-# Хто такий «я»
+# Who "I" am
 # ============================================================
 
 def _listener_status(timeout: float = 5.0) -> Optional[dict]:
-    """Спитати слухача, під ким він залогінений (він єдиний тримає сесію)."""
+    """Ask the listener who it is logged in as (it alone holds the session)."""
     try:
         from telegram_common import CONTROL_TOKEN_HEADER, control_token
     except ImportError:
@@ -83,15 +83,15 @@ def _listener_status(timeout: float = 5.0) -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8") or "{}").get("me") or None
     except (urllib.error.URLError, OSError, ValueError) as e:
-        logger.debug("[tg_questions] слухач недоступний: %s", e)
+        logger.debug("[tg_questions] listener unavailable: %s", e)
         return None
 
 
 def _derive_from_private_chats(db_path: str) -> Optional[dict]:
-    """Запасний шлях: у чаті 1:1 власник — той відправник, що НЕ є назвою чату.
+    """Fallback: in a 1:1 chat the owner is the sender who is NOT the chat title.
 
-    Працює лише якщо моніториться хоч одна лічка. Ім'я без ніка й без id, тож
-    @згадки цим шляхом не ловляться — про це чесно каже `source`.
+    Works only if at least one private chat is monitored. The name has no handle or id, so
+    @mentions are not caught this way; `source` says so honestly.
     """
     with get_db_connection(db_path) as conn:
         rows = conn.execute(
@@ -106,24 +106,24 @@ def _derive_from_private_chats(db_path: str) -> Optional[dict]:
 
 
 def resolve_self(db_path: str, *, refresh: bool = False) -> Optional[dict]:
-    """Хто власник архіву: {'id','name','username','source'} або None.
+    """Who owns the archive: {'id','name','username','source'} or None.
 
-    Порядок: env (явно задано людиною) → слухач (авторитет, він тримає сесію) →
-    кеш минулого опитування → виведення з лічок. Кеш потрібен, бо проходи й MCP
-    працюють і тоді, коли слухач вимкнений.
+    Order: env (set explicitly by a person) → listener (authority, it holds the session) →
+    cache of the last query → deduction from private chats. The cache is needed because passes and MCP
+    work even when the listener is off.
 
-    Здогадка «власник — той, хто присутній у найбільшій кількості чатів» НЕ
-    використовується: на живих даних вона показує на двох інших людей (16 чатів
-    проти 12 у власника).
+    The guess «the owner is whoever is present in the most chats» is NOT
+    used: on live data it points at two other people (16 chats
+    versus the owner's 12).
     """
     name = os.environ.get("TELEGRAM_SELF_NAME", "").strip()
     if name:
         user = os.environ.get("TELEGRAM_SELF_USERNAME", "").strip().lstrip("@") or None
         return {"id": None, "name": name, "username": user, "source": "env"}
 
-    # Кеш без ніка — неповний, а не готовий: саме такий лишає старий слухач,
-    # який ще не вміє віддавати username. Мовчки прийняти його означало б
-    # назавжди вимкнути детект по @згадці і не сказати про це нікому.
+    # A cache without a handle is incomplete, not ready: that is what an old listener leaves,
+    # one that cannot yet report username. Silently accepting it would mean
+    # disabling @mention detection forever and telling no one.
     cached_ok = False
     if _SELF_CACHE.exists():
         try:
@@ -139,8 +139,8 @@ def resolve_self(db_path: str, *, refresh: bool = False) -> Optional[dict]:
             try:
                 _SELF_CACHE.parent.mkdir(parents=True, exist_ok=True)
                 _SELF_CACHE.write_text(json.dumps(me, ensure_ascii=False), encoding="utf-8")
-            except OSError as e:      # кеш — зручність, не умова роботи
-                logger.debug("[tg_questions] кеш не записався: %s", e)
+            except OSError as e:      # the cache is a convenience, not a requirement
+                logger.debug("[tg_questions] cache not written: %s", e)
             return me
 
     if _SELF_CACHE.exists():
@@ -150,17 +150,17 @@ def resolve_self(db_path: str, *, refresh: bool = False) -> Optional[dict]:
                 cached["source"] = "cache"
                 return cached
         except (OSError, ValueError) as e:
-            logger.debug("[tg_questions] кеш не прочитався: %s", e)
+            logger.debug("[tg_questions] cache not read: %s", e)
 
     return _derive_from_private_chats(db_path)
 
 
 # ============================================================
-# Детектор
+# Detector
 # ============================================================
 
 def is_question(text: Optional[str]) -> bool:
-    """Питальний знак у тексті, а не в query-рядку посилання."""
+    """A question mark in the text, not in a link's query string."""
     return "?" in _URL_RE.sub(" ", text or "")
 
 
@@ -169,10 +169,10 @@ def _handles(text: Optional[str]) -> set:
 
 
 def addressed_to_me(row: Any, me: dict) -> Optional[str]:
-    """Чому це питання САМЕ до власника: 'private' | 'mention' | None.
+    """Why this is a question TO THE OWNER: 'private' | 'mention' | None.
 
-    None означає «невідомо», а не «ні»: групове питання без звернення може бути
-    і до власника — просто довести це нічим, тож у список воно не йде.
+    None means «unknown», not «no»: a group question without an address may be
+    to the owner too; there is just nothing to prove it, so it does not go on the list.
     """
     if (row["tg_chat_id"] or 0) > 0:
         return "private"
@@ -185,17 +185,17 @@ def addressed_to_me(row: Any, me: dict) -> Optional[str]:
 def open_questions(db_path: str, *, days: int = DEFAULT_DAYS,
                    window_h: float = REPLY_WINDOW_H, chat_id: Optional[int] = None,
                    limit: int = 20, today: Optional[datetime] = None) -> dict:
-    """Питання до власника, після яких він не зʼявився в чаті.
+    """Questions to the owner after which they did not appear in the chat.
 
-    Повертає {'me', 'questions', 'skipped_group'}: `skipped_group` — скільки
-    питань лишилось поза списком через невідомого адресата (це не нуль і має
-    бути видно, інакше список читається як «більше нічого немає»).
+    Returns {'me', 'questions', 'skipped_group'}: `skipped_group` is how many
+    questions stayed off the list because of an unknown addressee (this is not zero and must
+    be visible, otherwise the list reads as «nothing more»).
     """
     me = resolve_self(db_path)
     if not me:
         return {"me": None, "questions": [], "skipped_group": 0,
-                "reason": "невідомо, хто власник архіву: слухач вимкнений і "
-                          "немає ні TELEGRAM_SELF_NAME, ні приватних чатів"}
+                "reason": "unknown who owns the archive: the listener is off and "
+                          "there is neither TELEGRAM_SELF_NAME nor private chats"}
 
     now = today or datetime.now()
     since = (now - timedelta(days=days)).date().isoformat()
@@ -220,16 +220,16 @@ def open_questions(db_path: str, *, days: int = DEFAULT_DAYS,
                 skipped += 1
                 continue
 
-            # Пряма відповідь реплаєм — найсильніший доказ, коли він є (0.6%).
+            # A direct reply is the strongest evidence when it exists (0.6%).
             replied = conn.execute(
                 "SELECT 1 FROM transcriptions WHERE tg_sender = ? AND deleted_at IS NULL "
                 "AND tg_reply_to = ? LIMIT 1", (me["name"], r["tg_message_id"])).fetchone()
             if replied:
                 continue
 
-            # Присутність у ЧАТІ, а не в нитці: нитки розмічені моделлю, і
-            # відповідь регулярно лягає в сусідню (заміряно: 4 випадки з 10
-            # мали відповідь через 0.0–0.4 год у тому ж чаті).
+            # Presence in the CHAT, not the thread: threads are labelled by the model, and
+            # the reply regularly lands in a neighbouring one (measured: 4 cases of 10
+            # had a reply within 0.0-0.4 h in the same chat).
             nxt = conn.execute(
                 "SELECT MIN(tg_date) AS d FROM transcriptions WHERE tg_sender = ? "
                 "AND deleted_at IS NULL AND tg_chat_id = ? AND tg_date > ?",
@@ -239,8 +239,8 @@ def open_questions(db_path: str, *, days: int = DEFAULT_DAYS,
                 try:
                     gap_h = (datetime.fromisoformat(nxt)
                              - datetime.fromisoformat(r["tg_date"])).total_seconds() / 3600
-                except ValueError:                 # дата в чужому форматі — не мовчимо
-                    logger.debug("[tg_questions] дата не розібралась: %r", nxt)
+                except ValueError:                 # date in a foreign format — do not stay silent
+                    logger.debug("[tg_questions] date not parsed: %r", nxt)
                     gap_h = None
                 if gap_h is not None and gap_h <= window_h:
                     continue
@@ -277,19 +277,19 @@ def main(argv: Optional[list] = None) -> int:
     default_db = str(Config.BASE_DIR / Config.DATABASE)
 
     p = argparse.ArgumentParser(prog="tg_questions",
-                                description="Питання без відповіді (Волна 5.3).")
+                                description="Unanswered questions (Wave 5.3).")
     p.add_argument("--db", default=default_db)
     sub = p.add_subparsers(dest="command", required=True)
 
-    q = sub.add_parser("list", help="Питання до мене, на які я не відповів")
+    q = sub.add_parser("list", help="Questions to me that I have not answered")
     q.add_argument("--days", type=int, default=DEFAULT_DAYS)
     q.add_argument("--window", type=float, default=REPLY_WINDOW_H,
-                   help="Годин присутності в чаті, які вважати відповіддю")
+                   help="Hours of presence in the chat to count as an answer")
     q.add_argument("--chat", type=int, default=None)
     q.add_argument("--limit", type=int, default=20)
 
-    w = sub.add_parser("whoami", help="Кого архів вважає власником і звідки це відомо")
-    w.add_argument("--refresh", action="store_true", help="Перепитати слухача")
+    w = sub.add_parser("whoami", help="Whom the archive considers the owner and how that is known")
+    w.add_argument("--refresh", action="store_true", help="Ask the listener again")
 
     args = p.parse_args(argv)
     if args.command == "whoami":

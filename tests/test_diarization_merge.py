@@ -1,8 +1,8 @@
-"""Tests для merge-логіки diarization_service (Phase 10.2).
+"""Tests for the merge logic of diarization_service (Phase 10.2).
 
-Реальний pipeline (pyannote) не вантажиться у тестах — це GPU-залежно
-і повільно. Тестуємо чисту функцію ``assign_speakers_to_whisper_segments``,
-яка містить всю не-ML логіку (overlap math, priority, fallback).
+The real pipeline (pyannote) is not loaded in the tests - it is GPU-dependent
+and slow. We test the pure function ``assign_speakers_to_whisper_segments``,
+which holds all the non-ML logic (overlap math, priority, fallback).
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def test_single_speaker_assigned_when_full_overlap():
 
 
 def test_dominant_overlap_wins():
-    """Whisper 0-10, diar A:0-3, B:3-10 → B (більший overlap 7s vs 3s)."""
+    """Whisper 0-10, diar A:0-3, B:3-10 → B (larger overlap 7s vs 3s)."""
     diar = [
         DiarSegment(0.0, 3.0, 'SPEAKER_00'),
         DiarSegment(3.0, 10.0, 'SPEAKER_01'),
@@ -39,13 +39,13 @@ def test_dominant_overlap_wins():
 
 def test_no_overlap_marked_unknown():
     diar = [DiarSegment(0.0, 5.0, 'SPEAKER_00')]
-    whisper = [_ws(20.0, 25.0)]  # цілком поза будь-яким діар-сегментом
+    whisper = [_ws(20.0, 25.0)]  # entirely outside any diar segment
     out = assign_speakers_to_whisper_segments(whisper, diar)
     assert out[0]['speaker'] == UNKNOWN_LABEL
 
 
 def test_self_priority_breaks_ties():
-    """50/50 overlap між self і remote → виграє self (mic-власник)."""
+    """50/50 overlap between self and remote → self wins (the mic owner)."""
     diar = [
         DiarSegment(0.0, 5.0, SELF_LABEL),
         DiarSegment(0.0, 5.0, 'SPEAKER_00'),
@@ -56,7 +56,7 @@ def test_self_priority_breaks_ties():
 
 
 def test_self_loses_when_remote_has_more_overlap():
-    """Self 1s, remote 4s → виграє remote попри пріоритет."""
+    """Self 1s, remote 4s → remote wins despite the priority."""
     diar = [
         DiarSegment(0.0, 1.0, SELF_LABEL),
         DiarSegment(1.0, 5.0, 'SPEAKER_00'),
@@ -67,11 +67,11 @@ def test_self_loses_when_remote_has_more_overlap():
 
 
 def test_multiple_segments_per_speaker_aggregated():
-    """Якщо один спікер з'являється в кількох інтервалах,
-    overlap'и сумуються — суцільний враховується разом з фрагментованими."""
+    """If one speaker appears in several intervals,
+    the overlaps are summed - a continuous one is counted together with fragmented ones."""
     diar = [
         DiarSegment(0.0, 2.0, 'SPEAKER_00'),
-        DiarSegment(3.0, 5.0, 'SPEAKER_00'),  # сумарно 4s SPEAKER_00
+        DiarSegment(3.0, 5.0, 'SPEAKER_00'),  # 4s in total for SPEAKER_00
         DiarSegment(2.0, 3.0, 'SPEAKER_01'),  # 1s SPEAKER_01
     ]
     whisper = [_ws(0.0, 5.0)]
@@ -92,7 +92,7 @@ def test_empty_whisper_returns_empty():
 
 
 def test_input_segments_not_mutated():
-    """assign_* не повинна мутувати оригінальні whisper-сегменти."""
+    """assign_* must not mutate the original whisper segments."""
     diar = [DiarSegment(0.0, 5.0, 'SPEAKER_00')]
     whisper = [_ws(1.0, 4.0, 'привіт')]
     out = assign_speakers_to_whisper_segments(whisper, diar)
@@ -104,7 +104,7 @@ def test_collect_unique_labels_preserves_order():
     enriched = [
         {'start': 0, 'end': 1, 'speaker': 'SPEAKER_01'},
         {'start': 1, 'end': 2, 'speaker': SELF_LABEL},
-        {'start': 2, 'end': 3, 'speaker': 'SPEAKER_01'},  # дубль ігнорується
+        {'start': 2, 'end': 3, 'speaker': 'SPEAKER_01'},  # the duplicate is ignored
         {'start': 3, 'end': 4, 'speaker': 'SPEAKER_00'},
     ]
     assert collect_unique_labels(enriched) == ['SPEAKER_01', SELF_LABEL, 'SPEAKER_00']
@@ -131,9 +131,9 @@ def test_partial_overlap_at_boundaries():
 
 
 def test_zero_duration_whisper_segment_handled():
-    """Whisper з 0-тривалістю не повинен крашити (start == end)."""
+    """A zero-duration whisper must not crash (start == end)."""
     diar = [DiarSegment(0.0, 5.0, 'SPEAKER_00')]
     whisper = [_ws(2.0, 2.0)]
     out = assign_speakers_to_whisper_segments(whisper, diar)
-    # Точкове перетин = 0, тому UNKNOWN
+    # A point intersection = 0, hence UNKNOWN
     assert out[0]['speaker'] == UNKNOWN_LABEL

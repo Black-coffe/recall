@@ -1,23 +1,23 @@
-"""T8.1 (REMEDIATION_PLAN Волна 4): тести на GET /api/system/diagnostic-package
+"""T8.1 (REMEDIATION_PLAN Wave 4): tests for GET /api/system/diagnostic-package
 (app/blueprints/system.py).
 
-Перевіряє критерії приймання T8.1 (простий варіант, без Sentry):
-  - Ендпоінт збирає zip з manifest.json + system_info.json + logs/*.
-  - У пакет попадають лише ЛОГИ, що реально існують на диску (не порожні
-    записи для відсутніх процесів).
-  - Redaction: значення, схожі на ключі/токени/хеші (sk-ant-…,
+Checks the T8.1 acceptance criteria (simple variant, no Sentry):
+  - The endpoint builds a zip with manifest.json + system_info.json + logs/*.
+  - Only LOGS that really exist on disk go into the package (no empty
+    entries for absent processes).
+  - Redaction: values that look like keys/tokens/hashes (sk-ant-…,
     ANTHROPIC_API_KEY=, TELEGRAM_API_HASH=, TELEGRAM_API_ID=, *_KEY=,
-    *_TOKEN=), НЕ потрапляють у пакет у відкритому вигляді.
-  - Хвіст логу обрізається до DIAGNOSTIC_LOG_TAIL_LINES (500) рядків.
-  - Content-Type відповіді — application/zip.
+    *_TOKEN=) do NOT get into the package in the clear.
+  - The log tail is truncated to DIAGNOSTIC_LOG_TAIL_LINES (500) lines.
+  - The response Content-Type is application/zip.
 
-Навмисно НЕ імпортує app.py (важкий Whisper-імпорт) — той самий паттерн, що
-tests/test_settings_api.py: мінімальний Flask-застосунок лише з system_bp,
-root_path=tmp_path, щоб файли логів читались із тимчасової директорії.
-state.whisper_manager монкіпатчиться на None — ендпоінт має деградувати
-(system_info.json = {}), а не падати 500.
+Deliberately does NOT import app.py (a heavy Whisper import) — the same pattern as
+tests/test_settings_api.py: a minimal Flask app with only system_bp,
+root_path=tmp_path, so the log files are read from a temporary directory.
+state.whisper_manager is monkeypatched to None — the endpoint must degrade
+(system_info.json = {}), not fail with 500.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_diagnostic_package.py -v
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ class TestDiagnosticPackageAssembly:
         assert "generated_at" in manifest
         assert "app_version" in manifest
         assert "os" in manifest
-        # git_commit не гарантований (tmp_path — не git-repo), але ключ є.
+        # git_commit is not guaranteed (tmp_path is not a git repo), but the key is present.
         assert "git_commit" in manifest
 
     def test_system_info_degrades_gracefully_without_whisper_manager(self, client):
@@ -73,7 +73,7 @@ class TestDiagnosticPackageAssembly:
 
     def test_includes_only_logs_that_exist_on_disk(self, client, tmp_path):
         (tmp_path / "whisper_ui.log").write_text("2026-07-03 INFO started\n", encoding="utf-8")
-        # telegram_listener.log / mcp_server.log навмисно НЕ створюємо.
+        # telegram_listener.log / mcp_server.log are deliberately NOT created.
 
         r = client.get("/api/system/diagnostic-package")
         zf = zipfile.ZipFile(io.BytesIO(r.data))
@@ -107,11 +107,11 @@ class TestDiagnosticPackageRedaction:
         assert "987654" not in content
         assert "super-secret-flask-key" not in content
         assert "REDACTED" in content
-        # Не-секретний рядок лишається читабельним.
+        # A non-secret line stays readable.
         assert "started" in content
 
     def test_redacts_bare_anthropic_key_without_assignment(self, client, tmp_path):
-        """Ключ, що трапився у тексті помилки (не в парі ІМ'Я=значення)."""
+        """A key that occurred in error text (not in a NAME=value pair)."""
         fake_key = "sk-ant-api03-BAREKEYNOTASSIGNED9876543210"
         (tmp_path / "whisper_ui.log").write_text(
             f"anthropic.APIError: invalid key {fake_key} rejected\n", encoding="utf-8",

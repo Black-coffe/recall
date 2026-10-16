@@ -1,4 +1,4 @@
-"""Каталог: спільні серверні тексти (settings_api, system, app.py, error_handlers)."""
+"""Catalog: shared server texts (settings_api, system, app.py, error_handlers)."""
 MESSAGES: dict = {
     "core.error.internal": {
         "uk": "Внутрішня помилка сервера. Спробуйте пізніше.",

@@ -1,21 +1,21 @@
-"""Co-pilot — локальний диспетчер-LLM (Phase 19, Крок 3).
+"""Co-pilot — local dispatcher LLM (Phase 19, Step 3).
 
-Локальна сильна модель (Ollama, $0 API) як «відсікач сміття»: на каденс/подію
-дивиться свіже вікно розмови і вирішує структурованим JSON —
-  1. **триаж**: коротка мітка теми, чи треба шукати в архіві, який запит,
-     первинні спостереження (протиріччя/питання/уточнення/факти);
-  2. **аналіз-сверка**: якщо RAG щось знайшов — модель бачить РЕАЛЬНІ фрагменти
-     архіву (з ``chunk_id``) і формулює обґрунтовані інсайти з ``evidence_chunk_ids``.
+A strong local model (Ollama, $0 API) as a "garbage filter": on a cadence/event it
+looks at the fresh conversation window and decides with structured JSON —
+  1. **triage**: a short topic label, whether to search the archive, which query,
+     primary observations (contradictions/questions/clarifications/facts);
+  2. **analysis-reconciliation**: if RAG found something, the model sees REAL archive
+     fragments (with ``chunk_id``) and formulates grounded insights with ``evidence_chunk_ids``.
 
-Два виклики (а не один) навмисно: у першому модель ще не бачила архів і не може
-посилатися на конкретні чанки; у другому — бачить і прив'язує докази. Обидва
-локальні ($0). Ескалація в Claude — Крок 5 (тут лише виставляється прапор
-``escalate`` за порогом режиму, ефект підключається далі).
+Two calls (rather than one) on purpose: in the first the model has not seen the archive yet and cannot
+reference specific chunks; in the second it sees them and binds the evidence. Both
+are local ($0). Escalation to Claude is Step 5 (here only the ``escalate``
+flag is set by the mode threshold; the effect is wired up further on).
 
-Чиста оркестрація: LLM (``local_llm``) і пошук (``retrieval.search``) інжектяться
-→ модуль тестується офлайн з підставними, без Ollama/мережі/GPU. Стан сесії
-(rolling-summary, показані чанки, кеш тем) живе у :class:`CopilotWorker`, не тут —
-диспетчер сам по собі без стану, крім конфіга.
+Pure orchestration: the LLM (``local_llm``) and search (``retrieval.search``) are injected
+→ the module is tested offline with stubs, without Ollama/network/GPU. Session state
+(rolling-summary, shown chunks, topic cache) lives in :class:`CopilotWorker`, not here —
+the dispatcher itself is stateless, except for the config.
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from app.services.copilot.config import INSIGHT_KINDS as _KINDS
 
 logger = logging.getLogger(__name__)
 
-# --- JSON-схеми (Ollama structured outputs) ------------------------------------
-# Тримаємо мінімальними: чим строгіша схема, тим стабільніший вивід малих квантів.
+# --- JSON schemas (Ollama structured outputs) ---------------------------------
+# Keep them minimal: the stricter the schema, the more stable the output of small quants.
 TRIAGE_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -74,7 +74,7 @@ ANALYSIS_SCHEMA: dict = {
     "required": ["insights"],
 }
 
-# --- Системні промпти (UA) -----------------------------------------------------
+# --- System prompts (UA) -------------------------------------------------------
 _SYS_TRIAGE = (
     "Ти — локальний диспетчер живого ко-пілота ділового дзвінка. Аналізуєш свіже "
     "вікно розмови (репліки сторін) разом з коротким конспектом сесії, профілем "
@@ -126,22 +126,22 @@ _SUMMARY_SCHEMA: dict = {
 
 
 def _fmt_chunks(chunks: list[dict], limit_chars: int = 320) -> str:
-    """Згорнути RAG-чанки у компактний контекст для LLM (id + провенанс + текст).
+    """Collapse RAG chunks into a compact context for the LLM (id + provenance + text).
 
-    Коментар оператора позначається окремо і НЕ як «(джерело, дата)»: 7B-модель
-    зважує рядки за тим, як вони підписані, і без явної мітки репліка, яку
-    оператор щойно вписав руками, читалась би як ще один старий фрагмент
-    архіву — тобто найсвіжіший і найточніший сигнал у вікні втрачав би вагу
-    рівно там, де він потрібен.
+    The operator comment is marked separately and NOT as "(source, date)": a 7B model
+    weighs lines by how they are signed, and without an explicit label a line the
+    operator has just typed by hand would read as yet another old archive fragment
+    — i.e. the freshest and most accurate signal in the window would lose weight
+    exactly where it is needed.
 
-    АЛЕ мітка вішається лише на ЖИВІ коментарі цього дзвінка (`live_operator`,
-    їх кладе `worker._operator_comments`). Архівні коментарі теж мають
-    `source_type == 'comment'` — вони приходять із RAG-пошуку, бо шар
-    коментарів увімкнений у `retrieval.search` за замовчуванням. Підписати
-    торішнє уточнення до ЧУЖОГО проєкту як «оператор щойно сказав» —
-    вивернути сенс мітки навиворіт, ще й позбавивши модель джерела й дати.
-    Тому в них лишається звичайний провенанс, лише з позначкою, що це
-    коментар власника, а не репліка з розмови."""
+    BUT the label is attached only to LIVE comments of this call (`live_operator`,
+    put there by `worker._operator_comments`). Archive comments also have
+    `source_type == 'comment'` — they come from the RAG search, because the comment
+    layer is enabled in `retrieval.search` by default. Signing last year's
+    clarification about SOMEONE ELSE's project as "the operator just said" would
+    turn the label's meaning inside out, and deprive the model of source and date.
+    So they keep the regular provenance, only marked as
+    the owner's comment, not a line from the conversation."""
     lines = []
     for c in chunks:
         txt = (c.get("text") or "").strip().replace("\n", " ")
@@ -166,16 +166,16 @@ def _fmt_chunks(chunks: list[dict], limit_chars: int = 320) -> str:
 
 
 def _tokens(raw: Optional[dict]) -> tuple[Optional[int], Optional[int]]:
-    """(tokens_in, tokens_out) з сирого Ollama-респонсу для обліку в історії."""
+    """(tokens_in, tokens_out) from the raw Ollama response for history accounting."""
     if not raw:
         return None, None
     return raw.get("prompt_eval_count"), raw.get("eval_count")
 
 
 class Dispatcher:
-    """Локальний диспетчер. Без стану (крім конфіга): теми/summary/кеш — у воркері.
+    """Local dispatcher. Stateless (except the config): topics/summary/cache live in the worker.
 
-    ``llm`` і ``search_fn`` інжектяться → офлайн-тест без Ollama/БД.
+    ``llm`` and ``search_fn`` are injected → offline test without Ollama/DB.
     """
 
     def __init__(self, *, db_path: str, llm: Any = local_llm,
@@ -191,18 +191,18 @@ class Dispatcher:
     def retrieve(self, query: str, *, top_k: Optional[int] = None,
                  category_id: Optional[int] = None,
                  scope_tids: Optional[list] = None) -> dict:
-        """RAG-пошук в архіві (обгортка над інжектованим search_fn). category_id —
-        обмежити напрямком сесії. Returns {"query", "chunks", "vector_available"}."""
+        """RAG search in the archive (wrapper over the injected search_fn). category_id —
+        restricts to the session direction. Returns {"query", "chunks", "vector_available"}."""
         return self._search(self._db_path, query, top_k=top_k or self._top_k,
                             category_id=category_id, scope_tids=scope_tids)
 
-    # ------------------------------------------------------------- LLM-кроки
+    # ------------------------------------------------------------- LLM steps
 
     def triage(self, *, window: str, summary: str = "", profile: str = "",
                topics: Optional[list[dict]] = None,
                current_index: Optional[int] = None) -> Optional[dict]:
-        """Перший прохід: спадкоємність теми (LLM вирішує continue/shift/return) +
-        чи шукати + запит + спостереження. None на збій LLM."""
+        """First pass: topic continuity (the LLM decides continue/shift/return) +
+        whether to search + query + observations. None on LLM failure."""
         prompt = (
             (f"Профіль напрямку: {profile}\n" if profile else "")
             + (f"Конспект сесії:\n{summary}\n\n" if summary else "")
@@ -214,7 +214,7 @@ class Dispatcher:
             return None
         data = out["data"]
         data["tokens_in"], data["tokens_out"] = out["tokens"]
-        # нормалізація
+        # normalization
         data["topic_label"] = (data.get("topic_label") or "").strip()
         st = data.get("topic_status")
         data["topic_status"] = st if st in ("continue", "shift", "return") else "continue"
@@ -227,7 +227,7 @@ class Dispatcher:
 
     @staticmethod
     def _fmt_topics(topics: Optional[list[dict]], current_index: Optional[int]) -> str:
-        """Список відомих тем для промпта триажу (позначає поточну)."""
+        """List of known topics for the triage prompt (marks the current one)."""
         if not topics:
             return "Відомих тем ще нема (це початок розмови).\n\n"
         lines = ["Відомі теми сесії (індекс: назва):"]
@@ -238,7 +238,7 @@ class Dispatcher:
 
     def analyze(self, *, window: str, chunks: list[dict],
                 profile: str = "") -> Optional[dict]:
-        """Другий прохід: інсайти, обґрунтовані наданими чанками. None на збій LLM."""
+        """Second pass: insights grounded in the supplied chunks. None on LLM failure."""
         if not chunks:
             return {"insights": [], "tokens_in": None, "tokens_out": None}
         valid_ids = {int(c["chunk_id"]) for c in chunks if c.get("chunk_id") is not None}
@@ -257,7 +257,7 @@ class Dispatcher:
                 "tokens_out": out["tokens"][1]}
 
     def summarize(self, *, prev_summary: str, window: str) -> Optional[str]:
-        """Оновити rolling-summary сесії. None на збій (тоді лишаємо старий)."""
+        """Update the session rolling-summary. None on failure (then the old one is kept)."""
         prompt = (
             (f"Попередній конспект:\n{prev_summary}\n\n" if prev_summary else "")
             + f"Нові репліки:\n{self._clip(window)}"
@@ -276,8 +276,8 @@ class Dispatcher:
                 prompt, schema=schema, system=system,
                 max_tokens=max_tokens or self._max_tokens,
             )
-        except Exception as e:  # LocalLLMError / мережа / невалідний JSON після ретраю
-            logger.warning("[copilot] диспетчер LLM збій: %s", e)
+        except Exception as e:  # LocalLLMError / network / invalid JSON after retry
+            logger.warning("[copilot] dispatcher LLM failure: %s", e)
             return None
         if not isinstance(res.get("data"), dict):
             return None
@@ -285,7 +285,7 @@ class Dispatcher:
 
     def _clean_insights(self, items: Any, *, with_evidence: bool,
                         valid_ids: Optional[set] = None) -> list[dict]:
-        """Відфільтрувати/нормалізувати інсайти від моделі (захист від сміття)."""
+        """Filter/normalize insights from the model (protection against garbage)."""
         out: list[dict] = []
         if not isinstance(items, list):
             return out
@@ -311,8 +311,8 @@ class Dispatcher:
                         continue
                     if valid_ids is None or cid in valid_ids:
                         ids.append(cid)
-                # інсайт з евіденс-схеми, але без жодного реального доказу — відкидаємо
-                # (модель «галюцинувала» прив'язку); спостереження без евіденс ок.
+                # an insight from the evidence schema but without any real proof — drop it
+                # (the model "hallucinated" the binding); an observation without evidence is ok.
                 if not ids:
                     continue
                 ins["evidence_chunk_ids"] = ids

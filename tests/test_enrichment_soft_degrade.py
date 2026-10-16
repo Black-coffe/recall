@@ -1,11 +1,11 @@
-"""Тести м'якої деградації enrichment при збої Claude-виклику (REMEDIATION_PLAN
-Волна 3, T6.3).
+"""Tests of soft degradation of enrichment when a Claude call fails (REMEDIATION_PLAN
+Wave 3, T6.3).
 
-Раніше text_polishing.extract_meeting_card() усередині _enrich_card() не був
-обгорнутий у try/except — збій (мережа, вичерпані retry, некоректний JSON)
-прокидався і рвав УСЮ enrich_transcription() (embed-фаза, що НЕ залежить від
-Claude, теж не встигала виконатись). Тепер — "retry_needed" замість жорсткого
-падіння.
+Previously text_polishing.extract_meeting_card() inside _enrich_card() was not
+wrapped in try/except — a failure (network, retries exhausted, invalid JSON)
+propagated and broke the WHOLE enrich_transcription() (the embed phase, which does NOT depend on
+Claude, did not get to run either). Now — "retry_needed" instead of a hard
+failure.
 """
 from __future__ import annotations
 
@@ -32,8 +32,8 @@ def db_path(tmp_path):
 
 class TestEnrichCardSoftDegradation:
     def test_card_failure_returns_retry_needed_not_raises(self, db_path, monkeypatch):
-        """Claude-виклик падає (напр. вичерпані retry на транзиентній помилці) —
-        _enrich_card НЕ прокидає виняток, повертає status=retry_needed."""
+        """The Claude call fails (e.g. retries exhausted on a transient error) —
+        _enrich_card does NOT propagate the exception, returns status=retry_needed."""
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated Claude API failure after retries exhausted")
 
@@ -45,8 +45,8 @@ class TestEnrichCardSoftDegradation:
         assert "error" in res and "simulated Claude API failure" in res["error"]
 
     def test_card_failure_does_not_block_independent_embed_phase(self, db_path, monkeypatch):
-        """Збій card-фази не повинен зупиняти embed-фазу (локальна, без Claude) —
-        це і є 'збій одного card не рушить весь прохід'."""
+        """A card-phase failure must not stop the embed phase (local, no Claude) —
+        that is the point of 'one card failing does not break the whole pass'."""
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated Claude API failure")
 
@@ -63,17 +63,17 @@ class TestEnrichCardSoftDegradation:
 
         res = enrichment.enrich_transcription(db_path, 1)
 
-        # Card-фаза деградувала м'яко...
+        # The card phase degraded softly...
         assert res["card"]["status"] == "retry_needed"
-        # ...але embed-фаза ВСЕ ОДНО виконалась (раніше exception з card-фази
-        # рвав enrich_transcription() ще ДО виклику embed-фази).
+        # ...but the embed phase RAN ANYWAY (previously an exception from the card phase
+        # broke enrich_transcription() BEFORE the embed phase call).
         assert embed_calls == [1]
         assert res["embed"]["status"] == "embedded"
-        assert res["status"] == "done"  # embed зробив роботу, тож загальний статус "done"
+        assert res["status"] == "done"  # embed did the work, so the overall status is "done"
 
     def test_backfill_continues_after_one_card_failure(self, db_path, monkeypatch):
-        """backfill() по кількох транскриптах: збій card-фази на одному записі
-        не повинен зупиняти прохід по решті."""
+        """backfill() over several transcripts: a card-phase failure on one record
+        must not stop the pass over the rest."""
         with get_db_connection(db_path) as conn:
             conn.execute(
                 "INSERT INTO transcriptions (source_type, source_name, transcript_text, created_at) "
@@ -89,7 +89,7 @@ class TestEnrichCardSoftDegradation:
         monkeypatch.setattr(enrichment.embeddings, "is_available", lambda: False)
 
         result = enrichment.backfill(db_path, force=True)
-        # Обидва записи оброблені (не впали ексепшеном на першому) — і жоден
-        # НЕ підрахований у "failed", бо це більше не unhandled exception.
+        # Both records were processed (did not blow up on the first) — and neither
+        # is counted in "failed", because this is no longer an unhandled exception.
         assert result["total"] == 2
         assert result["failed"] == 0

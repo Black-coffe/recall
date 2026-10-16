@@ -1,5 +1,5 @@
 """
-Настройка логирования для приложения
+Logging setup for the application
 """
 
 import json
@@ -21,43 +21,43 @@ def setup_logger(
     backup_count: int = 5
 ) -> logging.Logger:
     """
-    Настраивает логгер с ротацией файлов и консольным выводом
+    Sets up a logger with file rotation and console output
     """
     
     config = get_config()
     
-    # Создаем логгер
+    # Create the logger
     logger = logging.getLogger(name)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     
-    # Очищаем существующие обработчики
+    # Clear existing handlers
     logger.handlers.clear()
     
-    # Формат логов
+    # Log format
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Консольный обработчик
+    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     
-    # Файловый обработчик с ротацией. ВЫКЛЮЧЕН по умолчанию (RECALL_LOG_TO_FILE != 1):
-    # этот модульный logger («whisper_ui») нигде не используется, а его второй
-    # RotatingFileHandler на общем whisper_ui.log лишь блокировал rollover главного
-    # процесса на Windows (WinError 32 — файл занят: app.py пишет своим basicConfig,
-    # listener — своим, каждый stdio-mcp_server открывал ещё по копии). Включить
-    # обратно для конкретного процесса можно через RECALL_LOG_TO_FILE=1.
-    # config-registry-fix-r3-01: читання переведено на settings.env_bool —
-    # truthy-набір розширився з ('1','true','yes') до ('1','true','yes','on').
+    # File handler with rotation. OFF by default (RECALL_LOG_TO_FILE != 1):
+    # this module-level logger ("whisper_ui") is not used anywhere, and its second
+    # RotatingFileHandler on the shared whisper_ui.log only blocked the main process's
+    # rollover on Windows (WinError 32 — file in use: app.py writes with its own basicConfig,
+    # the listener with its own, every stdio mcp_server opened yet another copy). It can be
+    # turned back on for a specific process via RECALL_LOG_TO_FILE=1.
+    # config-registry-fix-r3-01: reading switched to settings.env_bool —
+    # the truthy set widened from ('1','true','yes') to ('1','true','yes','on').
     _file_logging = _settings.env_bool("RECALL_LOG_TO_FILE")
     if _file_logging and (log_file or hasattr(config, 'LOG_FILE')):
         log_path = log_file or config.LOG_FILE
         
-        # Создаем папку для логов если не существует
+        # Create the logs folder if it does not exist
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         
         file_handler = logging.handlers.RotatingFileHandler(
@@ -70,24 +70,24 @@ def setup_logger(
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     
-    # Предотвращаем дублирование логов
+    # Prevent duplicate logs
     logger.propagate = False
     
     return logger
 
 
 class JsonFormatter(logging.Formatter):
-    """config-registry-profiles S2: `RECALL_LOG_FORMAT=json` — один рядок JSON
-    на запис замість тексту (`app.py:219-275` підключає це до file+stream
-    хендлерів, коли увімкнено). Поля навмисно ті самі, що в text-форматі
-    (`_RequestIdLogFilter` в app.py проставляє `record.request_id`) — жодних
-    зайвих полів не додаємо (план, Contracts §Логи)."""
+    """config-registry-profiles S2: `RECALL_LOG_FORMAT=json` — one JSON line
+    per record instead of text (`app.py:219-275` attaches this to the file+stream
+    handlers when enabled). The fields are deliberately the same as in the text format
+    (`_RequestIdLogFilter` in app.py sets `record.request_id`) — no
+    extra fields added (plan, Contracts §Logs)."""
 
     def format(self, record: logging.LogRecord) -> str:
-        # config-registry-fix S4 (знахідка 16): мілісекунди — text-режим у
-        # app.py несе їх у `%(asctime)s` за замовчуванням (Formatter без
-        # datefmt додає ",%03d"), тут `formatTime` з явним datefmt їх
-        # губив. Дописуємо тим самим форматом, що й стандартний logging.
+        # config-registry-fix S4 (finding 16): milliseconds — text mode in
+        # app.py carries them in `%(asctime)s` by default (a Formatter without
+        # datefmt appends ",%03d"), while `formatTime` with an explicit datefmt here
+        # lost them. We append them in the same format as standard logging.
         payload = {
             "ts": f"{self.formatTime(record, '%Y-%m-%d %H:%M:%S')},{int(record.msecs):03d}",
             "level": record.levelname,
@@ -96,33 +96,33 @@ class JsonFormatter(logging.Formatter):
             "request_id": getattr(record, "request_id", "-"),
         }
         if record.exc_info:
-            # exc_info — поле поза початковим контрактом Contracts (§Логи мали
-            # ті самі поля, що text-формат); лишаємо, бо без нього
-            # __format__ ковтав би трейсбеки на ERROR-записах. Зафіксувати
-            # як свідоме відхилення — в Contracts S3 (історія 06).
+            # exc_info — a field outside the original Contracts (§Logs had
+            # the same fields as the text format); kept, because without it
+            # __format__ would swallow tracebacks on ERROR records. To be recorded
+            # as a deliberate deviation — in Contracts S3 (story 06).
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
 
 
 def get_logger(name: str) -> logging.Logger:
     """
-    Получает настроенный логгер
+    Returns a configured logger
     """
     return logging.getLogger(name)
 
 
-# config-registry-fix S4 (знахідка 5): раніше тут стояло
-# `app_logger = setup_logger("whisper_ui")` — виконувалось при БУДЬ-якому
-# імпорті цього модуля (навіть заради `JsonFormatter`), додавало
-# StreamHandler і, при `RECALL_LOG_TO_FILE=1`, ДРУГИЙ `RotatingFileHandler`
-# на той самий `whisper_ui.log`, за який уже конкурує `app.py`-хендлер —
-# та сама WinError 32 гонитва за файлом, заради усунення якої існує прапорець.
-# Нічого в кодовій базі не читає `app_logger` (перевірено грепом), тож
-# прибираємо побічний ефект імпорту, а не переписуємо `setup_logger`.
+# config-registry-fix S4 (finding 5): there used to be
+# `app_logger = setup_logger("whisper_ui")` here — it ran on ANY
+# import of this module (even just for `JsonFormatter`), added a
+# StreamHandler and, with `RECALL_LOG_TO_FILE=1`, a SECOND `RotatingFileHandler`
+# on the same `whisper_ui.log` the `app.py` handler already competes for —
+# the same WinError 32 file race the flag exists to eliminate.
+# Nothing in the codebase reads `app_logger` (checked with grep), so
+# we remove the import side effect rather than rewrite `setup_logger`.
 
 
 class LoggerMixin:
-    """Миксин для добавления логгера в классы"""
+    """Mixin for adding a logger to classes"""
     
     @property
     def logger(self) -> logging.Logger:

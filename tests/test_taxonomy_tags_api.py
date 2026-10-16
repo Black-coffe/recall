@@ -1,10 +1,10 @@
-"""`/api/memory/*`: осі category_id/tags/since/until на search/ask/ask-stream/
-entities/action-items + CRUD словника тегів + теги запису + підказки (спека
-`directions-projects-tags`, історія 07, контракт C4 «Теги» / C5).
+"""`/api/memory/*`: the category_id/tags/since/until axes on search/ask/ask-stream/
+entities/action-items + tag dictionary CRUD + record tags + suggestions (spec
+`directions-projects-tags`, story 07, contract C4 "Tags" / C5).
 
-Той самий підхід, що й `test_taxonomy_http.py`: tmp-БД (`init_database`) +
-Flask `test_client` навколо `memory_bp` напряму — бойовий `whisper_history.db`
-не чіпається. Фікстури кириличні (`plan-dictated-sql-ignored-own-memory`).
+The same approach as `test_taxonomy_http.py`: a tmp DB (`init_database`) +
+Flask `test_client` around `memory_bp` directly - the live `whisper_history.db`
+is not touched. Fixtures are Cyrillic (`plan-dictated-sql-ignored-own-memory`).
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ def client(db):
 
 @pytest.fixture(autouse=True)
 def _reembed_spy(monkeypatch):
-    """Ловить кожен виклик re-embed без справжнього планувальника (той тягне
-    embeddings/torch — memory-мапа `mcp-stdio-no-heavy-models`)."""
+    """Catches every re-embed call without the real scheduler (that one pulls in
+    embeddings/torch - memory map `mcp-stdio-no-heavy-models`)."""
     calls = []
     monkeypatch.setattr(
         "app.services.reembed.schedule_records_reembed",
@@ -54,7 +54,7 @@ def _reembed_spy(monkeypatch):
 
 
 def _tree(conn):
-    """«Фонд Робота» уже серед засівів v15 — знайти-або-створити, як у
+    """«Фонд Робота» is already among the v15 seeds - find-or-create, as in
     `test_taxonomy_http.py._tree`."""
     row = conn.execute("SELECT id FROM categories WHERE COALESCE(name_norm, name) = ?",
                        ("фонд робота",)).fetchone()
@@ -100,7 +100,7 @@ def _add_action(conn, *, tid, task, owner_name=None, status="open"):
 
 
 # ============================================================
-# search / ask / ask/stream — осі category_id/tags/since/until (C5)
+# search / ask / ask/stream - the category_id/tags/since/until axes (C5)
 # ============================================================
 
 def test_search_passes_axes_to_retrieval(client, monkeypatch):
@@ -185,7 +185,7 @@ def test_ask_stream_bad_until_is_400_without_calling_rag(client, monkeypatch):
 
 
 # ============================================================
-# /api/memory/entities — category_id (з розкриттям) / tags
+# /api/memory/entities - category_id (with expansion) / tags
 # ============================================================
 
 def test_entities_category_id_counts_mentions_in_project_records(client, conn):
@@ -227,7 +227,7 @@ def test_entities_bad_category_id_is_400(client):
 
 
 # ============================================================
-# /api/memory/action-items — ті самі осі (category_id, tags)
+# /api/memory/action-items - the same axes (category_id, tags)
 # ============================================================
 
 def test_action_items_category_id_expands_direction_to_projects(client, conn):
@@ -263,7 +263,7 @@ def test_action_items_tags_filters_and_unknown_tag_is_empty(client, conn):
 
 
 # ============================================================
-# Словник тегів: GET/POST/PATCH/DELETE/merge
+# Tag dictionary: GET/POST/PATCH/DELETE/merge
 # ============================================================
 
 def test_create_tag_then_repeat_post_is_idempotent_by_norm(client):
@@ -332,8 +332,8 @@ def test_patch_tag_rename_reembeds_live_records_only_color_change_does_not(clien
 
 
 def test_patch_tag_rename_same_exact_name_does_not_reembed(client, conn, _reembed_spy):
-    """Мінор 3: `name_changed` порівнює точний збережений рядок, не
-    `name_norm` — «AI» → «AI» нічого не міняє в префіксі."""
+    """Minor 3: `name_changed` compares the exact stored string, not
+    `name_norm` - «AI» -> «AI» changes nothing in the prefix."""
     a = _add_tx(conn, name="Раз")
     tag = client.post("/api/memory/tags", json={"name": "AI"}).get_json()["tag"]
     client.put(f"/api/memory/{a}/tags", json={"add": ["AI"]})
@@ -346,9 +346,9 @@ def test_patch_tag_rename_same_exact_name_does_not_reembed(client, conn, _reembe
 
 
 def test_set_record_tags_add_rejects_empty_name_before_write(client, conn):
-    """`""` сам по собі: `parse_tags` тихо відкидає порожні елементи (це ок
-    для фільтрів), тож без окремого гарда сирого списку запит повертав би
-    200 і нічого не писав — тепер 400 до першого INSERT (Мінор 4)."""
+    """`""` by itself: `parse_tags` quietly drops empty items (fine
+    for filters), so without a separate guard of the raw list the request returned
+    200 and wrote nothing - now a 400 before the first INSERT (Minor 4)."""
     tid = _add_tx(conn, name="Запис")
 
     r = client.put(f"/api/memory/{tid}/tags", json={"add": [""]})
@@ -423,9 +423,9 @@ def test_delete_unknown_tag_is_404(client):
 
 
 # ============================================================
-# `color` — літерал #RGB/#RGBA/#RRGGBB/#RRGGBBAA, інакше 400 (мінор 12 р1,
-# ревʼю раунду 5): без перевірки будь-який текст потрапляв у
-# `style="--tag-color:…"`.
+# `color` - a literal #RGB/#RGBA/#RRGGBB/#RRGGBBAA, otherwise 400 (minor 12 r1,
+# round 5 review): without a check any text landed in
+# `style="--tag-color:..."`.
 # ============================================================
 
 def test_create_tag_rejects_arbitrary_css_as_color(client):
@@ -463,8 +463,8 @@ def test_patch_tag_null_color_clears_it(client):
 
 
 # ============================================================
-# POST /api/memory/tags/merge — keep_id/merge_id криве значення → 400
-# (мінор 6 р4).
+# POST /api/memory/tags/merge - a bad keep_id/merge_id value -> 400
+# (minor 6 r4).
 # ============================================================
 
 def test_merge_tags_rejects_garbled_id(client):
@@ -518,7 +518,7 @@ def test_set_record_tags_add_and_remove(client, conn, _reembed_spy):
     assert set(names) == {"AI", "новий"}
     assert names == sorted(names, key=cats.norm_name)
     assert any(tid in ids for ids, _reason in _reembed_spy)
-    # Тег "новий" справді зʼявився у словнику.
+    # The tag "новий" really appeared in the dictionary.
     assert any(t["name"] == "новий" for t in
               client.get("/api/memory/tags").get_json()["tags"])
 

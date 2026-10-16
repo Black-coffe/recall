@@ -1,12 +1,12 @@
-"""RAG «Запитай архів» (Phase 13C).
+"""RAG "Ask the archive" (Phase 13C).
 
-Питання користувача → гібридний retrieval по чанках усіх мітингів → Claude
-формує відповідь СУВОРО з знайдених фрагментів, з цитатами [n] на конкретні
-мітинги (дата + спікер + таймкод). Це і є досвід «запустив Claude Code в
-meeting_archive і спитав», але вбудований у Whisper.
+User question -> hybrid retrieval over the chunks of all meetings -> Claude
+composes the answer STRICTLY from the found fragments, with [n] citations to specific
+meetings (date + speaker + timecode). This is the "launched Claude Code in
+meeting_archive and asked" experience, but built into Whisper.
 
-Антигалюцинація: модель відповідає тільки з наданого контексту; якщо даних
-бракує — каже про це. Кожен source повертається клієнту для клікабельних цитат.
+Anti-hallucination: the model answers only from the provided context; if the data
+is missing, it says so. Every source is returned to the client for clickable citations.
 """
 from __future__ import annotations
 
@@ -25,28 +25,28 @@ from app.services.models import get_default_model, supports_adaptive_thinking
 
 logger = logging.getLogger(__name__)
 
-# T6.4: опційний локальний cross-encoder rerank (app/services/retrieval.py
-# rerank=True → app/services/reranker.py). ЗА ЗАМОВЧУВАННЯМ OFF — вмикається
-# точково лише тут (RAG-чат «Запитай архів», найвища ціна помилки top-k), а
-# НЕ у retrieval.search() глобально — copilot/categorize/MCP-пошук лишаються
-# без rerank і без зміни латентності. Читаємо env напряму (як
-# COPILOT_ENABLED/embeddings.py), щоб модуль лишався standalone-тестованим.
+# T6.4: optional local cross-encoder rerank (app/services/retrieval.py
+# rerank=True -> app/services/reranker.py). OFF BY DEFAULT -- enabled
+# selectively only here (the "Ask the archive" RAG chat, the highest cost of a top-k mistake), and
+# NOT in retrieval.search() globally -- copilot/categorize/MCP search stay
+# without rerank and without a change in latency. We read the env directly (like
+# COPILOT_ENABLED/embeddings.py) so that the module stays standalone-testable.
 _RERANK_ENABLED = os.environ.get("RECALL_RERANK_ENABLED", "0").strip() in ("1", "true", "True")
 
-# production-rag-wave-b-07: переписування запиту (retrieval.py `rewrite=`,
-# app/services/query_rewrite.py) — той самий патерн, що rerank вище: дефолт
-# OFF, читається на імпорті. production-rag-wave-b-08 (Major 2, ADR-008):
-# жоден код не читає bool-прапорець власним набором істинних значень — той
-# самий `env_bool`, яким `retrieval.search` резолвить свій хот-дефолт.
+# production-rag-wave-b-07: query rewriting (retrieval.py `rewrite=`,
+# app/services/query_rewrite.py) -- the same pattern as rerank above: default
+# OFF, read at import. production-rag-wave-b-08 (Major 2, ADR-008):
+# no code reads a bool flag with its own set of truthy values -- the same
+# `env_bool` with which `retrieval.search` resolves its hot default.
 _QUERY_REWRITE_ENABLED = _settings.env_bool("RAG_QUERY_REWRITE")
 
-# Скільки фрагментів іде у контекст відповіді. 12, а не 8 — за замірами
-# eval-харнеса на golden-set (14.08.2026, після T6.5): recall@8 67.9% проти
-# recall@12 82.1%, source_name_hit 78.6% проти 85.7%. Тобто на k=8 частина
-# правильних джерел стоїть одразу ЗА межею зрізу (характерний випадок —
-# джерело на 9-й позиції). Ціна: +4 фрагменти у промпті ≈ +1.5k вхідних
-# токенів на питання; вихідні не змінюються. Копілот сюди НЕ входить — у
-# нього власні бюджети уваги за режимами (5/7/9, Трек 3).
+# How many fragments go into the answer context. 12, not 8 -- per the measurements of the
+# eval harness on the golden-set (14.08.2026, after T6.5): recall@8 67.9% vs
+# recall@12 82.1%, source_name_hit 78.6% vs 85.7%. That is, at k=8 some of the
+# right sources stand right BEYOND the cut (a typical case --
+# a source at the 9th position). Cost: +4 fragments in the prompt = +1.5k input
+# tokens per question; output is unchanged. The copilot is NOT included here -- it has
+# its own attention budgets per mode (5/7/9, Track 3).
 _DEFAULT_TOP_K = int(os.environ.get("RAG_TOP_K", "12"))
 
 
@@ -104,12 +104,12 @@ _COMMENT_KIND_LABEL = {
 
 def _fmt_comment(i: int, kind: str, label: str, date, text: str,
                  anchor_time=None, pinned: bool = False) -> str:
-    """Заголовок коментаря у контексті.
+    """Comment header in the context.
 
-    Слово «КОМЕНТАР ВЛАСНИКА» стоїть першим навмисно: без явної позначки
-    провенансу модель читала б уточнення як ще одну репліку з дзвінка і
-    зважувала б його нарівні з нею — тобто весь сенс шару зникав би саме там,
-    де формулюється відповідь.
+    The words «КОМЕНТАР ВЛАСНИКА» stand first deliberately: without an explicit provenance
+    mark the model would read a clarification as one more utterance from the call and
+    weigh it on a par with it -- i.e. the whole point of the layer would vanish exactly where
+    the answer is formulated.
     """
     head = f"[{i}] КОМЕНТАР ВЛАСНИКА ({_COMMENT_KIND_LABEL.get(kind, 'НОТАТКА')})"
     if pinned:
@@ -125,61 +125,61 @@ def _fmt_comment(i: int, kind: str, label: str, date, text: str,
 
 def order_citables(chunks: list[dict],
                    attached_comments: Optional[list[dict]] = None) -> list[dict]:
-    """Єдиний порядок джерел — і для нумерації [n], і для масиву `sources`.
+    """A single order of sources -- both for the [n] numbering and for the `sources` array.
 
-    ЧОМУ ОДНА ФУНКЦІЯ, А НЕ ДВА СПИСКИ. Контекст ставить коментарі першими
-    (правило пріоритету в system prompt працює лише тоді, коли модель
-    прочитала уточнення ДО транскрипту, який воно виправляє), а `sources`
-    раніше віддавався у порядку видачі. Номери роз'їжджались: на chunks
-    [t1, t2] плюс одне підшите виправлення контекст давав [1]=коментар,
-    [2]=t1, [3]=t2, а клієнт відкривав `sources[n-1]` — тобто [2] вело на t2,
-    а [3] взагалі виходило за межі масиву і лишалось голим текстом.
-    Розходження зачіпало саме той випадок, заради якого шар зроблено:
-    будь-який pinned/correction коментар на знайденому записі зсував УСІ
-    посилання на одиницю.
+    WHY ONE FUNCTION, NOT TWO LISTS. The context puts comments first
+    (the priority rule in the system prompt works only if the model
+    read the clarification BEFORE the transcript it corrects), while `sources`
+    used to be returned in output order. The numbers drifted apart: on chunks
+    [t1, t2] plus one attached correction the context gave [1]=comment,
+    [2]=t1, [3]=t2, while the client opened `sources[n-1]` -- i.e. [2] led to t2,
+    and [3] went out of the array's bounds altogether and stayed bare text.
+    The discrepancy hit exactly the case the layer was made for:
+    any pinned/correction comment on a found record shifted ALL
+    references by one.
 
-    Підшиті коментарі теж потрапляють у список: вони пронумеровані в
-    контексті, отже клієнт мусить уміти їх відкрити (у них є
+    Attached comments also make it into the list: they are numbered in
+    the context, so the client must be able to open them (they have
     `transcription_id`).
 
-    `why` на кожному елементі. Знайдені `chunks` уже несуть `why` від
-    `retrieval.search` (контракт C2). Підшиті коментарі — інший шлях: вони
-    прийшли з `attach_comments` (SQL-запит на pinned/correction по картках
-    видачі), який ніколи не звертався до `retrieval.search`, тож `why` у них
-    нема органічно. Мовчазна відсутність ключа ловить `KeyError` у
-    споживача — ставимо явний маркер провенансу замість скорингу.
-    Маркер несе ТОЙ САМИЙ обовʼязковий набір ключів C2 (`src`, `rrf`, `rec`,
-    `by`, `top`), з нульовими внесками (`rrf`/`rec` = 0.0, `by` = []) і
-    пʼятим легальним значенням `top` — `"attached"` (план D2): ключ, який
-    іноді є, а іноді нема, — той самий `KeyError` з відстрочкою. Перелік
-    ключів не переписується літералом тут — береться з
-    `retrieval.build_placeholder_why` (одне джерело істини, історія 13, план D3).
+    `why` on every item. Found `chunks` already carry `why` from
+    `retrieval.search` (contract C2). Attached comments are a different path: they
+    came from `attach_comments` (an SQL query for pinned/correction by the cards
+    of the output), which never called `retrieval.search`, so they have no `why`
+    organically. A silent absence of the key triggers `KeyError` in the
+    consumer -- so we set an explicit provenance marker instead of scoring.
+    The marker carries THE SAME required set of C2 keys (`src`, `rrf`, `rec`,
+    `by`, `top`), with zero contributions (`rrf`/`rec` = 0.0, `by` = []) and
+    a fifth legal value of `top` -- `"attached"` (plan D2): a key that is
+    sometimes there and sometimes not is the same `KeyError`, deferred. The list of
+    keys is not rewritten as a literal here -- it is taken from
+    `retrieval.build_placeholder_why` (single source of truth, story 13, plan D3).
 
-    ХРОНОЛОГІЯ (історія 03). Решта (не-коментарі) йде за датою джерела за
-    зростанням — модель читає «було» РАНІШЕ за «стало» так само, як людина
-    читала б архів по порядку, і system prompt спирається саме на це («пізніша
-    версія веде», нижче). Дата — `meeting_date` (для мітингу/документа — дата
-    запису/файлу, для telegram — та сама колонка, заповнена `tg_date`
-    повідомлення; `retrieval.search` кладе її в усі три типи однаково через
-    `COALESCE(t.meeting_date, substr(t.created_at,1,10))`). Чанків без дати
-    очікувати не мали б, але якщо трапиться — вони йдуть в кінець, а не в
-    довільне місце.
+    CHRONOLOGY (story 03). The rest (non-comments) goes by source date
+    ascending -- the model reads "was" BEFORE "became" the way a human
+    would read the archive in order, and the system prompt relies exactly on this ("the later
+    version leads", below). The date is `meeting_date` (for a meeting/document -- the date of
+    the recording/file, for telegram -- the same column, filled with the message's
+    `tg_date`; `retrieval.search` puts it into all three types equally via
+    `COALESCE(t.meeting_date, substr(t.created_at,1,10))`). Chunks without a date
+    should not be expected, but if one turns up -- they go to the end, not to
+    an arbitrary place.
 
-    ЧАНКИ ОДНІЄЇ ЗАПИСИ (історія 09, ремонт 5). Тай-брейк при однаковій даті —
-    НЕ «порядок ретривалу як є», а `(ранг_запису, chunk_index)`: `ранг_запису` —
-    позиція ПЕРШОЇ появи цього `transcription_id` серед `rest` (у порядку, в
-    якому чанки прийшли з ретривалу), `chunk_index` — поле, яке `retrieval.search`
-    вже кладе в кожен гідрований рядок. Так два чанки однієї зустрічі йдуть
-    підряд за `chunk_index` (а не впереміш «як знайшлись»), а порядок ретривалу
-    лишається тай-брейком лише МІЖ записами. Чанк без `chunk_index` (коментар-
-    подібні шари серед `rest`) не падає — рангу запису достатньо, тримає своє
-    місце в порядку ретривалу.
+    CHUNKS OF ONE RECORD (story 09, repair 5). The tie-break at equal date is
+    NOT "retrieval order as is", but `(record_rank, chunk_index)`: `record_rank` is the
+    position of the FIRST appearance of this `transcription_id` among `rest` (in the order
+    in which the chunks came from retrieval), `chunk_index` is the field `retrieval.search`
+    already puts into every hydrated row. This way two chunks of one meeting go
+    consecutively by `chunk_index` (not interleaved "as found"), and the retrieval order
+    stays the tie-break only BETWEEN records. A chunk without `chunk_index` (comment-
+    like layers among `rest`) does not fail -- the record rank is enough, it keeps its
+    place in the retrieval order.
     """
     comment_chunks = [c for c in chunks if c.get("source_type") == "comment"]
     attached = [dict(ac, source_type="comment", attached=True,
                      why=ac.get("why") or retrieval.build_placeholder_why(
                          "comment", "attached",
-                         note="підшито без пошуку (pinned/correction)"))
+                         note="attached without search (pinned/correction)"))
                 for ac in (attached_comments or [])]
     rest = [c for c in chunks if c.get("source_type") != "comment"]
     record_rank: dict = {}
@@ -197,14 +197,14 @@ def order_citables(chunks: list[dict],
 
 
 def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] = None) -> str:
-    """Контекст для Claude. Порядок і нумерація — з `order_citables`."""
+    """Context for Claude. Order and numbering come from `order_citables`."""
     parts = []
     for i, ch in enumerate(order_citables(chunks, attached_comments), 1):
         source_type = ch.get("source_type")
         if source_type == "comment":
-            # Підшитий коментар приходить із `attach_comments` (ключі kind/
-            # date/anchor_time), самостійна знахідка — з retrieval
-            # (comment_kind/meeting_date/start_time). Читаємо обидві форми.
+            # An attached comment comes from `attach_comments` (keys kind/
+            # date/anchor_time), a standalone finding -- from retrieval
+            # (comment_kind/meeting_date/start_time). We read both forms.
             parts.append(_fmt_comment(
                 i,
                 ch.get("comment_kind") or ch.get("kind"),
@@ -216,11 +216,11 @@ def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] =
                 ch.get("pinned")))
             continue
         if source_type == "telegram":
-            # Переписка — НЕ мітинг. Раніше сюди йшло «Мітинг «[TG] чат: сніпет»»,
-            # тобто переважна більшість корпусу модель переказувала як «на зустрічі ви вирішили»,
-            # ще й не знаючи автора. Чат виносимо окремо (а не як частину
-            # source_name), автора — теж: у TG це tg_sender, який тепер доїжджає
-            # у chunks.speaker.
+            # A correspondence is NOT a meeting. Earlier this took «Мітинг «[TG] чат: сніпет»»,
+            # i.e. the model retold the vast majority of the corpus as "at the meeting you decided",
+            # and without even knowing the author. The chat is taken out separately (not as part of
+            # source_name), the author too: in TG it is tg_sender, which now arrives
+            # in chunks.speaker.
             chat = ch.get("tg_chat_title") or ch.get("source_name")
             head = f"[{i}] Telegram, чат «{chat}»"
             if ch.get("meeting_date"):
@@ -229,11 +229,11 @@ def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] =
                 head += f", від: {ch['speaker']}"
             if ch.get("tg_reply_to"):
                 head += f", відповідь на повідомлення {ch['tg_reply_to']}"
-            # Нитка (Волна 4.5): у переписці знахідка часто є ПИТАННЯМ, а
-            # відповідь — наступною реплікою, у якої немає спільних слів із
-            # запитом, тож окремо вона не знаходиться ніколи. Віддаємо розмову
-            # шматком і явно позначаємо, що саме знайшлось, — інакше модель не
-            # відрізнить знахідку від контексту і цитуватиме сусіда.
+            # Thread (Wave 4.5): in a correspondence a finding is often a QUESTION, and
+            # the answer is the next reply, which has no words in common with the
+            # query, so on its own it is never found. We give the conversation
+            # as a piece and explicitly mark what exactly was found -- otherwise the model will not
+            # tell the finding from the context and will cite the neighbour.
             thread = ch.get("thread")
             if thread and thread.get("messages"):
                 label = thread.get("label")
@@ -252,15 +252,15 @@ def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] =
             continue
 
         kind = "Документ" if source_type == "document" else "Мітинг"
-        # Називаємо запис так, як його назвав власник (`display_name` —
-        # `title`, інакше провенанс `source_name`): модель цитує те імʼя, яке
-        # людина бачить у списку, а не «rec_2026-09-17_final.mp3».
+        # We name the record the way the owner named it (`display_name` --
+        # `title`, otherwise the provenance `source_name`): the model cites the name the
+        # person sees in the list, not "rec_2026-09-17_final.mp3".
         head = f"[{i}] {kind} «{ch.get('display_name') or ch['source_name']}»"
         if ch.get("meeting_date"):
             head += f" ({ch['meeting_date']})"
         if ch.get("speaker"):
             head += f", спікер: {ch['speaker']}"
-        # Провенанс документів — сторінка / слайд / лист (+ заголовок секції)
+        # Provenance of documents -- page / slide / sheet (+ section heading)
         page = ch.get("page")
         if page:
             dt = ch.get("doc_type")
@@ -277,7 +277,7 @@ def _build_context(chunks: list[dict], attached_comments: Optional[list[dict]] =
 
 def _build_request_kwargs(question: str, chunks: list[dict], model: Optional[str],
                           attached_comments: Optional[list[dict]] = None) -> tuple[dict, str]:
-    """Спільна побудова запиту до Claude (для sync і stream). Returns (kwargs, model)."""
+    """Shared construction of the request to Claude (for sync and stream). Returns (kwargs, model)."""
     model = model or get_default_model()
     user_message = (
         f"ПИТАННЯ: {question}\n\n"
@@ -300,33 +300,33 @@ def _build_request_kwargs(question: str, chunks: list[dict], model: Optional[str
 
 
 def _resolve_project(db_path: str, project: Optional[str]) -> Optional[list[int]]:
-    """Назви проєктів/людей → id сутностей для звуження пошуку (Трек 2).
+    """Project/people names -> entity ids to narrow the search (Track 2).
 
-    Другий шар скоупу: категорії недостатньо, бо «Фонд Робота» — більша частина корпусу.
-    Порожній результат (назви не знайдено) НЕ звужує пошук до нуля — повертаємо
-    None, тобто «шукай скрізь»: краще ширша відповідь, ніж мовчання через друкарську
-    помилку в назві проєкту.
+    The second scope layer: the category is not enough, because «Фонд Робота» is more than half of the corpus.
+    An empty result (the name was not found) does NOT narrow the search to zero -- we return
+    None, i.e. "search everywhere": a wider answer is better than silence because of a typo
+    in the project name.
     """
     if not project:
         return None
     from app.services import scope
     ids = scope.scope_filter_ids(db_path, project)
     if not ids:
-        logger.info("rag: проєкт/людину «%s» не знайдено у графі — шукаю без звуження", project)
+        logger.info("rag: project/person «%s» not found in the graph -- searching without narrowing", project)
         return None
     return ids
 
 
 def _mcp_screen_filter(db_path: str, channel: str, chunks: list) -> list:
-    """Питання з MCP: текст з екрана (speaker='екран') проходить фільтр приватного ДО
-    виклику Claude — приватні записи, стоп-слова, RECALL_MCP_VISUAL=off (spec
-    mcp-visual-privacy). Канал ui (сам інтерфейс Recall) фільтр не зачіпає."""
+    """A question from MCP: text from the screen (speaker='екран') passes the privacy filter BEFORE
+    the Claude call -- private records, stop words, RECALL_MCP_VISUAL=off (spec
+    mcp-visual-privacy). The ui channel (Recall's own interface) is not affected by the filter."""
     if channel != "mcp":
         return chunks
     from app.services import privacy
     kept, hidden = privacy.filter_screen_chunks(db_path, chunks)
     if hidden:
-        logger.info("[rag] mcp: %d чанк(ів) з екрана приховано фільтром приватного", hidden)
+        logger.info("[rag] mcp: %d screen chunk(s) hidden by the privacy filter", hidden)
     return kept
 
 
@@ -344,13 +344,13 @@ def answer_question(
     since: Optional[str] = None,
     until: Optional[str] = None,
 ) -> dict:
-    """Відповісти на питання по архіву з цитатами. category_id — обмежити напрямком
-    (id напрямку захоплює і його проєкти — `categories.filter_sql`).
-    explain — Історія 05: прокидається у `retrieval.search`, `why` кожного
-    чанка виживає до `sources` крізь `order_citables`/`attach_thread_context`.
-    tags/since/until — directions-projects-tags-03 (контракт C5): прокидаються
-    у `retrieval.search` як є (OR по тегах, ISO-дати включно); розбір фрази
-    «за тиждень» робить викликач, не Recall.
+    """Answer a question about the archive with citations. category_id -- restrict by direction
+    (a direction id also covers its projects -- `categories.filter_sql`).
+    explain -- Story 05: passed through to `retrieval.search`, the `why` of each
+    chunk survives to `sources` through `order_citables`/`attach_thread_context`.
+    tags/since/until -- directions-projects-tags-03 (contract C5): passed through
+    to `retrieval.search` as is (OR over tags, inclusive ISO dates); parsing a phrase
+    like "for the week" is done by the caller, not Recall.
 
     Returns {"answer", "sources": [chunks], "model", "found", token usage}.
     """
@@ -374,11 +374,11 @@ def answer_question(
             "vector_available": res.get("vector_available", False),
         }
 
-    # Шар 2 пріоритету: виправлення й закріплені коментарі тих записів, що
-    # потрапили у видачу, — навіть якщо самі вони із запитом не збіглися.
+    # Priority layer 2: corrections and pinned comments of those records that
+    # made it into the output -- even if they themselves did not match the query.
     attached = retrieval.attach_comments(db_path, chunks)
-    # `sources` мусить бути ТИМ САМИМ списком, який пронумеровано в контексті —
-    # інакше [n] у відповіді вказує не на те джерело (див. order_citables).
+    # `sources` must be THE SAME list that is numbered in the context --
+    # otherwise [n] in the answer points to the wrong source (see order_citables).
     sources = order_citables(chunks, attached)
 
     client = text_polishing._get_client()
@@ -386,9 +386,9 @@ def answer_question(
 
     logger.info("[rag] ask: model=%s, chunks=%d, comments=%d, q=%r",
                 model, len(chunks), len(attached), question[:80])
-    # Retry на транзиентних помилках (429/5xx/timeout) — T6.3. Увесь виклик
-    # заново на кожній спробі, безпечно тут: get_final_message() нічого не
-    # віддає споживачу до повного завершення.
+    # Retry on transient errors (429/5xx/timeout) -- T6.3. The whole call
+    # again on each attempt, safe here: get_final_message() gives nothing
+    # to the consumer until it fully completes.
     result = text_polishing._stream_with_retry(client, timeout, request_kwargs, what="rag-ask")
 
     answer = "".join(b.text for b in result.content if b.type == "text").strip()
@@ -414,18 +414,18 @@ def answer_question(
     }
 
 
-#: Допустимі канали питання (контракт `ask_log.channel`).
+#: Allowed question channels (contract `ask_log.channel`).
 ASK_CHANNELS = ("ui", "mcp")
 
 
 def _ask_cost(model: str, input_tokens: int, output_tokens: int,
               cache_read_tokens: int) -> Optional[float]:
-    """$ за питання або None для моделі поза таблицею тарифів.
+    """$ per question or None for a model outside the price table.
 
-    Таблиця живе в `app/services/pricing.py` (єдина точка правди — саме її
-    відсутність колись давала мовчазну оцінку за ціною ЧУЖОЇ моделі, T6.2).
-    Тут лише додано явне None замість фолбеку на дефолтний тариф: у логу
-    краще порожня вартість, ніж правдоподібна неправда.
+    The table lives in `app/services/pricing.py` (the single point of truth -- its
+    absence once gave a silent estimate at the price of a FOREIGN model, T6.2).
+    Here an explicit None was added instead of a fallback to the default tariff: in the log
+    an empty cost is better than a plausible falsehood.
     """
     from app.services import pricing
     if not model or model not in pricing.MODEL_PRICES:
@@ -437,11 +437,11 @@ def _log_ask(db_path: str, *, channel: str, question: str, top_k: int,
              model: str, sources: list[dict], answer: str,
              category_id: Optional[int], project: Optional[str],
              input_tokens: int, output_tokens: int, cache_read_tokens: int) -> Optional[int]:
-    """Записати успішну відповідь у `ask_log` → id рядка (`ask_id`) або None.
+    """Write a successful answer to `ask_log` -> row id (`ask_id`) or None.
 
-    Best-effort: лог питань не має права зламати саму відповідь, за яку вже
-    заплачено (і не має права падати на БД без міграції v41 — офлайн-тести
-    ганяють `answer_question` на `:memory:`). Збій пишемо в лог, не назовні.
+    Best-effort: the question log has no right to break the answer itself, which has already been
+    paid for (and no right to fail on a DB without migration v41 -- offline tests
+    run `answer_question` on `:memory:`). A failure is written to the log, not outward.
     """
     from app.db.connection import get_db_connection
     try:
@@ -464,15 +464,15 @@ def _log_ask(db_path: str, *, channel: str, question: str, top_k: int,
             conn.commit()
             return cur.lastrowid
     except Exception as exc:
-        logger.warning("[rag] ask_log: не вдалося записати питання: %s", exc)
+        logger.warning("[rag] ask_log: failed to record the question: %s", exc)
         return None
 
 
 def rate_ask(db_path: str, ask_id: int, rating: int, note: Optional[str] = None) -> bool:
-    """Оцінка власника на рядок `ask_log` (1 / -1) + замітка. False — немає такого id.
+    """Owner's rating of an `ask_log` row (1 / -1) + a note. False -- no such id.
 
-    Оцінка перезаписується: власник має право передумати, історія оцінок
-    нікому не потрібна — потрібен останній вердикт для golden-set.
+    The rating is overwritten: the owner has the right to change their mind, the history of ratings
+    is needed by nobody -- the last verdict for the golden-set is what's needed.
     """
     from app.db.connection import get_db_connection
     with get_db_connection(db_path) as conn:
@@ -484,7 +484,7 @@ def rate_ask(db_path: str, ask_id: int, rating: int, note: Optional[str] = None)
 
 
 def _sse(event: str, data: dict) -> str:
-    """Сформувати один SSE-кадр. data JSON-кодуємо (newlines зберігаються як \\n)."""
+    """Build one SSE frame. data is JSON-encoded (newlines are preserved as \\n)."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
@@ -502,12 +502,12 @@ def answer_question_stream(
     since: Optional[str] = None,
     until: Optional[str] = None,
 ) -> Iterator[str]:
-    """Стрім-версія answer_question. category_id — обмежити напрямком. explain —
-    Історія 05, те саме, що в answer_question (не міняє формат SSE-подій).
-    tags/since/until — ті самі осі, що в answer_question (контракт C5).
-    Yields SSE-кадри:
-      event: sources — {sources, found, vector_available} (одразу після retrieval)
-      event: delta   — {text} (токени відповіді по мірі надходження)
+    """Streaming version of answer_question. category_id -- restrict by direction. explain --
+    Story 05, the same as in answer_question (does not change the SSE event format).
+    tags/since/until -- the same axes as in answer_question (contract C5).
+    Yields SSE frames:
+      event: sources -- {sources, found, vector_available} (right after retrieval)
+      event: delta   -- {text} (answer tokens as they arrive)
       event: done    — {model, *_tokens}
       event: error   — {error}
     """
@@ -526,14 +526,14 @@ def answer_question_stream(
     chunks = _mcp_screen_filter(db_path, channel,
                                 retrieval.attach_thread_context(db_path, res["chunks"]))
     attached = retrieval.attach_comments(db_path, chunks)
-    # Той самий порядок, що й у контексті: клієнт резолвить [n] як sources[n-1],
-    # тож підшиті коментарі мусять бути ТУТ, а не окремим полем — вони
-    # пронумеровані нарівні з рештою (див. order_citables).
+    # The same order as in the context: the client resolves [n] as sources[n-1],
+    # so attached comments must be HERE, not in a separate field -- they are
+    # numbered on a par with the rest (see order_citables).
     sources = order_citables(chunks, attached)
     yield _sse("sources", {
         "sources": sources, "found": len(sources),
-        "retrieved": len(chunks),      # скільки реально знайшов пошук
-        "attached": len(attached),     # скільки підшито без збігу
+        "retrieved": len(chunks),      # how many the search actually found
+        "attached": len(attached),     # how many were attached without a match
         "vector_available": res.get("vector_available", False),
     })
 
@@ -548,11 +548,11 @@ def answer_question_stream(
         logger.info("[rag] ask-stream: model=%s, chunks=%d, comments=%d, q=%r",
                     model, len(chunks), len(attached), question[:80])
 
-        # Retry на транзиентних помилках (429/5xx/timeout) — T6.3. Повторюємо
-        # ВЕСЬ виклик заново, АЛЕ лише поки в цій спробі ще жоден delta не
-        # був відданий споживачу (SSE-клієнту) — після першого delta повтор
-        # небезпечний (дубльований/пошкоджений вивід), тому далі помилка
-        # прокидається як є в зовнішній except.
+        # Retry on transient errors (429/5xx/timeout) -- T6.3. We repeat the
+        # WHOLE call again, BUT only while in this attempt no delta has yet
+        # been given to the consumer (the SSE client) -- after the first delta a retry is
+        # dangerous (duplicated/corrupted output), so further the error is
+        # propagated as is to the outer except.
         attempt = 0
         final = None
         while True:
@@ -570,7 +570,7 @@ def answer_question_stream(
                     raise
                 delay = claude_retry.backoff_delay(attempt)
                 logger.warning(
-                    "[rag] ask-stream: транзиентна помилка (спроба %d/%d): %s — повтор через %.1fс",
+                    "[rag] ask-stream: transient error (attempt %d/%d): %s -- retry in %.1fs",
                     attempt + 1, claude_retry.DEFAULT_MAX_RETRIES + 1, exc, delay,
                 )
                 time.sleep(delay)
@@ -580,8 +580,8 @@ def answer_question_stream(
         input_tokens = getattr(usage, "input_tokens", 0) or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
         cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
-        # Текст беремо з фінального повідомлення, а не з накопичених delta —
-        # це той самий рядок, але без ризику розійтися з ним на retry.
+        # We take the text from the final message, not from the accumulated deltas --
+        # it is the same string, but without the risk of diverging from it on a retry.
         answer = "".join(b.text for b in (final.content or []) if b.type == "text").strip()
         ask_id = _log_ask(db_path, channel=channel, question=question, top_k=top_k,
                           model=final.model, sources=sources, answer=answer,

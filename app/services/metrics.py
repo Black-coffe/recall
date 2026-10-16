@@ -1,16 +1,16 @@
-"""Простой in-memory лічильник для /api/metrics (Phase 6.3).
+"""Simple in-memory counter for /api/metrics (Phase 6.3).
 
-Не залежимо від prometheus_client — щоб не тягнути зайву залежність.
-Формат вихідного тексту повністю Prometheus-сумісний (text/plain;
-version=0.0.4), тож scrape через Prometheus / Grafana працює.
+Independent of prometheus_client — to avoid pulling in an extra dependency.
+The output text format is fully Prometheus-compatible (text/plain;
+version=0.0.4), so scraping via Prometheus / Grafana works.
 
-Метрики:
+Metrics:
 - whisper_transcriptions_total{model, source} (counter)
 - whisper_transcription_duration_seconds{model} (histogram-lite — sum + count)
 - whisper_youtube_downloads_total (counter)
 - whisper_polish_total{model} (counter)
 - whisper_polish_tokens_total{model, kind} (counter; kind=input|output|cache_read)
-- whisper_active_jobs (gauge — підтягується з job_queue)
+- whisper_active_jobs (gauge — pulled from job_queue)
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class MetricsRegistry:
             self._duration_count[key] += 1
 
     def render(self, gauges: Dict[str, float] = None) -> str:
-        """Render у Prometheus exposition format."""
+        """Render in the Prometheus exposition format."""
         lines = []
         with self._lock:
             counters = dict(self._counters)
@@ -71,7 +71,7 @@ class MetricsRegistry:
             lines.append(f"{base}_seconds_sum{label_str} {val}")
             lines.append(f"{base}_seconds_count{label_str} {cnt}")
 
-        # Gauges (з зовнішнього коду — job_queue, system_monitor)
+        # Gauges (from external code — job_queue, system_monitor)
         if gauges:
             for name, val in sorted(gauges.items()):
                 lines.append(f"# HELP {name} Gauge (Whisper UI)")
@@ -92,5 +92,5 @@ class MetricsRegistry:
         return "{" + ",".join(parts) + "}"
 
 
-# Глобальний реєстр на процес
+# Global registry per process
 metrics = MetricsRegistry()

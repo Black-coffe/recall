@@ -1,20 +1,20 @@
-"""Co-pilot — ескалація в Claude API (Phase 19, Крок 5).
+"""Co-pilot — escalation to the Claude API (Phase 19, Step 5).
 
-Замикає local-first cascade: локальна модель (диспетчер, Крок 3) дає **чернетку**
-підказки, а Claude (Sonnet, «старший брат») її **верифікує** — real/refuted/
-uncertain — і полірує текст. Дешево, бо: (1) ескалюємо лише позначене локалкою
-важливим (не весь транскрипт); (2) prompt caching на стабільному system-блоці
-(як у rag.py); (3) форсований tool-use → стислий структурований вихід (мало
-вихідних токенів).
+Closes the local-first cascade: the local model (dispatcher, Step 3) gives a **draft**
+hint, and Claude (Sonnet, the "big brother") **verifies** it — real/refuted/
+uncertain — and polishes the text. Cheap because: (1) we escalate only what the local model
+marked important (not the whole transcript); (2) prompt caching on the stable system block
+(as in rag.py); (3) forced tool-use → a compact structured output (few
+output tokens).
 
-Два режими:
-- :meth:`Escalator.verify` — перевірити одну чернетку локалки за її доказами.
-- :meth:`Escalator.sweep` — safety-sweep: незалежний прохід Sonnet по поточному
-  вікну + чанках теми (страховка від «тихих» хибнонегативів локалки, Крок 5).
+Two modes:
+- :meth:`Escalator.verify` — verify one local draft against its evidence.
+- :meth:`Escalator.sweep` — safety-sweep: an independent Sonnet pass over the current
+  window + topic chunks (insurance against the local model's "silent" false negatives, Step 5).
 
-Усе деградує: нема ключа / API впав → метод повертає None, ко-пілот лишається
-локальним ($0). Клієнт і tool-схема інжектяться через ``client_factory`` →
-тестується офлайн без мережі.
+Everything degrades: no key / API down → the method returns None, the co-pilot stays
+local ($0). The client and tool schema are injected via ``client_factory`` →
+tested offline without network.
 """
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ from app.services.copilot.config import INSIGHT_KINDS as _KINDS
 logger = logging.getLogger(__name__)
 
 
-# Фолбек, коли caller не передав model явно (worker.py завжди передає
-# ws.config.get("model_api") — див. app/services/copilot/config.py). НЕ
-# pricing.DEFAULT_PRICE_MODEL (це загальний app-дефолт, зараз Opus) — тут
-# зберігаємо саме "звичайну" copilot-модель (Sonnet), щоб не схлопнути
-# normal/gnarly тіри в один за замовчуванням (T6.2).
+# Fallback when the caller did not pass model explicitly (worker.py always passes
+# ws.config.get("model_api") — see app/services/copilot/config.py). NOT
+# pricing.DEFAULT_PRICE_MODEL (that is the general app default, currently Opus) — here
+# we keep exactly the "normal" copilot model (Sonnet), so as not to collapse
+# the normal/gnarly tiers into one by default (T6.2).
 DEFAULT_MODEL = _models.COPILOT_NORMAL_MODEL_DEFAULT
 
-# Тарифи — спільні з research.py (app/services/pricing.py), щоб не розходились.
+# Prices are shared with research.py (app/services/pricing.py) so they do not diverge.
 cost_estimate = pricing.estimate_cost
 
 _VERDICT_TOOL = {
@@ -116,7 +116,7 @@ def _fmt_chunks(chunks: list[dict], limit_chars: int = 400) -> str:
 
 
 class Escalator:
-    """Клієнт ескалації в Claude. ``client_factory`` інжектиться → офлайн-тест."""
+    """Escalation client to Claude. ``client_factory`` is injected → offline test."""
 
     def __init__(self, *, client_factory: Callable[[], Any] = text_polishing._get_client,
                  timeout: float = 60.0):
@@ -125,11 +125,11 @@ class Escalator:
 
     def _request(self, *, model: str, system: str, tool: dict, user: str,
                  max_tokens: int) -> Optional[dict]:
-        """Один форсований tool-use виклик. Повертає {"input", usage...} або None."""
+        """One forced tool-use call. Returns {"input", usage...} or None."""
         try:
             client = self._client_factory()
-        except Exception as e:  # нема ключа тощо
-            logger.info("[copilot] ескалація недоступна: %s", e)
+        except Exception as e:  # no key, etc.
+            logger.info("[copilot] escalation unavailable: %s", e)
             return None
         kwargs = dict(
             model=model, max_tokens=max_tokens,
@@ -138,23 +138,23 @@ class Escalator:
             tool_choice={"type": "tool", "name": tool["name"]},
             messages=[{"role": "user", "content": user}],
         )
-        # Claude 5 (Opus 5 / Sonnet 5): thinking on-by-default. Тут live-вердикт
-        # на дзвінку — форсований tool-use з малим max_tokens; adaptive thinking
-        # зʼїв би токен-бюджет (кап спільний) і додав секунди → вимикаємо явно.
-        # Форсований tool_choice гарантує tool-блок, тож відомий failure mode
-        # disabled-thinking («tool call текстом») тут не загрожує.
+        # Claude 5 (Opus 5 / Sonnet 5): thinking on-by-default. Here the live verdict
+        # on a call is a forced tool-use with a small max_tokens; adaptive thinking
+        # would eat the token budget (the cap is shared) and add seconds → turn it off explicitly.
+        # A forced tool_choice guarantees a tool block, so the known failure mode
+        # of disabled thinking ("tool call as text") is not a threat here.
         if _models.needs_explicit_thinking_off(model):
             kwargs["thinking"] = {"type": "disabled"}
         try:
-            # Retry на транзиентних помилках (429/5xx/timeout) — T6.3. Тут
-            # НЕ стрім (messages.create), тож увесь виклик безпечно повторити
-            # заново — нічого ще не віддано caller'у.
+            # Retry on transient errors (429/5xx/timeout) — T6.3. This is
+            # NOT a stream (messages.create), so the whole call can be safely repeated
+            # from scratch — nothing has been handed to the caller yet.
             resp = call_with_retry(
                 lambda: client.with_options(timeout=self._timeout).messages.create(**kwargs),
                 what="copilot-escalate",
             )
         except Exception as e:
-            logger.warning("[copilot] ескалація API збій: %s", e)
+            logger.warning("[copilot] escalation API failure: %s", e)
             return None
         tool_input = None
         for block in (resp.content or []):
@@ -162,7 +162,7 @@ class Escalator:
                 tool_input = block.input
                 break
         if tool_input is None:
-            logger.warning("[copilot] ескалація: модель не викликала інструмент")
+            logger.warning("[copilot] escalation: the model did not call the tool")
             return None
         usage = getattr(resp, "usage", None)
         tin = getattr(usage, "input_tokens", 0) or 0
@@ -177,7 +177,7 @@ class Escalator:
 
     def _verify_once(self, *, insight: dict, evidence_chunks: list[dict],
                      profile: str, model: str, lens: str = "") -> Optional[dict]:
-        """Один голос верифікації (опційно з лінзою для різноманіття)."""
+        """One verification vote (optionally with a lens for diversity)."""
         user = (
             (f"Профіль напрямку: {profile}\n" if profile else "")
             + f"Чернетка підказки (тип={insight.get('kind')}):\n{insight.get('text', '')}\n\n"
@@ -208,21 +208,21 @@ class Escalator:
                model: str = DEFAULT_MODEL, votes: int = 1,
                on_vote: Optional[Callable[[dict], None]] = None,
                can_continue: Optional[Callable[[], bool]] = None) -> Optional[dict]:
-        """Верифікувати чернетку локалки. ``votes`` > 1 → мульти-лінза (жорсткий
-        режим, Крок 6): кілька незалежних голосів з різними фокусами, мажоритарний
-        вердикт. Returns verdict-dict (+сумарний облік токенів) або None.
+        """Verify the local draft. ``votes`` > 1 → multi-lens (hard
+        mode, Step 6): several independent votes with different focuses, a majority
+        verdict. Returns a verdict dict (+ summed token accounting) or None.
 
-        ``on_vote(result)`` викликається ПІСЛЯ кожного голосу (для облікy токенів/$
-        одразу), ``can_continue()`` перевіряється ПЕРЕД кожним наступним голосом —
-        повертає False → припиняємо витрати (бюджет вичерпано посеред мульти-голосу,
-        Крок 9 fix). Перший голос завжди виконується (вхід уже відгейтовано caller'ом)."""
+        ``on_vote(result)`` is called AFTER each vote (to account tokens/$
+        immediately), ``can_continue()`` is checked BEFORE each next vote —
+        returning False → we stop spending (budget exhausted mid multi-vote,
+        Step 9 fix). The first vote always runs (the input is already gated by the caller)."""
         if not evidence_chunks:
             return None
         votes = max(1, int(votes or 1))
         results = []
         for i in range(votes):
             if i > 0 and can_continue is not None and not can_continue():
-                break  # бюджет вичерпано попереднім голосом → не витрачаємо далі
+                break  # budget exhausted by the previous vote → do not spend further
             r = self._verify_once(insight=insight, evidence_chunks=evidence_chunks,
                                   profile=profile, model=model,
                                   lens=_LENSES[i % len(_LENSES)] if votes > 1 else "")
@@ -237,7 +237,7 @@ class Escalator:
 
     def sweep(self, *, window: str, chunks: list[dict], profile: str = "",
               model: str = DEFAULT_MODEL) -> Optional[dict]:
-        """Safety-прохід Sonnet по вікну+чанках. Returns {"insights", облік} або None."""
+        """Sonnet safety pass over the window+chunks. Returns {"insights", accounting} or None."""
         if not chunks:
             return None
         valid = {int(c["chunk_id"]) for c in chunks if c.get("chunk_id") is not None}
@@ -275,8 +275,8 @@ class Escalator:
         }
 
 
-# Лінзи для мульти-голосової перевірки (жорсткий режим): різні фокуси → ловлять
-# різні режими помилок (підтвердження / спростування / актуальність).
+# Lenses for multi-vote verification (hard mode): different focuses → catch
+# different failure modes (confirmation / refutation / relevance).
 _LENSES = [
     "",
     "Спробуй СПРОСТУВАТИ твердження: чи є в доказах щось, що йому прямо суперечить?",
@@ -285,7 +285,7 @@ _LENSES = [
 
 
 def _aggregate_votes(results: list[dict], insight: dict) -> dict:
-    """Звести кілька голосів у фінальний вердикт (мажоритарно) + сумарний облік."""
+    """Merge several votes into the final verdict (majority) + summed accounting."""
     n = len(results)
     real = [r for r in results if r["verdict"] == "real"]
     refuted = [r for r in results if r["verdict"] == "refuted"]
@@ -296,7 +296,7 @@ def _aggregate_votes(results: list[dict], insight: dict) -> dict:
     else:
         side, verdict = results, "uncertain"
     conf = round(sum(r["confidence"] for r in side) / max(1, len(side)), 3)
-    # текст: з представника переможної сторони (інакше — з першого голосу)
+    # text: from a representative of the winning side (otherwise — from the first vote)
     text = (side[0]["text"] if side else results[0]["text"]) or insight.get("text", "")
     return {
         "verdict": verdict, "confidence": conf, "text": text,

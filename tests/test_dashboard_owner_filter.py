@@ -1,10 +1,10 @@
-"""Фільтр власника на дашборді задач (/api/memory/action-items?owner=…).
+"""Owner filter on the task dashboard (/api/memory/action-items?owner=...).
 
-Дашборд шукає ТОЧНИМ збігом, бо значення приходить із чипа фасета. Але одне й
-те саме імʼя живе в трьох місцях — канонічне в графі, сире в задачі та аліаси —
-і після злиття сутностей (`entity_dedup merge`) саме в аліаси переїжджають усі
-інші написання людини. Власник архіву жив трьома сутностями; після їх злиття в
-одну посилання `/tasks?owner=Мельник` давало порожньо при живих даних.
+The dashboard searches by EXACT match, because the value comes from a facet chip. But one and the
+same name lives in three places - canonical in the graph, raw in the task and aliases -
+and after an entity merge (`entity_dedup merge`) all other spellings of a person move
+into the aliases. The archive owner lived as three entities; after merging them into
+one, the link `/tasks?owner=Мельник` gave empty with live data.
 """
 import sqlite3
 
@@ -60,48 +60,48 @@ OWNER_TASKS = {"Задача власника", "Друга задача вла�
 
 
 def test_canonical_name_finds_owner_tasks(client):
-    """Чип фасета — канонічне імʼя сутності."""
+    """A facet chip is the entity's canonical name."""
     assert _tasks(client, "Андрій") == OWNER_TASKS
 
 
 def test_alias_finds_the_same_tasks(client):
-    """Після злиття сутностей решта написань живе аліасами — і має працювати."""
+    """After an entity merge the remaining spellings live as aliases - and must work."""
     assert _tasks(client, "Мельник") == OWNER_TASKS
     assert _tasks(client, "@johndoe") == OWNER_TASKS
 
 
 def test_alias_lookup_ignores_case_in_cyrillic(client):
-    """Ключ рахується `enrichment._normalize`, а не SQL LOWER() (той не згортає кирилицю)."""
+    """The key is computed by `enrichment._normalize`, not by SQL LOWER() (which does not fold Cyrillic)."""
     assert _tasks(client, "мельник") == OWNER_TASKS
     assert _tasks(client, "  Мельник  ") == OWNER_TASKS
 
 
 def test_unlinked_task_matches_by_its_own_name(client):
-    """Задача без сутності живе під чипом свого сирого імені — і ним же шукається."""
+    """A task without an entity lives under the chip of its raw name - and is searched by it."""
     assert _tasks(client, "Павло") == {"Задача без сутності"}
 
 
 def test_raw_name_of_linked_task_is_not_a_separate_filter(client):
-    """Сире імʼя звʼязаної задачі НЕ фільтр: інакше список був би довшим за чип.
+    """The raw name of a linked task is NOT a filter: otherwise the list would be longer than the chip.
 
-    «Andrii Melnyk» — те, як задачу назвали в тексті, але живе вона під
-    чипом «Андрій». Якби сире імʼя теж фільтрувало, під чип потрапляли б задачі
-    з чужих чипів (задача, що звучить як «Юлія», але звʼязана з сутністю «Юля»),
-    і число на чипі перестало б дорівнювати довжині списку. Для вільного тексту
-    є MCP-тулза `list_action_items`.
+    «Andrii Melnyk» is how the task was named in the text, but it lives under
+    the chip «Андрій». If the raw name filtered too, tasks of foreign chips
+    would land under the chip (a task that sounds like «Юлія» but is linked to the entity «Юля»),
+    and the number on the chip would stop equalling the list length. For free text
+    there is the MCP tool `list_action_items`.
     """
     assert _tasks(client, "Andrii Melnyk") == set()
 
 
 def test_filter_stays_exact_and_does_not_leak(client):
-    """Точний збіг: чужі задачі не підмішуються, підрядок не спрацьовує."""
+    """Exact match: foreign tasks are not mixed in, a substring does not fire."""
     assert _tasks(client, "Юлія") == {"Задача Юлії"}
-    assert _tasks(client, "Андр") == set()          # підрядок — не збіг
-    assert _tasks(client, "Julia") == {"Задача Юлії"}   # аліас сутності Юлії
+    assert _tasks(client, "Андр") == set()          # a substring is not a match
+    assert _tasks(client, "Julia") == {"Задача Юлії"}   # an alias of the entity «Юлія»
 
 
 def test_owner_facet_counts_unchanged_by_filter(client):
-    """Фасет власників рахується без самого себе — чипи показують повні суми."""
+    """The owner facet is counted without itself - chips show full totals."""
     r = client.get("/api/memory/action-items?owner=Мельник")
     owners = {o["owner"]: o["n"] for o in r.get_json()["owners"]}
     assert owners == {"Андрій": 2, "Юлія": 1, "Павло": 1}
@@ -109,7 +109,7 @@ def test_owner_facet_counts_unchanged_by_filter(client):
 
 @pytest.mark.parametrize("owner", ["Андрій", "Мельник", "Юлія", "Павло"])
 def test_chip_number_equals_list_length(client, owner):
-    """Контракт дашборда: натиснув чип із числом N — побачив рівно N рядків."""
+    """Dashboard contract: clicked a chip with number N - saw exactly N rows."""
     data = client.get("/api/memory/action-items?owner=%s" % owner).get_json()
     chip = {o["owner"]: o["n"] for o in data["owners"]}
     canonical = {"Мельник": "Андрій"}.get(owner, owner)

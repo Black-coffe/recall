@@ -1,7 +1,7 @@
 # frontend — SPA (`static/js/recall/`)
 
 Client-side router + shell, vanilla JS (no framework), global `window.Recall`.
-last-verified: 2026-10-15 (english-i18n 4.16.0, sw.js v80)
+last-verified: 2026-10-16 (english-i18n 4.16.0, english-code 4.17.0, sw.js v80)
 **Design:** editorial catalog, a warm paper canvas, light theme only; classes with the `rc-*` prefix.
 
 ## Architecture
@@ -68,6 +68,8 @@ API-GET network-first; SSE/POST are not cached. On `activate` old `recall-vN` ar
     `tests/test_i18n_coverage.py` (allowlist `JS_ALLOW` in the same place: slugs, language endonyms, stop words). A direct `fetch` outside
     `api.js` must carry `R.i18n.headers()` (`transcript.js:358`). Text in `shell.html` — `data-i18n*`. uk/en parity
     and `{vars}` — `tests/test_i18n_js.py`. Dates/numbers — `R.i18n.num/date`, sorting — `R.i18n.compare`.
+    JS comments are English too (4.17.0, `tests/test_code_english.py` covers `.py` only); server-originated texts arrive already
+    in the request language (`X-Recall-Lang`), including the service-layer catalog `svc_*`.
 11. **`data-i18n-content`** sits on `<meta name=description>` in `shell.html:7`, but `apply()` does not handle it
     (:82-87) — the static uk text stays.
 

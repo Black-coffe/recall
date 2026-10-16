@@ -1,5 +1,5 @@
 """
-Утилиты для мониторинга производительности
+Utilities for performance monitoring
 """
 
 import time
@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 
 
 class PerformanceMonitor:
-    """Монитор производительности системы"""
+    """System performance monitor"""
     
     def __init__(self):
         self.metrics = {}
@@ -25,7 +25,7 @@ class PerformanceMonitor:
         self._monitor_thread = None
     
     def start_monitoring(self, interval: int = 5):
-        """Запускает мониторинг системы"""
+        """Starts system monitoring"""
         if self._monitoring:
             return
         
@@ -33,39 +33,39 @@ class PerformanceMonitor:
         self._monitor_thread = threading.Thread(target=self._monitor_loop, args=(interval,))
         self._monitor_thread.daemon = True
         self._monitor_thread.start()
-        logger.info("Мониторинг производительности запущен")
+        logger.info("Performance monitoring started")
     
     def stop_monitoring(self):
-        """Останавливает мониторинг"""
+        """Stops monitoring"""
         self._monitoring = False
         if self._monitor_thread:
             self._monitor_thread.join(timeout=1)
-        logger.info("Мониторинг производительности остановлен")
+        logger.info("Performance monitoring stopped")
     
     def _monitor_loop(self, interval: int):
-        """Основной цикл мониторинга"""
+        """Main monitoring loop"""
         while self._monitoring:
             try:
                 self.metrics = self.get_current_metrics()
                 time.sleep(interval)
             except Exception as e:
-                logger.error(f"Ошибка мониторинга: {e}")
+                logger.error(f"Monitoring error: {e}")
                 time.sleep(interval)
     
     def get_current_metrics(self) -> Dict[str, Any]:
-        """Получает текущие метрики системы"""
+        """Gets the current system metrics"""
         try:
-            # CPU метрики
+            # CPU metrics
             cpu_percent = psutil.cpu_percent(interval=1)
             cpu_count = psutil.cpu_count()
             
-            # Память метрики
+            # Memory metrics
             memory = psutil.virtual_memory()
             
-            # Дисковые метрики
+            # Disk metrics
             disk = psutil.disk_usage('/')
             
-            # GPU метрики (если доступен)
+            # GPU metrics (if available)
             gpu_info = self._get_gpu_metrics()
             
             return {
@@ -99,11 +99,11 @@ class PerformanceMonitor:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения метрик: {e}")
+            logger.error(f"Error getting metrics: {e}")
             return {}
     
     def _get_gpu_metrics(self) -> Optional[Dict[str, Any]]:
-        """Получает метрики GPU"""
+        """Gets GPU metrics"""
         try:
             import torch
             if not torch.cuda.is_available():
@@ -135,11 +135,11 @@ class PerformanceMonitor:
             }
             
         except Exception as e:
-            logger.debug(f"GPU метрики недоступны: {e}")
+            logger.debug(f"GPU metrics unavailable: {e}")
             return {'available': False, 'error': str(e)}
     
     def _get_process_metrics(self) -> Dict[str, Any]:
-        """Получает метрики текущего процесса"""
+        """Gets metrics of the current process"""
         try:
             process = psutil.Process()
             
@@ -153,11 +153,11 @@ class PerformanceMonitor:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения метрик процесса: {e}")
+            logger.error(f"Error getting process metrics: {e}")
             return {}
     
     def get_summary(self) -> Dict[str, Any]:
-        """Возвращает сводку по производительности"""
+        """Returns a performance summary"""
         current_metrics = self.get_current_metrics()
         
         if not current_metrics:
@@ -175,29 +175,29 @@ class PerformanceMonitor:
 
 
 def timing_decorator(func):
-    """Декоратор для измерения времени выполнения функции"""
+    """Decorator for measuring a function's execution time"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.time()
         try:
             result = func(*args, **kwargs)
             execution_time = time.time() - start_time
-            logger.debug(f"{func.__name__} выполнена за {execution_time:.3f} сек")
+            logger.debug(f"{func.__name__} completed in {execution_time:.3f} s")
             return result
         except Exception as e:
             execution_time = time.time() - start_time
-            logger.error(f"{func.__name__} завершилась с ошибкой за {execution_time:.3f} сек: {e}")
+            logger.error(f"{func.__name__} failed after {execution_time:.3f} s: {e}")
             raise
     return wrapper
 
 
 @contextmanager
 def performance_context(operation_name: str):
-    """Контекстный менеджер для измерения производительности"""
+    """Context manager for measuring performance"""
     start_time = time.time()
     start_memory = psutil.Process().memory_info().rss
     
-    logger.info(f"Начало операции: {operation_name}")
+    logger.info(f"Operation started: {operation_name}")
     
     try:
         yield
@@ -208,19 +208,19 @@ def performance_context(operation_name: str):
         execution_time = end_time - start_time
         memory_delta = end_memory - start_memory
         
-        logger.info(f"Операция '{operation_name}' завершена:")
-        logger.info(f"  Время: {execution_time:.3f} сек")
-        logger.info(f"  Память: {memory_delta / 1024 / 1024:.2f} MB")
+        logger.info(f"Operation '{operation_name}' completed:")
+        logger.info(f"  Time: {execution_time:.3f} s")
+        logger.info(f"  Memory: {memory_delta / 1024 / 1024:.2f} MB")
 
 
 class ResourceTracker:
-    """Отслеживает использование ресурсов"""
+    """Tracks resource usage"""
     
     def __init__(self):
         self.operations = {}
     
     def start_operation(self, operation_id: str):
-        """Начинает отслеживание операции"""
+        """Starts tracking an operation"""
         self.operations[operation_id] = {
             'start_time': time.time(),
             'start_memory': psutil.Process().memory_info().rss,
@@ -228,7 +228,7 @@ class ResourceTracker:
         }
     
     def end_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
-        """Завершает отслеживание операции"""
+        """Finishes tracking an operation"""
         if operation_id not in self.operations:
             return None
         
@@ -246,7 +246,7 @@ class ResourceTracker:
         }
     
     def get_active_operations(self) -> Dict[str, Dict[str, Any]]:
-        """Возвращает активные операции"""
+        """Returns active operations"""
         current_time = time.time()
         active = {}
         
@@ -259,6 +259,6 @@ class ResourceTracker:
         return active
 
 
-# Глобальные экземпляры
+# Global instances
 performance_monitor = PerformanceMonitor()
 resource_tracker = ResourceTracker()

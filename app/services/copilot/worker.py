@@ -1,21 +1,21 @@
-"""Co-pilot — CopilotWorker (Phase 19, Крок 2).
+"""Co-pilot — CopilotWorker (Phase 19, Step 2).
 
-Один daemon-thread на активну сесію (за зразком :class:`LiveTranscribeWorker`).
-Кожен тік:
-  1. перевіряє паузу запису (recording_service.get_state.is_paused) — на паузі
-     ідлить (вимога оператора), не аналізує;
-  2. забирає нові live-сегменти (live_transcribe_worker.get_preview), накопичує
-     вікно тексту;
-  3. коли вікно достатнє — годує :class:`TopicTracker`;
-  4. на зсув/повернення теми — персистить у copilot_topics/_events і публікує
-     ``copilot_topic`` / ``copilot_status`` у SSE-канал ``recording:{sid}``
-     (record.js уже підписаний).
+One daemon thread per active session (modelled on :class:`LiveTranscribeWorker`).
+Each tick:
+  1. checks the recording pause (recording_service.get_state.is_paused) — while paused
+     it idles (operator requirement), does not analyze;
+  2. takes new live segments (live_transcribe_worker.get_preview), accumulates a
+     text window;
+  3. when the window is sufficient — feeds :class:`TopicTracker`;
+  4. on a topic shift/return — persists to copilot_topics/_events and publishes
+     ``copilot_topic`` / ``copilot_status`` to the SSE channel ``recording:{sid}``
+     (record.js is already subscribed).
 
-$0: лише локальні ембеддинги, жодних API-викликів. Усе деградує: нема ембеддингів
-або live-воркера → топік-трекінг просто не стартує, запис працює як раніше.
+$0: only local embeddings, no API calls. Everything degrades: no embeddings
+or no live worker → topic tracking simply does not start, recording works as before.
 
-Тестованість: вся логіка одного проходу — у :meth:`_tick`, який можна викликати
-напряму з підставними (broker/live/recording/embed_fn) — офлайн, без мікрофона.
+Testability: all the logic of one pass is in :meth:`_tick`, which can be called
+directly with stubs (broker/live/recording/embed_fn) — offline, without a microphone.
 """
 from __future__ import annotations
 
@@ -40,45 +40,45 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _WS:
-    """Стан воркера для однієї сесії."""
+    """Worker state for one session."""
     copilot_session_id: int
     recording_session_id: str
     config: dict
     tracker: TopicTracker
-    seen: set = field(default_factory=set)          # ключі вже спожитих сегментів
-    shown_chunks: dict = field(default_factory=dict)  # cid -> True, insertion-ordered (обмежене вікно дедупу)
-    pending: list = field(default_factory=list)     # накопичений текст до вікна
+    seen: set = field(default_factory=set)          # keys of segments already consumed
+    shown_chunks: dict = field(default_factory=dict)  # cid -> True, insertion-ordered (bounded dedup window)
+    pending: list = field(default_factory=list)     # text accumulated until the window
     pending_chars: int = 0
-    carryover: str = ""                             # хвіст попереднього вікна (контекст)
-    last_offset: float = 0.0                        # макс. end-таймкод (зсув у записі)
+    carryover: str = ""                             # tail of the previous window (context)
+    last_offset: float = 0.0                        # max end timecode (offset in the recording)
     topic_db_ids: dict = field(default_factory=dict)  # topic_index -> copilot_topics.id
     paused: bool = False
-    # --- Трек 3: бюджет уваги оператора ---
-    cards_shown: int = 0                             # скільки карток уже показано
-    last_card_ts: float = 0.0                        # time.monotonic останньої картки
-    cards_suppressed: int = 0                        # скільки притишено (йдуть у пост-бриф)
+    # --- Track 3: operator attention budget ---
+    cards_shown: int = 0                             # how many cards have been shown
+    last_card_ts: float = 0.0                        # time.monotonic of the last card
+    cards_suppressed: int = 0                        # how many were muted (go to the post-brief)
     budget_notice_sent: bool = False
-    scope_ambiguous_notice_sent: bool = False         # тезка-скоуп: попередити оператора один раз на сесію
-    # --- Крок 3: диспетчер-LLM (триаж + RAG + інсайти) ---
-    transcript: str = ""                             # ковзний буфер реплік для диспетчера
-    summary: str = ""                                # rolling-summary сесії (in-memory)
-    topic_chunks: dict = field(default_factory=dict)  # topic_index -> закешовані RAG-чанки
-    return_to: Optional[int] = None                  # тема, до якої щойно повернулись (reuse cache)
-    last_dispatch: float = 0.0                       # time.monotonic останнього диспатчу
+    scope_ambiguous_notice_sent: bool = False         # namesake scope: warn the operator once per session
+    # --- Step 3: dispatcher LLM (triage + RAG + insights) ---
+    transcript: str = ""                             # rolling buffer of lines for the dispatcher
+    summary: str = ""                                # session rolling-summary (in-memory)
+    topic_chunks: dict = field(default_factory=dict)  # topic_index -> cached RAG chunks
+    return_to: Optional[int] = None                  # topic just returned to (reuse cache)
+    last_dispatch: float = 0.0                       # time.monotonic of the last dispatch
     dispatch_count: int = 0
-    profile: Optional[str] = None                    # назва напрямку (лінива)
+    profile: Optional[str] = None                    # direction name (lazy)
     llm_warned: bool = False
-    # --- Крок 5: ескалація в Claude (старший брат) ---
-    budget_exhausted: bool = False                   # хард-стоп бюджету → локальний-only
-    last_sweep: float = 0.0                          # time.monotonic останнього safety-sweep
-    insights_by_event: dict = field(default_factory=dict)  # event_id -> {ins, chunks, topic_index} (для ручної ескалації)
-    esc_lock: threading.Lock = field(default_factory=threading.Lock)  # серіалізує ескалації сесії (daemon tick vs ручна escalate_now)
+    # --- Step 5: escalation to Claude (the big brother) ---
+    budget_exhausted: bool = False                   # budget hard stop → local-only
+    last_sweep: float = 0.0                          # time.monotonic of the last safety-sweep
+    insights_by_event: dict = field(default_factory=dict)  # event_id -> {ins, chunks, topic_index} (for manual escalation)
+    esc_lock: threading.Lock = field(default_factory=threading.Lock)  # serializes session escalations (daemon tick vs manual escalate_now)
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: Any = None
 
 
 class CopilotWorker:
-    """Крутить топік-трекери активних сесій. Singleton у app.state.copilot_worker."""
+    """Runs the topic trackers of active sessions. Singleton in app.state.copilot_worker."""
 
     def __init__(self, *, broker, live_transcribe_worker, recording_service,
                  copilot_service, db_path: Optional[str] = None,
@@ -95,8 +95,8 @@ class CopilotWorker:
         self._svc = copilot_service
         self._db_path = db_path
         self._embed_fn = embed_fn or embeddings.embed_query
-        self._dispatcher = dispatcher  # None → будуємо лінива в start() з db_path
-        self._escalator = escalator    # None → лінива Escalator() (Claude через text_polishing)
+        self._dispatcher = dispatcher  # None → built lazily in start() from db_path
+        self._escalator = escalator    # None → lazy Escalator() (Claude via text_polishing)
         self._llm = llm
         self._tick_sec = tick_sec or float(os.environ.get("COPILOT_TOPIC_TICK_SEC", "6"))
         self._min_window_chars = min_window_chars or int(
@@ -110,8 +110,8 @@ class CopilotWorker:
         self._lock = threading.RLock()
 
     def _get_dispatcher(self) -> Optional[Dispatcher]:
-        """Лінива побудова диспетчера (потрібен db_path для RAG). None якщо нема
-        db_path (тоді Крок-3 шар вимкнено, теми працюють як на Кроці 2)."""
+        """Lazy dispatcher construction (needs db_path for RAG). None if there is no
+        db_path (then the Step-3 layer is off, topics work as at Step 2)."""
         if self._dispatcher is not None:
             return self._dispatcher
         if not self._db_path:
@@ -120,7 +120,7 @@ class CopilotWorker:
         return self._dispatcher
 
     def _get_escalator(self) -> Escalator:
-        """Лінива побудова ескалатора (Claude через text_polishing._get_client)."""
+        """Lazy escalator construction (Claude via text_polishing._get_client)."""
         if self._escalator is None:
             self._escalator = Escalator()
         return self._escalator
@@ -129,10 +129,10 @@ class CopilotWorker:
 
     def start(self, *, copilot_session_id: int, recording_session_id: str,
               config: Optional[dict] = None) -> None:
-        """Запустити топік-трекінг для сесії. Idempotent. М'яко пропускає, якщо
-        локальні ембеддинги недоступні (дефолтний embed_fn)."""
+        """Start topic tracking for a session. Idempotent. Softly skips if
+        local embeddings are unavailable (the default embed_fn)."""
         if self._embed_fn is embeddings.embed_query and not embeddings.is_available():
-            logger.info("[copilot] ембеддинги недоступні — топік-трекінг вимкнено для %s",
+            logger.info("[copilot] embeddings unavailable — topic tracking disabled for %s",
                         recording_session_id)
             return
         with self._lock:
@@ -149,7 +149,7 @@ class CopilotWorker:
             ws.thread = t
             self._sessions[recording_session_id] = ws
             t.start()
-        logger.info("[copilot] worker запущено для %s (copilot_session=%s, tick=%.0fs)",
+        logger.info("[copilot] worker started for %s (copilot_session=%s, tick=%.0fs)",
                     recording_session_id, copilot_session_id, self._tick_sec)
 
     def stop(self, recording_session_id: str, wait: bool = False) -> None:
@@ -175,16 +175,16 @@ class CopilotWorker:
                     break
                 try:
                     self._tick(ws)
-                except Exception as e:  # один збій тіку не валить воркер
+                except Exception as e:  # one tick failure does not kill the worker
                     logger.warning("[copilot] tick error %s: %s",
                                    ws.recording_session_id, e, exc_info=True)
         finally:
-            logger.info("[copilot] worker зупинено для %s (тем=%d)",
+            logger.info("[copilot] worker stopped for %s (topics=%d)",
                         ws.recording_session_id, len(ws.tracker.topics))
 
     def _tick(self, ws: _WS) -> Optional[dict]:
-        """Один прохід. Повертає результат диспатчу (для тестів) або None."""
-        # 1. Пауза запису → ідлимо (вимога оператора).
+        """One pass. Returns the dispatch result (for tests) or None."""
+        # 1. Recording pause → idle (operator requirement).
         if self._is_paused(ws.recording_session_id):
             if not ws.paused:
                 ws.paused = True
@@ -194,15 +194,15 @@ class CopilotWorker:
             ws.paused = False
             self._publish(ws, "copilot_status", {"state": "analyzing"})
 
-        # 2. Нові сегменти → ковзний буфер диспетчера + зсув у записі.
+        # 2. New segments → the dispatcher rolling buffer + offset in the recording.
         new_text, max_end = self._collect_new(ws)
         if new_text:
             ws.transcript = (ws.transcript + " " + new_text).strip()[-self._transcript_chars:]
             if max_end is not None:
                 ws.last_offset = max_end
 
-        # 3. Диспетчер-LLM — за каденсом. Теми тепер визначає САМА LLM у триажі
-        #    (continue/shift/return), не косинусний поріг по вікну.
+        # 3. Dispatcher LLM — on a cadence. Topics are now decided by the LLM ITSELF in triage
+        #    (continue/shift/return), not by a cosine threshold on the window.
         return self._maybe_dispatch(ws)
 
     # ----------------------------------------------------------- helpers
@@ -242,7 +242,7 @@ class CopilotWorker:
         try:
             topic_id = self._svc.upsert_topic(
                 ws.copilot_session_id, idx, label=topic["label"],
-                centroid_bytes=None,  # теми LLM-керовані — центроїди не зберігаємо
+                centroid_bytes=None,  # topics are LLM-driven — we do not store centroids
                 first_ts=topic["first_ts"], last_ts=topic["last_ts"],
             )
             ws.topic_db_ids[idx] = topic_id
@@ -256,8 +256,8 @@ class CopilotWorker:
         except Exception as e:
             logger.warning("[copilot] persist topic event failed: %s", e)
 
-        # Повернення до теми → наступний диспатч переюзає закешований RAG-контекст
-        # цієї теми, а не шукає заново (економія + консистентність, Крок 3).
+        # Return to a topic → the next dispatch reuses the cached RAG context
+        # of this topic rather than searching anew (savings + consistency, Step 3).
         if ev["action"] == "return":
             ws.return_to = idx
 
@@ -267,10 +267,10 @@ class CopilotWorker:
         })
 
     def _persist_topic_label(self, ws: _WS, topic_index: int, label: str) -> None:
-        """Оновити назву теми від LLM-триажу в БД + relabel у віджеті. Тема вже існує
-        в copilot_topics (її створив _handle_topic_event на зсуві), тож upsert_topic
-        лише перепише label (COALESCE). Live-смужка перемальовується через
-        copilot_topic action=relabel (applyCopilotTopic уже вміє оновити наявний чип)."""
+        """Update the topic name from the LLM triage in the DB + relabel in the widget. The topic already exists
+        in copilot_topics (created by _handle_topic_event on the shift), so upsert_topic
+        only rewrites the label (COALESCE). The live strip is redrawn via
+        copilot_topic action=relabel (applyCopilotTopic can already update an existing chip)."""
         if self._svc is not None and topic_index in ws.topic_db_ids:
             try:
                 self._svc.upsert_topic(ws.copilot_session_id, topic_index, label=label)
@@ -281,13 +281,13 @@ class CopilotWorker:
             "ts_offset_sec": ws.last_offset,
         })
 
-    # ----------------------------------------------------- диспетчер (Крок 3)
+    # ----------------------------------------------------- dispatcher (Step 3)
 
     def _maybe_dispatch(self, ws: _WS) -> Optional[dict]:
-        """Каденс-гейтований прохід диспетчера: триаж → (RAG) → інсайти.
+        """Cadence-gated dispatcher pass: triage → (RAG) → insights.
 
-        Повертає словник з результатом (для тестів) або None, якщо не час / нема
-        тексту / LLM недоступний. Усе деградує: збій LLM → лог + None, теми живуть.
+        Returns a result dict (for tests) or None if it is not time / there is no
+        text / the LLM is unavailable. Everything degrades: LLM failure → log + None, topics live on.
         """
         disp = self._get_dispatcher()
         if disp is None:
@@ -299,12 +299,12 @@ class CopilotWorker:
         if ws.last_dispatch and (now - ws.last_dispatch) < cadence:
             return None
 
-        # LLM доступний? (короткий кеш у local_llm; деградуємо м'яко)
+        # Is the LLM available? (short cache in local_llm; degrade softly)
         if self._llm is local_llm and not local_llm.is_available():
             if not ws.llm_warned:
                 ws.llm_warned = True
-                logger.info("[copilot] локальний LLM недоступний — диспетчер вимкнено "
-                            "для %s (%s)", ws.recording_session_id,
+                logger.info("[copilot] local LLM unavailable — dispatcher disabled "
+                            "for %s (%s)", ws.recording_session_id,
                             local_llm.unavailability_reason())
                 self._publish(ws, "copilot_status",
                               {"state": "degraded", "reason": "local_llm_unavailable"})
@@ -319,8 +319,8 @@ class CopilotWorker:
         if triage is None:
             return None
 
-        # Тема — рішення САМОЇ LLM (continue/shift/return), а не косинусний поріг.
-        # Трекер застосовує його детерміновано й повертає подію.
+        # The topic is the decision of the LLM ITSELF (continue/shift/return), not a cosine threshold.
+        # The tracker applies it deterministically and returns an event.
         ev = ws.tracker.apply(status=triage.get("topic_status"),
                               label=triage.get("topic_label"),
                               return_to=triage.get("return_to_index"),
@@ -337,11 +337,11 @@ class CopilotWorker:
         for ins in insights:
             self._process_insight(ws, cur, ins, used_chunks, profile)
 
-        # Safety-sweep: незалежний Sonnet-прохід по вікну раз на T (страховка).
+        # Safety-sweep: an independent Sonnet pass over the window once per T (insurance).
         sweep_chunks = chunks or ws.topic_chunks.get(cur) or []
         self._maybe_safety_sweep(ws, sweep_chunks, profile, cur)
 
-        # rolling-summary раз на N диспатчів (тримає контекст малим)
+        # rolling-summary once per N dispatches (keeps the context small)
         ws.dispatch_count += 1
         if self._summary_every > 0 and ws.dispatch_count % self._summary_every == 0:
             new_sum = disp.summarize(prev_summary=ws.summary, window=ws.transcript)
@@ -352,16 +352,16 @@ class CopilotWorker:
 
     def _process_insight(self, ws: _WS, topic_index: int, ins: dict,
                          used_chunks: dict, profile: str) -> None:
-        """Один інсайт: персист завжди, показ — за гейтом і вердиктом Claude.
+        """One insight: persist always, show — by the gate and the Claude verdict.
 
-        Трек 3 перевертає каскад. Було: локальна картка показувалась одразу, а
-        Claude перевіряв уже показане (і лише 5.9% карток узагалі доходили до
-        перевірки). Стало: спершу вердикт, показуємо лише `real`. Це і є «тихіше
-        і точніше» — обсяг падає на порядок, а те, що лишилось, підтверджене.
+        Track 3 flips the cascade. It was: the local card was shown immediately, and
+        Claude verified what was already shown (and only 5.9% of cards ever reached
+        verification). Now: verdict first, we show only `real`. That is the "quieter
+        and more precise" — the volume drops by an order of magnitude, and what remains is confirmed.
 
-        Мʼяка деградація: якщо API недоступний (немає ключа, вичерпано бюджет,
-        режим «лише локально») — verified_only не діє, інакше копілот замовк би
-        зовсім; тоді показуємо локальне, але тільки анкороване доказами.
+        Soft degradation: if the API is unavailable (no key, budget exhausted,
+        "local only" mode) — verified_only does not apply, otherwise the copilot would go
+        fully silent; then we show the local one, but only the one anchored by evidence.
         """
         verified_only = bool(ws.config.get("verified_only")) and self._api_active(ws)
         gate = self._card_gate(ws)
@@ -376,7 +376,7 @@ class CopilotWorker:
                 self._escalate_insight(ws, event_id, ins, used_chunks, profile)
             return
 
-        # verified_only: персистимо мовчки, показуємо лише після вердикту `real`.
+        # verified_only: persist silently, show only after a `real` verdict.
         event_id, _ = self._emit_insight(ws, topic_index, ins, used_chunks, publish=False)
         if event_id is None:
             return
@@ -394,7 +394,7 @@ class CopilotWorker:
         if verdict.get("verdict") != "real":
             self._note_suppressed(ws, "refuted")
             return
-        # Показуємо ВЕРИФІКОВАНИЙ текст (Claude його ще й полірує), не чернетку локалки.
+        # Show the VERIFIED text (Claude also polishes it), not the local draft.
         self._publish(ws, "copilot_insight", {
             "id": event_id, "kind": ins["kind"],
             "text": verdict.get("text") or ins["text"],
@@ -410,34 +410,34 @@ class CopilotWorker:
         })
         self._count_card(ws)
 
-    #: Скільки коментарів оператора тягнемо у вікно аналізу. Стеля мала
-    #: навмисно: контекст 7B і так тісний, а свіжі репліки корисніші за
-    #: написані пів години тому — беремо ОСТАННІ.
+    #: How many operator comments we pull into the analysis window. The cap is deliberately
+    #: small: the 7B context is tight anyway, and fresh lines are more useful than
+    #: ones written half an hour ago — we take the LATEST.
     _OPERATOR_COMMENTS = 4
 
-    #: Окрема смуга id для коментарів оператора. Відʼємні id вже зайняті шаром
-    #: коментарів у `retrieval` (там це `-comment_chunks.id`), а тут ключ —
-    #: `comments.id`: різні таблиці, простори перетинаються, і в одному вікні
-    #: могли б трапитись два різні рядки під `-5`. Тоді `evidence_chunk_ids`
-    #: інсайту вказував би невідомо на що.
+    #: A separate id lane for operator comments. Negative ids are already taken by the
+    #: comment layer in `retrieval` (there it is `-comment_chunks.id`), while here the key is
+    #: `comments.id`: different tables, the spaces overlap, and in one window
+    #: two different rows could appear under `-5`. Then the insight's `evidence_chunk_ids`
+    #: would point at who knows what.
     _OPERATOR_CHUNK_BASE = -1_000_000_000
 
     def _operator_comments(self, ws: _WS) -> list[dict]:
-        """Коментарі, які оператор вписав ПІД ЧАС цього дзвінка (Волна 4).
+        """Comments the operator typed DURING this call (Wave 4).
 
-        Це найсильніший сигнал у вікні: людина щойно свідомо сформулювала, що
-        насправді відбувається, — точніше за будь-що, що дала розшифровка чи
-        архів. Тому вони йдуть у контекст ПЕРШИМИ і незалежно від того, чи
-        триаж просив пошук: коментар не є відповіддю на запит, він є вказівкою.
+        This is the strongest signal in the window: a person has just deliberately formulated what
+        is actually happening — more precisely than anything the transcript or the
+        archive gave. So they go into the context FIRST and regardless of whether
+        triage asked for a search: a comment is not an answer to a query, it is a pointer.
 
-        Подаються у формі звичайного чанка, щоб `analyze()` міг послатись на
-        них через `evidence_chunk_ids` без окремої гілки — відрізняє їх
-        `source_type='comment'`, за яким `_fmt_chunks` ставить іншу мітку.
-        Дедуп `shown_chunks` діє як для решти: показаний коментар не
-        повторюється карткою вдруге.
+        They are given in the form of a regular chunk, so that `analyze()` can refer to
+        them via `evidence_chunk_ids` without a separate branch — they are distinguished by
+        `source_type='comment'`, for which `_fmt_chunks` sets a different label.
+        The `shown_chunks` dedup works as for the rest: a shown comment is not
+        repeated by a card a second time.
 
-        Деградує тихо: немає таблиці (стара БД), немає БД — копілот працює як
-        раніше. Це надбудова, а не умова роботи.
+        Degrades quietly: no table (old DB), no DB — the copilot works as
+        before. It is an add-on, not a condition of operation.
         """
         if not self._db_path or not ws.recording_session_id:
             return []
@@ -446,13 +446,13 @@ class CopilotWorker:
             rows = comments_svc.list_for(self._db_path, "recording_session",
                                          ws.recording_session_id)
         except Exception as e:
-            logger.debug("[copilot] коментарі оператора не прочитано: %s", e)
+            logger.debug("[copilot] operator comments not read: %s", e)
             return []
         if not rows:
             return []
-        # `list_for` віддає закріплені ПЕРШИМИ, тож зріз «останні N» відрізав би
-        # рівно ті, які оператор свідомо підняв. Беремо закріплені плюс
-        # найсвіжіші з решти — і те, і те свідомо важливе, але з різних причин.
+        # `list_for` returns pinned ones FIRST, so a "last N" slice would cut off
+        # exactly those the operator deliberately raised. We take pinned plus
+        # the freshest of the rest — both are deliberately important, but for different reasons.
         cap = self._OPERATOR_COMMENTS
         picked = [c for c in rows if c.get("pinned")][:cap]
         room = cap - len(picked)
@@ -464,8 +464,8 @@ class CopilotWorker:
             out.append({
                 "chunk_id": self._OPERATOR_CHUNK_BASE - int(c["id"]),
                 "source_type": "comment",
-                # Відрізняє живу репліку цього дзвінка від архівного коментаря,
-                # що приїхав із RAG — див. dispatcher._fmt_chunks.
+                # Distinguishes a live line of this call from an archive comment
+                # that arrived from RAG — see dispatcher._fmt_chunks.
                 "live_operator": True,
                 "comment_id": c["id"],
                 "comment_kind": c.get("kind"),
@@ -478,18 +478,18 @@ class CopilotWorker:
         return out
 
     def _scope_entity_ids(self, ws: _WS, db_path: Optional[str]) -> Optional[list]:
-        """Сутності (проєкт/учасники) поточної сесії — тонкий скоуп пошуку (Трек 2).
+        """Entities (project/participants) of the current session — the fine search scope (Track 2).
 
-        Резолвимо ОДИН раз на сесію і кешуємо у стані воркера: під час дзвінка кожен
-        зайвий запит до БД їсть той самий бюджет часу, що й корисна робота. Порожній
-        список = скоупу нема, пошук іде як раніше (по категорії).
+        We resolve ONCE per session and cache in the worker state: during a call every
+        extra DB query eats the same time budget as useful work. An empty
+        list = no scope, the search goes as before (by category).
 
-        Тезка (`CategoryError('ambiguous')` з `resolve_node`, v47) — окремий випадок
-        від «не знайдено»: скоуп реально існує, просто в кількох напрямках, тож
-        тихо звужувати на одного з тезок означало б підмінити відповідь. Пошук іде
-        БЕЗ звуження (як і при not-found), але оператора попереджаємо один раз на
-        сесію — інакше «Маркетинг» мовчки розширюється на весь архів на всю сесію
-        і ніхто про це не дізнається.
+        A namesake (`CategoryError('ambiguous')` from `resolve_node`, v47) is a separate case
+        from "not found": the scope really exists, just in several directions, so
+        quietly narrowing to one of the namesakes would substitute the answer. The search goes
+        WITHOUT narrowing (as with not-found), but we warn the operator once per
+        session — otherwise "Маркетинг" is silently widened to the whole archive for the whole session
+        and nobody finds out.
         """
         cached = getattr(ws, "_scope_ids", None)
         if cached is not None:
@@ -504,33 +504,33 @@ class CopilotWorker:
             except CategoryError as exc:
                 if exc.code == "ambiguous":
                     candidates = list(exc.candidates or [])
-                    logger.warning("[copilot] скоуп %s неоднозначний: %s", names, candidates)
+                    logger.warning("[copilot] scope %s is ambiguous: %s", names, candidates)
                 else:
-                    logger.warning("[copilot] не вдалось розібрати скоуп %s: %s", names, exc)
+                    logger.warning("[copilot] could not parse scope %s: %s", names, exc)
                 ids = []
             except Exception as exc:
-                logger.warning("[copilot] не вдалось розібрати скоуп %s: %s", names, exc)
+                logger.warning("[copilot] could not parse scope %s: %s", names, exc)
                 ids = []
             if candidates:
                 if not ws.scope_ambiguous_notice_sent:
                     ws.scope_ambiguous_notice_sent = True
                     self._notify_scope_ambiguous(ws, names, candidates)
             elif not ids:
-                logger.info("[copilot] скоуп %s не знайдено у графі — шукаю без звуження", names)
+                logger.info("[copilot] scope %s not found in the graph — searching without narrowing", names)
         try:
             ws._scope_ids = ids
         except Exception:
-            logger.debug("[copilot] стан сесії не кешує скоуп (dataclass із slots?)")
+            logger.debug("[copilot] session state does not cache the scope (dataclass with slots?)")
         return ids or None
 
     def _notify_scope_ambiguous(self, ws: _WS, names: list, candidates: list) -> None:
-        """Тезка-скоуп: попередити оператора наявним каналом інсайту (Раунд 6
-        мажор 1), не окремим ``copilot_status``. Персист через ``log_event`` +
-        публікація ``copilot_insight`` з ``shown=true`` — так попередження і
-        рендериться карткою у віджеті, і лежить у ``copilot_events`` (історія
-        сесії, `get_state()`/MCP `get_live_copilot`, таймлайн). Навмисно поза
-        `_card_gate` і лічильником `cards_shown` — бюджет уваги стосується
-        інсайтів диспетчера, не системних попереджень."""
+        """Namesake scope: warn the operator via the existing insight channel (Round 6
+        major 1), not a separate ``copilot_status``. Persisted via ``log_event`` +
+        publishing ``copilot_insight`` with ``shown=true`` — so the warning is both
+        rendered as a card in the widget and lives in ``copilot_events`` (session
+        history, `get_state()`/MCP `get_live_copilot`, timeline). Deliberately outside
+        `_card_gate` and the `cards_shown` counter — the attention budget concerns
+        dispatcher insights, not system warnings."""
         scope_label = ", ".join(str(n) for n in names)
         text = (f"Скоуп «{scope_label}» є в кількох напрямках — шукаю без "
                 "звуження, уточніть скоуп повним шляхом:")
@@ -554,8 +554,8 @@ class CopilotWorker:
 
     def _gather_chunks(self, ws: _WS, disp: Dispatcher, cur: int,
                        triage: dict) -> list[dict]:
-        """RAG-чанки для аналізу: reuse кешу при поверненні теми, інакше пошук."""
-        # 1. Повернення до теми → закешований контекст (без нового пошуку).
+        """RAG chunks for analysis: reuse the cache when returning to a topic, otherwise search."""
+        # 1. Return to a topic → cached context (no new search).
         if ws.return_to is not None:
             cached = ws.topic_chunks.get(ws.return_to)
             if cached is None and self._svc is not None:
@@ -565,10 +565,10 @@ class CopilotWorker:
                     cached = None
             ws.return_to = None
             if cached:
-                logger.info("[copilot] reused cached retrieval for topic %d (%d чанків)",
+                logger.info("[copilot] reused cached retrieval for topic %d (%d chunks)",
                             cur, len(cached))
                 return cached
-        # 2. Триаж попросив пошук → шукаємо в архіві напрямку й кешуємо в тему.
+        # 2. Triage asked for a search → search the direction's archive and cache it in the topic.
         if not triage.get("needs_retrieval") or not triage.get("retrieval_query"):
             return []
         try:
@@ -578,7 +578,7 @@ class CopilotWorker:
                                 scope_tids=self._scope_entity_ids(ws, self._db_path))
             chunks = res.get("chunks") or []
         except Exception as e:
-            logger.warning("[copilot] RAG пошук збій: %s", e)
+            logger.warning("[copilot] RAG search failure: %s", e)
             return []
         if chunks:
             ws.topic_chunks[cur] = chunks
@@ -593,14 +593,14 @@ class CopilotWorker:
                     logger.debug("[copilot] persist retrieval failed: %s", e)
         return chunks
 
-    # Види, які допускаємо БЕЗ пруфів з архіву (решта unanchored — шум від 7B).
+    # Kinds we allow WITHOUT proofs from the archive (the other unanchored ones are 7B noise).
     _UNANCHORED_KINDS = ("contradiction", "fact")
 
     def _build_insights(self, ws: _WS, disp: Dispatcher, chunks: list[dict],
                         triage: dict, profile: str) -> tuple[list[dict], dict]:
-        """Сформувати інсайти. Є свіжий архів → аналіз-сверка (інсайти з евіденс);
-        нема → первинні спостереження триажу (без евіденс) — фільтруємо як шум. Дедуп:
-        у LLM не шлемо чанки, вже показані оператору."""
+        """Build insights. There is a fresh archive → analysis-reconciliation (insights with evidence);
+        none → primary triage observations (no evidence) — filtered as noise. Dedup:
+        we do not send chunks already shown to the operator to the LLM."""
         used = {c["chunk_id"]: c for c in chunks if c.get("chunk_id") is not None}
         fresh = [c for c in chunks if c.get("chunk_id") not in ws.shown_chunks]
         if fresh:
@@ -611,15 +611,15 @@ class CopilotWorker:
         return self._filter_unanchored(ws, insights), used
 
     def _filter_unanchored(self, ws: _WS, insights: list[dict]) -> list[dict]:
-        """Притишити шум: інсайти БЕЗ пруфів з архіву (evidence_chunk_ids) лишаємо
-        тільки якщо це contradiction/fact з conf >= min_unanchored_conf (поріг режиму).
-        question/clarification без пруфа — відкидаємо завжди. Інсайти З пруфами
-        (аналіз-сверка) проходять як є. Рантайм-тест 2026-06-02: без цього 82% карток
-        були беззмістовними спостереженнями без доказів."""
+        """Mute noise: insights WITHOUT proofs from the archive (evidence_chunk_ids) are kept
+        only if they are contradiction/fact with conf >= min_unanchored_conf (the mode threshold).
+        question/clarification without proof are always dropped. Insights WITH proofs
+        (analysis-reconciliation) pass as is. Runtime test 2026-06-02: without this 82% of cards
+        were meaningless observations without evidence."""
         thr = float(ws.config.get("min_unanchored_conf") or 0.80)
         out: list[dict] = []
         for ins in insights:
-            if ins.get("evidence_chunk_ids"):  # анкорений — лишаємо
+            if ins.get("evidence_chunk_ids"):  # anchored — keep
                 out.append(ins)
                 continue
             if ins.get("kind") not in self._UNANCHORED_KINDS:
@@ -633,11 +633,11 @@ class CopilotWorker:
         return out
 
     def _card_gate(self, ws: _WS) -> Optional[str]:
-        """Чи можна ЗАРАЗ показати картку. Повертає причину відмови або None.
+        """Whether a card can be shown RIGHT NOW. Returns the refusal reason or None.
 
-        Два обмежувачі (Трек 3): бюджет карток на сесію і пауза між ними.
-        Пауза важлива окремо від бюджету: інакше всі 5 карток вилітають у перші
-        три хвилини дзвінка й далі тиша — а корисне часто звучить під кінець.
+        Two limiters (Track 3): the card budget per session and the pause between them.
+        The pause matters separately from the budget: otherwise all 5 cards fly out in the first
+        three minutes of the call and then silence — while the useful often sounds near the end.
         """
         limit = int(ws.config.get("max_cards") or 0)
         if limit and ws.cards_shown >= limit:
@@ -652,9 +652,9 @@ class CopilotWorker:
         ws.last_card_ts = time.monotonic()
 
     def _note_suppressed(self, ws: _WS, reason: str) -> None:
-        """Притишена картка не зникає — вона лишається в історії сесії (подія
-        в БД) і потрапляє в пост-колл розбір. Оператору один раз кажемо, що
-        бюджет вичерпано, щоб тиша не читалась як «копілот помер»."""
+        """A muted card does not vanish — it stays in the session history (an event
+        in the DB) and goes into the post-call review. We tell the operator once that
+        the budget is spent, so that silence is not read as "the copilot died"."""
         ws.cards_suppressed += 1
         if reason == "budget" and not ws.budget_notice_sent:
             ws.budget_notice_sent = True
@@ -667,12 +667,12 @@ class CopilotWorker:
                       chunk_meta: dict, *, source: str = "local",
                       kind_event: str = "insight_local",
                       publish: bool = True) -> tuple[Optional[int], list]:
-        """Персист інсайту (+ публікація у віджет, якщо publish=True).
+        """Persist an insight (+ publish to the widget if publish=True).
 
-        ``source`` 'local' (диспетчер) або 'api' (safety-sweep — одразу перевірено).
-        ``publish=False`` — картку НЕ показуємо оператору (не пройшла гейт або
-        чекає вердикту Claude), але подія лишається в БД: історія сесії і
-        пост-колл розбір мають бачити все, що копілот помітив."""
+        ``source`` 'local' (dispatcher) or 'api' (safety-sweep — verified right away).
+        ``publish=False`` — the card is NOT shown to the operator (did not pass the gate or
+        is waiting for the Claude verdict), but the event stays in the DB: the session history and
+        the post-call review must see everything the copilot noticed."""
         evidence, full = [], {}
         for cid in ins.get("evidence_chunk_ids", []):
             c = chunk_meta.get(cid)
@@ -697,14 +697,14 @@ class CopilotWorker:
                 payload={"kind": ins["kind"], "text": ins["text"],
                          "evidence": evidence, "topic_index": topic_index,
                          "escalate": self._should_escalate(ws, ins),
-                         # Трек 3: чи бачив це оператор під час дзвінка. Притишене
-                         # не зникає — воно лишається для розбору ПІСЛЯ дзвінка,
-                         # і таймлайн має вміти їх розрізняти.
+                         # Track 3: whether the operator saw this during the call. Muted
+                         # does not vanish — it stays for the review AFTER the call,
+                         # and the timeline must be able to tell them apart.
                          "shown": bool(publish)},
             )
         except Exception as e:
             logger.debug("[copilot] persist insight failed: %s", e)
-        # запам'ятати для ручної ескалації (кнопка «копнути глибше», Крок 4→5)
+        # remember for manual escalation (the "dig deeper" button, Step 4→5)
         if event_id is not None and full:
             ws.insights_by_event[event_id] = {
                 "ins": ins, "chunks": full, "topic_index": topic_index}
@@ -720,15 +720,15 @@ class CopilotWorker:
             self._count_card(ws)
         return event_id, evidence
 
-    # ------------------------------------------------ ескалація в Claude (Крок 5)
+    # ------------------------------------------------ escalation to Claude (Step 5)
 
     def _api_active(self, ws: _WS) -> bool:
-        """Чи можна дзвонити в Claude: api увімкнено, бюджет не вичерпано, модель є."""
+        """Whether we can call Claude: api enabled, budget not exhausted, model present."""
         return bool(ws.config.get("api_enabled") and not ws.budget_exhausted
                     and ws.config.get("model_api"))
 
     def _should_escalate(self, ws: _WS, ins: dict) -> bool:
-        """Ескалювати, якщо є докази й локалка достатньо впевнена (поріг режиму)."""
+        """Escalate if there is evidence and the local model is confident enough (the mode threshold)."""
         if not ins.get("evidence_chunk_ids"):
             return False
         try:
@@ -740,7 +740,7 @@ class CopilotWorker:
     def _escalate_insight(self, ws: _WS, event_id: int, ins: dict,
                           chunk_meta: dict, profile: str,
                           publish_update: bool = True) -> Optional[dict]:
-        """Верифікувати локальний інсайт через Claude; оновити картку + облік/бюджет."""
+        """Verify a local insight through Claude; update the card + accounting/budget."""
         if not self._api_active(ws):
             return None
         full = [chunk_meta[c] for c in ins.get("evidence_chunk_ids", []) if c in chunk_meta]
@@ -748,10 +748,10 @@ class CopilotWorker:
             return None
         esc = self._get_escalator()
         votes = int(ws.config.get("verify_votes") or 1)
-        # Серіалізуємо ескалації сесії (daemon tick vs ручна escalate_now з HTTP-потоку)
-        # і повторно гейтуємо бюджет під локом — щоб дві ескалації не перевитратили
-        # разом (Крок 9 fix #2). Облік — ПО кожному голосу, з раннім стопом за
-        # бюджетом усередині мульти-голосу (fix #1).
+        # Serialize session escalations (daemon tick vs manual escalate_now from an HTTP thread)
+        # and re-gate the budget under the lock — so that two escalations do not overspend
+        # together (Step 9 fix #2). Accounting — PER vote, with an early stop on the
+        # budget inside a multi-vote (fix #1).
         with ws.esc_lock:
             if not self._api_active(ws):
                 return None
@@ -762,12 +762,12 @@ class CopilotWorker:
                     on_vote=lambda r: self._account_usage(ws, r),
                     can_continue=lambda: self._api_active(ws))
             except Exception as e:
-                logger.warning("[copilot] verify збій: %s", e)
+                logger.warning("[copilot] verify failure: %s", e)
                 return None
             if verdict is None:
                 return None
-            # «Opus на гнарлі» (Крок 6): невпевнений вердикт + є модель-арбітр + бюджет
-            # ще лишився → переарбітраж сильнішою моделлю (тільки на high-важливості).
+            # "Opus on gnarly" (Step 6): an unsure verdict + there is an arbiter model + budget
+            # still left → re-arbitration by the stronger model (only at high importance).
             gnarly = ws.config.get("model_api_gnarly")
             if verdict["verdict"] == "uncertain" and gnarly and self._api_active(ws):
                 try:
@@ -788,9 +788,9 @@ class CopilotWorker:
                          "text": verdict["text"], "model": verdict["model"]})
         except Exception as e:
             logger.debug("[copilot] persist verified failed: %s", e)
-        # publish_update=False — картку ще НЕ показували (verified_only): апдейт
-        # неіснуючої картки фронт просто проігнорує, а рішення про показ ухвалює
-        # _process_insight за вердиктом.
+        # publish_update=False — the card was NOT shown yet (verified_only): the update
+        # of a non-existent card is simply ignored by the frontend, and the decision to show is made by
+        # _process_insight by the verdict.
         if publish_update:
             self._publish(ws, "copilot_insight_update", {
                 "id": event_id, "source": "api", "verdict": verdict["verdict"],
@@ -799,7 +799,7 @@ class CopilotWorker:
 
     def _maybe_safety_sweep(self, ws: _WS, chunks: list, profile: str,
                             topic_index: int) -> Optional[dict]:
-        """Форсований Sonnet-прохід по вікну раз на safety_sweep_sec (страховка)."""
+        """Forced Sonnet pass over the window once per safety_sweep_sec (insurance)."""
         sweep_sec = float(ws.config.get("safety_sweep_sec") or 0)
         if sweep_sec <= 0 or not self._api_active(ws) or not chunks or not ws.transcript:
             return None
@@ -812,18 +812,18 @@ class CopilotWorker:
                 window=ws.transcript, chunks=chunks, profile=profile,
                 model=ws.config.get("model_api"))
         except Exception as e:
-            logger.warning("[copilot] safety-sweep збій: %s", e)
+            logger.warning("[copilot] safety-sweep failure: %s", e)
             return None
         if res is None:
             return None
         self._account_usage(ws, res)
         meta = {c["chunk_id"]: c for c in chunks if c.get("chunk_id") is not None}
         for ins in res.get("insights", []):
-            # дедуп: sweep не повторює вже показані оператору інсайти
+            # dedup: sweep does not repeat insights already shown to the operator
             if all(cid in ws.shown_chunks for cid in ins.get("evidence_chunk_ids", [])):
                 continue
-            # Трек 3: sweep — теж картки, і бюджет уваги для них той самий.
-            # Інакше «страховка» тихо обходила б обмеження і повертала шум.
+            # Track 3: sweep also yields cards, and the attention budget for them is the same.
+            # Otherwise the "insurance" would quietly bypass the limit and bring back noise.
             gate = self._card_gate(ws)
             if gate is not None:
                 self._note_suppressed(ws, gate)
@@ -832,8 +832,8 @@ class CopilotWorker:
         return res
 
     def escalate_now(self, recording_session_id: str, event_id: int) -> bool:
-        """Ручна ескалація конкретної картки (кнопка «копнути глибше», Крок 4).
-        Викликається з blueprint-потоку. Повертає True, якщо ескалацію виконано."""
+        """Manual escalation of a specific card (the "dig deeper" button, Step 4).
+        Called from the blueprint thread. Returns True if the escalation was performed."""
         with self._lock:
             ws = self._sessions.get(recording_session_id)
         if ws is None or not self._api_active(ws):
@@ -846,21 +846,21 @@ class CopilotWorker:
         return verdict is not None
 
     def update_config(self, recording_session_id: str, new_config: dict) -> bool:
-        """Підмінити поведінковий конфіг сесії на льоту (зміна режиму/важливості під
-        час дзвінка, Крок 6). Скидає прапор вичерпання — переоцінимо на наст. usage."""
+        """Replace the session's behavioural config on the fly (mode/importance change during
+        the call, Step 6). Resets the exhaustion flag — re-evaluated on the next usage."""
         with self._lock:
             ws = self._sessions.get(recording_session_id)
             if ws is None:
                 return False
             ws.config = dict(new_config or {})
             ws.budget_exhausted = False
-        logger.info("[copilot] конфіг сесії %s оновлено на льоту (mode=%s, importance=%s)",
+        logger.info("[copilot] session %s config updated on the fly (mode=%s, importance=%s)",
                     recording_session_id, ws.config.get("mode"), ws.config.get("importance"))
         return True
 
     def _account_usage(self, ws: _WS, usage: dict) -> None:
-        """Додати облік API-виклику до сесії, оновити лічильник у віджеті, перевірити
-        бюджет (хард-стоп → деградація в локальний-only)."""
+        """Add the accounting of an API call to the session, update the counter in the widget, check
+        the budget (hard stop → degradation to local-only)."""
         if self._svc is None:
             return
         try:
@@ -873,9 +873,9 @@ class CopilotWorker:
             return
         if tot.get("exhausted") and not ws.budget_exhausted:
             ws.budget_exhausted = True
-            logger.info("[copilot] бюджет сесії %s вичерпано ($%.4f) → локальний-only",
+            logger.info("[copilot] session %s budget exhausted ($%.4f) → local-only",
                         ws.copilot_session_id, tot.get("cost_estimate"))
-        # Cost-governor (Крок 6): м'який warn перед хард-стопом.
+        # Cost-governor (Step 6): soft warn before the hard stop.
         budget = tot.get("budget_usd")
         warn_ratio = float(ws.config.get("budget_warn_ratio") or 0.8)
         warned = bool(budget and budget > 0 and not ws.budget_exhausted
@@ -889,8 +889,8 @@ class CopilotWorker:
             "budget": tot.get("budget_usd"), "state": state})
 
     def _mark_shown(self, ws: _WS, cid) -> None:
-        """Позначити чанк як показаний (для дедупу) — обмежене FIFO-вікно, щоб сет
-        не ріс необмежено на довгих дзвінках (Крок 9 fix #3)."""
+        """Mark a chunk as shown (for dedup) — a bounded FIFO window, so the set
+        does not grow unboundedly on long calls (Step 9 fix #3)."""
         if cid in ws.shown_chunks:
             return
         ws.shown_chunks[cid] = True

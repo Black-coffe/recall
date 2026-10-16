@@ -1,4 +1,4 @@
-"""Дочитування OCR фото з Telegram і позначка збою розбору (spec tg-photo-ocr)."""
+"""Re-reading Telegram photos with OCR and marking a parse failure (spec tg-photo-ocr)."""
 import sqlite3
 
 import pytest
@@ -8,7 +8,7 @@ from app.db.migrations import init_database
 from app.services import tg_photo_ocr as tpo
 
 OCR = {
-    'scan.jpg': 'Рахунок №17 ТОВ Ромашка\nПароль: [🔒 секрет]',   # document_parser уже маскує
+    'scan.jpg': 'Рахунок №17 ТОВ Ромашка\nПароль: [🔒 секрет]',   # document_parser already masks it
     'caption.jpg': 'Таблиця бюджету Q3',
     'cat.jpg': '',
 }
@@ -38,7 +38,7 @@ def db(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setattr(document_parser, 'ocr_available', lambda: True)
-    def _parse(p, filename=None):                 # як справжній: порожній OCR → NoTextFound
+    def _parse(p, filename=None):                 # like the real one: empty OCR → NoTextFound
         if not OCR[filename]:
             raise document_parser.NoTextFound('OCR не знайшов тексту на зображенні.')
         return {'text': OCR[filename]}
@@ -71,7 +71,7 @@ def test_run_replaces_stub_keeps_caption_masks_and_is_idempotent(db, monkeypatch
     assert '[🔒 секрет]' in rows[0][0]
     assert rows[0][1] == 'ocr-backfill' and rows[0][2].startswith('[TG] Фонд: Рахунок')
     assert rows[1][0] == 'Глянь бюджет\n\nТаблиця бюджету Q3'
-    assert rows[2][0] == '[фото без тексту]' and rows[2][1] is None     # без тексту: позначку знято
+    assert rows[2][0] == '[фото без тексту]' and rows[2][1] is None     # no text: the mark is cleared
     assert calls == [1, 2] and res['reindexed'] == 2
     again = tpo.run(db, dry_run=False)
     assert again['updated'] == 0 and again['already'] == 2
@@ -115,7 +115,7 @@ def test_real_parser_raises_no_text_found_on_blank_image(tmp_path):
     from PIL import Image
     from app.services import document_parser
     if not document_parser.ocr_available():
-        pytest.skip('Tesseract недоступний')
+        pytest.skip('Tesseract is unavailable')
     blank = tmp_path / 'blank.jpg'
     Image.new('RGB', (400, 300), (120, 160, 200)).save(blank)
     with pytest.raises(document_parser.NoTextFound):
@@ -123,7 +123,7 @@ def test_real_parser_raises_no_text_found_on_blank_image(tmp_path):
 
 
 def test_extension_doc_type_is_only_remasked_never_appended(db):
-    """doc_type='jpg' = OCR при інжесті вже вдався; повторний OCR (трохи інший) не дописуємо."""
+    """doc_type='jpg' = OCR at ingest already succeeded; a repeated OCR (slightly different) is not appended."""
     conn = sqlite3.connect(db)
     conn.execute("UPDATE transcriptions SET doc_type = 'jpg', transcript_text = ? WHERE id = 2",
                  ('Таблиця бюджету Q3 стара версія OCR\npassword: hunter2',))
@@ -149,7 +149,7 @@ def test_coverage_reports_unparsed_media(db, monkeypatch):
 
 
 def test_run_remasks_text_recognized_before_masking_shipped(db, monkeypatch):
-    """Між оживленням OCR (4.10.0) і маскою фото-текст міг лягти незамаскованим."""
+    """Between the OCR revival (4.10.0) and the mask, a photo text could land unmasked."""
     conn = sqlite3.connect(db)
     conn.execute("UPDATE transcriptions SET transcript_text = ? WHERE id = 1",
                  ('Рахунок №17 ТОВ Ромашка\nПароль: Qw3rty!2026',))
@@ -169,7 +169,7 @@ def test_run_remasks_text_recognized_before_masking_shipped(db, monkeypatch):
     'Пароль: [🔒 секрет] і ще password: hunter2',
 ])
 def test_masking_is_idempotent(text):
-    """Раунд 3: уже стояча маска ловилась як «лейбл + значення» і росла з кожним прогоном."""
+    """Round 3: an already present mask was caught as «label + value» and grew with every run."""
     from app.services import screen_secrets as ss
     once = ss.mask_text(text, ss.scan_text(text))
     twice = ss.mask_text(once, ss.scan_text(once))
@@ -197,7 +197,7 @@ def test_two_runs_on_already_masked_extension_row_change_nothing(db):
 
 
 def test_epoch_refusal_is_not_counted_as_reindexed(db, monkeypatch):
-    """13.10.2026: CLI без .env — захист епохи відмовив писати чанки, а лічильник казав 606."""
+    """13.10.2026: CLI without .env — the epoch guard refused to write chunks, and the counter said 606."""
     from app.services import embeddings, tg_entities
     monkeypatch.setattr(embeddings, 'chunk_and_embed_transcription',
                         lambda p, tid, force=False: {'status': 'epoch_mismatch', 'transcription_id': tid})

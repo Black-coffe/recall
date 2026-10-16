@@ -1,8 +1,8 @@
-"""Integration tests для recording REST API (Phase 9.5).
+"""Integration tests for the recording REST API (Phase 9.5).
 
-Тести використовують Flask test_client + mock RecordingService — без
-реальних WASAPI стрімів. Покривають happy path і error-кейси для
-кожного endpoint'у.
+The tests use the Flask test_client + a mock RecordingService — without
+real WASAPI streams. They cover the happy path and error cases for
+every endpoint.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.db.connection import get_db_connection
 
 @pytest.fixture(autouse=True)
 def reset_devices_cache():
-    """Module-level кеш не повинен текти між тестами."""
+    """The module-level cache must not leak between tests."""
     recording_module._devices_cache['ts'] = 0.0
     recording_module._devices_cache['data'] = []
     yield
@@ -30,7 +30,7 @@ def reset_devices_cache():
 
 @pytest.fixture
 def fake_service():
-    """Mock RecordingService із заздалегідь налаштованою поведінкою."""
+    """A mock RecordingService with pre-configured behaviour."""
     svc = MagicMock()
     svc.list_devices.return_value = [
         {'index': 1, 'name': 'TestMic', 'channels': 1, 'default_sample_rate': 48000,
@@ -58,12 +58,12 @@ def fake_service():
 
 @pytest.fixture
 def client(fake_service):
-    """Flask test_client з підміненим recording_service."""
+    """A Flask test_client with a replaced recording_service."""
     app = Flask(__name__)
     app.register_blueprint(recording_bp)
     app.config['TESTING'] = True
 
-    # Підмінюємо state singletons
+    # Replace the state singletons
     original_service = state.recording_service
     original_broker = state.sse_broker
     original_live_worker = state.live_transcribe_worker
@@ -93,7 +93,7 @@ def test_get_devices_returns_list(client, fake_service):
 def test_get_devices_uses_cache_on_second_call(client, fake_service):
     client.get('/api/recording/devices')
     client.get('/api/recording/devices')
-    # list_devices мав викликатися лише раз (другий — з кешу)
+    # list_devices should have been called only once (the second time — from the cache)
     assert fake_service.list_devices.call_count == 1
 
 
@@ -104,7 +104,7 @@ def test_get_devices_force_bypasses_cache(client, fake_service):
 
 
 def test_devices_503_when_service_disabled(fake_service):
-    """Якщо recording_service is None — 503."""
+    """If recording_service is None — 503."""
     app = Flask(__name__)
     app.register_blueprint(recording_bp)
 
@@ -143,7 +143,7 @@ def test_start_without_streams_returns_400(client, fake_service):
 
 
 def test_start_twice_then_session_limit(client, fake_service):
-    """Дві сесії стартують; третя — 409 SESSION_LIMIT з переліком і лімітом."""
+    """Two sessions start; the third — 409 SESSION_LIMIT with the list and the limit."""
     from app.services.recording.service import SessionConflictError
     fake_service.start.side_effect = [
         'rec_a', 'rec_b',
@@ -173,7 +173,7 @@ def test_start_invalid_system_source_400_before_service(client, fake_service):
 
 
 def test_start_include_enables_system_without_device(client, fake_service):
-    """include/exclude вмикає системний потік і без system_device_index."""
+    """include/exclude enables the system stream even without system_device_index."""
     r = client.post('/api/recording/start', json={
         'system_source': {'mode': 'include', 'apps': ['Zoom.exe']},
     })
@@ -302,7 +302,7 @@ def test_get_state_404(client, fake_service):
 # ---------------------------------------------------------------- /live-transcript
 
 def test_live_transcript_worker_disabled(client, fake_service):
-    """state.live_transcribe_worker is None → available:false, не 500."""
+    """state.live_transcribe_worker is None → available:false, not 500."""
     state.live_transcribe_worker = None
     r = client.get('/api/recording/rec_test123/live-transcript')
     assert r.status_code == 200
@@ -389,15 +389,15 @@ def test_live_transcript_truncates_at_limit(client, fake_service):
 
 
 def test_live_transcript_seq_cursor_survives_stream_race(client, fake_service):
-    """Story 06: system-доріжка транскрибується повільніше за mic і її
-    сегмент з'являється ПІЗНІШЕ, хоч його `start` МЕНШИЙ за вже відданий
-    mic-сегмент. Курсор по `seq` (порядок append'у) зобов'язаний його
-    повернути; курсор по `start`/`since_sec` — загубив би назавжди.
+    """Story 06: the system track is transcribed more slowly than mic and its
+    segment appears LATER, although its `start` is SMALLER than that of the already returned
+    mic segment. A cursor by `seq` (the append order) is obliged to return
+    it; a cursor by `start`/`since_sec` would lose it forever.
     """
     worker = MagicMock()
     worker.is_active.return_value = True
 
-    # Крок 1: у RAM лежить лише mic-сегмент (start=105, доданий першим).
+    # Step 1: only the mic segment is in RAM (start=105, added first).
     worker.get_preview.return_value = [
         {'start': 105.0, 'end': 106.0, 'text': 'mic перший', 'speaker': 'self',
          'stream': 'mic', 'seq': 1},
@@ -408,30 +408,30 @@ def test_live_transcript_seq_cursor_survives_stream_race(client, fake_service):
     assert body1['count'] == 1
     assert body1['next_seq'] == 1
 
-    # Крок 2: system-доріжка нарешті домальовує свій пасс — її сегмент має
-    # МЕНШИЙ start (100 < 105), але доданий ПІЗНІШЕ (seq=2).
+    # Step 2: the system track finally finishes its pass — its segment has a
+    # SMALLER start (100 < 105), but was added LATER (seq=2).
     worker.get_preview.return_value = worker.get_preview.return_value + [
         {'start': 100.0, 'end': 101.0, 'text': 'system пізніше', 'speaker': 'other',
          'stream': 'system', 'seq': 2},
     ]
 
-    # Опит курсором по seq — system-сегмент приходить, не губиться.
+    # Polling with a seq cursor — the system segment arrives, it is not lost.
     r2 = client.get(f'/api/recording/rec_test123/live-transcript?since_seq={body1["next_seq"]}')
     body2 = r2.get_json()
     assert body2['count'] == 1
     assert body2['segments'][0]['text'] == 'system пізніше'
     assert body2['next_seq'] == 2
 
-    # Контроль на "не приходить двічі": ще один опит тим самим курсором — порожньо.
+    # A control for "does not arrive twice": one more poll with the same cursor — empty.
     r3 = client.get(f'/api/recording/rec_test123/live-transcript?since_seq={body2["next_seq"]}')
     body3 = r3.get_json()
     assert body3['count'] == 0
     assert body3['segments'] == []
     assert body3['next_seq'] == body2['next_seq']
 
-    # Контроль на бажаний контраст: той самий опит старим курсором по часу
-    # (since_sec = start вже відданого mic-сегмента) губить system-сегмент,
-    # бо його start=100 не перевищує 105 — саме той баг, який чинить ця історія.
+    # A control for the desired contrast: the same poll with the old time cursor
+    # (since_sec = the start of the already returned mic segment) loses the system segment,
+    # because its start=100 does not exceed 105 — exactly the bug this story fixes.
     r_broken = client.get('/api/recording/rec_test123/live-transcript?since_sec=105')
     body_broken = r_broken.get_json()
     assert body_broken['count'] == 0
@@ -577,7 +577,7 @@ def test_apps_enumerator_failure_is_200_unavailable(client, fake_service, monkey
 # ---------------------------------------------------------------- /recovered (Phase 9.10)
 
 def test_recovered_endpoint_empty_log(client, fake_service):
-    """Якщо recovery_log порожній — повертає count=0."""
+    """If recovery_log is empty — returns count=0."""
     original = state.recording_recovery_log
     state.recording_recovery_log = []
     try:
@@ -592,7 +592,7 @@ def test_recovered_endpoint_empty_log(client, fake_service):
 
 
 def test_recovered_endpoint_with_sessions(client, fake_service):
-    """Recovered sessions з manifest details. Auto-ack очищає лог."""
+    """Recovered sessions with manifest details. Auto-ack clears the log."""
     original = state.recording_recovery_log
     state.recording_recovery_log = ['rec_a', 'rec_b']
     fake_service.store.read = lambda sid: {
@@ -611,7 +611,7 @@ def test_recovered_endpoint_with_sessions(client, fake_service):
         assert body['count'] == 2
         ids = {item['session_id'] for item in body['recovered']}
         assert ids == {'rec_a', 'rec_b'}
-        # Auto-ack: повторний запит має повернути 0
+        # Auto-ack: a repeated request must return 0
         r2 = client.get('/api/recordings/recovered')
         assert r2.get_json()['count'] == 0
     finally:
@@ -619,7 +619,7 @@ def test_recovered_endpoint_with_sessions(client, fake_service):
 
 
 def test_recovered_endpoint_no_ack_keeps_log(client, fake_service):
-    """?ack=0 не очищує лог."""
+    """?ack=0 does not clear the log."""
     original = state.recording_recovery_log
     state.recording_recovery_log = ['rec_keep']
     fake_service.store.read = lambda sid: {
@@ -628,7 +628,7 @@ def test_recovered_endpoint_no_ack_keeps_log(client, fake_service):
     try:
         r = client.get('/api/recordings/recovered?ack=0')
         assert r.get_json()['count'] == 1
-        # Лог досі містить rec_keep
+        # The log still contains rec_keep
         assert state.recording_recovery_log == ['rec_keep']
     finally:
         state.recording_recovery_log = original
@@ -638,7 +638,7 @@ def test_recovered_endpoint_no_ack_keeps_log(client, fake_service):
 
 @pytest.fixture
 def save_client(fake_service, tmp_path):
-    """test_client з реальною БД (для /save → register_recording)."""
+    """A test_client with a real DB (for /save → register_recording)."""
     from app.db.migrations import init_database
 
     db_path = str(tmp_path / 'save.db')
@@ -692,11 +692,11 @@ def test_save_registers_recording_in_library(save_client):
 
 
 def test_save_is_idempotent_after_auto_register(save_client):
-    """Симуляція orphan-фіксу: finalize-callback вже зареєстрував запис,
-    потім фронтенд кличе /save → не дублює, лише оновлює назву."""
+    """A simulation of the orphan fix: the finalize callback has already registered the recording,
+    then the frontend calls /save → does not duplicate, only updates the name."""
     client, db_path = save_client
 
-    # finalize-callback зробив авто-реєстрацію (auto_name)
+    # the finalize callback did the auto-registration (auto_name)
     from app.services.recording.library import register_recording
     auto = register_recording(db_path, 'rec_xyz', {
         'final_mp3_path': state.recording_service.store.read('rec_xyz')['final_mp3_path'],
@@ -704,7 +704,7 @@ def test_save_is_idempotent_after_auto_register(save_client):
     })
     assert auto['created'] is True
 
-    # тепер /save з ручною назвою
+    # now /save with a manual name
     r = client.post('/api/recording/rec_xyz/save', json={'name': 'Перейменовано'})
     body = r.get_json()
     assert body['already_registered'] is True
@@ -715,7 +715,7 @@ def test_save_is_idempotent_after_auto_register(save_client):
         rows = conn.execute(
             "SELECT title FROM audio_downloads WHERE recording_session_id = 'rec_xyz'"
         ).fetchall()
-    assert len(rows) == 1  # без дубля
+    assert len(rows) == 1  # no duplicate
     assert rows[0]['title'] == 'Перейменовано'
 
 

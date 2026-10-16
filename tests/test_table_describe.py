@@ -1,8 +1,8 @@
-"""Тести NL-опису аркушів таблиць (Phase 16C).
+"""Tests for the NL description of table sheets (Phase 16C).
 
-Лёгкі — text_polishing імпортується без anthropic (клієнт lazy). Перевіряємо
-graceful-гілку (порожній вхід → без виклику API). Happy-path потребує ключа
-і перевіряється вручну.
+Lightweight - text_polishing is imported without anthropic (the client is lazy). We check
+the graceful branch (empty input → no API call). The happy path needs a key
+and is checked manually.
 """
 from app.services import text_polishing as tp
 

@@ -1,7 +1,7 @@
-"""`why` на кожному результаті retrieval.search() (Історія 02, C2/C3).
+"""`why` on every result of retrieval.search() (Story 02, C2/C3).
 
-Embeddings мокаються (EMBED_DIM=4) — так само як у test_retrieval.py /
-test_comments_ranking.py. FTS5 справжній.
+Embeddings are mocked (EMBED_DIM=4) -- the same as in test_retrieval.py /
+test_comments_ranking.py. FTS5 is real.
 """
 import sqlite3
 
@@ -46,9 +46,9 @@ def mock_embeddings(monkeypatch):
 
 
 def _add_tx(path, name="Дзвінок", date="2026-08-01", category_id=None):
-    """embedding_model/embedding_version — поточна пара (production-rag-wave-b-04):
-    retrieval._vector_search тепер фільтрує по (EMBED_MODEL, EMBED_VERSION), інакше
-    NULL-дефолт не потрапляв би у vector-гілку взагалі."""
+    """embedding_model/embedding_version -- the current pair (production-rag-wave-b-04):
+    retrieval._vector_search now filters by (EMBED_MODEL, EMBED_VERSION), otherwise
+    the NULL default would not get into the vector branch at all."""
     conn = sqlite3.connect(path)
     cur = conn.execute(
         "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
@@ -77,7 +77,7 @@ def _comment(path, tid, body, kind="note", **kw):
 
 
 # ============================================================
-# Компактний why на кожному елементі
+# Compact why on every item
 # ============================================================
 
 def test_every_chunk_has_why_with_required_keys(db, mock_embeddings):
@@ -85,12 +85,12 @@ def test_every_chunk_has_why_with_required_keys(db, mock_embeddings):
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч")
     _add_chunk(db, tid, 1, "інша тема геть без спільних слів")
     res = retrieval.search(db, "бюджет проєкту", top_k=5)
-    assert res["chunks"], "має бути хоч один результат"
+    assert res["chunks"], "there must be at least one result"
     for c in res["chunks"]:
         why = c["why"]
         assert set(why.keys()) >= {"src", "rrf", "rec", "by", "top"}
         assert why["top"] in ("rerank", "recency", "rrf", "comment_boost")
-        assert "rr" not in why  # rerank не вмикали
+        assert "rr" not in why  # rerank was not enabled
 
 
 def test_rr_present_iff_rerank_score_present(db, mock_embeddings, monkeypatch):
@@ -109,7 +109,7 @@ def test_rr_present_iff_rerank_score_present(db, mock_embeddings, monkeypatch):
 
 
 def test_rrf_and_rec_are_distinct_from_score(db, mock_embeddings):
-    tid = _add_tx(db, date="2026-01-01")  # старий, щоб recency != 1
+    tid = _add_tx(db, date="2026-01-01")  # old, so that recency != 1
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч гривень")
     res = retrieval.search(db, "бюджет проєкту", top_k=5)
     c = res["chunks"][0]
@@ -132,13 +132,13 @@ def test_comment_entry_has_why_with_comment_boost_possible(db, mock_embeddings):
 
 
 # ============================================================
-# Історія 09: `top` називає стадію, яка ФАКТИЧНО зрушила результат
+# Story 09: `top` names the stage that ACTUALLY moved the result
 # ============================================================
 
 def test_zero_recency_weight_never_reports_recency(db, mock_embeddings):
-    """rec_w=0 → свіжість помножила скор рівно на 1.0 — це не мало бути
-    прочитане як «recency зрушила результат» (знахідка 6/09)."""
-    tid = _add_tx(db, date="2020-01-01")  # старий запис — recency01 > 0, але вага 0
+    """rec_w=0 -> recency multiplied the score by exactly 1.0 -- that should not have been
+    read as "recency moved the result" (finding 6/09)."""
+    tid = _add_tx(db, date="2020-01-01")  # old record -- recency01 > 0, but weight 0
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч")
     res = retrieval.search(db, "бюджет проєкту", top_k=5, recency_weight=0.0)
     assert res["chunks"]
@@ -147,16 +147,16 @@ def test_zero_recency_weight_never_reports_recency(db, mock_embeddings):
 
 
 def test_rerank_actually_reordered_pool_reports_rerank(db, mock_embeddings, monkeypatch):
-    """Кандидат отримує `top == "rerank"` лише коли rerank ДІЙСНО переставив
-    його позицію в пулі — не просто тому, що він у пулі опинився."""
+    """A candidate gets `top == "rerank"` only when rerank REALLY moved
+    its position in the pool -- not just because it ended up in the pool."""
     from app.services import reranker
     tid = _add_tx(db)
     _add_chunk(db, tid, 0, "бюджет проєкту альфа")
     _add_chunk(db, tid, 1, "бюджет проєкту бета")
 
     def _reverse_rerank(q, items, text_key="text"):
-        # Розвертає пул — гарантовано змінює позицію КОЖНОГО елемента
-        # (за умови, що їх більше одного).
+        # Reverses the pool -- guaranteed to change the position of EVERY element
+        # (provided there is more than one).
         rev = list(reversed(items))
         return [{**it, "rerank_score": 0.9 - 0.1 * i} for i, it in enumerate(rev)]
 
@@ -192,7 +192,7 @@ def test_explain_false_has_no_stages(db, mock_embeddings):
 
 def test_explain_true_adds_stages_with_raw_scores(db, mock_embeddings):
     tid = _add_tx(db)
-    # чанк, знайдений і вектором, і FTS (спільний термін "бюджет")
+    # a chunk found by both vector and FTS (the shared term "бюджет")
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч гривень")
     res = retrieval.search(db, "бюджет проєкту", top_k=5, explain=True)
     c = res["chunks"][0]
@@ -203,15 +203,15 @@ def test_explain_true_adds_stages_with_raw_scores(db, mock_embeddings):
     assert "fts" in stages
     assert "pos" in stages["vector"] and "sim" in stages["vector"]
     assert "pos" in stages["fts"] and "bm25" in stages["fts"]
-    # сирі скори стадій — не позиції, і не дорівнюють rrf/score
+    # raw stage scores -- not positions, and not equal to rrf/score
     assert stages["vector"]["sim"] not in (why["rrf"], c["score"])
     assert stages["fts"]["bm25"] not in (why["rrf"], c["score"])
 
 
 def test_stage_raw_scores_are_not_swapped(db, mock_embeddings):
-    """Знахідка 09.3: `sim`/`bm25` перевірялись лише на «не дорівнює rrf», тож
-    перестановка сирих скорів між стадіями лишалась непоміченою. Тут звіряємо
-    значення точно з тим, що повертають самі `_vector_search`/`_fts_search`."""
+    """Finding 09.3: `sim`/`bm25` were checked only for "not equal to rrf", so
+    a permutation of raw scores between stages went unnoticed. Here we compare
+    the values exactly with what `_vector_search`/`_fts_search` themselves return."""
     tid = _add_tx(db)
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч гривень")
     query = "бюджет проєкту"
@@ -222,14 +222,14 @@ def test_stage_raw_scores_are_not_swapped(db, mock_embeddings):
     stages = c["why"]["stages"]
     assert stages["vector"]["sim"] == pytest.approx(vec_raw[c["chunk_id"]])
     assert stages["fts"]["bm25"] == pytest.approx(fts_raw[c["chunk_id"]])
-    # sanity: сирі значення різних стадій дійсно різні — перестановка мала б
-    # чим упіймати.
+    # sanity: the raw values of different stages are really different -- a permutation would
+    # have something to be caught by.
     assert stages["vector"]["sim"] != stages["fts"]["bm25"]
 
 
 def test_weights_final_raw_and_search_capped_have_value_asserts(db, mock_embeddings):
-    """Знахідка 09.3: `weights`, `final_raw`, `capped` не мали ЖОДНОГО ассерту
-    в наборі. `capped` перейменований на `search_capped` (знахідка 12/09)."""
+    """Finding 09.3: `weights`, `final_raw`, `capped` had NO assert
+    in the suite. `capped` was renamed to `search_capped` (finding 12/09)."""
     tid = _add_tx(db, date="2026-01-01")
     _add_chunk(db, tid, 0, "бюджет проєкту двадцять тисяч гривень")
     res = retrieval.search(db, "бюджет проєкту", top_k=5, explain=True,
@@ -245,19 +245,19 @@ def test_weights_final_raw_and_search_capped_have_value_asserts(db, mock_embeddi
 
 def test_vector_only_candidate_has_no_fts_stage(db, mock_embeddings):
     tid = _add_tx(db)
-    # унікальне слово, що НЕ токенізується у FTS-запиті іншими чанками,
-    # а embedding робить його top-1 за вектором.
+    # a unique word that is NOT tokenized in the FTS query by other chunks,
+    # while the embedding makes it top-1 by vector.
     _add_chunk(db, tid, 0, "zzzcompletelyunmatchedzzz", vec=(1.0, 0.0, 0.0, 0.0))
     res = retrieval.search(db, "щось геть інше без спільних слів взагалі", top_k=5, explain=True)
-    # запит не збігається лексично з текстом чанка → лише вектор
-    assert res["chunks"], "вектор має знайти хоч щось"
+    # the query does not match the chunk text lexically -> vector only
+    assert res["chunks"], "the vector must find at least something"
     c = res["chunks"][0]
     assert "vector" in c["why"]["stages"]
     assert "fts" not in c["why"]["stages"]
 
 
 def test_fts_only_candidate_has_no_vector_stage(db, mock_embeddings, monkeypatch):
-    # Вимикаємо вектор повністю — залишається тільки FTS.
+    # We turn the vector off completely -- only FTS remains.
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
     tid = _add_tx(db)
     _add_chunk(db, tid, 0, "унікальнийтермінбезвектора проєкту", has_vec=False)
@@ -283,7 +283,7 @@ def test_order_identical_with_and_without_explain(db, mock_embeddings):
 
 
 # ============================================================
-# Сумісність зі старим контрактом
+# Compatibility with the old contract
 # ============================================================
 
 def test_old_keys_still_present(db, mock_embeddings):
@@ -304,9 +304,9 @@ def test_source_ids_from_chunks_unaffected(db, mock_embeddings):
 
 
 # ============================================================
-# production-rag-wave-b-08, Major 4: stage_maps по мітках `vector`/`fts`
-# ЗЛИВАЮТЬСЯ по кандидату (найкраща позиція), а не перезаписуються останнім
-# списком — мітки не міняються для варіантів переписаного запиту (S2 C2).
+# production-rag-wave-b-08, Major 4: stage_maps by the labels `vector`/`fts`
+# are MERGED per candidate (the best position), not overwritten by the last
+# list -- the labels do not change for rewritten-query variants (S2 C2).
 # ============================================================
 
 def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddings, monkeypatch):
@@ -326,9 +326,9 @@ def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddi
 
     monkeypatch.setattr(query_rewrite, "rewrite_query", lambda q, **kw: ["варіант запиту"])
 
-    # **_kw: сигнатуру `_vector_search` розширили новими осями (tags/since/
-    # until) — фейк мусить їх приймати, інакше падіння приїде здалеку
-    # (памʼятка `graceful-degradation-hides-test-fake-drift`).
+    # **_kw: the signature of `_vector_search` was extended with new axes (tags/since/
+    # until) -- the fake must accept them, otherwise the failure will arrive from afar
+    # (memo `graceful-degradation-hides-test-fake-drift`).
     def fake_vector_search(db_path, query, candidate_k, category_id=None,
                            scope_tids=None, **_kw):
         if query == "оригінал запиту":
@@ -342,21 +342,21 @@ def test_stage_maps_merge_best_position_across_rewrite_variants(db, mock_embeddi
     res = retrieval.search(db, "оригінал запиту", top_k=5, explain=True, rewrite=True)
     by_id = {c["chunk_id"]: c for c in res["chunks"]}
 
-    # Кандидат лише з оригінального запиту — позиція/скор оригінального списку.
+    # A candidate from the original query only -- position/score of the original list.
     assert by_id[only_orig]["why"]["stages"]["vector"] == {"pos": 0, "sim": 0.9}
-    # Кандидат і з оригіналу (pos=1), і з варіанта (pos=0) — найкраща позиція,
-    # зі скором того списку, де вона досягнута (варіант).
+    # A candidate from both the original (pos=1) and the variant (pos=0) -- the best position,
+    # with the score of the list where it was reached (the variant).
     assert by_id[both]["why"]["stages"]["vector"] == {"pos": 0, "sim": 0.95}
-    # Кандидат лише з варіанта — позиція/скор варіантного списку.
+    # A candidate from the variant only -- position/score of the variant list.
     assert by_id[only_variant]["why"]["stages"]["vector"] == {"pos": 1, "sim": 0.4}
 
 
 # ============================================================
-# directions-projects-tags-03: нові осі не чіпають S2-контракт why
+# directions-projects-tags-03: the new axes do not touch the S2 why contract
 # ============================================================
 
 def test_tag_and_date_axes_keep_why_shape(db, mock_embeddings):
-    """Теги/період ріжуть кандидатів у SQL ДО RRF — форма `why` та сама."""
+    """Tags/period cut candidates in SQL BEFORE RRF -- the `why` shape is the same."""
     from app.services import categories
 
     tid = _add_tx(db, "Дзвінок", date="2026-09-10")

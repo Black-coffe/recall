@@ -1,5 +1,5 @@
 """
-Сервис для управления файлами и их обработки
+Service for managing files and processing them
 """
 
 import os
@@ -18,7 +18,7 @@ from config import get_config
 
 @dataclass
 class FileInfo:
-    """Информация о файле"""
+    """File information"""
     path: str
     name: str
     size: int
@@ -31,12 +31,12 @@ class FileInfo:
 
 
 class FileManager(LoggerMixin):
-    """Менеджер файлов с расширенной функциональностью"""
+    """File manager with extended functionality"""
     
     def __init__(self):
         self.config = get_config()
         
-        # Поддерживаемые MIME типы
+        # Supported MIME types
         self.mime_types = {
             '.mp3': 'audio/mpeg',
             '.mp4': 'video/mp4',
@@ -50,10 +50,10 @@ class FileManager(LoggerMixin):
         }
     
     def get_file_info(self, file_path: str, calculate_checksum: bool = False) -> FileInfo:
-        """Получает расширенную информацию о файле"""
+        """Gets extended information about a file"""
         try:
             if not os.path.exists(file_path):
-                raise FileProcessingError(f"Файл не найден: {file_path}")
+                raise FileProcessingError(f"File not found: {file_path}")
             
             path_obj = Path(file_path)
             stat = path_obj.stat()
@@ -78,7 +78,7 @@ class FileManager(LoggerMixin):
             )
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка получения информации о файле: {e}")
+            raise FileProcessingError(f"Failed to get file information: {e}")
     
     def list_files(
         self, 
@@ -87,7 +87,7 @@ class FileManager(LoggerMixin):
         recursive: bool = False,
         include_hidden: bool = False
     ) -> List[FileInfo]:
-        """Получает список файлов в директории"""
+        """Gets the list of files in a directory"""
         try:
             if not os.path.exists(directory):
                 return []
@@ -103,7 +103,7 @@ class FileManager(LoggerMixin):
             
             for file_path in file_paths:
                 if file_path.is_file():
-                    # Пропускаем скрытые файлы если нужно
+                    # Skip hidden files if needed
                     if not include_hidden and file_path.name.startswith('.'):
                         continue
                     
@@ -111,15 +111,15 @@ class FileManager(LoggerMixin):
                         file_info = self.get_file_info(str(file_path))
                         files.append(file_info)
                     except Exception as e:
-                        self.logger.warning(f"Не удалось получить информацию о файле {file_path}: {e}")
+                        self.logger.warning(f"Could not get information about file {file_path}: {e}")
             
-            # Сортируем по дате модификации (новые первыми)
+            # Sort by modification date (newest first)
             files.sort(key=lambda f: f.modified, reverse=True)
             
             return files
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка получения списка файлов: {e}")
+            raise FileProcessingError(f"Failed to get the file list: {e}")
     
     def cleanup_directory(
         self, 
@@ -128,7 +128,7 @@ class FileManager(LoggerMixin):
         max_files: int = None,
         dry_run: bool = False
     ) -> Dict[str, Any]:
-        """Очищает директорию от старых файлов"""
+        """Cleans a directory of old files"""
         try:
             if not os.path.exists(directory):
                 return {'deleted': 0, 'freed_space': 0, 'errors': []}
@@ -138,19 +138,19 @@ class FileManager(LoggerMixin):
             
             to_delete = []
             
-            # Файлы старше указанного возраста
+            # Files older than the given age
             for file_info in files:
                 if file_info.modified < cutoff_date:
                     to_delete.append(file_info)
             
-            # Если указано максимальное количество файлов
+            # If a maximum number of files is given
             if max_files and len(files) > max_files:
-                # Сортируем по дате (старые первыми) и берем лишние
+                # Sort by date (oldest first) and take the excess
                 files_sorted = sorted(files, key=lambda f: f.modified)
                 excess_files = files_sorted[max_files:]
                 to_delete.extend(excess_files)
             
-            # Удаляем дубликаты
+            # Remove duplicates
             to_delete = list({f.path: f for f in to_delete}.values())
             
             deleted_count = 0
@@ -159,7 +159,7 @@ class FileManager(LoggerMixin):
             
             for file_info in to_delete:
                 if dry_run:
-                    self.logger.info(f"[DRY RUN] Будет удален: {file_info.path}")
+                    self.logger.info(f"[DRY RUN] Would be deleted: {file_info.path}")
                     deleted_count += 1
                     freed_space += file_info.size
                 else:
@@ -167,9 +167,9 @@ class FileManager(LoggerMixin):
                         os.remove(file_info.path)
                         deleted_count += 1
                         freed_space += file_info.size
-                        self.logger.debug(f"Удален файл: {file_info.path}")
+                        self.logger.debug(f"File deleted: {file_info.path}")
                     except Exception as e:
-                        error_msg = f"Ошибка удаления {file_info.path}: {e}"
+                        error_msg = f"Failed to delete {file_info.path}: {e}"
                         errors.append(error_msg)
                         self.logger.error(error_msg)
             
@@ -182,16 +182,16 @@ class FileManager(LoggerMixin):
             }
             
             if deleted_count > 0:
-                action = "Будет удалено" if dry_run else "Удалено"
-                self.logger.info(f"{action} {deleted_count} файлов, освобождено {format_file_size(freed_space)}")
+                action = "Would delete" if dry_run else "Deleted"
+                self.logger.info(f"{action} {deleted_count} files, freed {format_file_size(freed_space)}")
             
             return result
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка очистки директории: {e}")
+            raise FileProcessingError(f"Failed to clean the directory: {e}")
     
     def get_directory_stats(self, directory: str) -> Dict[str, Any]:
-        """Получает статистику по директории"""
+        """Gets statistics for a directory"""
         try:
             if not os.path.exists(directory):
                 return {
@@ -205,7 +205,7 @@ class FileManager(LoggerMixin):
             
             total_size = sum(f.size for f in files)
             
-            # Группируем по расширениям
+            # Group by extension
             by_extension = {}
             for file_info in files:
                 ext = file_info.extension or 'no_extension'
@@ -214,11 +214,11 @@ class FileManager(LoggerMixin):
                 by_extension[ext]['count'] += 1
                 by_extension[ext]['size'] += file_info.size
             
-            # Форматируем размеры
+            # Format the sizes
             for ext_info in by_extension.values():
                 ext_info['size_formatted'] = format_file_size(ext_info['size'])
             
-            # Находим самые старые и новые файлы
+            # Find the oldest and newest files
             oldest_file = min(files, key=lambda f: f.modified) if files else None
             newest_file = max(files, key=lambda f: f.modified) if files else None
             
@@ -240,15 +240,15 @@ class FileManager(LoggerMixin):
             }
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка получения статистики директории: {e}")
+            raise FileProcessingError(f"Failed to get directory statistics: {e}")
     
     def duplicate_detector(self, directory: str) -> Dict[str, List[str]]:
-        """Находит дублированные файлы по контрольной сумме"""
+        """Finds duplicate files by checksum"""
         try:
             files = self.list_files(directory, recursive=True)
             checksums = {}
             
-            self.logger.info(f"Вычисляем контрольные суммы для {len(files)} файлов...")
+            self.logger.info(f"Computing checksums for {len(files)} files...")
             
             for file_info in files:
                 try:
@@ -257,35 +257,35 @@ class FileManager(LoggerMixin):
                         checksums[checksum] = []
                     checksums[checksum].append(file_info.path)
                 except Exception as e:
-                    self.logger.warning(f"Не удалось вычислить сумму для {file_info.path}: {e}")
+                    self.logger.warning(f"Could not compute the checksum for {file_info.path}: {e}")
             
-            # Оставляем только дубликаты
+            # Keep only duplicates
             duplicates = {k: v for k, v in checksums.items() if len(v) > 1}
             
             if duplicates:
-                self.logger.info(f"Найдено {len(duplicates)} групп дублированных файлов")
+                self.logger.info(f"Found {len(duplicates)} groups of duplicate files")
             else:
-                self.logger.info("Дублированные файлы не найдены")
+                self.logger.info("No duplicate files found")
             
             return duplicates
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка поиска дубликатов: {e}")
+            raise FileProcessingError(f"Failed to find duplicates: {e}")
     
     def safe_move_file(self, source: str, destination: str, overwrite: bool = False) -> str:
-        """Безопасно перемещает файл"""
+        """Safely moves a file"""
         try:
             if not os.path.exists(source):
-                raise FileProcessingError(f"Исходный файл не найден: {source}")
+                raise FileProcessingError(f"Source file not found: {source}")
             
             dest_path = Path(destination)
             
-            # Создаем директорию если не существует
+            # Create the directory if it does not exist
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Проверяем существование файла назначения
+            # Check whether the destination file exists
             if dest_path.exists() and not overwrite:
-                # Генерируем уникальное имя
+                # Generate a unique name
                 counter = 1
                 base_name = dest_path.stem
                 suffix = dest_path.suffix
@@ -296,20 +296,20 @@ class FileManager(LoggerMixin):
                     dest_path = parent / new_name
                     counter += 1
             
-            # Перемещаем файл
+            # Move the file
             shutil.move(source, str(dest_path))
             
-            self.logger.info(f"Файл перемещен: {source} -> {dest_path}")
+            self.logger.info(f"File moved: {source} -> {dest_path}")
             return str(dest_path)
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка перемещения файла: {e}")
+            raise FileProcessingError(f"Failed to move the file: {e}")
     
     def create_backup(self, file_path: str, backup_dir: str = None) -> str:
-        """Создает резервную копию файла"""
+        """Creates a backup copy of a file"""
         try:
             if not os.path.exists(file_path):
-                raise FileProcessingError(f"Файл для бэкапа не найден: {file_path}")
+                raise FileProcessingError(f"File to back up not found: {file_path}")
             
             source_path = Path(file_path)
             
@@ -320,33 +320,33 @@ class FileManager(LoggerMixin):
             
             backup_dir.mkdir(parents=True, exist_ok=True)
             
-            # Генерируем имя бэкапа с временной меткой
+            # Generate the backup name with a timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"{source_path.stem}_{timestamp}{source_path.suffix}"
             backup_path = backup_dir / backup_name
             
-            # Копируем файл
+            # Copy the file
             shutil.copy2(file_path, str(backup_path))
             
-            self.logger.info(f"Создан бэкап: {backup_path}")
+            self.logger.info(f"Backup created: {backup_path}")
             return str(backup_path)
             
         except Exception as e:
-            raise FileProcessingError(f"Ошибка создания бэкапа: {e}")
+            raise FileProcessingError(f"Failed to create the backup: {e}")
     
     def _calculate_checksum(self, file_path: str, algorithm: str = 'md5') -> str:
-        """Вычисляет контрольную сумму файла"""
+        """Computes the checksum of a file"""
         hash_obj = hashlib.new(algorithm)
         
         with open(file_path, 'rb') as f:
-            # Читаем файл по частям для экономии памяти
+            # Read the file in parts to save memory
             for chunk in iter(lambda: f.read(8192), b""):
                 hash_obj.update(chunk)
         
         return hash_obj.hexdigest()
     
     def validate_audio_file(self, file_path: str) -> Dict[str, Any]:
-        """Валидирует аудио файл"""
+        """Validates an audio file"""
         try:
             file_info = self.get_file_info(file_path)
             
@@ -357,32 +357,32 @@ class FileManager(LoggerMixin):
                 'file_info': file_info
             }
             
-            # Проверяем расширение
+            # Check the extension
             if file_info.extension not in self.config.ALLOWED_EXTENSIONS:
                 validation_result['valid'] = False
-                validation_result['errors'].append(f"Неподдерживаемый формат: {file_info.extension}")
+                validation_result['errors'].append(f"Unsupported format: {file_info.extension}")
             
-            # Проверяем размер
+            # Check the size
             if file_info.size > self.config.MAX_CONTENT_LENGTH:
                 validation_result['valid'] = False
                 max_size_mb = self.config.MAX_CONTENT_LENGTH / (1024 * 1024)
-                validation_result['errors'].append(f"Файл слишком большой. Максимум: {max_size_mb} MB")
+                validation_result['errors'].append(f"File is too large. Maximum: {max_size_mb} MB")
             
-            # Проверяем минимальный размер (100 KB)
+            # Check the minimum size (100 KB)
             if file_info.size < 100 * 1024:
-                validation_result['warnings'].append("Файл очень маленький, возможно поврежден")
+                validation_result['warnings'].append("File is very small, possibly corrupted")
             
-            # Можно добавить дополнительные проверки:
-            # - Проверка заголовков файла
-            # - Проверка длительности аудио
-            # - Проверка на повреждение
+            # Additional checks could be added:
+            # - Check the file headers
+            # - Check the audio duration
+            # - Check for corruption
             
             return validation_result
             
         except Exception as e:
             return {
                 'valid': False,
-                'errors': [f"Ошибка валидации: {e}"],
+                'errors': [f"Validation error: {e}"],
                 'warnings': [],
                 'file_info': None
             }

@@ -1,29 +1,29 @@
-"""T7.4 (REMEDIATION_PLAN Волна 4): єдиний error-handler для НЕоброблених
-виключень.
+"""T7.4 (REMEDIATION_PLAN Wave 4): a single error handler for UNhandled
+exceptions.
 
-Проблема (аудит): ~124 `except Exception` по кодовій базі. Частина ловить
-конкретні винятки і повертає контрольований `jsonify(...)` 4xx/5xx — це НЕ
-територія цього модуля, ті місця лишаються як є. Але для того, що взагалі
-НЕ спіймане жодним try/except у blueprint'ах, дефолтна поведінка Flask —
-генерична "500 Internal Server Error" відповідь без traceback у логах і без
-кореляції з X-Request-Id (T8.2). Це і закриває цей модуль.
+Problem (audit): ~124 `except Exception` across the codebase. Some catch
+specific exceptions and return a controlled `jsonify(...)` 4xx/5xx — that is NOT
+this module's territory, those places stay as they are. But for whatever is
+NOT caught by any try/except in the blueprints, the default Flask behaviour is
+a generic "500 Internal Server Error" response with no traceback in the logs and no
+correlation with X-Request-Id (T8.2). This module closes that gap.
 
-Реєструється як app-wide ``@app.errorhandler(Exception)``:
-  - Ловить будь-яке необроблене виключення з БУДЬ-якого view/blueprint.
+Registered as an app-wide ``@app.errorhandler(Exception)``:
+  - Catches any unhandled exception from ANY view/blueprint.
   - ``werkzeug.exceptions.HTTPException`` (404, 405, 429, 413, ...)
-    пропускаємо без змін — Flask вже або викликав конкретніший handler
-    (напр. ``@app.errorhandler(429)`` у app.py), або сформував стандартну
-    відповідь; перехоплювати їх тут і підміняти на 500 — регресія, не фіча.
-  - Інакше: повний traceback у лог (``logger.exception`` — request_id
-    підхоплюється автоматично через ``_RequestIdLogFilter`` з app.py, той
-    самий фільтр стоїть на root-логері), клієнту — узагальнене повідомлення
-    БЕЗ ``str(exc)`` (жодних internal деталей: шляхи, SQL, стек) + сам
-    request_id для кореляції відповіді з лог-записом.
+    we pass through unchanged — Flask has already either called a more specific handler
+    (e.g. ``@app.errorhandler(429)`` in app.py), or built a standard
+    response; intercepting them here and replacing with 500 is a regression, not a feature.
+  - Otherwise: full traceback to the log (``logger.exception`` — request_id
+    is picked up automatically via ``_RequestIdLogFilter`` from app.py, the same
+    filter sits on the root logger), the client gets a generic message
+    WITHOUT ``str(exc)`` (no internal details: paths, SQL, stack) plus the
+    request_id itself to correlate the response with the log entry.
 
-Правило «no bare except without log» (див. CLAUDE.md): будь-який
-``except Exception`` без хоча б debug-логу — або додай лог з поясненням
-(best-effort/навмисне поглинання), або прибери try/except і дай виключенню
-долетіти сюди.
+The "no bare except without log" rule (see CLAUDE.md): any
+``except Exception`` without at least a debug log — either add a log with an explanation
+(best-effort/intentional swallowing), or remove the try/except and let the exception
+reach this handler.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from app.core.i18n import tr
 
 logger = logging.getLogger(__name__)
 
-GENERIC_MESSAGE = tr("core.error.internal", lang="uk")  # uk-текст для сумісності; відповідь локалізує tr()
+GENERIC_MESSAGE = tr("core.error.internal", lang="uk")  # uk text for compatibility; the response is localized by tr()
 
 
 def _current_request_id() -> str:
@@ -46,13 +46,13 @@ def _current_request_id() -> str:
 
 
 def register(app: Flask) -> None:
-    """Реєструє єдиний catch-all error-handler на весь застосунок."""
+    """Registers the single catch-all error handler for the whole application."""
 
     @app.errorhandler(Exception)
     def _handle_unexpected_exception(exc: Exception):
         if isinstance(exc, HTTPException):
-            # Уже коректно оброблено Flask/werkzeug (або конкретнішим
-            # @app.errorhandler(<code>)) — не підміняємо на 500.
+            # Already handled correctly by Flask/werkzeug (or by a more specific
+            # @app.errorhandler(<code>)) — do not replace with 500.
             return exc
 
         rid = _current_request_id()

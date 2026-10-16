@@ -1,15 +1,15 @@
-"""Статистика спікерів описує два шари, а не один (правдивість, 12.08.2026).
+"""Speaker statistics describe two layers, not one (truthfulness, 12.08.2026).
 
-`speakers` — це ГОЛОСИ з діаризації: на живому архіві частина записів.
-Решта — переписка, де автор відомий точно (`tg_sender`, 35 людей на повідомлень), але в цій таблиці його немає взагалі. Поки відповідь про це
-мовчала, «статистика по кожному спікеру» описувала дрібна частка архіву і читалась як увесь.
+`speakers` are the VOICES from diarization: on the live archive some recordings.
+The rest is correspondence, where the author is known exactly (`tg_sender`, 35 people over many messages), but who is not in this table at all. While the response was silent about this,
+"statistics for each speaker" described a small share of the archive and read as all of it.
 
-Одна людина живе в обох шарах під різними написаннями («Слава Верес» у
-діаризації, «Veres Viacheslav» у переписці). Зводимо їх ГРАФОМ (canonical-імена
-та аліаси), а не схожістю рядків: у сутності «Юлія» серед аліасів справді є
-«Julia Bondarenko», і це знання, а не здогад.
+One person lives in both layers under different spellings («Слава Верес» in
+diarization, «Veres Viacheslav» in the correspondence). We join them via the GRAPH (canonical names
+and aliases), not by string similarity: the entity «Юлія» really has
+«Julia Bondarenko» among its aliases, and that is knowledge, not a guess.
 
-Ізольований Flask із самим speakers_bp + tmp БД — той самий патерн, що в
+An isolated Flask with only speakers_bp + a tmp DB - the same pattern as in
 tests/test_speakers_api.py.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _entity(db: str, canonical: str, aliases: tuple = (), etype: str = "person")
 
 
 def test_stats_report_the_correspondence_layer(client, db_path):
-    """Автори переписки видні окремим списком зі своїми одиницями."""
+    """The correspondence authors are visible as a separate list with their own units."""
     _tg(db_path, "Dmytro Lebid", chat_id=-100, msg_id=1)
     _tg(db_path, "Dmytro Lebid", chat_id=-200, msg_id=2, date="2026-07-01")
     _tg(db_path, "Julia Bondarenko", chat_id=-100, msg_id=3)
@@ -81,20 +81,20 @@ def test_stats_report_the_correspondence_layer(client, db_path):
 
 
 def test_coverage_says_how_little_diarization_covers(client, db_path):
-    """Знаменник: скільки записів має діаризацію, а скільки їх усього."""
+    """The denominator: how many records have diarization, and how many there are in total."""
     for i in range(3):
         _tg(db_path, "Dmytro Lebid", chat_id=-100, msg_id=i + 1)
 
     cov = client.get("/api/speakers/stats").get_json()["coverage"]
 
-    assert cov["diarized_transcripts"] == 0        # жодного дзвінка не заведено
+    assert cov["diarized_transcripts"] == 0        # not a single call has been added
     assert cov["total_transcripts"] == 3
     assert cov["telegram_messages"] == 3
     assert "не додають" in cov["note"]
 
 
 def test_graph_links_the_same_person_across_layers(client, db_path):
-    """«Julia Bondarenko» у переписці і «Юлія» в діаризації — одна сутність графа."""
+    """«Julia Bondarenko» in the correspondence and «Юлія» in diarization are one graph entity."""
     eid = _entity(db_path, "Юлія", aliases=("Julia Bondarenko",))
     _tg(db_path, "Julia Bondarenko", chat_id=-100, msg_id=1)
     conn = sqlite3.connect(db_path)
@@ -107,12 +107,12 @@ def test_graph_links_the_same_person_across_layers(client, db_path):
     sender = next(s for s in d["tg_senders"] if s["name"] == "Julia Bondarenko")
     voice = next(s for s in d["speakers"] if s["name"] == "Юлія")
     assert sender["entity_id"] == eid
-    assert voice["entity_id"] == eid               # спільний id = це та сама людина
+    assert voice["entity_id"] == eid               # a shared id = it is the same person
     assert d["coverage"]["tg_senders_linked_to_graph"] == 1
 
 
 def test_unknown_writing_gets_no_invented_link(client, db_path):
-    """Чого граф не знає — лишається прочерком, а не здогадом за схожістю."""
+    """What the graph does not know stays a dash, not a guess by name similarity."""
     _entity(db_path, "Слава", aliases=("Слава Верес",))
     _tg(db_path, "Veres Viacheslav", chat_id=-100, msg_id=1)
 
@@ -123,12 +123,12 @@ def test_unknown_writing_gets_no_invented_link(client, db_path):
 
 
 def test_ambiguous_writing_is_left_unlinked(client, db_path):
-    """Однакове написання у двох сутностей — привʼязка неможлива, і це не помилка.
+    """The same spelling in two entities - linking is impossible, and that is not an error.
 
-    Схема забороняє дублікат у межах типу (UNIQUE на `type`+`normalized_name`),
-    але НЕ поперек типів — і саме там неоднозначність реальна: на живому архіві
-    202 написання ведуть до двох і більше сутностей («acmecorp» → 14 і 538).
-    Приписати повідомлення одній із них навмання означало б вигадати звʼязок.
+    The schema forbids a duplicate within a type (UNIQUE on `type`+`normalized_name`),
+    but NOT across types - and that is exactly where the ambiguity is real: on the live archive
+    202 spellings lead to two or more entities («acmecorp» → 14 and 538).
+    Attributing a message to one of them at random would mean inventing a link.
     """
     _entity(db_path, "Acmecorp", etype="project")
     _entity(db_path, "Acmecorp", etype="org")
@@ -140,7 +140,7 @@ def test_ambiguous_writing_is_left_unlinked(client, db_path):
 
 
 def test_deleted_messages_do_not_count(client, db_path):
-    """Видалене в Telegram не роздуває лічильник автора."""
+    """Deleted in Telegram does not inflate the author's counter."""
     _tg(db_path, "Dmytro Lebid", chat_id=-100, msg_id=1)
     _tg(db_path, "Dmytro Lebid", chat_id=-100, msg_id=2)
     conn = sqlite3.connect(db_path)
@@ -155,7 +155,7 @@ def test_deleted_messages_do_not_count(client, db_path):
 
 
 def test_existing_shape_is_kept_for_the_ui(client, db_path):
-    """Старі ключі лишаються: сторінка «Спікери» читає саме їх."""
+    """The old keys stay: the "Спікери" page reads exactly them."""
     d = client.get("/api/speakers/stats").get_json()
 
     assert {"speakers", "total_speakers", "total_seconds"} <= set(d)
@@ -163,11 +163,11 @@ def test_existing_shape_is_kept_for_the_ui(client, db_path):
 
 
 def test_soft_deleted_recording_leaves_the_numerator_too(client, db_path):
-    """Мʼяке видалення прибирає запис з ОБОХ боків дробу, а не лише зі знаменника.
+    """A soft delete removes a record from BOTH sides of the fraction, not only the denominator.
 
-    `transcription_speaker_map` переживає видалення запису (рядки чистить лише
-    масовий прохід), тож чисельник тримав видалене, поки знаменник його вже не
-    рахував — і покриття діаризації виглядало більшим, ніж воно є.
+    `transcription_speaker_map` outlives the record deletion (the rows are cleaned only by the
+    bulk pass), so the numerator held the deleted one while the denominator no longer
+    counted it - and the diarization coverage looked larger than it is.
     """
     conn = sqlite3.connect(db_path)
     conn.execute("INSERT INTO transcriptions (id, source_type, source_name, transcript_text) "
@@ -188,11 +188,11 @@ def test_soft_deleted_recording_leaves_the_numerator_too(client, db_path):
     cov = d["coverage"]
     assert (cov["diarized_transcripts"], cov["total_transcripts"]) == (0, 0)
     voice = next(s for s in d["speakers"] if s["name"] == "Юлія")
-    assert voice["transcripts_count"] == 0          # звʼязка в мапі лишилась, запис — ні
+    assert voice["transcripts_count"] == 0          # the link in the map stayed, the record did not
 
 
 def test_link_only_through_person_entities(client, db_path):
-    """Канал, чиє імʼя збігається з назвою проєкту, не стає «тією самою людиною»."""
+    """A channel whose name coincides with a project name does not become "the same person"."""
     _entity(db_path, "Acmecorp", etype="project")
     _tg(db_path, "Acmecorp", chat_id=-100, msg_id=1)
 
@@ -203,11 +203,11 @@ def test_link_only_through_person_entities(client, db_path):
 
 
 def test_both_layers_date_by_the_event_not_by_ingest(client, db_path):
-    """`first_seen`/`last_seen` в обох списках означають дату ПОДІЇ.
+    """`first_seen`/`last_seen` in both lists mean the date of the EVENT.
 
-    У голосів вони бралися з `created_at` (коли запис потрапив в архів), у
-    переписки — з дати повідомлення. Однаково названі сусідні поля з різним
-    сенсом штовхають до порівняння, від якого сам же опис і застерігає.
+    For voices they were taken from `created_at` (when the record got into the archive), for
+    correspondence - from the message date. Identically named neighbouring fields with different
+    meanings push toward a comparison that the description itself warns against.
     """
     conn = sqlite3.connect(db_path)
     conn.execute("INSERT INTO transcriptions (id, source_type, source_name, transcript_text, "
@@ -222,5 +222,5 @@ def test_both_layers_date_by_the_event_not_by_ingest(client, db_path):
     voice = next(s for s in client.get("/api/speakers/stats").get_json()["speakers"]
                  if s["name"] == "Юлія")
 
-    assert voice["first_seen"] == "2026-03-05"      # дата розмови, не дата заливки
+    assert voice["first_seen"] == "2026-03-05"      # the conversation date, not the upload date
     assert voice["last_seen"] == "2026-03-05"

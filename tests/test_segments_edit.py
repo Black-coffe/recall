@@ -1,10 +1,10 @@
-"""Phase 12.9: тести merge_segments + split_segment endpoints.
+"""Phase 12.9: tests of the merge_segments + split_segment endpoints.
 
-Покриваємо:
+We cover:
 - Merge consecutive segments — time/text/speaker/words concat.
-- Split segment — proportional text division з/без words[].
+- Split segment - proportional text division with/without words[].
 - Validation: non-consecutive indices, out of bounds, single index.
-- summary_json кеш інвалідується.
+- The summary_json cache is invalidated.
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ class TestMergeSegments:
         assert data['success'] is True
         segs = _read_segments(db_path, tx_id)
         assert len(segs) == 3
-        # Перший — merged
+        # The first one is merged
         assert segs[0]['start'] == 0.0
         assert segs[0]['end'] == 4.0
         assert segs[0]['speaker'] == 'SPEAKER_00'
@@ -117,7 +117,7 @@ class TestMergeSegments:
         assert r.status_code == 404
 
     def test_summary_cache_invalidated(self, app_and_tx):
-        """Phase 12.9 spec: після segment edit summary_json має скидатись."""
+        """Phase 12.9 spec: after a segment edit summary_json must be reset."""
         client, db_path, tx_id = app_and_tx
         client.post(f'/api/transcription/{tx_id}/segments/merge',
                     json={'indices': [0, 1]})
@@ -128,7 +128,7 @@ class TestMergeSegments:
         assert row[0] is None
 
     def test_transcript_text_updated(self, app_and_tx):
-        """Після merge transcript_text має містити склеєний текст усіх сегментів."""
+        """After a merge transcript_text must contain the joined text of all segments."""
         client, db_path, tx_id = app_and_tx
         client.post(f'/api/transcription/{tx_id}/segments/merge',
                     json={'indices': [0, 1]})
@@ -167,14 +167,14 @@ class TestSplitSegment:
 
     def test_split_outside_bounds_rejected(self, app_and_tx):
         client, _, tx_id = app_and_tx
-        # split_at = 5.0 але segment 0 — це 0.0-2.0
+        # split_at = 5.0 but segment 0 is 0.0-2.0
         r = client.post(f'/api/transcription/{tx_id}/segments/split',
                         json={'index': 0, 'split_at_seconds': 5.0})
         assert r.status_code == 400
 
     def test_split_at_boundary_rejected(self, app_and_tx):
         client, _, tx_id = app_and_tx
-        # split_at = end exactly — не валідний
+        # split_at = end exactly - not valid
         r = client.post(f'/api/transcription/{tx_id}/segments/split',
                         json={'index': 0, 'split_at_seconds': 2.0})
         assert r.status_code == 400
@@ -186,16 +186,16 @@ class TestSplitSegment:
         assert r.status_code == 400
 
     def test_split_proportional_text_no_words(self, app_and_tx):
-        """Без words[] текст ділиться приблизно по character ratio з прив'язкою
-        до word boundary."""
+        """Without words[] the text is split approximately by character ratio, snapped
+        to a word boundary."""
         client, db_path, tx_id = app_and_tx
-        # Split seg 0 ('Привіт усім.', 0.0-2.0) посередині (1.0)
+        # Split seg 0 ('Привіт усім.', 0.0-2.0) in the middle (1.0)
         client.post(f'/api/transcription/{tx_id}/segments/split',
                     json={'index': 0, 'split_at_seconds': 1.0})
         segs = _read_segments(db_path, tx_id)
-        # Текст має розділитись на дві частини, обидві непорожні
+        # The text must split into two parts, both non-empty
         assert segs[0]['text']
         assert segs[1]['text']
-        # Обидва містять частину оригіналу
+        # Both contain part of the original
         combined = segs[0]['text'] + ' ' + segs[1]['text']
         assert 'Привіт' in combined and 'усім' in combined

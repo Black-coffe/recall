@@ -1,11 +1,11 @@
-"""Tests для run_diarization_for_audio orchestrator (Phase 10.3).
+"""Tests for the run_diarization_for_audio orchestrator (Phase 10.3).
 
-Не вантажимо pyannote pipeline — мокаємо DiarizationService методи
-diarize_audio / diarize_recording. Перевіряємо тільки routing-логіку:
-- recording з manifest з streams_finalized → diarize_recording
-- recording без streams_finalized → fallback на diarize_audio (mix)
+We do not load the pyannote pipeline - we mock the DiarizationService methods
+diarize_audio / diarize_recording. We check only the routing logic:
+- a recording with a manifest with streams_finalized → diarize_recording
+- a recording without streams_finalized → fallback to diarize_audio (mix)
 - file/youtube → diarize_audio
-- merge коректно проставляє speaker label на whisper-сегментах
+- the merge correctly sets the speaker label on whisper segments
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from app.services.diarization_service import (
 
 @pytest.fixture
 def fake_audio(tmp_path):
-    """Створює фейковий audio file (порожній OK — service mock'ається)."""
+    """Creates a fake audio file (empty is OK - the service is mocked)."""
     p = tmp_path / 'audio.mp3'
     p.write_bytes(b'fake mp3 content')
     return p
@@ -32,7 +32,7 @@ def fake_audio(tmp_path):
 
 @pytest.fixture
 def fake_recording_files(tmp_path):
-    """Створює fake mic.wav + system.wav."""
+    """Creates a fake mic.wav + system.wav."""
     mic = tmp_path / 'mic.wav'
     sys_ = tmp_path / 'system.wav'
     mic.write_bytes(b'fake mic wav')
@@ -42,7 +42,7 @@ def fake_recording_files(tmp_path):
 
 @pytest.fixture
 def mocked_service(monkeypatch):
-    """Singleton DiarizationService з мокнутими методами + token."""
+    """Singleton DiarizationService with mocked methods + token."""
     DiarizationService._instance = None  # reset singleton
     svc = DiarizationService(hf_token='hf_fake_token_for_test')
     svc._import_error = None  # pretend pyannote installed
@@ -138,7 +138,7 @@ def test_recording_with_only_mic_stream(mocked_service, fake_audio, fake_recordi
 def test_recording_without_streams_finalized_falls_back_to_mix(
     mocked_service, fake_audio,
 ):
-    """Старі manifest'и без streams_finalized → fallback на diarize_audio(mix)."""
+    """Old manifests without streams_finalized → fallback to diarize_audio(mix)."""
     manifest = {'status': 'finalized'}  # no streams_finalized
     whisper_segs = [{'start': 0, 'end': 5, 'text': 'a'}]
     run_diarization_for_audio(
@@ -152,7 +152,7 @@ def test_recording_without_streams_finalized_falls_back_to_mix(
 
 
 def test_recording_with_empty_streams_finalized_falls_back(mocked_service, fake_audio):
-    """streams_finalized присутнє але порожнє (no wav_path) → fallback."""
+    """streams_finalized is present but empty (no wav_path) → fallback."""
     manifest = {
         'streams_finalized': {
             'mic': {},  # no wav_path
@@ -169,7 +169,7 @@ def test_recording_with_empty_streams_finalized_falls_back(mocked_service, fake_
 
 
 def test_recording_without_manifest_falls_back(mocked_service, fake_audio):
-    """source_type='recording' але manifest=None → fallback на diarize_audio."""
+    """source_type='recording' but manifest=None → fallback to diarize_audio."""
     whisper_segs = [{'start': 0, 'end': 5, 'text': 'a'}]
     run_diarization_for_audio(
         fake_audio, whisper_segs,
@@ -180,14 +180,14 @@ def test_recording_without_manifest_falls_back(mocked_service, fake_audio):
 
 
 def test_unavailable_service_raises(monkeypatch, fake_audio):
-    """Якщо HF_TOKEN відсутній — orchestrator кидає RuntimeError.
+    """If HF_TOKEN is missing - the orchestrator raises RuntimeError.
 
-    Відсутність токена створюємо самі: `DiarizationService(hf_token=None)`
-    підхоплює `os.environ['HF_TOKEN']`, а той зʼявляється в оточенні від будь-
-    якого імпорту, що читає `.env` (`config` тягне `load_dotenv`). Без цього
-    тест проходив лише тоді, коли ніхто в прогоні раніше не імпортував config,
-    і падав від сусіда — з повідомленням про ffmpeg, бо сервіс вважався живим
-    і йшов далі до реального pyannote.
+    We create the absence of the token ourselves: `DiarizationService(hf_token=None)`
+    picks up `os.environ['HF_TOKEN']`, and that appears in the environment from any
+    import that reads `.env` (`config` pulls in `load_dotenv`). Without this the
+    test passed only when nobody in the run had imported config earlier,
+    and failed because of a neighbour - with a message about ffmpeg, since the service was considered alive
+    and went on to the real pyannote.
     """
     monkeypatch.delenv('HF_TOKEN', raising=False)
     DiarizationService._instance = None
@@ -242,7 +242,7 @@ def test_progress_callback_passed_to_diarize_recording(
 
 
 def test_unique_labels_returned_in_appearance_order(mocked_service, fake_audio):
-    """labels мають бути у порядку першої появи у whisper-сегментах."""
+    """labels must be in the order of first appearance in the whisper segments."""
     # Mock returns segments in order: SPEAKER_00, SPEAKER_01
     whisper_segs = [
         {'start': 0, 'end': 5, 'text': 'a'},   # → SPEAKER_00
@@ -269,7 +269,7 @@ def test_is_available_without_token():
     DiarizationService._instance = None
     svc = DiarizationService(hf_token=None)
     svc._import_error = None
-    # Може бути None якщо у environment немає HF_TOKEN
+    # May be None if there is no HF_TOKEN in the environment
     import os
     saved = os.environ.pop('HF_TOKEN', None)
     try:

@@ -1,4 +1,4 @@
-"""K4: труби за розкладом — cron, файл труби, рендер, історія, догін."""
+"""K4: scheduled pipes — cron, the pipe file, render, history, catch-up."""
 from __future__ import annotations
 
 import logging
@@ -15,7 +15,7 @@ from app.services.pipes import Cron, PipeError, PipeScheduler, parse_pipe, run_p
 
 @pytest.fixture(autouse=True)
 def _isolated_privacy(tmp_path, monkeypatch):
-    """Справжній private.txt власника в тести не потрапляє."""
+    """The owner's real private.txt does not get into the tests."""
     monkeypatch.setenv("RECALL_PRIVATE_WORDS_FILE", str(tmp_path / "private.txt"))
     monkeypatch.delenv("RECALL_PRIVATE_CATEGORIES", raising=False)
 
@@ -68,11 +68,11 @@ def no_key(monkeypatch):
 class TestCron:
     def test_monday_9_next_and_prev_around_week_edge(self):
         c = Cron.parse("0 9 * * 1")
-        sun = datetime(2026, 10, 18, 23, 59)            # неділя
+        sun = datetime(2026, 10, 18, 23, 59)            # Sunday
         assert c.next(sun) == datetime(2026, 10, 19, 9, 0)
         assert c.prev(sun) == datetime(2026, 10, 12, 9, 0)
         mon_9 = datetime(2026, 10, 19, 9, 0)
-        assert c.prev(mon_9) == mon_9                    # момент ≤ now включно
+        assert c.prev(mon_9) == mon_9                    # the moment ≤ now inclusive
         assert c.next(mon_9) == datetime(2026, 10, 26, 9, 0)
 
     def test_weekdays_skip_weekend(self):
@@ -96,7 +96,7 @@ class TestCron:
             Cron.parse(bad)
 
 
-# ----------------------------------------------------------- файл труби
+# ----------------------------------------------------------- pipe file
 
 class TestPipeFile:
     def test_parses_frontmatter_and_body(self):
@@ -106,7 +106,7 @@ class TestPipeFile:
         assert p.prompt == "Перекажи звід коротко."
 
     def test_tool_outside_registry_rejected(self):
-        with pytest.raises(PipeError, match="поза реєстром"):
+        with pytest.raises(PipeError, match="outside the registry"):
             _pipe(tools="weekly_digest, ask_archive")
 
     def test_invalid_file_skipped_with_reason_in_log(self, tmp_path, caplog):
@@ -119,7 +119,7 @@ class TestPipeFile:
         with caplog.at_level(logging.WARNING, logger="app.services.pipes"):
             loaded = pipes.load_pipes(tmp_path)
         assert [p.name for p in loaded] == ["добра"]
-        assert "зламана.md" in caplog.text and "година" in caplog.text
+        assert "зламана.md" in caplog.text and "hour" in caplog.text
 
     def test_shipped_pipe_files_load(self):
         names = {p.name: p for p in pipes.load_pipes()}
@@ -129,7 +129,7 @@ class TestPipeFile:
         assert names["weekly-digest"].schedule.expr == "0 9 * * 1"
 
 
-# --------------------------------------------------------------- рендер
+# --------------------------------------------------------------- render
 
 class _FakeClient:
     def __init__(self, text="Звід: надіслати Олені договір.", exc=None):
@@ -164,7 +164,7 @@ class TestRunPipe:
         sent = []
         res = run_pipe(_pipe(budget_usd="0.0001"), db_path=db, deliver=sent.append)
         assert client.calls == []
-        assert res["rendered_by"] == "plain" and "бюджет" in res["error"]
+        assert res["rendered_by"] == "plain" and "budget" in res["error"]
         assert "💡" not in sent[0] and "Надіслати Олені договір" in sent[0]
 
     def test_claude_exception_goes_plain(self, db, fake_tools, monkeypatch):
@@ -219,7 +219,7 @@ class TestRunPipe:
         assert res["status"] == "error" and "Telegram недоступний" in res["error"]
 
 
-# ---------------------------------------------------------- планувальник
+# ---------------------------------------------------------- scheduler
 
 class TestScheduler:
     def _sched(self, db, now, sent):
@@ -229,7 +229,7 @@ class TestScheduler:
     def test_catchup_runs_once_even_if_several_missed(self, db, fake_tools, no_key):
         fake_tools("weekly_digest", DATA_FULL)
         sent = []
-        # Останній запуск 3 тижні тому — пропущено три понеділки.
+        # The last run was 3 weeks ago — three Mondays were missed.
         run_pipe(_pipe(), db_path=db, deliver=lambda t: None,
                  now=datetime(2026, 9, 28, 9, 0), trigger="schedule",
                  scheduled_for=datetime(2026, 9, 28, 9, 0))
@@ -276,14 +276,14 @@ class TestScheduler:
 
 
 def _app_py():
-    """app.py затінений пакетом app/ — вантажимо файлом (як test_endpoints_smoke)."""
+    """app.py is shadowed by the app/ package — we load it by file (like test_endpoints_smoke)."""
     import importlib.util
     import sys
     mod = sys.modules.get("whisper_app_module")
     if mod is None:
         root = Path(__file__).resolve().parents[1]
         if not (root / "whisper_history.db").exists():
-            pytest.skip("нема бойової БД — app.py не імпортуємо")
+            pytest.skip("no live DB — not importing app.py")
         spec = importlib.util.spec_from_file_location("whisper_app_module", root / "app.py")
         mod = importlib.util.module_from_spec(spec)
         sys.modules["whisper_app_module"] = mod
@@ -301,12 +301,12 @@ def test_disabled_flag_logs_one_line(monkeypatch, caplog):
     monkeypatch.setenv("PIPES_ENABLED", "0")
     with caplog.at_level(logging.INFO):
         app_module._maybe_start_pipes()
-    lines = [r for r in caplog.records if "Труби" in r.getMessage()]
+    lines = [r for r in caplog.records if "Pipes" in r.getMessage()]
     assert len(lines) == 1 and "PIPES_ENABLED=0" in lines[0].getMessage()
     assert "pipe_scheduler" not in app_module.app.extensions
 
 
-# ------------------------------------------------- збій → повідомлення в бот
+# ------------------------------------------------- failure → message to the bot
 
 class TestFailureNotice:
     def test_data_failure_sends_short_notice_without_data(self, db, fake_tools, no_key):
@@ -340,7 +340,7 @@ class TestFailureNotice:
         monkeypatch.setenv("TELEGRAM_BOT_CHAT_ID", "")
         fake_tools("weekly_digest", DATA_FULL)
         res = run_pipe(_pipe(), db_path=db, deliver=tg_bot.send)
-        assert res["status"] == "error" and "не налаштований" in pipes.list_runs(db)[0]["error"]
+        assert res["status"] == "error" and "not configured" in pipes.list_runs(db)[0]["error"]
 
 
 def test_mcp_list_pipe_runs(db, fake_tools, no_key, monkeypatch):
@@ -354,11 +354,11 @@ def test_mcp_list_pipe_runs(db, fake_tools, no_key, monkeypatch):
     assert {"status", "error", "cost_usd"} <= set(runs[0])
 
 
-# ------------------------------------- повтор після збою (story 05, власник 15.10.2026)
+# ------------------------------------- retry after a failure (story 05, owner 15.10.2026)
 
 class TestRetry:
-    """«Если в понедельник в 9:00 брифинг не отправится, Recall не попробует ещё раз,
-    и свод за эту неделю пропадёт.»"""
+    """«If the brief is not sent on Monday at 9:00, Recall will not try again,
+    and the digest for that week will be lost.»"""
 
     def _sched(self, db, clock, sent, **kw):
         return PipeScheduler([_pipe()], db_path=db, deliver=sent.append,
@@ -378,13 +378,13 @@ class TestRetry:
         assert [r["status"] for r in s.step()] == ["error"]
         fail["on"] = False
         clock["t"] = datetime(2026, 10, 19, 9, 10)
-        assert s.step() == []                                  # ще рано
+        assert s.step() == []                                  # too early
         clock["t"] = datetime(2026, 10, 19, 9, 16)
         res = s.step()
         assert [(r["trigger"], r["status"]) for r in res] == [("retry", "ok")]
         assert len(sent) == 1
         clock["t"] = datetime(2026, 10, 19, 10, 0)
-        assert s.step() == []                                  # доставлено — момент закрито
+        assert s.step() == []                                  # delivered — the moment is closed
 
     def test_gives_up_after_max_and_notifies_first_and_last(self, db, fake_tools, no_key):
         fake_tools("weekly_digest", RuntimeError("БД зайнята"))
@@ -405,21 +405,21 @@ class TestRetry:
     def test_dead_running_row_does_not_eat_catchup(self, db, fake_tools, no_key):
         import sqlite3
         fake_tools("weekly_digest", DATA_FULL)
-        with sqlite3.connect(db) as conn:                      # процес помер посеред запуску
+        with sqlite3.connect(db) as conn:                      # the process died in the middle of a run
             conn.execute("INSERT INTO pipe_runs (pipe, trigger, scheduled_for, started_at, status) "
                          "VALUES ('звід', 'schedule', '2026-10-19 09:00:00', "
                          "'2026-10-19 09:00:00', 'running')")
         sent = []
         clock = {"t": datetime(2026, 10, 19, 9, 10)}
         s = self._sched(db, clock, sent)
-        assert s.step("catchup") == []                         # ще може йти
+        assert s.step("catchup") == []                         # may still go
         clock["t"] = datetime(2026, 10, 19, 11, 0)
         assert [r["status"] for r in s.step("catchup")] == ["ok"] and len(sent) == 1
 
     def test_manual_run_does_not_close_moment(self, db, fake_tools, no_key):
         fake_tools("weekly_digest", DATA_FULL)
         run_pipe(_pipe(), db_path=db, deliver=lambda t: None,
-                 now=datetime(2026, 10, 19, 9, 30))           # pipes run у консолі
+                 now=datetime(2026, 10, 19, 9, 30))           # pipes run in the console
         sent = []
         clock = {"t": datetime(2026, 10, 19, 12, 0)}
         assert [r["trigger"] for r in self._sched(db, clock, sent).step("catchup")] == ["catchup"]
@@ -435,15 +435,15 @@ class TestRetry:
         assert s.step() == []
 
 
-# ------------------------- «не зміг зібрати» ≠ «порожньо» (story 07, власник 15.10.2026)
+# ------------------------- "could not collect" ≠ "empty" (story 07, owner 15.10.2026)
 
 NO_OWNER = {"me": None, "questions": [], "skipped_group": 0,
             "reason": "невідомо, хто власник архіву: слухач вимкнений"}
 
 
 class TestNotCollected:
-    """«Утренняя сводка вопросов может молчать каждый будний день, если Recall не знает, кто владелец
-    Telegram, и это молчание не отличить от «вопросов нет».»"""
+    """«The morning summary of questions can stay silent every workday if Recall does not know who owns the
+    Telegram, and this silence cannot be told from "no questions".»"""
 
     def _q(self):
         return _pipe(tools="open_questions", skip_if_empty="true")
@@ -454,7 +454,7 @@ class TestNotCollected:
         res = run_pipe(self._q(), db_path=db, deliver=sent.append)
         assert res["status"] == "ok" and len(sent) == 1
         assert "⚠️ Питання з Telegram не зібрано: невідомо, хто власник" in sent[0]
-        assert "не зібрано: open_questions" in pipes.list_runs(db)[0]["error"]
+        assert "not collected: open_questions" in pipes.list_runs(db)[0]["error"]
 
     def test_real_empty_still_silent(self, db, fake_tools, no_key):
         fake_tools("open_questions", DATA_EMPTY)

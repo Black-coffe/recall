@@ -1,9 +1,9 @@
-/* Recall — спільний рушій «великого експорту» (Phase 18).
-   Використовується і сторінкою /research, і карткою сутності (/entities/:id).
-   Рендерить статус/готово у переданий box-елемент; payload може бути
-   {q,...} (вільний термін) або {entity_id} (сутність — бекенд сам резолвить
-   ім'я+псевдоніми у терміни). SSE-саммарі — через api.researchSummary
-   (fetch-reader, НЕ EventSource — recall_sse_connection_gotcha). */
+/* Recall — shared "big export" engine (Phase 18).
+   Used by both the /research page and the entity card (/entities/:id).
+   Renders status/done into the passed box element; payload can be
+   {q,...} (free term) or {entity_id} (entity — the backend resolves
+   name+aliases into terms itself). SSE summary — via api.researchSummary
+   (fetch-reader, NOT EventSource — recall_sse_connection_gotcha). */
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
@@ -21,7 +21,7 @@
         return (s || 'research').replace(/[^\wа-яіїєґ]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'research';
     }
 
-    // Експорт оригіналів (0 токенів, без AI). payload: {q?|entity_id?, category_id?}.
+    // Export of originals (0 tokens, no AI). payload: {q?|entity_id?, category_id?}.
     async function runOriginals(payload, box, ctx) {
         box.innerHTML = `<div class="rc-research__status"><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.export.collecting')}</div>`;
         try {
@@ -41,7 +41,7 @@
         }
     }
 
-    // AI-саммарі (дешева модель, SSE map-reduce). payload: {q?|entity_id?, category_id?, model?}.
+    // AI summary (cheap model, SSE map-reduce). payload: {q?|entity_id?, category_id?, model?}.
     async function runSummary(payload, box, ctx, signal, nameForFile) {
         box.innerHTML = `<div class="rc-research__status" data-st><i class="fa-solid fa-spinner fa-spin"></i> ${R.t('knowledge.export.preparing')}</div>`;
         const st = box.querySelector('[data-st]');
@@ -75,7 +75,7 @@
             <pre class="rc-research__md" data-md></pre>`;
         box.querySelector('[data-md]').textContent = d.markdown || '';
         box.querySelector('[data-dl]').addEventListener('click', () => downloadMd(fn, d.markdown || ''));
-        downloadMd(fn, d.markdown || '');  // одразу віддаємо файл
+        downloadMd(fn, d.markdown || '');  // hand the file over right away
         UI.toast(R.t('knowledge.export.summaryToast'), 'success');
     }
 

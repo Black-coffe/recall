@@ -1,127 +1,127 @@
-/* Recall service worker — повний офлайн app shell + кеш read-only API.
+/* Recall service worker — full offline app shell + read-only API cache.
  *
- * Стратегії:
- *   - HTML/navigation:    network-first, fallback на cache, фінальний fallback на '/'.
- *   - /static/* (local):  stale-while-revalidate (швидко з кешу + оновлення у фоні).
- *   - CDN (origin !=):    cache-first (versioned URLs Inter/FontAwesome/Tippy — стабільні).
- *   - /api/* GET:         network-first з fallback'ом на cache (дані можуть бути stale, але краще ніж нічого).
- *   - SSE (Accept: text/event-stream або шлях /stream): не кешується (browser default).
- *   - POST/PATCH/DELETE:  не кешується.
+ * Strategies:
+ *   - HTML/navigation:    network-first, fall back to cache, final fall back to '/'.
+ *   - /static/* (local):  stale-while-revalidate (fast from cache + background update).
+ *   - CDN (origin !=):    cache-first (versioned URLs Inter/FontAwesome/Tippy — stable).
+ *   - /api/* GET:         network-first with a cache fallback (data may be stale, but better than nothing).
+ *   - SSE (Accept: text/event-stream or path /stream): not cached (browser default).
+ *   - POST/PATCH/DELETE:  not cached.
  *
- * Що НЕ працює офлайн (свідомо): транскрипція, запис, ask/stream, polish, backup.
- * Що працює: відкрити сторінку, переглянути історію, сутності, задачі (з кешу).
+ * What does NOT work offline (deliberately): transcription, recording, ask/stream, polish, backup.
+ * What works: opening the page, viewing history, entities, tasks (from cache).
  */
 
-// Bump при зміні app shell (JS/CSS/HTML), щоб SW скинув старий кеш і віддав
-// свіжі ассети. v2 — Phase 16 (вкладка Документи, нові формати, імпорт папки).
-// v3 — Phase 17 (вкладка Telegram + кнопка «Новий напрямок»).
-// v4 — фікс: чекбокс/селектор напрямку у TG слухали change через data-change.
-// v5 — TG: фільтри-чипси + показ збереженого напрямку (merge з /chats).
-// v6 — Дизайн-стандарт: видалено темну тему, ребренд підписів (Recall/записів).
-// v10 — Recall Phase 2: нативна сторінка YouTube (/youtube) у новому каркасі.
-// v11 — Recall Phase 2: нативна сторінка завантаження файлу (/upload).
-// v12 — Recall Phase 2: нативна сторінка документів (/documents).
-// v13 — Recall Phase 2: нативна сторінка Telegram (/telegram).
-// v14 — Recall Phase 2: нативна сторінка Налаштувань (/settings).
-// v15 — Recall Phase 2: нативна сторінка Запису (/record). Phase 2 завершено.
-// v16 — cleanup: APP_SHELL = новий каркас (recall/*), а не старий app.js/index.html.
-// v17 — нативна Аудіотека (/audio).
-// v18 — пост-обробка транскрипту: переклад/теми/хмара слів/емоції.
-// v19 — bulk-розмітка напрямку + bulk-видалення у Бібліотеці.
-// v20 — динамічний каталог моделей + перевірка оновлень faster-whisper.
-// v21 — дефолтна модель транскрибації large-v3-turbo (замість medium).
-// v22 — новий розділ «Дослідження»: великий експорт згадок бренду (оригінали/саммарі).
-// v23 — кнопки експорту на картці сутності (той самий рушій research_export.js).
-// v24 — порт legacy: YouTube-обрізка (trim) + сторінка «Спікери» (статистика/обʼєднання/таймлайн).
-// v25 — редактор спікерів на сторінці запису: назвати/переназначити діаризовані голоси.
-// v26 — клік-по-сегменту→seek+підсвітка під час відтворення; закладки; ✨ авто-напрямок; saved searches; bulk-export.
-// v27 — видалено /legacy: усі фічі портовані в новий каркас (index.html/app.js/старі CSS прибрано).
-// v28 — Co-pilot Крок 1: мега-панель ко-пілота на старті запису (вектор/режим/важливість/бюджет/лише-локально).
-// v29 — Co-pilot Крок 2: смужка тем у записі (зсув/повернення теми) через copilot_topic SSE.
-// v30 — Co-pilot Крок 3: локальний диспетчер-LLM (триаж+RAG+інсайти) → чорнові картки copilot_insight.
-// v31 — Co-pilot Крок 4: повноцінний віджет оператора (2-колонки, картки з діями dismiss/pin/👍👎/копнути, статус, пауза, антишум, згортання).
-// v32 — Co-pilot Крок 5: ескалація в Claude (Sonnet верифікує → бейдж «перевірено», лічильник $, бюджет/safety-sweep, ручна «копнути глибше»).
-// v33 — Co-pilot Крок 6: матриця режим×важливість (мульти-голос verify, Opus на гнарлі), cost-governor (warn), зміна режиму/важливості на льоту.
-// v34 — Co-pilot Крок 7: таймлайн сесії на сторінці транскрипту (паралельна доріжка подій + seek по інсайту), лінк сесія→транскрипт.
-// v35 — Co-pilot Крок 8: експорт сесії (md/json: діалог+нотатки) + реінджест підказок у RAG (source_type=copilot).
-// v36 — Co-pilot Крок 9: hardening — GPU-черга, банер деградації, розділ «Ко-пілот» у налаштуваннях, smoke-тести.
-// v37 — фільтр напрямків на /audio + /entities, фільтр напрямків + кнопки періоду (24год/7д/місяць/рік/усі) на /tasks.
-// v38 — переробка контролу періоду на /tasks: сегмент-контрол (max-content+nowrap, не ламається), коротші підписи.
-// v39 — фікс колізії класів: контрол періоду .rc-seg→.rc-period (.rc-seg вже зайнятий аудіо-сегментами /transcript як grid).
-// v40 — контекстні фасет-фільтри в Бібліотеці під джерело: Telegram (відправник+чат), YouTube (автор) — live від 2 символів.
-// v41 — напрямки: керування в Налаштуваннях (CRUD+перенесення/обʼєднання), inline «＋ Новий напрямок…» у будь-якому селекті, casefold-унікальність (кирилиця-дублі неможливі).
-// v42 — recording UX: запис зʼявляється в Аудіотеці одразу після save (неблокуючий save→фонова транскрипція library-шляхом), статус «транскрибується…» у картці (polling /api/transcribe/active), власний напрямок запису (audio_downloads.category_id, фільтр працює до транскрипції).
+// Bump on any app shell change (JS/CSS/HTML), so the SW drops the old cache and serves
+// fresh assets. v2 — Phase 16 (Documents tab, new formats, folder import).
+// v3 — Phase 17 (Telegram tab + the «Новий напрямок» button).
+// v4 — fix: the checkbox/category selector in TG listened to change via data-change.
+// v5 — TG: filter chips + showing the saved category (merge with /chats).
+// v6 — Design standard: dark theme removed, labels rebranded (Recall/records).
+// v10 — Recall Phase 2: native YouTube page (/youtube) in the new shell.
+// v11 — Recall Phase 2: native file upload page (/upload).
+// v12 — Recall Phase 2: native documents page (/documents).
+// v13 — Recall Phase 2: native Telegram page (/telegram).
+// v14 — Recall Phase 2: native Settings page (/settings).
+// v15 — Recall Phase 2: native Record page (/record). Phase 2 complete.
+// v16 — cleanup: APP_SHELL = the new shell (recall/*), not the old app.js/index.html.
+// v17 — native Audio library (/audio).
+// v18 — transcript post-processing: translation/topics/word cloud/emotions.
+// v19 — bulk category labeling + bulk deletion in the Library.
+// v20 — dynamic model catalog + faster-whisper update check.
+// v21 — default transcription model large-v3-turbo (instead of medium).
+// v22 — new section «Дослідження»: big export of brand mentions (originals/summaries).
+// v23 — export buttons on the entity card (the same research_export.js engine).
+// v24 — legacy port: YouTube trim + the «Спікери» page (statistics/merging/timeline).
+// v25 — speaker editor on the record page: name/reassign diarized voices.
+// v26 — click-on-segment→seek+highlight during playback; bookmarks; ✨ auto-category; saved searches; bulk-export.
+// v27 — /legacy removed: all features ported to the new shell (index.html/app.js/old CSS dropped).
+// v28 — Co-pilot Step 1: co-pilot mega-panel at recording start (vector/mode/importance/budget/local-only).
+// v29 — Co-pilot Step 2: topic strip in the recording (topic shift/return) via copilot_topic SSE.
+// v30 — Co-pilot Step 3: local dispatcher LLM (triage+RAG+insights) → draft copilot_insight cards.
+// v31 — Co-pilot Step 4: a full operator widget (2 columns, cards with actions dismiss/pin/👍👎/dig deeper, status, pause, anti-noise, collapse).
+// v32 — Co-pilot Step 5: escalation to Claude (Sonnet verifies → badge «перевірено», $ counter, budget/safety-sweep, manual «копнути глибше»).
+// v33 — Co-pilot Step 6: mode×importance matrix (multi-voice verify, Opus on the hard ones), cost-governor (warn), changing mode/importance on the fly.
+// v34 — Co-pilot Step 7: session timeline on the transcript page (parallel track of events + seek by insight), session→transcript link.
+// v35 — Co-pilot Step 8: session export (md/json: dialogue+notes) + re-ingest of hints into RAG (source_type=copilot).
+// v36 — Co-pilot Step 9: hardening — GPU queue, degradation banner, «Ко-пілот» section in settings, smoke tests.
+// v37 — category filter on /audio + /entities, category filter + period buttons (24h/7d/month/year/all) on /tasks.
+// v38 — reworked the period control on /tasks: segment control (max-content+nowrap, does not break), shorter labels.
+// v39 — class collision fix: period control .rc-seg→.rc-period (.rc-seg is already taken by the audio segments of /transcript as a grid).
+// v40 — contextual facet filters in the Library per source: Telegram (sender+chat), YouTube (author) — live from 2 characters.
+// v41 — categories: management in Settings (CRUD+move/merge), inline «＋ Новий напрямок…» in any select, casefold uniqueness (Cyrillic duplicates are impossible).
+// v42 — recording UX: a recording appears in the Audio library right after save (non-blocking save→background transcription via the library path), «транскрибується…» status in the card (polling /api/transcribe/active), the recording's own category (audio_downloads.category_id, the filter works before transcription).
 // v43 — screen video capture toggle + monitor select + video status chips (Phase 22, S7).
-// v44 — Аудіотека→Медіатека + 📹 Відео badge + UTC→local date fix (Phase 22).
+// v44 — Audio library→Media library + 📹 Відео badge + UTC→local date fix (Phase 22).
 // v45 — Camtasia-style screen region selection UI: per-monitor Повний/Область toggle, drag-rect modal, numeric inputs, region chip (Phase 22 R-D).
 // v46 — Phase 23 B-C: synced muted screen-video player, keyframe strip, «Розібрати відео» button on /transcript.
-// v47 — Phase 23B: vision-опис кадрів (Qwen2.5-VL / Claude) → у RAG + тултипи кадрів + Claude-опис toggle.
-// v48 — REC-індикатор: live розмір файлу + швидкість росту (МБ/хв) + вільне місце на диску з прогнозом.
-// v49 — REC-відеочіп: розмір виділеної області (◳ W×H) + видеотреки в get_state (чіпи переживають reload).
-// v50 — REC-відеочіп: звірка track_id зі state після старту (канонічна мітка/статус/fps + region, без stale-чипа).
-// v51 — фікс fps/МБ на відеочіпі: video_stats шле {stats:{...}} вкладено, фронт читав плоско → розпаковка.
-// v52 — Волна 2 T4.4: прибрано безумовний skipWaiting() (тепер тільки за
-//       SKIP_WAITING-повідомленням від клієнта, див. shell.js promptSwUpdate);
-//       APP_SHELL більше не дублюється вручну — install парсить реальні
-//       <script src>/<link href> з відповіді на '/' (deriveAppShellUrls),
-//       лишається лиш FALLBACK_SHELL для того, чого в shell.html немає
-//       тегом (manifest/icons) — див. чекліст bump'а нижче.
-// v53 — Волна 3 T5.3: онбординг-візард першого запуску (static/js/recall/
-//       onboarding.js, новий <script> тег у shell.html — підхоплюється
-//       парсингом; localStorage recall_onboarding_done). shell.js викликає
-//       maybeShowFirstRun() + топбар-іконка graduation-cap для повторного
-//       відкриття; мінімальний CSS (.rc-modal--wide, .rc-onb__*).
-// v58 — UI/UX списків: /library рендерить рядок ПО ТИПУ джерела (TG —
-//       чат+відправник у підписі, повідомлення в тілі; дзвінок — тривалість/
-//       спікери/задачі), /audio отримав фільтр «Без транскрипта», /tasks
-//       перебудовано на відра терміновості (протерміновано / 7 днів / пізніше
-//       / без дати) + фасет власника. Токени --rc-ink-3 і --rc-ok підняті до
-//       WCAG AA; глобальне `.rc-app [hidden]{display:none}` прибрало фантомну
-//       панель bulk-дій, що висіла внизу Бібліотеки завжди.
-// v62 — шар коментарів власника (Волни 0-6): бейдж-лічильник і інлайн-панель
-//       на картках /library та /audio, постійна панель на /transcript із
-//       якорем на таймкод плеєра, поле живого коментаря на /record
-//       (Ctrl+Shift+K), нова сторінка /comments — записник поверх усього
-//       архіву з фасетами за типом. Нові файли: js/recall/comments.js
-//       (спільний компонент) і js/recall/views/comments.js — обидва мають
-//       теги в shell.html, тож install підхопить їх сам.
-// v66 — UNASKED(2) раунду 4: пікер тегів чіпами (.rc-tagpick поверх
-//       прихованого select.rc-tagsel, той самий контракт C9) замість голого
-//       <select multiple>; порожній словник тегів — абзац-пояснення з
-//       посиланням на Налаштування→Теги замість пустого прямокутника.
-// v68 — хвиля 8: один гард кольору в ui.js (tagChip/tagOptions/catChip —
-//       #RGB/#RGBA/#RRGGBB/#RRGGBBAA, той самий контракт, що серверний
-//       _COLOR_RE); стан помилки пікера тегів лишає вже вибрані теги
-//       selected-опціями (фільтр URL більше не губиться при retry);
-//       покриває й record.js історії 27 (одне підняття на хвилю).
-// v69 — паралельні записи: /record показує кожен живий запис табом (свій
-//       SSE, тік, стоп), перемикач системного звуку «весь / тільки ці /
-//       усе крім цих», питання про звучні застосунки при другому записі,
-//       банер повернення звуку сусідові, перенесення ко-пілота
-//       (.rc-rectabs/.rc-recsrc/.rc-recwarn у recall.css).
-// v70 — /telegram: рядок чату показує, хто це (назва, тип, @нік, телефон),
-//       чіпи тегів із рядка прибрано (виштовхували назву в нуль); пошук за
-//       імʼям (кирилиця/латиниця), @ніком і телефоном.
-// v71 — вигадані приклади в підказках, онбордингу й налаштуваннях («Агенція» →
-//       «Маяк», «Орбіта», Polaris, Олена) замість реальних напрямків, проєктів і людей.
+// v47 — Phase 23B: vision description of frames (Qwen2.5-VL / Claude) → into RAG + frame tooltips + Claude description toggle.
+// v48 — REC indicator: live file size + growth rate (MB/min) + free disk space with a forecast.
+// v49 — REC video chip: size of the selected area (◳ W×H) + video tracks in get_state (chips survive reload).
+// v50 — REC video chip: track_id reconciliation with state after start (canonical label/status/fps + region, no stale chip).
+// v51 — fix fps/MB on the video chip: video_stats sends {stats:{...}} nested, the front read it flat → unpacking.
+// v52 — Wave 2 T4.4: the unconditional skipWaiting() removed (now only on a
+//       SKIP_WAITING message from the client, see shell.js promptSwUpdate);
+//       APP_SHELL is no longer duplicated by hand — install parses the real
+//       <script src>/<link href> from the response to '/' (deriveAppShellUrls),
+//       only FALLBACK_SHELL remains for what shell.html does not have as a
+//       tag (manifest/icons) — see the bump checklist below.
+// v53 — Wave 3 T5.3: first-run onboarding wizard (static/js/recall/
+//       onboarding.js, a new <script> tag in shell.html — picked up by
+//       parsing; localStorage recall_onboarding_done). shell.js calls
+//       maybeShowFirstRun() + a graduation-cap topbar icon for reopening;
+//       minimal CSS (.rc-modal--wide, .rc-onb__*).
+// v58 — list UI/UX: /library renders a row BY source type (TG —
+//       chat+sender in the caption, message in the body; call — duration/
+//       speakers/tasks), /audio got a «Без транскрипта» filter, /tasks
+//       was rebuilt on urgency buckets (overdue / 7 days / later
+//       / no date) + an owner facet. The --rc-ink-3 and --rc-ok tokens were raised to
+//       WCAG AA; the global `.rc-app [hidden]{display:none}` removed the phantom
+//       bulk-action panel that always hung at the bottom of the Library.
+// v62 — owner comments layer (Waves 0-6): a counter badge and an inline panel
+//       on /library and /audio cards, a permanent panel on /transcript with an
+//       anchor to the player timecode, a live comment field on /record
+//       (Ctrl+Shift+K), a new /comments page — a notebook over the whole
+//       archive with facets by type. New files: js/recall/comments.js
+//       (shared component) and js/recall/views/comments.js — both have
+//       tags in shell.html, so install picks them up by itself.
+// v66 — UNASKED(2) of round 4: tag picker with chips (.rc-tagpick over
+//       the hidden select.rc-tagsel, the same C9 contract) instead of a bare
+//       <select multiple>; an empty tag dictionary — an explanatory paragraph with a
+//       link to Settings→Tags instead of an empty rectangle.
+// v68 — wave 8: one color guard in ui.js (tagChip/tagOptions/catChip —
+//       #RGB/#RGBA/#RRGGBB/#RRGGBBAA, the same contract as the server
+//       _COLOR_RE); the tag picker error state keeps already chosen tags as
+//       selected options (the URL filter is no longer lost on retry);
+//       also covers record.js of story 27 (one bump per wave).
+// v69 — parallel recordings: /record shows each live recording as a tab (its own
+//       SSE, tick, stop), a system sound switch «весь / тільки ці /
+//       усе крім цих», a question about sounding applications on a second recording,
+//       a banner returning the sound to the neighbour, co-pilot transfer
+//       (.rc-rectabs/.rc-recsrc/.rc-recwarn in recall.css).
+// v70 — /telegram: the chat row shows who it is (title, type, @nick, phone),
+//       tag chips removed from the row (they pushed the title to zero); search by
+//       name (Cyrillic/Latin), @nick and phone.
+// v71 — made-up examples in hints, onboarding and settings («Агенція» →
+//       «Маяк», «Орбіта», Polaris, Олена) instead of real categories, projects and people.
 //
-// ЧЕКЛІСТ bump'а версії (мінімум ручної роботи, без build-step):
-//   1. Правка в JS/CSS під /static/ → просто збільш VERSION нижче + додай
-//      рядок у changelog. Список файлів чіпати НЕ треба — install сам
-//      перечитає <script>/<link> теги з shell.html.
-//   2. Новий JS/CSS-файл, потрібен для першого рендеру (view-модуль, css)
-//      → додай йому <script>/<link> тег у templates/shell.html — і все:
-//      sw.js підхопить його автоматично при наступному install.
-//   3. Новий асет, на який НЕМАЄ тегу в shell.html (іконка з
-//      manifest.webmanifest, інший файл, на який лише JS посилається
-//      рядком) → додай вручну в FALLBACK_SHELL нижче.
+// CHECKLIST for a version bump (minimum manual work, no build step):
+//   1. An edit in JS/CSS under /static/ → just increase VERSION below + add a
+//      line to the changelog. The file list does NOT need touching — install
+//      rereads the <script>/<link> tags from shell.html itself.
+//   2. A new JS/CSS file needed for the first render (view module, css)
+//      → add a <script>/<link> tag to it in templates/shell.html — and that's it:
+//      sw.js will pick it up automatically on the next install.
+//   3. A new asset with NO tag in shell.html (an icon from
+//      manifest.webmanifest, another file that only JS references
+//      by a string) → add it by hand to FALLBACK_SHELL below.
 const VERSION = 'recall-v80';
 const STATIC_CACHE = `recall-static-${VERSION}`;
 const RUNTIME_CACHE = `recall-runtime-${VERSION}`;
 
-// Мінімальний ручний список: лише те, що НЕ виявляється парсингом
-// shell.html (не має свого <script src>/<link href> — manifest посилається
-// на іконки рядками в JSON, а не HTML-тегами).
+// Minimal manual list: only what is NOT discovered by parsing
+// shell.html (has no <script src>/<link href> of its own — the manifest references
+// the icons by strings in JSON, not by HTML tags).
 const FALLBACK_SHELL = [
     '/',
     '/static/favicon.svg',
@@ -130,11 +130,11 @@ const FALLBACK_SHELL = [
     '/static/manifest.webmanifest',
 ];
 
-// Виводить повний app-shell зі свіжої розмітки '/' — так APP_SHELL більше
-// НЕ дублюється вручну проти <script>/<link> тегів у shell.html (це було
-// третє місце ручної синхронізації версій, окрім VERSION і самого
-// changelog). Якщо фетч/парсинг не вдався — деградуємо на FALLBACK_SHELL,
-// щоб install() у гіршому разі закешував хоча б '/' і критичні іконки.
+// Derives the full app shell from the fresh '/' markup — so APP_SHELL is no longer
+// duplicated by hand against the <script>/<link> tags in shell.html (that was the
+// third place of manual version sync, besides VERSION and the
+// changelog itself). If fetch/parsing fails — we degrade to FALLBACK_SHELL,
+// so that install() at worst caches at least '/' and the critical icons.
 async function deriveAppShellUrls() {
     try {
         const res = await fetch('/', { cache: 'no-store' });
@@ -145,8 +145,8 @@ async function deriveAppShellUrls() {
         let m;
         while ((m = re.exec(html))) {
             const u = m[1];
-            // Лише локальні /static/* — CDN (fonts/FontAwesome) свідомо НЕ
-            // precache'иться тут, вони йдуть через cache-first у fetch-хендлері.
+            // Only local /static/* — the CDN (fonts/FontAwesome) is deliberately NOT
+            // precached here, it goes through cache-first in the fetch handler.
             if (u.startsWith('/static/')) urls.add(u);
         }
         return Array.from(urls);
@@ -160,26 +160,26 @@ self.addEventListener('install', (event) => {
     event.waitUntil((async () => {
         const cache = await caches.open(STATIC_CACHE);
         const shellUrls = await deriveAppShellUrls();
-        // Кожен ассет окремо, щоб 1 невдача не похоронила весь install.
+        // Each asset separately, so that 1 failure does not bury the whole install.
         await Promise.all(shellUrls.map((url) =>
             cache.add(url).catch((err) => console.warn('[sw] precache skip', url, err.message))
         ));
-        // НЕ викликаємо self.skipWaiting() тут — новий воркер лишається
-        // "waiting", доки клієнт explicit не попросить (SKIP_WAITING
-        // повідомлення з shell.js, після кліку «Оновити» у toast'і). Так
-        // відкрита вкладка ніколи не переключається на нові модулі посеред
-        // сесії без відома користувача.
+        // We do NOT call self.skipWaiting() here — the new worker stays
+        // "waiting" until the client explicitly asks (the SKIP_WAITING
+        // message from shell.js, after a click on «Оновити» in the toast). This way
+        // an open tab never switches to new modules in the middle of a
+        // session without the user's knowledge.
     })());
 });
 
 self.addEventListener('activate', (event) => {
     event.waitUntil((async () => {
-        // Видалити старі версії кешу (попередні VERSION).
+        // Delete old cache versions (the previous VERSION).
         const keys = await caches.keys();
         await Promise.all(keys
             .filter((k) => k.startsWith('recall-') && k !== STATIC_CACHE && k !== RUNTIME_CACHE)
             .map((k) => caches.delete(k)));
-        // Взяти контроль над усіма tab'ами одразу (без reload).
+        // Take control of all tabs at once (without reload).
         await self.clients.claim();
     })());
 });
@@ -187,40 +187,40 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
     const req = event.request;
 
-    // Не-GET: лиш network. POST/PATCH/DELETE завжди йдуть на сервер.
+    // Non-GET: network only. POST/PATCH/DELETE always go to the server.
     if (req.method !== 'GET') return;
 
     const url = new URL(req.url);
     const accept = req.headers.get('Accept') || '';
 
-    // SSE: ніколи не кешуємо (стрім).
+    // SSE: never cache (a stream).
     if (accept.includes('text/event-stream') || url.pathname.includes('/stream')) return;
 
-    // CDN (інший origin) — cache-first. Версіоновані URL'и стабільні.
+    // CDN (another origin) — cache-first. Versioned URLs are stable.
     if (url.origin !== self.location.origin) {
         event.respondWith(cacheFirst(req, RUNTIME_CACHE));
         return;
     }
 
-    // Локальна статика — stale-while-revalidate.
+    // Local static — stale-while-revalidate.
     if (url.pathname.startsWith('/static/')) {
         event.respondWith(staleWhileRevalidate(req, STATIC_CACHE));
         return;
     }
 
-    // HTML-навігація (корінь чи прямий вхід у /something) — network-first з fallback'ом на '/'.
+    // HTML navigation (the root or a direct entry into /something) — network-first with a fallback to '/'.
     if (req.mode === 'navigate' || accept.includes('text/html')) {
         event.respondWith(networkFirstFallback(req, STATIC_CACHE, '/'));
         return;
     }
 
-    // /api/* GET — network-first з кеш-fallback'ом (бачимо stale дані офлайн).
+    // /api/* GET — network-first with a cache fallback (we see stale data offline).
     if (url.pathname.startsWith('/api/')) {
         event.respondWith(networkFirstFallback(req, RUNTIME_CACHE, null));
         return;
     }
 
-    // Все інше — network passthrough.
+    // Everything else — network passthrough.
 });
 
 // ============ helpers ============
@@ -252,7 +252,7 @@ async function networkFirstFallback(req, cacheName, fallbackUrl) {
     const cache = await caches.open(cacheName);
     try {
         const resp = await fetch(req);
-        // Не кешуємо помилкові відповіді (4xx/5xx).
+        // Do not cache error responses (4xx/5xx).
         if (resp && resp.ok) cache.put(req, resp.clone());
         return resp;
     } catch (_) {
@@ -267,7 +267,7 @@ async function networkFirstFallback(req, cacheName, fallbackUrl) {
     }
 }
 
-// Дозволяє сторінці попросити нову версію SW активуватись миттєво.
+// Lets the page ask a new SW version to activate instantly.
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });

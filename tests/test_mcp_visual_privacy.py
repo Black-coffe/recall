@@ -1,4 +1,4 @@
-"""Фільтр приватного на виході MCP (spec mcp-visual-privacy)."""
+"""The private filter at the MCP output (spec mcp-visual-privacy)."""
 import base64
 import sqlite3
 
@@ -17,7 +17,7 @@ def db(tmp_path, monkeypatch):
     conn = sqlite3.connect(path)
     conn.execute("INSERT INTO categories (id, name, name_norm, parent_id) VALUES "
                  "(15, 'Юридичне', 'юридичне', 5)")
-    # 1 — робочий запис, 2 — «Особисте», 3 — проєкт під «Юридичне»
+    # 1 — a work record, 2 — «Особисте», 3 — a project under «Юридичне»
     for tid, cat in ((1, 1), (2, 2), (3, 15)):
         conn.execute("INSERT INTO transcriptions (id, source_type, source_name, category_id) "
                      "VALUES (?, 'recording', 'дзвінок', ?)", (tid, cat))
@@ -27,7 +27,7 @@ def db(tmp_path, monkeypatch):
                      "VALUES (?, ?, 0, ?)", (kid, tid, text))
     conn.commit()
     conn.close()
-    # основа, а не слово: морфології нема, «Петренк» ловить і Петренко, і Петренку
+    # a stem, not a word: there is no morphology, «Петренк» catches both «Петренко» and «Петренку»
     (tmp_path / 'private.txt').write_text('Петренк\n', encoding='utf-8')
     monkeypatch.setattr(m, 'DB_PATH', path)
     monkeypatch.setenv('RECALL_PRIVATE_WORDS_FILE', str(tmp_path / 'private.txt'))
@@ -92,9 +92,9 @@ def test_frames_for_text_filters_frames(db, api):
 def test_get_frame_checks_this_frames_text_and_unverifiable_frame(db, api):
     api.responses['/frames'] = {'transcription_id': 1, 'count': 3, 'frames': [
         {'t': 1, 'ocr_text': 'Бюджет', 'frame_text': 'Бюджет', 'image_b64': JPEG},
-        # представник відрізка чистий, а САМ кадр має стоп-слово
+        # the segment representative is clean, but the frame ITSELF has a stop word
         {'t': 2, 'ocr_text': 'Бюджет', 'frame_text': 'лист Петренку', 'image_b64': JPEG},
-        # OCR недоступний — перевірити нічим
+        # OCR unavailable — nothing to check with
         {'t': 3, 'ocr_text': 'Бюджет', 'frame_text': None, 'image_b64': JPEG},
     ]}
     out = m.get_frame(1, from_sec=0, to_sec=10)
@@ -106,7 +106,7 @@ def test_get_frame_checks_this_frames_text_and_unverifiable_frame(db, api):
 def test_search_visual_checks_full_frame_text_and_private(db, api):
     api.responses['/api/video/search'] = {'query': 'рахунок', 'count': 4, 'results': [
         {'transcription_id': 1, 'keyframe_id': 11, 'snippet': 'Бюджет'},
-        {'transcription_id': 1, 'keyframe_id': 12, 'snippet': 'Рахунок'},   # повний текст — стоп
+        {'transcription_id': 1, 'keyframe_id': 12, 'snippet': 'Рахунок'},   # full text — stop
         {'transcription_id': 2, 'keyframe_id': 13, 'snippet': 'фото'},
         {'transcription_id': 3, 'keyframe_id': 14, 'snippet': 'Позов'},
     ]}
@@ -142,7 +142,7 @@ def test_mode_off_or_unknown_refuses_all_five(db, api, monkeypatch, mode):
 
 
 def test_render_frame_reports_masked_text_of_this_frame(monkeypatch):
-    """frame_text — текст самого кадру з живого OCR, секрети замасковані."""
+    """frame_text — the text of the frame itself from live OCR, secrets masked."""
     from app.services import video_timeline as vt
     from app.services import document_parser as dp, video_analysis as va, video_frames as vf
     from PIL import Image
@@ -156,7 +156,7 @@ def test_render_frame_reports_masked_text_of_this_frame(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Історія 02: текст з екрана в загальному пошуку (search_archive / grep_archive)
+# Story 02: on-screen text in the general search (search_archive / grep_archive)
 # ---------------------------------------------------------------------------
 
 def _screen(tid, text, idx=9):
@@ -169,7 +169,7 @@ def test_search_archive_hides_private_and_stop_word_screen_chunks(db, api):
         _screen(1, 'Бюджет Q3'), _screen(1, 'Рахунок Петренку'), _screen(2, 'Бюджет сімʼї')]}
     res = m.search_archive('бюджет')
     texts = [c['text'] for c in res['chunks']]
-    # звичайна репліка не фільтрується, навіть зі стоп-словом: фільтр лише про візуальне
+    # an ordinary line is not filtered, even with a stop word: the filter is only about visual content
     assert texts == ['бюджет і Петренко', 'Бюджет Q3']
     assert res['count'] == 2 and res['private_hidden'] == 2
 
@@ -200,7 +200,7 @@ def test_grep_archive_hides_screen_matches_and_context(db):
     assert got == {(1, 0), (1, 2), (2, 1)}
     assert res['private_hidden'] == 2 and res['count'] == 3
     by = {(x['transcription_id'], x['chunk_index']): x for x in res['matches']}
-    # сусід-екран зі стоп-словом прибраний із контексту; чистий екранний лишився
+    # a neighbouring screen chunk with a stop word is removed from the context; a clean screen one stays
     assert [c['chunk_index'] for c in by[(1, 0)]['context_after']] == []
     assert [c['chunk_index'] for c in by[(1, 2)]['context_before']] == []
     assert [c['chunk_index'] for c in by[(2, 1)]['context_before']] == []

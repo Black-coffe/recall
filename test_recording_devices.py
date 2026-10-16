@@ -1,28 +1,28 @@
-"""Smoke test для Phase 9.1: WASAPI recorder primitive.
+"""Smoke test for Phase 9.1: the WASAPI recorder primitive.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe test_recording_devices.py
 
-Що перевіряє:
-1. Імпорт pyaudiowpatch працює.
-2. list_input_devices() повертає mic-и та loopback'и.
-3. resolve_device_params() для default mic та default loopback повертає
-   валідні (rate, channels).
-4. WasapiRecorder можна відкрити, стартувати, отримати кадри ~2 сек з
-   default loopback'у і коректно закрити.
-5. LevelMeter повертає peak/rms (значення 0..1, можуть бути нулями
-   якщо тиша).
+What it checks:
+1. The pyaudiowpatch import works.
+2. list_input_devices() returns mics and loopbacks.
+3. resolve_device_params() for the default mic and default loopback returns
+   valid (rate, channels).
+4. A WasapiRecorder can be opened, started, receive frames for ~2 sec from the
+   default loopback and be closed correctly.
+5. LevelMeter returns peak/rms (values 0..1, may be zeros
+   if silent).
 
-Якщо PyAudioWPatch не встановлений → script завершиться з
-exit-code 2 і відповідним повідомленням.
+If PyAudioWPatch is not installed → the script exits with
+exit code 2 and a matching message.
 """
 from __future__ import annotations
 
 import sys
 import time
 
-# Windows console default cp1252 ламається на укр. символах. Флешимо stdout
-# у UTF-8 — гарантує читабельний вивід незалежно від chcp.
+# The Windows console default cp1252 breaks on Ukrainian characters. We flush stdout
+# as UTF-8 — guarantees readable output regardless of chcp.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -38,7 +38,7 @@ try:
     )
     from app.services.recording.recorder import _HAS_PYAUDIO  # type: ignore
 except Exception as e:
-    print(f"[FAIL] Імпорт модулю recording: {e}")
+    print(f"[FAIL] Import of the recording module: {e}")
     sys.exit(1)
 
 
@@ -51,18 +51,18 @@ def section(title: str) -> None:
 
 def main() -> int:
     if not _HAS_PYAUDIO:
-        print("[SKIP] PyAudioWPatch не встановлений — recording disabled")
+        print("[SKIP] PyAudioWPatch is not installed — recording disabled")
         return 2
 
     section("1. list_input_devices()")
     devices = list_input_devices()
     if not devices:
-        print("[FAIL] Жодного WASAPI девайсу не знайдено")
+        print("[FAIL] No WASAPI device found")
         return 1
 
     mics = [d for d in devices if d.kind == 'mic']
     loopbacks = [d for d in devices if d.kind == 'loopback']
-    print(f"  знайдено: {len(mics)} мікрофон(и), {len(loopbacks)} loopback")
+    print(f"  found: {len(mics)} microphone(s), {len(loopbacks)} loopback")
     print()
     print(f"  {'#':>3}  {'kind':<8} {'def':<3} {'ch':>2} {'rate':>6}  name")
     print(f"  {'-'*3}  {'-'*8} {'-'*3} {'-'*2} {'-'*6}  {'-'*40}")
@@ -76,10 +76,10 @@ def main() -> int:
     default_mic = next((d for d in mics if d.is_default), mics[0] if mics else None)
     default_lb = next((d for d in loopbacks if d.is_default), loopbacks[0] if loopbacks else None)
     print()
-    print(f"  default mic:      {default_mic.name if default_mic else 'НЕМА'}")
-    print(f"  default loopback: {default_lb.name if default_lb else 'НЕМА'}")
+    print(f"  default mic:      {default_mic.name if default_mic else 'NONE'}")
+    print(f"  default loopback: {default_lb.name if default_lb else 'NONE'}")
 
-    section("2. resolve_device_params() для mic та loopback")
+    section("2. resolve_device_params() for mic and loopback")
     if default_mic:
         rate, ch = resolve_device_params(default_mic.index, 48000, 2)
         print(f"  mic:      requested 48000/2 → resolved {rate}/{ch}")
@@ -89,10 +89,10 @@ def main() -> int:
 
     target = default_lb or default_mic
     if target is None:
-        print("[FAIL] Немає жодного придатного девайсу для запису")
+        print("[FAIL] No suitable device to record from")
         return 1
 
-    section(f"3. WasapiRecorder smoke (~2s з {target.kind}: {target.name[:40]})")
+    section(f"3. WasapiRecorder smoke (~2s from {target.kind}: {target.name[:40]})")
     rate, ch = resolve_device_params(target.index, 48000, 2)
     try:
         with WasapiRecorder(
@@ -105,7 +105,7 @@ def main() -> int:
             captured_bytes = 0
             captured_frames = 0
             t_start = time.time()
-            # Збираємо ~2 сек з періодичним polling (10Hz)
+            # Collect ~2 sec with periodic polling (10Hz)
             while time.time() - t_start < 2.0:
                 time.sleep(0.1)
                 frames = rec.drain()
@@ -124,21 +124,21 @@ def main() -> int:
             err = rec.get_callback_error()
             if err is not None:
                 print(f"  [WARN] callback error: {err}")
-            print(f"  всього кадрів: {captured_frames}")
-            print(f"  всього байт:   {captured_bytes}")
-            print(f"  expected ~{int(rate * ch * 2 * 2)} байт за 2с (rate*ch*2*2)")
+            print(f"  total frames: {captured_frames}")
+            print(f"  total bytes:  {captured_bytes}")
+            print(f"  expected ~{int(rate * ch * 2 * 2)} bytes per 2s (rate*ch*2*2)")
             print(f"  dropped:       {rec.dropped_frames}")
     except Exception as e:
         print(f"[FAIL] WasapiRecorder error: {e}")
         return 1
 
     if captured_bytes < 1000:
-        print("[FAIL] Захоплено замало даних — щось не так зі стрімом")
+        print("[FAIL] Too little data captured — something is wrong with the stream")
         return 1
 
-    expected_min_bytes = int(rate * ch * 2 * 1.0)  # 1 секунда мінімум
+    expected_min_bytes = int(rate * ch * 2 * 1.0)  # 1 second minimum
     if captured_bytes < expected_min_bytes:
-        print(f"[WARN] Захоплено {captured_bytes} байт за 2с — менше ніж очікувалось")
+        print(f"[WARN] Captured {captured_bytes} bytes in 2s — less than expected")
 
     print()
     print("[OK] Phase 9.1 smoke passed")

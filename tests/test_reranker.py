@@ -1,10 +1,10 @@
-"""Тести локального cross-encoder reranker (T6.4, Волна 4).
+"""Tests of the local cross-encoder reranker (T6.4, Wave 4).
 
-Модель НІКОЛИ не завантажується в тестах (ані bge-reranker-v2-m3, ані
-торч-моделі взагалі) — _get_model мокається Fake-об'єктом (образок з
-test_copilot_dispatcher.py). Перевіряємо: переранжування за скором мока,
-graceful degradation при недоступності/помилці моделі, "raw"-порядок при
-порожньому вводі.
+The model is NEVER loaded in tests (neither bge-reranker-v2-m3 nor any
+torch model at all); _get_model is mocked with a Fake object (pattern from
+test_copilot_dispatcher.py). We check: re-ranking by the mock score,
+graceful degradation when the model is unavailable/fails, "raw" order on
+empty input.
 """
 import logging
 
@@ -14,8 +14,8 @@ from app.services import reranker
 
 
 class FakeCrossEncoder:
-    """Мок CrossEncoder: predict повертає скори за мапою text->score (0.0 за
-    замовчуванням для незнайомого тексту), або кидає виняток якщо fail=True."""
+    """CrossEncoder mock: predict returns scores from a text->score map (0.0 by
+    default for an unknown text), or raises if fail=True."""
 
     def __init__(self, scores_by_text: dict, fail: bool = False):
         self._scores = scores_by_text
@@ -31,14 +31,14 @@ class FakeCrossEncoder:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state(monkeypatch):
-    """Кожен тест ізольований від lazy-singleton і "попереджено раз" стану."""
+    """Every test is isolated from the lazy singleton and the "warned once" state."""
     monkeypatch.setattr(reranker, "_model", None)
     monkeypatch.setattr(reranker, "_warned_unavailable", False)
     yield
 
 
 # ============================================================
-# Базова поведінка / edge-кейси
+# Basic behaviour / edge cases
 # ============================================================
 
 def test_rerank_empty_candidates_returns_empty():
@@ -53,8 +53,8 @@ def test_rerank_unavailable_returns_unchanged(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         out = reranker.rerank("query", candidates)
 
-    assert out == candidates  # той самий вихідний порядок/обʼєкт
-    assert "rerank" in caplog.text.lower() or "Недоступний" in caplog.text
+    assert out == candidates  # the same original order/object
+    assert "rerank" in caplog.text.lower() or "Unavailable" in caplog.text
 
 
 def test_rerank_unavailable_warns_only_once(monkeypatch, caplog):
@@ -70,7 +70,7 @@ def test_rerank_unavailable_warns_only_once(monkeypatch, caplog):
 
 
 # ============================================================
-# Переранжування за скором мока
+# Re-ranking by the mock score
 # ============================================================
 
 def test_rerank_reorders_by_mock_score(monkeypatch):
@@ -89,9 +89,9 @@ def test_rerank_reorders_by_mock_score(monkeypatch):
     assert [c["id"] for c in out] == [2, 3, 1]
     assert out[0]["rerank_score"] == pytest.approx(0.9)
     assert out[-1]["rerank_score"] == pytest.approx(0.1)
-    # вхідний список НЕ мутований
+    # the input list is NOT mutated
     assert candidates[0]["id"] == 1 and "rerank_score" not in candidates[0]
-    # query коректно проброшений у пари (query, text)
+    # query is correctly passed into the (query, text) pairs
     assert fake.calls[0][0][0] == "запит"
 
 
@@ -107,7 +107,7 @@ def test_rerank_custom_text_key(monkeypatch):
 
 
 # ============================================================
-# Graceful degradation при помилці inference
+# Graceful degradation on an inference error
 # ============================================================
 
 def test_rerank_model_failure_returns_unchanged(monkeypatch, caplog):
@@ -120,4 +120,4 @@ def test_rerank_model_failure_returns_unchanged(monkeypatch, caplog):
         out = reranker.rerank("q", candidates)
 
     assert out == candidates
-    assert "Помилка rerank" in caplog.text
+    assert "Rerank error" in caplog.text

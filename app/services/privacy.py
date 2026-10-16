@@ -1,15 +1,15 @@
-"""Що з архіву не віддається назовні (spec mcp-visual-privacy; той самий стоп-лист бере K4).
+"""What of the archive is not given out (spec mcp-visual-privacy; K4 takes the same stop list).
 
-Три питання, без моделі:
-  * чи запис у приватному напрямку — ``RECALL_PRIVATE_CATEGORIES`` (назви через кому, дефолт
-    «Юридичне,Особисте»); назва ловиться на будь-якому рівні дерева разом з усіма нащадками,
-    а тезки ховаються всі (неоднозначність = приховати);
-  * чи текст має слово з ``private.txt`` (по рядку на слово/імʼя, ``#`` — коментар;
-    регістронезалежна підрядкова перевірка ``casefold()`` у Python, не SQLite LOWER);
-  * режим ``RECALL_MCP_VISUAL``: images | text | off.
+Three questions, no model:
+  * whether a recording is in a private direction — ``RECALL_PRIVATE_CATEGORIES`` (names comma-separated, default
+    «Юридичне,Особисте»); a name is caught at any level of the tree together with all descendants,
+    and namesakes are all hidden (ambiguity = hide);
+  * whether the text has a word from ``private.txt`` (one word/name per line, ``#`` is a comment;
+    case-insensitive substring check with ``casefold()`` in Python, not SQLite LOWER);
+  * the ``RECALL_MCP_VISUAL`` mode: images | text | off.
 
-Fail closed: збій перевірки напрямку кидає ``PrivacyError`` — викликач ховає все, що перевіряв;
-невідомий режим = off.
+Fail closed: a direction check failure raises ``PrivacyError`` — the caller hides everything it was checking;
+an unknown mode = off.
 """
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ SCREEN_SPEAKER = 'екран'
 
 
 class PrivacyError(Exception):
-    """Перевірку не вдалося виконати — нічого з перевірюваного не віддаємо."""
+    """The check could not be performed — nothing of what is being checked is given out."""
 
 
 def visual_mode() -> str:
     raw = settings.env('RECALL_MCP_VISUAL').strip().lower()
     if raw in MODES:
         return raw
-    logger.warning("RECALL_MCP_VISUAL=%r невідомий — візуальне через MCP вимкнено (off)", raw)
+    logger.warning("RECALL_MCP_VISUAL=%r is unknown — visual via MCP disabled (off)", raw)
     return 'off'
 
 
@@ -49,7 +49,7 @@ def words_file() -> str:
 
 
 def stop_words() -> list[str]:
-    """Слова з private.txt; файла нема — стоп-слів нема. Нечитабельний файл — PrivacyError."""
+    """Words from private.txt; no file — no stop words. An unreadable file — PrivacyError."""
     path = words_file()
     if not os.path.exists(path):
         return []
@@ -57,7 +57,7 @@ def stop_words() -> list[str]:
         with open(path, encoding='utf-8-sig') as f:
             lines = f.read().splitlines()
     except (OSError, UnicodeDecodeError) as e:
-        raise PrivacyError(f'private.txt не читається: {e}') from e
+        raise PrivacyError(f'private.txt is not readable: {e}') from e
     return [w.strip().casefold() for w in lines if w.strip() and not w.strip().startswith('#')]
 
 
@@ -70,7 +70,7 @@ def has_stop_word(text: Optional[str], words: Optional[list[str]] = None) -> boo
 
 
 def private_category_ids(conn) -> set[int]:
-    """id вузлів із назвою зі стоп-листа + усі їхні нащадки."""
+    """Ids of nodes whose name is in the stop list + all their descendants."""
     names = set(private_category_names())
     if not names:
         return set()
@@ -90,7 +90,7 @@ def private_category_ids(conn) -> set[int]:
 
 
 def private_tids(db_path: str, tids: Iterable[int]) -> set[int]:
-    """Які з записів лежать у приватному напрямку. Збій БД → PrivacyError."""
+    """Which of the records lie in a private direction. DB failure → PrivacyError."""
     tids = sorted({int(t) for t in tids if t is not None})
     if not tids:
         return set()
@@ -107,14 +107,14 @@ def private_tids(db_path: str, tids: Iterable[int]) -> set[int]:
                     f'SELECT id FROM transcriptions WHERE id IN ({q}) AND category_id IN '
                     f'({",".join("?" * len(cats))})', [*part, *sorted(cats)]))
             return out
-    except Exception as e:  # noqa: BLE001 — будь-який збій перевірки = приховати
-        logger.warning("privacy: напрямок не перевірено (%s) — приховую", e)
+    except Exception as e:  # noqa: BLE001 — any check failure = hide
+        logger.warning("privacy: direction not verified (%s) — hiding", e)
         raise PrivacyError(str(e)) from e
 
 
 def screen_chunk_allowed(chunk: dict, private: set, words: list[str], mode: str) -> bool:
-    """Чанк із тексту з екрана (speaker='екран') можна віддати через MCP?
-    Інші чанки фільтр не стосується."""
+    """May a chunk from on-screen text (speaker='екран') be given out via MCP?
+    Other chunks are not affected by the filter."""
     if (chunk.get('speaker') or '') != SCREEN_SPEAKER:
         return True
     if mode == 'off':
@@ -125,7 +125,7 @@ def screen_chunk_allowed(chunk: dict, private: set, words: list[str], mode: str)
 
 
 def filter_screen_chunks(db_path: str, chunks: list) -> tuple[list, int]:
-    """→ (дозволені чанки, скільки прибрано). Збій перевірки — прибрати всі екранні."""
+    """→ (allowed chunks, how many removed). Check failure — remove all on-screen ones."""
     screen = [c for c in chunks if (c.get('speaker') or '') == SCREEN_SPEAKER]
     if not screen:
         return chunks, 0

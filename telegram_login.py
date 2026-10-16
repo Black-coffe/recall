@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Phase 17 — одноразовий вхід у Telegram через QR-код (MTProto/Telethon).
+"""Phase 17 — one-time Telegram login via QR code (MTProto/Telethon).
 
-Запуск (потрібна РЕАЛЬНА консоль для вводу пароля 2FA):
-    подвійний клік telegram_login.bat
-    або:  .venv\\Scripts\\python.exe telegram_login.py
+Run (a REAL console is needed to enter the 2FA password):
+    double-click telegram_login.bat
+    or:  .venv\\Scripts\\python.exe telegram_login.py
 
-Чому QR, а не код: код Telegram надсилає у службовий чат «Telegram» (легко не
-помітити, в SMS він НЕ приходить за наявності активної сесії). QR простіше —
-скануєш телефоном і готово. Якщо ввімкнено хмарний пароль (2FA), скрипт спитає
-його в консолі (вводиться локально, нікуди не передається).
+Why QR and not a code: Telegram sends the code to the service chat «Telegram» (easy to
+miss; it does NOT arrive by SMS while an active session exists). QR is simpler:
+scan it with the phone and you are done. If a cloud password (2FA) is enabled, the script asks for
+it in the console (entered locally, sent nowhere).
 
-⚠️ Важливий нюанс Telethon: після QR-логіну `client.sign_in(password=...)` кидає
-ValueError — 2FA треба завершувати низькорівнево (compute_check +
-CheckPasswordRequest), див. _complete_2fa.
+⚠️ Telethon caveat: after a QR login `client.sign_in(password=...)` raises
+ValueError, so 2FA must be completed at a low level (compute_check +
+CheckPasswordRequest), see _complete_2fa.
 
-Передумови: TELEGRAM_API_ID/HASH у .env; pip install telethon qrcode Pillow.
-Після успіху створюється telegram.session — далі Recall (app.py/ярлик) сам
-піднімає слухача. Повторний запуск, якщо вже залогінено, просто це підтвердить.
+Prerequisites: TELEGRAM_API_ID/HASH in .env; pip install telethon qrcode Pillow.
+On success telegram.session is created; after that Recall (app.py / shortcut) starts
+the listener itself. A repeat run when already logged in simply confirms that.
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ def _load_env() -> None:
 
 
 async def _complete_2fa(client, pwd: str) -> None:
-    """Завершити 2FA після QR низькорівнево (client.sign_in(password=) тут кидає
-    ValueError, бо SessionPasswordNeededError прийшов від ExportLoginTokenRequest)."""
+    """Complete 2FA after QR at a low level (client.sign_in(password=) raises here
+    ValueError because SessionPasswordNeededError came from ExportLoginTokenRequest)."""
     from telethon.tl.functions.account import GetPasswordRequest
     from telethon.tl.functions.auth import CheckPasswordRequest
     from telethon.password import compute_check
@@ -58,7 +58,7 @@ async def run(api_id: int, api_hash: str, session: str) -> int:
     await client.connect()
     if await client.is_user_authorized():
         me = await client.get_me()
-        print(f"[OK] Уже залогінено: {me.first_name} (@{me.username}, id={me.id})")
+        print(f"[OK] Already logged in: {me.first_name} (@{me.username}, id={me.id})")
         await client.disconnect()
         return 0
 
@@ -70,40 +70,40 @@ async def run(api_id: int, api_hash: str, session: str) -> int:
 
     _save()
     try:
-        os.startfile(png)                       # Windows: відкрити картинку на екрані
+        os.startfile(png)                       # Windows: open the image on screen
     except Exception:
-        print(f"Відкрий вручну файл з QR: {png}")
-    print("Скануй QR з телефону: Telegram → Налаштування → Пристрої → "
-          "Підключити пристрій")
+        print(f"Open the QR file manually: {png}")
+    print("Scan the QR with your phone: Telegram → Settings → Devices → "
+          "Link Desktop Device")
 
     ok = False
-    for _ in range(12):                          # ~12×25с = до ~5 хв
+    for _ in range(12):                          # ~12×25s = up to ~5 min
         try:
             await qr_login.wait(timeout=25)
             ok = True
             break
         except asyncio.TimeoutError:
             await qr_login.recreate()
-            _save()                              # QR оновився → перезберігаємо картинку
+            _save()                              # QR refreshed → save the image again
         except SessionPasswordNeededError:
-            pwd = input("\nВведіть хмарний пароль Telegram (2FA) і натисніть Enter: ")
+            pwd = input("\nEnter the Telegram cloud password (2FA) and press Enter: ")
             await _complete_2fa(client, pwd)
             ok = True
             break
 
     try:
-        os.remove(png)                           # картинка містить токен — прибираємо
+        os.remove(png)                           # the image contains a token — remove it
     except OSError:
         pass
 
     if ok:
         me = await client.get_me()
-        print(f"\n[OK] Вхід виконано: {me.first_name} (@{me.username}, id={me.id})")
-        print("Сесію збережено. Тепер запускай Recall (ярлик на робочому столі).")
+        print(f"\n[OK] Logged in: {me.first_name} (@{me.username}, id={me.id})")
+        print("Session saved. Now launch Recall (desktop shortcut).")
         await client.disconnect()
         return 0
 
-    print("[!] QR не відскановано вчасно. Закрий вікно і запусти ще раз.")
+    print("[!] QR was not scanned in time. Close the window and run again.")
     await client.disconnect()
     return 1
 
@@ -113,24 +113,24 @@ def main() -> int:
     api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
     api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
     if not api_id or not api_hash:
-        print("[ПОМИЛКА] Немає TELEGRAM_API_ID / TELEGRAM_API_HASH у .env "
-              "(значення з https://my.telegram.org).")
+        print("[ERROR] TELEGRAM_API_ID / TELEGRAM_API_HASH missing in .env "
+              "(values from https://my.telegram.org).")
         return 1
     try:
         api_id_int = int(api_id)
     except ValueError:
-        print(f"[ПОМИЛКА] TELEGRAM_API_ID має бути числом, а не '{api_id}'.")
+        print(f"[ERROR] TELEGRAM_API_ID must be a number, not '{api_id}'.")
         return 1
     try:
         import telethon  # noqa: F401
         import qrcode  # noqa: F401
     except ImportError:
-        print("[ПОМИЛКА] Встанови залежності: "
+        print("[ERROR] Install the dependencies: "
               ".venv\\Scripts\\python.exe -m pip install telethon qrcode Pillow")
         return 1
 
     session = os.environ.get("TELEGRAM_SESSION", "telegram")
-    print(f"Вхід у Telegram через QR (сесія: {session}.session)\n")
+    print(f"Telegram QR login (session: {session}.session)\n")
     return asyncio.run(run(api_id_int, api_hash, session))
 
 

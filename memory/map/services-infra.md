@@ -1,11 +1,11 @@
 # services — infrastructure
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
 - **app/core/i18n.py** (140, not a service, but shared infrastructure; `app/core/i18n_catalog/`) — `LANGS`, `ui_lang_setting()`,
-  `server_lang()`, `request_lang()`, `tr`/`tr_n`, `localize_sse`. An unknown key → returns the key + a warning. `RECALL_UI_LANG`
+  `server_lang()`, `request_lang()`, `tr`/`tr_n`, `localize_sse`. Catalog modules incl. `svc_*` (service texts, 4.17.0; list in `services.md`). An unknown key → returns the key + a warning. `RECALL_UI_LANG`
   is read from `os.environ` on every call. Contract details — `blueprints.md` § i18n, `docs/wiki/ui-language.md`.
 - **job_queue.py** — `JobQueue.submit(kind, fn, meta)` on top of an executor; `Job` (state machine, `is_cancelled()`). Cancel
   is cooperative; history is bounded.

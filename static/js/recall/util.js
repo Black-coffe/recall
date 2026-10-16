@@ -47,10 +47,10 @@
     };
 
     // — Dates / durations —
-    // SQLite CURRENT_TIMESTAMP пише UTC-naive рядок ("YYYY-MM-DD HH:MM:SS").
-    // Позначаємо його як UTC ('Z'), щоб браузер сконвертував у ЛОКАЛЬНИЙ час
-    // (напр. Europe/Kyiv +3). Без 'Z' JS трактує рядок як локальний → час
-    // показується на кілька годин позаду. 'Z' додаємо лише якщо TZ ще нема.
+    // SQLite CURRENT_TIMESTAMP writes a UTC-naive string ("YYYY-MM-DD HH:MM:SS").
+    // We mark it as UTC ('Z') so the browser converts it to LOCAL time
+    // (e.g. Europe/Kyiv +3). Without 'Z' JS treats the string as local → the time
+    // is shown several hours behind. We add 'Z' only if there is no TZ yet.
     function _toLocalDate(s) {
         let str = String(s).replace(' ', 'T');
         if (!/[zZ]$|[+\-]\d{2}:?\d{2}$/.test(str)) str += 'Z';
@@ -80,9 +80,9 @@
         if (h) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
         return `${m}:${String(s).padStart(2,'0')}`;
     };
-    // — Дедлайни (Трек 1). Працюють з ISO-датою 'YYYY-MM-DD' (ai.due_date), яка
-    // вже нормалізована на бекенді. Порівнюємо по КАЛЕНДАРНИХ днях у локальній
-    // зоні, не по мілісекундах: «завтра» має лишатись «завтра» і о 23:59.
+    // — Deadlines (Track 1). Work with the ISO date 'YYYY-MM-DD' (ai.due_date), which is
+    // already normalized on the backend. We compare by CALENDAR days in the local
+    // zone, not by milliseconds: "tomorrow" must stay "tomorrow" even at 23:59.
     function _isoToLocalMidnight(iso) {
         const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
         return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
@@ -101,7 +101,7 @@
         if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return forms[1];
         return forms[2];
     };
-    // «сьогодні» / «завтра» / «за 3 дні» / «3 дні тому» — людською мовою.
+    // "today" / "tomorrow" / "in 3 days" / "3 days ago" — in human language.
     U.fmtDue = function (iso) {
         const n = U.daysUntil(iso);
         if (n == null) return '';
@@ -111,7 +111,7 @@
         if (n > 0) return T('core.due.in', { count: n });
         return T('core.due.ago', { count: -n });
     };
-    // Коротка дата дедлайну: «пн 27.07», з роком якщо не поточний.
+    // Short deadline date: "Mon 27.07", with the year if it is not the current one.
     const _WD = [T('core.wd.sun'), T('core.wd.mon'), T('core.wd.tue'), T('core.wd.wed'), T('core.wd.thu'), T('core.wd.fri'), T('core.wd.sat')];
     U.fmtDueDate = function (iso) {
         const d = _isoToLocalMidnight(iso);
@@ -119,7 +119,7 @@
         const base = `${_WD[d.getDay()]} ${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
         return d.getFullYear() === new Date().getFullYear() ? base : `${base}.${d.getFullYear()}`;
     };
-    // Клас точності дедлайну (Трек 1): наскільки буквально читати дату.
+    // Deadline precision class (Track 1): how literally to read the date.
     U.DUE_PRECISION = {
         day: '', week: T('core.precision.week'), month: T('core.precision.month'), quarter: T('core.precision.quarter'),
         soon: T('core.precision.soon'), event: T('core.precision.event'),
@@ -146,9 +146,9 @@
         telegram: 'fa-brands fa-telegram', library: 'fa-solid fa-compact-disc',
         meeting_archive: 'fa-solid fa-box-archive', copilot: 'fa-solid fa-wand-magic-sparkles',
     };
-    // Статуси задач. У БД вони англійські (open/done/cancelled/stale) — але в
-    // UI показувались сирими, тобто єдиним англійським словом серед українського
-    // інтерфейсу. Один словник на всі три екрани, де задача видима.
+    // Task statuses. In the DB they are English (open/done/cancelled/stale) — but in the
+    // UI they were shown raw, i.e. the only English word among the Ukrainian
+    // interface. One dictionary for all three screens where a task is visible.
     U.TASK_STATUS = { open: T('core.task.open'), done: T('core.task.done'), cancelled: T('core.task.cancelled'), stale: T('core.task.stale') };
     U.taskStatus = function (s) { return U.TASK_STATUS[s] || s || ''; };
 

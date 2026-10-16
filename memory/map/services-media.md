@@ -1,6 +1,6 @@
 # services — media, transcription, dedup
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
@@ -41,7 +41,7 @@ A dictionary of "hard" names for faster-whisper.
 ## Record title and description
 - **record_meta.py** (stdlib + `app.db.connection` — safe from the stdio-MCP) — `TITLE_MAX=200`, `DESCRIPTION_MAX=4000`;
   `normalize_title/description` (empty→`None`; a non-string or too long→`ValueError`), `display_name(row)` (`title` →
-  `source_name` → `Запис #id`), `update_meta(conn, tid, *, title=UNSET, description=UNSET)` (`changed=False` → no UPDATE),
+  `source_name` → "Record #id" via `tr('svc_embed.meta.record_fallback')` (`ValueError` texts are `svc_embed.meta.*` too)), `update_meta(conn, tid, *, title=UNSET, description=UNSET)` (`changed=False` → no UPDATE),
   `after_meta_update(tid, *, changed, db_path)` → lazy `reembed.schedule_record_reembed`.
   `source_name` is provenance, NOT overwritten.
   Consumers: `PATCH /api/history/<id>`, `PATCH /api/audio/downloads/<id>`, `/api/transcribe`, `/api/documents/upload`,

@@ -1,15 +1,15 @@
-"""Три MCP-тулзи до живого дзвінка (історія mcp-live-call-03, контракт C4).
+"""Three MCP tools for a live call (story mcp-live-call-03, contract C4).
 
-`get_live_transcript`/`ask_live` — тонкі HTTP-проксі на C1/C2 (app/blueprints/
-recording.py, app/blueprints/copilot.py) — тут перевіряється лише форма
-виклику `_api` (замокана, без мережі й без app.py). `get_live_copilot` —
-direct-DB: повний потік `copilot_events`, нічого не фільтрує. Несе два поля
-статусу показу: сире `shown` (`payload.shown` на момент персисту — бреше в
-режимі verified_only для `insight_local`, історія 07) і виведений
-`operator_saw` (правда, побудована по ланцюжку `ref_event_id`/`verdict`).
+`get_live_transcript`/`ask_live` are thin HTTP proxies to C1/C2 (app/blueprints/
+recording.py, app/blueprints/copilot.py) — here only the shape of the
+`_api` call is checked (mocked, without network and without app.py). `get_live_copilot` is
+direct-DB: the full stream of `copilot_events`, filters nothing. It carries two
+fields of the show status: the raw `shown` (`payload.shown` at persist time — it lies in
+verified_only mode for `insight_local`, story 07) and the derived
+`operator_saw` (the truth, built from the `ref_event_id`/`verdict` chain).
 
-Офлайн: тимчасова SQLite через `init_database`, без мережі й без важких
-моделей (mcp_server ліниво вантажить torch лише в search_archive).
+Offline: a temporary SQLite via `init_database`, no network and no heavy
+models (mcp_server lazily loads torch only in search_archive).
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def _add_event(conn, copilot_session_id, *, kind, event_id_hint=None,
 
 
 # --------------------------------------------------------------------------
-# Реєстрація й about()
+# Registration and about()
 # --------------------------------------------------------------------------
 
 def test_three_new_tools_registered():
@@ -81,14 +81,14 @@ def test_about_bucket_invariant_holds():
 
 
 # --------------------------------------------------------------------------
-# get_live_copilot — direct-DB, повний потік, без app.py
+# get_live_copilot — direct-DB, the full stream, without app.py
 # --------------------------------------------------------------------------
 
 def test_get_live_copilot_returns_all_kinds_and_derives_operator_saw(db):
-    """Усі 9 видів зі схеми (app/db/migrations.py v19) представлені й
-    оброблені — включно з обома формами `insight_verified` — і `operator_saw`
-    виправляє брехню `shown` для картки, показаної пізніше через ланцюжок
-    `ref_event_id`/`verdict`."""
+    """All 9 kinds from the schema (app/db/migrations.py v19) are present and
+    handled — including both forms of `insight_verified` — and `operator_saw`
+    corrects the lie of `shown` for a card shown later via the
+    `ref_event_id`/`verdict` chain."""
     from app.db.connection import get_db_connection
 
     with get_db_connection(db) as conn:
@@ -102,12 +102,12 @@ def test_get_live_copilot_returns_all_kinds_and_derives_operator_saw(db):
                                    payload={"kind": "fact", "text": "притишено назавжди", "shown": False})
         verified_later_id = _add_event(conn, cs_id, kind="insight_local", source="local", confidence=0.8,
                                        payload={"kind": "fact", "text": "чернетка", "shown": False})
-        # Вердикт ескалації (verified_only): посилається на verified_later_id,
-        # verdict=real, БЕЗ ключа 'shown' — сам по собі не картка.
+        # Escalation verdict (verified_only): refers to verified_later_id,
+        # verdict=real, WITHOUT the 'shown' key — not a card by itself.
         _add_event(conn, cs_id, kind="insight_verified", source="api", confidence=0.9,
                     payload={"ref_event_id": verified_later_id, "verdict": "real",
                              "text": "верифікований текст", "model": "sonnet"})
-        # safety-sweep: інша форма того самого kind, зі своїм 'shown', без ref_event_id.
+        # safety-sweep: another shape of the same kind, with its own 'shown', without ref_event_id.
         _add_event(conn, cs_id, kind="insight_verified", source="api", confidence=0.6,
                     payload={"kind": "fact", "text": "sweep-картка", "shown": True})
         _add_event(conn, cs_id, kind="escalation", source="local")
@@ -133,15 +133,15 @@ def test_get_live_copilot_returns_all_kinds_and_derives_operator_saw(db):
     ev = next(e for e in by_kind["insight_local"] if e["id"] == suppressed_id)
     assert ev["shown"] is False and ev["operator_saw"] is False
 
-    # payload.shown=False, але verified_only таки показав пізніше — shown
-    # лишається сирим (False), operator_saw виправляє брехню на True.
+    # payload.shown=False, but verified_only showed it later after all — shown
+    # stays raw (False), operator_saw corrects the lie to True.
     ev = next(e for e in by_kind["insight_local"] if e["id"] == verified_later_id)
     assert ev["shown"] is False
     assert ev["operator_saw"] is True
 
     verdict_records = [e for e in by_kind["insight_verified"] if "ref_event_id" in e["payload"]]
     assert len(verdict_records) == 1
-    # Немає 'shown' у payload → не видається за притишене (не False, а None).
+    # No 'shown' in the payload → not passed off as muted (not False, but None).
     assert verdict_records[0]["shown"] is None
     assert verdict_records[0]["operator_saw"] is None
 
@@ -150,7 +150,7 @@ def test_get_live_copilot_returns_all_kinds_and_derives_operator_saw(db):
     assert sweep_cards[0]["shown"] is True
     assert sweep_cards[0]["operator_saw"] is True
 
-    # Види без картки несуть None в обох полях, а не вигаданий True/False.
+    # Kinds without a card carry None in both fields, not an invented True/False.
     for kind in ("topic_shift", "topic_return", "retrieval", "escalation",
                 "operator_action", "usage", "safety_sweep"):
         for e in by_kind[kind]:
@@ -194,8 +194,8 @@ def test_get_live_copilot_since_event_id_and_truncation(db):
         ids = [r[0] for r in conn.execute(
             "SELECT id FROM copilot_events WHERE copilot_session_id = ? ORDER BY id", (cs_id,)
         ).fetchall()]
-    # 6 подій пропущено через since_event_id → залишок (LIMIT - 1) менший за
-    # потолок, тобто НЕ обрізається.
+    # 6 events skipped via since_event_id → the remainder (LIMIT - 1) is smaller than
+    # the ceiling, i.e. NOT truncated.
     cursor_id = ids[5]
 
     since_first = m.get_live_copilot(session_id="rec_trunc", since_event_id=cursor_id)
@@ -220,9 +220,9 @@ def test_get_live_copilot_kinds_filter(db):
 
 
 def test_get_live_copilot_session_id_none_resolves_via_active_recording(db, monkeypatch):
-    """`session_id=None` розв'язується через те саме джерело, що й
-    `get_live_transcript` (`/api/recordings/active`) — а не просто «найновіша
-    active-сесія в БД» (та, зависла від впалого процесу, тут не бере участі)."""
+    """`session_id=None` resolves via the same source as
+    `get_live_transcript` (`/api/recordings/active`) — and not simply "the newest
+    active session in the DB" (the one hung from a crashed process does not take part here)."""
     from app.db.connection import get_db_connection
 
     with get_db_connection(db) as conn:
@@ -248,8 +248,8 @@ def test_get_live_copilot_session_id_none_resolves_via_active_recording(db, monk
 
 
 def test_get_live_copilot_app_py_no_active_ignores_stale_db_session(db, monkeypatch):
-    """app.py каже «немає активного запису» — зависла `status='active'`
-    copilot-сесія впалого процесу НЕ підміняє цю відповідь."""
+    """app.py says "there is no active recording" — a hung `status='active'`
+    copilot session of a crashed process does NOT replace this answer."""
     from app.db.connection import get_db_connection
 
     with get_db_connection(db) as conn:
@@ -263,7 +263,7 @@ def test_get_live_copilot_app_py_no_active_ignores_stale_db_session(db, monkeypa
     out = m.get_live_copilot()
     assert out["available"] is False
     assert out["session_id"] is None
-    assert out["reason"] == "немає активної сесії запису"
+    assert out["reason"] == "no active recording session"
 
 
 def test_get_live_copilot_no_session_found_degrades(db):
@@ -275,10 +275,10 @@ def test_get_live_copilot_no_session_found_degrades(db):
 
 
 def test_get_live_copilot_falls_back_to_db_when_app_py_down(db, monkeypatch):
-    """app.py недосяжний — тулза лишається живою (direct-DB фолбек), і каже
-    про це чесно `session_resolution`. Перевіряється властивість, яку додає
-    сама тулза (fallback-резолюція + повідомлення), а не echo фейкового `_api`
-    (фейк тут узагалі не повертає ні session_id, ні подій)."""
+    """app.py is unreachable — the tool stays alive (direct-DB fallback), and says
+    so honestly via `session_resolution`. What is checked is the property added by
+    the tool itself (fallback resolution + message), not an echo of the fake `_api`
+    (the fake does not return a session_id or events at all)."""
     from app.db.connection import get_db_connection
 
     with get_db_connection(db) as conn:
@@ -287,7 +287,7 @@ def test_get_live_copilot_falls_back_to_db_when_app_py_down(db, monkeypatch):
         conn.commit()
 
     def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
-        return {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."}
+        return {"error": "Recall (app.py) is not running at http://127.0.0.1:5050."}
 
     monkeypatch.setattr(m, "_api", fake_api)
     out = m.get_live_copilot()
@@ -299,16 +299,16 @@ def test_get_live_copilot_falls_back_to_db_when_app_py_down(db, monkeypatch):
 
 def test_get_live_copilot_no_active_session_at_all(db, monkeypatch):
     monkeypatch.setattr(m, "_api", lambda *a, **kw:
-                        {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."})
+                        {"error": "Recall (app.py) is not running at http://127.0.0.1:5050."})
     out = m.get_live_copilot()
     assert out["available"] is False
     assert out["events"] == []
 
 
 def test_get_live_copilot_works_without_app_py(db, monkeypatch):
-    """Явний `session_id` — жодного HTTP-виклику."""
+    """An explicit `session_id` — no HTTP call at all."""
     def _boom(*a, **kw):
-        raise AssertionError("get_live_copilot не має ходити по мережі")
+        raise AssertionError("get_live_copilot must not go over the network")
 
     monkeypatch.setattr(m, "_api", _boom)
     out = m.get_live_copilot(session_id="rec_offline")
@@ -316,7 +316,7 @@ def test_get_live_copilot_works_without_app_py(db, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# get_live_transcript — прокси на C1
+# get_live_transcript — proxy to C1
 # --------------------------------------------------------------------------
 
 def test_get_live_transcript_proxies_with_explicit_session(monkeypatch):
@@ -334,24 +334,24 @@ def test_get_live_transcript_proxies_with_explicit_session(monkeypatch):
 
 
 def test_get_live_transcript_has_no_lossy_time_param():
-    """Story 10: `since_sec` губить сегменти повільнішої доріжки при
-    опитуванні по часу — на MCP-поверхні його не має бути зовсім, лише
-    `since_seq`-курсор."""
+    """Story 10: `since_sec` loses segments of the slower track when
+    polling by time — it must not exist on the MCP surface at all, only the
+    `since_seq` cursor."""
     params = set(inspect.signature(m.get_live_transcript).parameters)
     assert "since_sec" not in params
     assert "since_seq" in params
 
 
 def test_get_live_transcript_proxies_since_seq_and_returns_next_seq_verbatim(monkeypatch):
-    """Курсор має пробрасуватись у параметри запиту, а `next_seq` — повертатись
-    саме те значення, що видав ендпоінт, без перерахунку тулзою (Story 09)."""
+    """The cursor must be passed into the request parameters, and `next_seq` must be returned
+    as exactly the value the endpoint gave, without recomputation by the tool (Story 09)."""
     calls = []
 
     def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
         calls.append((method, path, params))
-        # next_seq свідомо НЕ дорівнює max(seq) виданих сегментів — так тест
-        # ловить перерахунок курсору тулзою (заборонено Non-goals історії),
-        # а не просто ехо максимуму з segments.
+        # next_seq deliberately does NOT equal max(seq) of the returned segments — this way the test
+        # catches the tool recomputing the cursor (forbidden by the story's Non-goals),
+        # not just an echo of the maximum from segments.
         return {"success": True, "session_id": "rec_1", "available": True,
                 "segments": [{"seq": 41, "start": 1.0, "text": "..."}],
                 "count": 1, "next_seq": 17, "truncated": True}
@@ -392,16 +392,16 @@ def test_get_live_transcript_no_active_session_degrades_gracefully(monkeypatch):
 
 def test_get_live_transcript_app_down_returns_error_not_raise(monkeypatch):
     def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
-        return {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."}
+        return {"error": "Recall (app.py) is not running at http://127.0.0.1:5050."}
 
     monkeypatch.setattr(m, "_api", fake_api)
     out = m.get_live_transcript()
     assert out["available"] is False
-    assert "не запущений" in out["reason"]
+    assert "is not running" in out["reason"]
 
 
 # --------------------------------------------------------------------------
-# ask_live — прокси на C2
+# ask_live — proxy to C2
 # --------------------------------------------------------------------------
 
 def test_ask_live_proxies_body(monkeypatch):
@@ -427,7 +427,7 @@ def test_ask_live_default_scope_and_session():
 
 def test_ask_live_app_down_returns_error_not_raise(monkeypatch):
     def fake_api(method, path, *, params=None, body=None, write=False, timeout=60.0):
-        return {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."}
+        return {"error": "Recall (app.py) is not running at http://127.0.0.1:5050."}
 
     monkeypatch.setattr(m, "_api", fake_api)
     out = m.ask_live("питання")
@@ -435,7 +435,7 @@ def test_ask_live_app_down_returns_error_not_raise(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# get_active_recording — доповнені поля (copilot_session_id/copilot_active/
+# get_active_recording — added fields (copilot_session_id/copilot_active/
 # live_transcript_available)
 # --------------------------------------------------------------------------
 
@@ -476,7 +476,7 @@ def test_get_active_recording_no_copilot_session_defaults(db, monkeypatch):
         if path == "/api/recordings/active":
             return {"success": True, "active": True, "session_id": "rec_no_copilot"}
         return {"success": True, "session_id": "rec_no_copilot", "available": False,
-                "reason": "live-прев'ю для цієї сесії недоступне", "segments": [], "count": 0}
+                "reason": "the live preview for this session is unavailable", "segments": [], "count": 0}
 
     monkeypatch.setattr(m, "_api", fake_api)
     out = m.get_active_recording()
@@ -486,8 +486,8 @@ def test_get_active_recording_no_copilot_session_defaults(db, monkeypatch):
 
 
 def test_get_active_recording_db_locked_degrades_instead_of_raising(db, monkeypatch):
-    """`copilot_sessions`-лукап падає (БД заблокована довше busy_timeout) —
-    тулза й далі повертає відповідь про активний запис, а не кидає виключення."""
+    """The `copilot_sessions` lookup fails (DB locked longer than busy_timeout) —
+    the tool still returns the answer about the active recording instead of raising."""
     import sqlite3 as _sqlite3
 
     class _BoomConn:
@@ -515,7 +515,7 @@ def test_get_active_recording_db_locked_degrades_instead_of_raising(db, monkeypa
 
 
 # --------------------------------------------------------------------------
-# Правило неоднозначності (C7, ADR-026 D4): кілька записів — не вгадуємо
+# Ambiguity rule (C7, ADR-026 D4): several recordings — we do not guess
 # --------------------------------------------------------------------------
 
 _TWO = {"success": True, "active": True, "count": 2, "session_id": None, "state": None,
@@ -607,7 +607,7 @@ def test_single_session_resolves_both_shapes(active, monkeypatch):
     assert calls[1][0] == "/api/recording/rec_1/live-transcript"
     calls.clear()
     m.ask_live("q")
-    # розв'язана локально сесія передається явно
+    # the locally resolved session is passed explicitly
     assert calls[1] == ("/api/copilot/live-ask",
                         {"question": "q", "session_id": "rec_1", "scope": "both"})
 
@@ -621,9 +621,9 @@ def test_zero_sessions_is_todays_unavailable(active, db, monkeypatch):
     calls = []
     monkeypatch.setattr(m, "_api", _only_active(active, calls))
     out = m.get_live_transcript()
-    assert out["available"] is False and out["reason"] == "немає активної сесії запису"
+    assert out["available"] is False and out["reason"] == "no active recording session"
     out = m.get_live_copilot()
-    assert out["available"] is False and out["reason"] == "немає активної сесії запису"
+    assert out["available"] is False and out["reason"] == "no active recording session"
 
 
 def test_ask_live_passes_server_ambiguity_through(monkeypatch):
@@ -663,7 +663,7 @@ def test_get_active_recording_one_session_adds_count(db, monkeypatch):
 
 
 def _app_down(*a, **kw):
-    return {"error": "Recall (app.py) не запущений на http://127.0.0.1:5050."}
+    return {"error": "Recall (app.py) is not running at http://127.0.0.1:5050."}
 
 
 def test_live_copilot_db_fallback_two_active_is_ambiguous(db, monkeypatch):

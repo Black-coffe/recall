@@ -1,4 +1,4 @@
-"""Каталог серверних текстів: область capture (recording, youtube, copilot blueprints)."""
+"""Catalog of server texts: the capture area (recording, youtube, copilot blueprints)."""
 MESSAGES: dict = {
     # --- youtube ---
     "capture.yt.err.no_url": {"uk": "URL не вказано", "en": "URL not provided"},

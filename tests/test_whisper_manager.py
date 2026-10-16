@@ -1,16 +1,16 @@
-"""Юніт-тести ModernWhisperManager (whisper_manager_new.py) — T7.5.
+"""Unit tests of ModernWhisperManager (whisper_manager_new.py) — T7.5.
 
-Офлайн, БЕЗ реального інференсу/GPU: instance.  _backend підміняється фейком
-(протокол WhisperBackend: load/unload/transcribe/supports_batched), тож
-жодна реальна модель не тягнеться і не вантажиться на GPU/CPU. Покриває:
-  - LRU-кеш моделей (_evict_to_fit): евікшн найстарішої, cache-hit не
-    рахується новим load, touch на cache-hit переносить у MRU-кінець.
-  - Валідація невідомої моделі (без мережевих запитів до HF).
-  - Семафор інференсу (_inference_semaphore): дефолт серіалізує паралельні
-    transcribe_with_progress; WHISPER_MAX_PARALLEL=N дозволяє N одночасних.
+Offline, WITHOUT real inference/GPU: the instance._backend is replaced by a fake
+(the WhisperBackend protocol: load/unload/transcribe/supports_batched), so
+no real model is pulled in or loaded onto GPU/CPU. Covers:
+  - The model LRU cache (_evict_to_fit): eviction of the oldest, a cache hit is not
+    counted as a new load, a touch on a cache hit moves it to the MRU end.
+  - Validation of an unknown model (without network requests to HF).
+  - The inference semaphore (_inference_semaphore): the default serializes parallel
+    transcribe_with_progress; WHISPER_MAX_PARALLEL=N allows N at once.
 
-torch у venv є (CUDA доступна на цій машині), але тест форсує force_cpu=True
-і НІЧОГО реального на GPU не запускає — увесь "інференс" іде через фейк-бекенд.
+torch is in the venv (CUDA is available on this machine), but the test forces force_cpu=True
+and runs NOTHING real on the GPU — all "inference" goes through the fake backend.
 """
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ from whisper_manager_new import FasterWhisperBackend, ModernWhisperManager
 
 
 # ============================================================
-# Fake backend (протокол WhisperBackend, без реальної моделі)
+# Fake backend (the WhisperBackend protocol, without a real model)
 # ============================================================
 
 class FakeBackend:
-    """Мінімальний фейк-бекенд: не торкається GPU/файлової системи моделей."""
+    """Minimal fake backend: does not touch the GPU/model file system."""
 
     name = "fake"
 
@@ -57,23 +57,23 @@ class FakeBackend:
 
 @pytest.fixture()
 def manager():
-    """force_cpu=True — уникаємо будь-якого реального CUDA-детекту в шляхах,
-    що нас не цікавлять; _backend одразу підмінено фейком (LRU/семафор-логіка
-    в ModernWhisperManager не залежить від конкретного backend)."""
+    """force_cpu=True — avoid any real CUDA detection on paths
+    we are not interested in; _backend is replaced by the fake right away (the LRU/semaphore logic
+    in ModernWhisperManager does not depend on a specific backend)."""
     m = ModernWhisperManager(force_cpu=True)
     m._backend = FakeBackend()
     return m
 
 
 # ============================================================
-# LRU-кеш моделей
+# Model LRU cache
 # ============================================================
 
 def test_load_model_caches_and_does_not_reload_on_cache_hit(manager):
     h1 = manager.load_model("tiny")
     h2 = manager.load_model("tiny")
     assert h1 == h2 == "handle:tiny"
-    assert manager._backend.load_calls == ["tiny"]  # лише 1 реальне завантаження
+    assert manager._backend.load_calls == ["tiny"]  # only 1 real load
     assert manager.current_model_name == "tiny"
 
 
@@ -81,7 +81,7 @@ def test_load_model_lru_evicts_least_recently_used(manager):
     manager._cache_size = 2
     manager.load_model("tiny")
     manager.load_model("small")
-    manager.load_model("medium")  # має витіснити "tiny" (найстаріший)
+    manager.load_model("medium")  # must evict "tiny" (the oldest)
 
     assert "tiny" not in manager._models
     assert set(manager._models.keys()) == {"small", "medium"}
@@ -92,8 +92,8 @@ def test_load_model_cache_hit_touches_lru_order(manager):
     manager._cache_size = 2
     manager.load_model("tiny")
     manager.load_model("small")
-    manager.load_model("tiny")   # cache-hit → "tiny" переїжджає у MRU-кінець
-    manager.load_model("medium")  # тепер має витіснитись "small", НЕ "tiny"
+    manager.load_model("tiny")   # cache hit → "tiny" moves to the MRU end
+    manager.load_model("medium")  # now "small" must be evicted, NOT "tiny"
 
     assert "tiny" in manager._models
     assert "small" not in manager._models
@@ -111,7 +111,7 @@ def test_load_model_no_eviction_while_under_cache_size(manager):
 def test_load_model_unknown_model_returns_none_without_backend_call(manager):
     result = manager.load_model("no-such-model-xyz")
     assert result is None
-    assert manager._backend.load_calls == []  # невалідне ім'я відсіяно ДО виклику backend
+    assert manager._backend.load_calls == []  # an invalid name is filtered out BEFORE the backend call
     assert manager.current_model_name is None
 
 
@@ -121,7 +121,7 @@ def test_load_model_rejects_non_string_name(manager):
 
 
 # ============================================================
-# Семафор інференсу
+# Inference semaphore
 # ============================================================
 
 def _make_manager_with_env(monkeypatch, max_parallel, transcribe_fn):
@@ -131,7 +131,7 @@ def _make_manager_with_env(monkeypatch, max_parallel, transcribe_fn):
         monkeypatch.setenv("WHISPER_MAX_PARALLEL", str(max_parallel))
     m = ModernWhisperManager(force_cpu=True)
     m._backend = FakeBackend(transcribe_fn=transcribe_fn)
-    m._get_duration_ffprobe = lambda audio_path: 1.0  # уникаємо реального ffprobe/pydub
+    m._get_duration_ffprobe = lambda audio_path: 1.0  # avoid a real ffprobe/pydub
     return m
 
 
@@ -148,8 +148,8 @@ def test_semaphore_env_override_sets_value(monkeypatch):
 
 
 def test_semaphore_serializes_concurrent_transcriptions_by_default(monkeypatch, tmp_path: Path):
-    """WHISPER_MAX_PARALLEL=1 (дефолт): дві паралельні transcribe_with_progress
-    НІКОЛИ не мають одночасно виконувати backend.transcribe."""
+    """WHISPER_MAX_PARALLEL=1 (default): two parallel transcribe_with_progress
+    calls must NEVER run backend.transcribe at the same time."""
     lock = threading.Lock()
     active = 0
     max_active_seen = 0
@@ -182,18 +182,18 @@ def test_semaphore_serializes_concurrent_transcriptions_by_default(monkeypatch, 
     t1.join(timeout=5)
     t2.join(timeout=5)
 
-    assert max_active_seen == 1, "семафор=1 мав повністю серіалізувати обидва виклики"
+    assert max_active_seen == 1, "semaphore=1 should have fully serialized both calls"
     assert "error" not in results["a"] and "error" not in results["b"]
 
 
 def test_semaphore_env_override_allows_true_concurrency(monkeypatch, tmp_path: Path):
-    """WHISPER_MAX_PARALLEL=2: дозволяє РІВНО стільки одночасних transcribe.
-    Детерміновано доводимо через Barrier — якщо семафор регресує до 1, обидва
-    потоки застрягнуть на бар'єрі й transcribe поверне помилку (тест впаде)."""
+    """WHISPER_MAX_PARALLEL=2: allows EXACTLY that many concurrent transcribes.
+    We prove it deterministically via a Barrier — if the semaphore regresses to 1, both
+    threads get stuck on the barrier and transcribe returns an error (the test fails)."""
     barrier = threading.Barrier(2, timeout=3)
 
     def transcribe_fn(handle, audio_path, language, task, progress_callback=None):
-        barrier.wait()  # обидва потоки мають дістатись сюди ОДНОЧАСНО
+        barrier.wait()  # both threads must get here AT THE SAME TIME
         return {"text": "ok", "segments": [], "language": language}
 
     m = _make_manager_with_env(monkeypatch, 2, transcribe_fn)
@@ -219,7 +219,7 @@ def test_semaphore_env_override_allows_true_concurrency(monkeypatch, tmp_path: P
 
 
 # ============================================================
-# reset_cuda — виважений smoke-тест (не має падати без CUDA-моделей у кеші)
+# reset_cuda — a measured smoke test (must not fail without CUDA models in the cache)
 # ============================================================
 
 def test_reset_cuda_clears_model_cache(manager):
@@ -232,14 +232,14 @@ def test_reset_cuda_clears_model_cache(manager):
 
 
 # ============================================================
-# K1: decode_options → faster-whisper (послідовний і batched виклик)
+# K1: decode_options → faster-whisper (sequential and batched call)
 # ============================================================
 
-BUDGET = 448 // 2 - 1  # max_length // 2 - 1 — межа hotwords/prompt у faster-whisper
+BUDGET = 448 // 2 - 1  # max_length // 2 - 1 — the hotwords/prompt limit in faster-whisper
 
 
 class _FakeTokenizer:
-    """1 токен на слово: «Імʼя1, Імʼя2» → 2 токени."""
+    """1 token per word: "Імʼя1, Імʼя2" → 2 tokens."""
 
     def encode(self, text, add_special_tokens=False):
         return types.SimpleNamespace(ids=[0] * len(text.split()))
@@ -270,7 +270,7 @@ class _FakePipeline:
 
 @pytest.fixture()
 def faster(tmp_path: Path):
-    """Справжній FasterWhisperBackend із фейковою моделлю (без GPU і ваг)."""
+    """The real FasterWhisperBackend with a fake model (without GPU and weights)."""
     backend = FasterWhisperBackend()
     backend._BatchedInferencePipeline = _FakePipeline
     _FakePipeline.calls = []
@@ -309,7 +309,7 @@ def test_names_cut_at_name_boundary_within_budget(faster, duration):
     text = faster(duration, {"hotwords": names})["hotwords"]
     assert len(_FakeTokenizer().encode(" " + text).ids) <= BUDGET
     kept = text.split(", ")
-    assert kept == names[:len(kept)], "лише цілі імена, порядок рангу збережено"
+    assert kept == names[:len(kept)], "only whole names, rank order preserved"
     assert len(kept) == BUDGET
 
 
@@ -328,8 +328,8 @@ def test_chunk_length_never_reaches_sequential(faster):
 @pytest.mark.parametrize("duration", [SEQ, BATCHED])
 @pytest.mark.parametrize("language", ["uk", "ru", "en"])
 def test_explicit_language_is_never_overridden_by_multilingual(faster, duration, language):
-    """4.8.1, рішення власника: «uk» означає uk. multilingual у faster-whisper перекриває задану
-    мову на кожному вікні, а заміряли його лише на змішаних дзвінках — тому тільки для «auto»."""
+    """4.8.1, owner's decision: "uk" means uk. multilingual in faster-whisper overrides the given
+    language on every window, and it was measured only on mixed calls — so only for "auto"."""
     kwargs = faster(duration, {"multilingual": True}, language=language)
     assert "multilingual" not in kwargs
     assert kwargs["language"] == language
@@ -353,11 +353,11 @@ def test_without_decode_options_call_is_unchanged(faster, decode_options):
 
 
 # ============================================================
-# Ремонт раунду 1: промпт hotwords + попередній контекст
+# Repair round 1: hotwords prompt + previous context
 # ============================================================
 
 class _PromptTokenizer:
-    """Мінімум, який читає справжній faster_whisper get_prompt."""
+    """The minimum that the real faster_whisper get_prompt reads."""
 
     sot_prev = 1
     sot_sequence = (2, 3, 4)
@@ -376,13 +376,13 @@ def _prompt_len(kwargs, previous_tokens):
 
 
 def test_sequential_hotwords_never_overflow_decoding_length(faster):
-    """Повний словник (223 токени) + 223 токени попереднього тексту — це 449 > 448, CTranslate2
-    падає й транскрипція губиться. Послідовний шлях із hotwords не тягне попередній текст."""
+    """The full vocabulary (223 tokens) + 223 tokens of previous text is 449 > 448, CTranslate2
+    fails and the transcription is lost. The sequential path with hotwords does not pull in previous text."""
     kwargs = faster(SEQ, {"hotwords": [f"Імʼя{i}" for i in range(300)]})
     assert kwargs["condition_on_previous_text"] is False
     previous = [] if kwargs["condition_on_previous_text"] is False else [0] * 223
-    assert _prompt_len(kwargs, previous) <= 448 - 200, "лишається бюджет на текст вікна"
-    assert _prompt_len(kwargs, [0] * 223) > 448, "без скидання контексту промпт переповнюється"
+    assert _prompt_len(kwargs, previous) <= 448 - 200, "budget is left for the window text"
+    assert _prompt_len(kwargs, [0] * 223) > 448, "without a context reset the prompt overflows"
 
 
 def test_batched_and_initial_prompt_keep_previous_text_default(faster):

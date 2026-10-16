@@ -1,12 +1,12 @@
-"""Тести «тихішого» копілота (Трек 3): бюджет карток + верифікація до показу.
+"""Tests of the "quieter" copilot (Track 3): card budget + verification before display.
 
-Привід (заміри на 80 реальних сесіях): 5743 локальних інсайти ≈ 72 картки за
-дзвінок, з них Claude перевірив 5.9%, а оператор не відреагував ЖОДНОГО разу
-(operator_action = NULL у всіх 9706 подіях при робочих кнопках 👍/👎). Тобто
-проблема не в браку сигналів, а в їх кількості й недоведеності.
+The cause (measurements on 80 real sessions): 5743 local insights ≈ 72 cards per
+call, of which Claude verified 5.9%, and the operator reacted NOT ONCE
+(operator_action = NULL in all 9706 events with working 👍/👎 buttons). So
+the problem is not a lack of signals but their number and lack of proof.
 
-Тут перевіряємо саме контракт показу, без мережі й GPU: воркер зі підставними
-диспетчером/ескалатором/сервісом.
+Here we check exactly the display contract, without network and GPU: a worker with stub
+dispatcher/escalator/service.
 """
 from __future__ import annotations
 
@@ -68,10 +68,10 @@ CHUNKS = {"c1": {"chunk_id": "c1", "transcription_id": 7, "source_name": "Дзв
 
 
 def test_local_mode_shows_anchored_insight():
-    """Без API (лише локально) копілот НЕ мовчить — інакше деградація зла."""
+    """Without the API (local only) the copilot does NOT go silent — otherwise the degradation is evil."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
-    cfg = cp_config.resolve_settings({"importance": "low"})   # api вимкнено
+    cfg = cp_config.resolve_settings({"importance": "low"})   # api disabled
     assert cfg["verified_only"] is False
     ws = _ws(cfg)
 
@@ -84,24 +84,24 @@ def test_card_budget_stops_after_limit():
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     cfg = cp_config.resolve_settings({"importance": "low", "mode": "light"})
-    cfg["min_card_gap_sec"] = 0        # тут перевіряємо саме бюджет
+    cfg["min_card_gap_sec"] = 0        # here we test exactly the budget
     ws = _ws(cfg)
 
     for i in range(6):
         w._process_insight(ws, 0, _insight(text=f"інсайт {i}"), CHUNKS, "профіль")
 
     assert cfg["max_cards"] == 3
-    assert len(broker.cards()) == 3, "понад бюджет карток не показуємо"
+    assert len(broker.cards()) == 3, "we do not show cards beyond the budget"
     assert ws.cards_suppressed == 3
-    # Усі шість лишились в історії сесії — притишене не зникає, а йде в пост-бриф.
+    # All six stayed in the session history — the muted does not vanish, it goes to the post-brief.
     assert len([e for e in svc.logged if e["kind"] == "insight_local"]) == 6
-    # Оператору один раз сказали, що стало тихо (щоб не читалось як «зламався»).
+    # The operator was told once that it got quiet (so it is not read as "it broke").
     quiet = [s for s in broker.statuses() if s.get("reason") == "card_budget"]
     assert len(quiet) == 1
 
 
 def test_min_gap_spreads_cards_over_call():
-    """Пауза між картками окремо від бюджету: інакше все вилітає в перші хвилини."""
+    """The pause between cards is separate from the budget: otherwise everything flies out in the first minutes."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     cfg = cp_config.resolve_settings({"importance": "low"})
@@ -112,7 +112,7 @@ def test_min_gap_spreads_cards_over_call():
     w._process_insight(ws, 0, _insight("другий"), CHUNKS, "профіль")
     assert len(broker.cards()) == 1
 
-    ws.last_card_ts = time.monotonic() - 1000     # пауза минула
+    ws.last_card_ts = time.monotonic() - 1000     # the pause has passed
     w._process_insight(ws, 0, _insight("третій"), CHUNKS, "профіль")
     assert len(broker.cards()) == 2
 
@@ -149,7 +149,7 @@ def test_verified_only_shows_card_after_real_verdict():
     cards = broker.cards()
     assert len(cards) == 1
     assert cards[0]["source"] == "api" and cards[0]["verdict"] == "real"
-    assert cards[0]["text"] == "Claude: підтверджено", "показуємо вердикт, а не чернетку локалки"
+    assert cards[0]["text"] == "Claude: підтверджено", "we show the verdict, not the local draft"
     assert cards[0]["evidence"][0]["source_name"] == "Дзвінок"
 
 
@@ -162,14 +162,14 @@ def test_verified_only_hides_unconfirmed(verdict):
 
     w._process_insight(ws, 0, _insight(), CHUNKS, "профіль")
 
-    assert broker.cards() == [], f"вердикт {verdict} не показуємо оператору"
+    assert broker.cards() == [], f"we do not show the {verdict} verdict to the operator"
     assert ws.cards_suppressed == 1
-    # але подія збережена — пост-колл розбір її побачить
+    # but the event is saved — the post-call review will see it
     assert any(e["kind"] == "insight_local" for e in svc.logged)
 
 
 def test_verified_only_skips_insight_below_escalation_bar():
-    """Низька впевненість локалки не витрачає виклик Claude і не стає карткою."""
+    """Low confidence of the local model does not spend a Claude call and does not become a card."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     esc = _Escalator()
@@ -182,16 +182,16 @@ def test_verified_only_skips_insight_below_escalation_bar():
 
 
 def test_verified_only_degrades_when_api_dies_midcall():
-    """Бюджет вичерпано посеред дзвінка → повертаємось до локальних карток."""
+    """The budget is exhausted mid-call → we return to local cards."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     w._escalator = _Escalator()
     ws = _api_ws()
-    ws.budget_exhausted = True          # API більше недоступний
+    ws.budget_exhausted = True          # the API is no longer available
 
     w._process_insight(ws, 0, _insight(), CHUNKS, "профіль")
 
-    assert len(broker.cards()) == 1, "мовчання гірше за неперевірену, але анкоровану картку"
+    assert len(broker.cards()) == 1, "silence is worse than an unverified but anchored card"
     assert broker.cards()[0]["source"] == "local"
 
 
@@ -206,16 +206,16 @@ def test_gate_reports_reason():
 
 
 # ---------------------------------------------------------------------------
-# Історія 25: скоуп-тезка («Маркетинг» у двох напрямках) — видимо оператору,
-# не мовчки розширюємо пошук на весь архів на всю сесію.
+# Story 25: a namesake scope ("Маркетинг" in two directions) — visible to the operator,
+# we do not silently widen the search to the whole archive for the whole session.
 # ---------------------------------------------------------------------------
 
 _AMBIGUOUS_PATHS = ["Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
 
 
 def test_scope_ambiguous_notifies_operator_with_both_paths(monkeypatch, caplog):
-    """Раунд 6 мажор 1: канал — наявний шлях інсайту (log_event + copilot_insight
-    з shown=true), НЕ окремий copilot_status; поза бюджетом карток."""
+    """Round 6 major 1: the channel is the existing insight path (log_event + copilot_insight
+    with shown=true), NOT a separate copilot_status; outside the card budget."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     ws = _ws({"scope_projects": ["Маркетинг"]})
@@ -228,10 +228,10 @@ def test_scope_ambiguous_notifies_operator_with_both_paths(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         result = w._scope_entity_ids(ws, "dummy.db")
 
-    assert result is None, "тезка — пошук БЕЗ звуження, як not-found"
+    assert result is None, "namesake — search WITHOUT narrowing, as with not-found"
     assert any(all(p in rec.message for p in _AMBIGUOUS_PATHS) for rec in caplog.records)
 
-    # Жодного copilot_status зі state:quiet для цього випадку.
+    # No copilot_status with state:quiet for this case.
     assert broker.statuses() == []
 
     cards = broker.cards()
@@ -241,11 +241,11 @@ def test_scope_ambiguous_notifies_operator_with_both_paths(monkeypatch, caplog):
     assert notice["candidates"] == _AMBIGUOUS_PATHS
     assert "кількох напрямках" in notice["text"]
 
-    # Бюджет карток/гейт не займає (не пройшло через _card_gate/_count_card).
+    # It does not take the card budget/gate (it did not pass through _card_gate/_count_card).
     assert ws.cards_shown == 0
 
-    # Персиститься в історію сесії (get_state()/MCP get_live_copilot/таймлайн
-    # бачать її через log_event, не лише SSE).
+    # It is persisted into the session history (get_state()/MCP get_live_copilot/timeline
+    # see it via log_event, not only SSE).
     assert len(svc.logged) == 1
     logged = svc.logged[0]
     assert logged["kind"] == "insight_local"
@@ -255,8 +255,8 @@ def test_scope_ambiguous_notifies_operator_with_both_paths(monkeypatch, caplog):
 
 
 def test_scope_ambiguous_notice_not_repeated_when_cache_does_not_save_you(monkeypatch):
-    """Мінор 7 р0: прапорець сам не дає дубля, доведено з очищеним кешем
-    ws._scope_ids — інакше тест не доводить, що рятує саме прапорець."""
+    """Minor 7 r0: the flag alone prevents a duplicate, proven with a cleared cache
+    ws._scope_ids — otherwise the test does not prove that exactly the flag saves."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     ws = _ws({"scope_projects": ["Маркетинг"]})
@@ -269,16 +269,16 @@ def test_scope_ambiguous_notice_not_repeated_when_cache_does_not_save_you(monkey
     w._scope_entity_ids(ws, "dummy.db")
     assert len(broker.cards()) == 1
 
-    # Кеш скоупу знято — без прапорця другий тік знову дійшов би до
-    # scope_filter_ids і опублікував би другу картку.
+    # The scope cache is cleared — without the flag the second tick would again reach
+    # scope_filter_ids and publish a second card.
     ws._scope_ids = None
     w._scope_entity_ids(ws, "dummy.db")
 
-    assert len(broker.cards()) == 1, "прапорець, а не кеш, не дає дубля"
+    assert len(broker.cards()) == 1, "the flag, not the cache, prevents the duplicate"
 
 
 def test_scope_not_found_only_warns_no_notice(monkeypatch):
-    """Скоуп, якого немає в архіві (не тезка) — як раніше: WARNING без повідомлення."""
+    """A scope that is not in the archive (not a namesake) — as before: WARNING without a message."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     ws = _ws({"scope_projects": ["Невідомий Проєкт"]})
@@ -289,17 +289,17 @@ def test_scope_not_found_only_warns_no_notice(monkeypatch):
 
     assert result is None
     assert broker.statuses() == []
-    assert broker.cards() == [], "not-found не повідомляє про тезок"
+    assert broker.cards() == [], "not-found does not report namesakes"
 
 
 def test_scope_other_exception_behaves_as_before(monkeypatch):
-    """Інший виняток зі scope_filter_ids — як раніше: без повідомлення оператору."""
+    """Another exception from scope_filter_ids — as before: no message to the operator."""
     broker, svc = _Broker(), _Svc()
     w = _worker(broker, svc)
     ws = _ws({"scope_projects": ["Маркетинг"]})
 
     def _raise(db_path, names):
-        raise RuntimeError("боляче")
+        raise RuntimeError("ouch")
 
     monkeypatch.setattr("app.services.scope.scope_filter_ids", _raise)
 
@@ -311,9 +311,9 @@ def test_scope_other_exception_behaves_as_before(monkeypatch):
 
 
 def test_scope_notice_excluded_from_rag_reingest_digest():
-    """Реінджест у RAG (notes_digest) бере лише фіксовані групи інсайтів
-    (contradiction/fact/question/clarification) — scope_notice туди не
-    потрапляє, навіть якщо в подіях сесії він лежить поряд з ними."""
+    """Re-ingest into RAG (notes_digest) takes only the fixed groups of insights
+    (contradiction/fact/question/clarification) — scope_notice does not
+    get there, even if in the session events it lies next to them."""
     from app.services.copilot import export as cp_export
 
     events = [

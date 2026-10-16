@@ -1,9 +1,9 @@
-"""Тести allowlist коренів для /api/documents/import-folder (T1.3, Волна 1).
+"""Tests of the allowlist of roots for /api/documents/import-folder (T1.3, Wave 1).
 
-Лёгкі — реєструємо documents_bp у мінімальному Flask app (без app.py/DB),
-за зразком tests/test_recording_blueprint.py. Мокаємо state.job_queue,
-щоб не чіпати справжню чергу задач. RECALL_IMPORT_ROOTS підмінюється через
-monkeypatch.setenv — не через .env файл проєкту.
+Light — we register documents_bp in a minimal Flask app (without app.py/DB),
+following the tests/test_recording_blueprint.py pattern. We mock state.job_queue
+so as not to touch the real task queue. RECALL_IMPORT_ROOTS is substituted via
+monkeypatch.setenv — not via the project's .env file.
 """
 from __future__ import annotations
 
@@ -73,8 +73,8 @@ class TestImportFolderAllowlist:
 
         r = client.post("/api/documents/import-folder", json={"path": str(inside_folder)})
 
-        # Проходить гейт allowlist і далі летить у звичайну логіку (job_queue
-        # замоканий) — 200 зі started=True, НЕ 403.
+        # Passes the allowlist gate and goes on into the ordinary logic (job_queue
+        # is mocked) — 200 with started=True, NOT 403.
         assert r.status_code == 200
         body = r.get_json()
         assert body["success"] is True
@@ -95,8 +95,8 @@ class TestImportFolderAllowlist:
         assert r.get_json()["success"] is True
 
     def test_sibling_dir_with_matching_prefix_rejected(self, client, tmp_path, monkeypatch):
-        # allowed = ".../allowed", candidate = ".../allowed_evil/..." — голий
-        # startswith хибно пропустив би це; safe_path_within_any має відхилити.
+        # allowed = ".../allowed", candidate = ".../allowed_evil/..." — a bare
+        # startswith would wrongly let this through; safe_path_within_any must reject.
         allowed_root = tmp_path / "allowed"
         allowed_root.mkdir()
         monkeypatch.setenv("RECALL_IMPORT_ROOTS", str(allowed_root))

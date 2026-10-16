@@ -1,7 +1,7 @@
-"""Тести парсера документів (Phase 16A).
+"""Document parser tests (Phase 16A).
 
-Лёгкі, без torch/GPU/живої БД — працюють на тимчасових файлах. Безпечні навіть
-під час активного запису/транскрибації.
+Lightweight, no torch/GPU/live DB - they work on temporary files. Safe even
+during active recording/transcription.
 """
 import importlib
 
@@ -43,7 +43,7 @@ def test_normalize_collapses_blank_lines(tmp_path):
 
 
 def test_filename_override_determines_type(tmp_path):
-    # фізичний шлях .dat, але filename вказує .md → парситься як текст
+    # the physical path is .dat, but filename says .md → parsed as text
     p = tmp_path / "blob.dat"
     p.write_text("просто текст", encoding="utf-8")
     res = dp.parse_document(str(p), filename="real.md")
@@ -51,7 +51,7 @@ def test_filename_override_determines_type(tmp_path):
 
 
 # ============================================================
-# DOCX (python-docx у базових deps)
+# DOCX (python-docx is in the base deps)
 # ============================================================
 
 def test_parse_docx(tmp_path):
@@ -71,14 +71,14 @@ def test_parse_docx(tmp_path):
     assert res["doc_type"] == "docx"
     assert "Розділ перший" in res["text"]
     assert "Тіло параграфа" in res["text"]
-    # таблиця → markdown
+    # table → markdown
     assert "| Ключ | Значення |" in res["text"]
     assert "| ціна | 100 |" in res["text"]
     assert "---" in res["text"]
 
 
 # ============================================================
-# Помилки / краєві випадки
+# Errors / edge cases
 # ============================================================
 
 def test_unsupported_extension_raises(tmp_path):
@@ -110,7 +110,7 @@ def test_is_supported():
 
 
 def test_text_formats_have_no_blocks(tmp_path):
-    # md/txt/docx структури не мають → blocks=None (чанкінг падає на текстовий)
+    # md/txt/docx have no structure → blocks=None (chunking falls back to the text)
     p = tmp_path / "n.md"
     p.write_text("# H\n\nтекст", encoding="utf-8")
     res = dp.parse_document(str(p))
@@ -125,11 +125,11 @@ def test_content_hash_deterministic():
 
 
 # ============================================================
-# PDF — залежить від наявності PyMuPDF
+# PDF - depends on PyMuPDF being present
 # ============================================================
 
 def test_pdf_parser_behavior(tmp_path):
-    """Якщо PyMuPDF стоїть — парсимо згенерований PDF; інакше ParserUnavailable."""
+    """If PyMuPDF is installed - parse a generated PDF; otherwise ParserUnavailable."""
     has_fitz = importlib.util.find_spec("fitz") is not None
     p = tmp_path / "doc.pdf"
     if not has_fitz:
@@ -138,8 +138,8 @@ def test_pdf_parser_behavior(tmp_path):
             dp.parse_document(str(p))
         return
 
-    # ASCII-текст: дефолтний base-14 шрифт fitz не має кириличних гліфів
-    # (insert_text видав би «крапки»). Реальні PDF вбудовують шрифти.
+    # ASCII text: the default base-14 fitz font has no Cyrillic glyphs
+    # (insert_text would produce "dots"). Real PDFs embed fonts.
     import fitz
     doc = fitz.open()
     for txt in ("Hello from page one", "Second page content"):
@@ -151,7 +151,7 @@ def test_pdf_parser_behavior(tmp_path):
     assert res["doc_type"] == "pdf"
     assert res["page_count"] == 2
     assert "Hello" in res["text"]
-    # Phase 16B: блоки сторінок з провенансом
+    # Phase 16B: page blocks with provenance
     blocks = res["blocks"]
     assert blocks and len(blocks) == 2
     assert [b["page"] for b in blocks] == [1, 2]
@@ -159,7 +159,7 @@ def test_pdf_parser_behavior(tmp_path):
 
 
 def test_parse_pptx_blocks(tmp_path):
-    """PPTX → блоки слайдів з page+section(title) + нотатки доповідача."""
+    """PPTX → slide blocks with page+section(title) + speaker notes."""
     pptx = pytest.importorskip("pptx")
     from pptx import Presentation
     p = tmp_path / "deck.pptx"
@@ -181,10 +181,10 @@ def test_parse_pptx_blocks(tmp_path):
 
 
 def test_pptx_unavailable_raises(tmp_path, monkeypatch):
-    """Якщо python-pptx не встановлено — ParserUnavailable (graceful)."""
+    """If python-pptx is not installed - ParserUnavailable (graceful)."""
     import importlib
     if importlib.util.find_spec("pptx") is not None:
-        pytest.skip("python-pptx встановлено — гілку недоступності не перевірити")
+        pytest.skip("python-pptx is installed - cannot check the unavailable branch")
     p = tmp_path / "deck.pptx"
     p.write_bytes(b"PK\x03\x04 fake pptx")
     with pytest.raises(dp.ParserUnavailable):
@@ -192,7 +192,7 @@ def test_pptx_unavailable_raises(tmp_path, monkeypatch):
 
 
 # ============================================================
-# Таблиці: CSV / XLSX (Phase 16C)
+# Tables: CSV / XLSX (Phase 16C)
 # ============================================================
 
 def test_parse_csv_blocks(tmp_path):
@@ -217,8 +217,8 @@ def test_parse_csv_semicolon_delimiter(tmp_path):
 
 def test_rows_to_markdown_escapes_pipe():
     md, nrows, ncols = dp._rows_to_markdown([["a|b", "c"], ["1", "2"]])
-    assert "a\\|b" in md          # pipe екранований
-    assert "| --- | --- |" in md  # роздільник заголовка
+    assert "a\\|b" in md          # pipe escaped
+    assert "| --- | --- |" in md  # header separator
     assert nrows == 2 and ncols == 2
 
 
@@ -229,7 +229,7 @@ def test_md_cell_collapses_whitespace_and_newlines():
 
 
 def test_parse_xlsx_blocks(tmp_path):
-    """XLSX → блоки аркушів з section=назва аркуша + markdown-таблиця."""
+    """XLSX → sheet blocks with section=sheet name + markdown table."""
     pytest.importorskip("openpyxl")
     from openpyxl import Workbook
     p = tmp_path / "book.xlsx"
@@ -259,7 +259,7 @@ def test_parse_xlsx_blocks(tmp_path):
 def test_xlsx_unavailable_raises(tmp_path):
     import importlib
     if importlib.util.find_spec("openpyxl") is not None:
-        pytest.skip("openpyxl встановлено — гілку недоступності не перевірити")
+        pytest.skip("openpyxl is installed - cannot check the unavailable branch")
     p = tmp_path / "book.xlsx"
     p.write_bytes(b"PK\x03\x04 fake xlsx")
     with pytest.raises(dp.ParserUnavailable):
@@ -267,7 +267,7 @@ def test_xlsx_unavailable_raises(tmp_path):
 
 
 # ============================================================
-# OCR: зображення (Phase 16D)
+# OCR: images (Phase 16D)
 # ============================================================
 
 def test_ocr_available_returns_bool():
@@ -277,7 +277,7 @@ def test_ocr_available_returns_bool():
 
 def test_image_without_ocr_raises(tmp_path):
     if dp.ocr_available():
-        pytest.skip("OCR доступний — гілку недоступності не перевірити")
+        pytest.skip("OCR is available - cannot check the unavailable branch")
     p = tmp_path / "scan.png"
     p.write_bytes(b"\x89PNG\r\n\x1a\n fake")
     with pytest.raises(dp.ParserUnavailable):
@@ -285,9 +285,9 @@ def test_image_without_ocr_raises(tmp_path):
 
 
 def test_ocr_image_roundtrip(tmp_path):
-    """Happy-path OCR: рендеримо текст у зображення і розпізнаємо. Skip без OCR."""
+    """Happy-path OCR: render text into an image and recognize it. Skipped without OCR."""
     if not dp.ocr_available():
-        pytest.skip("OCR недоступний (немає pytesseract/tesseract)")
+        pytest.skip("OCR is unavailable (no pytesseract/tesseract)")
     from PIL import Image, ImageDraw
     p = tmp_path / "scan.png"
     img = Image.new("RGB", (480, 120), "white")

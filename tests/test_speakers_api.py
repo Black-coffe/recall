@@ -1,8 +1,8 @@
-"""Tests для API спікерів (Phase 10.4).
+"""Tests for the speakers API (Phase 10.4).
 
-Використовуємо isolated Flask app з тільки speakers_bp + tmp DB
-для швидких тестів. Повний smoke-flow проганяється у test_endpoints_smoke
-через registered blueprint.
+We use an isolated Flask app with only speakers_bp + a tmp DB
+for fast tests. The full smoke flow is run in test_endpoints_smoke
+through the registered blueprint.
 """
 from __future__ import annotations
 
@@ -35,38 +35,38 @@ class TestListSpeakers:
         data = r.get_json()
         names = [s['name'] for s in data['speakers']]
         assert 'Ви' in names
-        # is_self для seeded
+        # is_self for the seeded one
         self_row = next(s for s in data['speakers'] if s['name'] == 'Ви')
         assert self_row['is_self'] is True
 
     def test_autocomplete_starts_with_filter(self, client):
-        # Створимо кілька спікерів
+        # Create several speakers
         for name in ('Андрій', 'Анна', 'Богдан', 'Анастасія'):
             client.post('/api/speakers', json={'name': name})
 
         r = client.get('/api/speakers?q=Ан')
         names = [s['name'] for s in r.get_json()['speakers']]
-        # Cyrillic case-folding: 'Ан' має матчити Андрій, Анна, Анастасія
+        # Cyrillic case-folding: 'Ан' must match «Андрій», «Анна», «Анастасія»
         assert set(names) == {'Андрій', 'Анна', 'Анастасія'}
         assert 'Богдан' not in names
 
     def test_autocomplete_case_insensitive_cyrillic(self, client):
         client.post('/api/speakers', json={'name': 'Андрій'})
 
-        # 'ан' lowercase має знайти Андрій
+        # 'ан' lowercase must find «Андрій»
         r = client.get('/api/speakers?q=ан')
         names = [s['name'] for s in r.get_json()['speakers']]
         assert 'Андрій' in names
 
     def test_sort_by_usage_count_desc(self, client):
-        # Створюємо двох + бамп usage в одного
+        # Create two + bump usage on one
         rA = client.post('/api/speakers', json={'name': 'Ada'})
         rB = client.post('/api/speakers', json={'name': 'Bob'})
         ada_id = rA.get_json()['speaker']['id']
-        # Створимо transcription і прив'яжемо Ada — це інкрементує usage
-        # Робимо через PATCH endpoint щоб usage_count зріс
-        # Спочатку треба transcription, але в цьому тестовому додатку немає.
-        # Тому просто оновимо вручну через connection.
+        # Create a transcription and bind Ada - this increments usage
+        # We do it through the PATCH endpoint so that usage_count grows
+        # First a transcription is needed, but this test app has none.
+        # So we just update it manually through the connection.
         from app.db.connection import get_db_connection
         with get_db_connection(client.application.config['DATABASE']) as conn:
             conn.execute(
@@ -76,7 +76,7 @@ class TestListSpeakers:
 
         r = client.get('/api/speakers?q=')
         names = [s['name'] for s in r.get_json()['speakers']]
-        # Ada з usage=5 має бути перед Bob з usage=0 (Ви sorting variable)
+        # Ada with usage=5 must come before Bob with usage=0 (the 'Ви' sorting variable)
         assert names.index('Ada') < names.index('Bob')
 
 
@@ -120,7 +120,7 @@ class TestCreateSpeaker:
 
     def test_name_normalized(self, client):
         r = client.post('/api/speakers', json={'name': '  Слава   Ка   '})
-        # Внутрішні множинні пробіли → один, trim країв
+        # Internal multiple spaces → one, edges trimmed
         assert r.get_json()['speaker']['name'] == 'Слава Ка'
 
 
@@ -154,7 +154,7 @@ class TestUpdateSpeaker:
     def test_rename_to_same_name_ok(self, client):
         rc = client.post('/api/speakers', json={'name': 'Slava'})
         sid = rc.get_json()['speaker']['id']
-        # Той самий case → нічого не змінюється, але і не падає
+        # The same case → nothing changes, but it does not fail either
         r = client.put(f'/api/speakers/{sid}', json={'name': 'Slava'})
         assert r.status_code == 200
 
@@ -172,13 +172,13 @@ class TestDeleteSpeaker:
         r = client.delete(f'/api/speakers/{sid}')
         assert r.status_code == 200
 
-        # Підтверджуємо що його немає у списку
+        # Confirm that it is not in the list
         r2 = client.get('/api/speakers')
         names = [s['name'] for s in r2.get_json()['speakers']]
         assert 'Temp' not in names
 
     def test_cannot_delete_self(self, client):
-        # Знаходимо seeded "Ви"
+        # Find the seeded "Ви"
         r = client.get('/api/speakers')
         self_id = next(s for s in r.get_json()['speakers'] if s['is_self'])['id']
 
@@ -220,30 +220,30 @@ class TestPatchTranscriptionSpeakers:
 
     def test_existing_speaker_reused_and_usage_incremented(self, client):
         tid = self._create_transcription(client)
-        # Створимо спікера наперед
+        # Create the speaker in advance
         rc = client.post('/api/speakers', json={'name': 'Адам'})
         adam_id = rc.get_json()['speaker']['id']
 
-        # Mapping використовує існуюче ім'я
+        # The mapping uses an existing name
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': 'адам'}},  # case insensitive
         )
 
-        # speaker_id має бути той самий
+        # speaker_id must be the same
         r = client.get('/api/speakers?q=Ад')
         adam_row = next(s for s in r.get_json()['speakers'] if s['name'] == 'Адам')
         assert adam_row['id'] == adam_id
-        assert adam_row['usage_count'] == 1  # інкремент
+        assert adam_row['usage_count'] == 1  # increment
 
     def test_clear_mapping_with_null(self, client):
         tid = self._create_transcription(client)
-        # Спочатку прив'яжемо
+        # First bind
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': 'X'}},
         )
-        # Тепер очистимо
+        # Now clear
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': None}},
@@ -259,7 +259,7 @@ class TestPatchTranscriptionSpeakers:
         )
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
-            json={'mapping': {'SPEAKER_00': '  '}},  # тільки whitespace
+            json={'mapping': {'SPEAKER_00': '  '}},  # whitespace only
         )
         speakers = {s['raw_label']: s for s in r.get_json()['speakers']}
         assert speakers['SPEAKER_00']['speaker_id'] is None
@@ -281,12 +281,12 @@ class TestPatchTranscriptionSpeakers:
 
     def test_overwrite_existing_mapping(self, client):
         tid = self._create_transcription(client)
-        # Першай прив'язка → "Спікер A"
+        # First binding → "Спікер A"
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': 'Перший'}},
         )
-        # Друга → "Спікер B" (заміна)
+        # Second → "Спікер B" (replacement)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': 'Другий'}},

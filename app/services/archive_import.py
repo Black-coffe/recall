@@ -1,16 +1,16 @@
-"""Імпорт корпусу meeting_archive у Whisper (Phase 13D).
+"""Import of the meeting_archive corpus into Whisper (Phase 13D).
 
-Бере markdown-файли мітингів зі старого проєкту meeting_archive (структура
-`MM_YYYY/YYYY-MM-DD_*.md` з YAML-frontmatter від /indexer) і заливає їх як
-транскрипти Whisper. Після імпорту вони стають у чергу на авто-enrich (Claude
-card) + embed (вектори) — як і нативні транскрипції.
+Takes the meeting markdown files from the old meeting_archive project (the structure
+`MM_YYYY/YYYY-MM-DD_*.md` with YAML frontmatter from /indexer) and loads them as
+Whisper transcripts. After the import they are queued for auto-enrich (Claude
+card) + embed (vectors) - like native transcriptions.
 
-Тіло markdown (вже структуроване Claude-веб при їх workflow) кладеться у
-transcript_text. meeting_date парситься з імені файлу. Frontmatter (summary/tags)
-прибирається — наш пайплайн генерує власні структуровані дані.
+The markdown body (already structured by Claude web in their workflow) goes into
+transcript_text. meeting_date is parsed from the file name. The frontmatter (summary/tags)
+is removed - our pipeline generates its own structured data.
 
-Ідемпотентність: source_url = абсолютний шлях .md; повторний імпорт пропускає
-вже залиті файли.
+Idempotency: source_url = the absolute path of the .md; a repeated import skips
+files that are already loaded.
 """
 from __future__ import annotations
 
@@ -25,12 +25,12 @@ from app.db.connection import get_db_connection
 logger = logging.getLogger(__name__)
 
 _DIR_RE = re.compile(r"^\d{2}_\d{4}$")          # 01_2026, 12_2025
-_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")    # у назві файлу
+_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")    # in the file name
 SOURCE_TYPE = "meeting_archive"
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
-    """Відділити YAML-frontmatter (--- ... ---) від тіла. Повертає (meta, body)."""
+    """Split the YAML frontmatter (--- ... ---) from the body. Returns (meta, body)."""
     if not text.startswith("---"):
         return {}, text
     lines = text.split("\n")
@@ -43,7 +43,7 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def _parse_frontmatter(fm: str) -> dict:
-    """Легкий парс summary + tags (без повного YAML)."""
+    """Light parse of summary + tags (without full YAML)."""
     meta: dict = {}
     for line in fm.split("\n"):
         if line.startswith("summary:"):
@@ -63,7 +63,7 @@ def _title_from_body(body: str, fallback: str) -> str:
 
 
 def parse_markdown_file(path: str) -> dict:
-    """Розпарсити один .md → {title, meeting_date, body, meta}."""
+    """Parse a single .md → {title, meeting_date, body, meta}."""
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
     meta, body = _split_frontmatter(text)
@@ -76,7 +76,7 @@ def parse_markdown_file(path: str) -> dict:
 
 
 def find_meeting_files(root: str) -> list[str]:
-    """Усі .md у директоріях формату MM_YYYY (як scope /indexer)."""
+    """All .md files in directories of the MM_YYYY format (like the /indexer scope)."""
     found: list[str] = []
     if not os.path.isdir(root):
         return found
@@ -90,7 +90,7 @@ def find_meeting_files(root: str) -> list[str]:
 
 
 def import_directory(db_path: str, root: str) -> dict:
-    """Залити всі мітинг-файли з root. Idempotent (skip за source_url=абс.шлях).
+    """Load all meeting files from root. Idempotent (skip by source_url=absolute path).
 
     Returns {"found", "imported", "skipped", "ids": [...]}.
     """
@@ -102,8 +102,8 @@ def import_directory(db_path: str, root: str) -> dict:
         c = conn.cursor()
         for path in files:
             abspath = os.path.abspath(path)
-            # T4.6: soft-deleted не рахується дублем — дозволяємо повторний
-            # import того самого файлу, якщо попередній запис видалено.
+            # T4.6: a soft-deleted one does not count as a duplicate - allow a repeated
+            # import of the same file if the previous record was deleted.
             exists = c.execute(
                 "SELECT id FROM transcriptions WHERE source_type = ? AND source_url = ? "
                 "AND deleted_at IS NULL",
@@ -115,7 +115,7 @@ def import_directory(db_path: str, root: str) -> dict:
             try:
                 parsed = parse_markdown_file(path)
             except Exception as e:
-                logger.warning("[import] не вдалось розпарсити %s: %s", path, e)
+                logger.warning("[import] failed to parse %s: %s", path, e)
                 skipped += 1
                 continue
             if not parsed["body"].strip():

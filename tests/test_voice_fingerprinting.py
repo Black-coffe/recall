@@ -1,10 +1,10 @@
-"""Tests для voice fingerprinting (Phase 10.6).
+"""Tests for voice fingerprinting (Phase 10.6).
 
-Покриття:
+Coverage:
 - Pure-Python helpers: cosine_similarity, embedding_to_blob/blob_to_embedding,
   average_embeddings, find_matching_speaker
-- Міграція v7 (embedding column у map)
-- Не вантажимо pyannote — embedding це просто list[float] для тестів.
+- Migration v7 (embedding column in the map)
+- We do not load pyannote - the embedding is just a list[float] for the tests.
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class TestEmbeddingSerialization:
         assert len(b512) == 4 + 512 * 4
 
     def test_can_handle_typical_pyannote_dim(self):
-        # pyannote/wespeaker-voxceleb-resnet34-LM має 256-dim embeddings
+        # pyannote/wespeaker-voxceleb-resnet34-LM has 256-dim embeddings
         original = [float(i) / 256 for i in range(256)]
         blob = embedding_to_blob(original)
         restored = blob_to_embedding(blob)
@@ -102,7 +102,7 @@ class TestEmbeddingSerialization:
 
 class TestAverageEmbeddings:
     def test_first_assignment_normalizes_b(self):
-        # a=None → результат = L2-normalize(b)
+        # a=None → result = L2-normalize(b)
         b = [3.0, 4.0]  # length 5
         result = average_embeddings(None, b)
         # Norm should be 1.0
@@ -122,11 +122,11 @@ class TestAverageEmbeddings:
         a = [1.0, 0.0]
         b = [0.0, 1.0]
         result = average_embeddings(a, b, weight_a=99.0, weight_b=1.0)
-        # Result повинен бути ближче до a ніж до b
+        # The result must be closer to a than to b
         assert result[0] > result[1]
 
     def test_dim_mismatch_raises(self):
-        with pytest.raises(ValueError, match='Розмірності'):
+        with pytest.raises(ValueError, match='dimensions do not match'):
             average_embeddings([1.0, 2.0], [1.0])
 
 
@@ -181,7 +181,7 @@ class TestFindMatchingSpeaker:
         assert result[0] == 2
 
     def test_default_threshold_constant_reasonable(self):
-        # Sanity check: default не занадто низький (false-positive) і не високий (no-match)
+        # Sanity check: the default is not too low (false-positive) and not too high (no-match)
         assert 0.7 <= DEFAULT_MATCH_THRESHOLD <= 0.85
 
 
@@ -211,7 +211,7 @@ class TestMigrationV7:
 
         conn = sqlite3.connect(db)
         try:
-            # Створюємо transcription
+            # Create a transcription
             conn.execute(
                 "INSERT INTO transcriptions (source_type, source_name) VALUES ('file', 'a.mp3')"
             )
@@ -253,7 +253,7 @@ class TestMigrationV7:
 # ---------------------------------------------------------------- integration
 
 class TestVoiceFingerprintingFlow:
-    """End-to-end test через PATCH endpoint з реальним Flask app."""
+    """End-to-end test through the PATCH endpoint with a real Flask app."""
 
     @pytest.fixture
     def client(self, tmp_path: Path):
@@ -268,7 +268,7 @@ class TestVoiceFingerprintingFlow:
         return app.test_client()
 
     def _create_transcription_with_embedding(self, client, raw_label='SPEAKER_00', embedding=None):
-        """Helper: створює transcription + map row з embedding."""
+        """Helper: creates a transcription + a map row with an embedding."""
         from app.db.connection import get_db_connection
         with get_db_connection(client.application.config['DATABASE']) as conn:
             c = conn.cursor()
@@ -287,18 +287,18 @@ class TestVoiceFingerprintingFlow:
             return tid
 
     def test_patch_saves_embedding_to_speaker(self, client):
-        # Симулюємо що diarization зберіг embedding для SPEAKER_00
+        # Simulate that diarization saved the embedding for SPEAKER_00
         emb = [0.5, 0.3, 0.7, 0.2]
         tid = self._create_transcription_with_embedding(client, embedding=emb)
 
-        # User іменує "Андрій"
+        # The user names "Андрій"
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
             json={'mapping': {'SPEAKER_00': 'Андрій'}},
         )
         assert r.status_code == 200
 
-        # Перевіряємо що embedding потрапив у speakers.embedding
+        # Check that the embedding landed in speakers.embedding
         from app.db.connection import get_db_connection
         with get_db_connection(client.application.config['DATABASE']) as conn:
             row = conn.execute(
@@ -306,7 +306,7 @@ class TestVoiceFingerprintingFlow:
             ).fetchone()
             assert row['embedding'] is not None
             stored = blob_to_embedding(row['embedding'])
-            # На першому assignment це L2-normalized version of emb
+            # On the first assignment this is the L2-normalized version of emb
             norm = sum(x * x for x in stored) ** 0.5
             assert norm == pytest.approx(1.0)
 
@@ -319,7 +319,7 @@ class TestVoiceFingerprintingFlow:
         client.patch(f'/api/transcriptions/{tid1}/speakers',
                      json={'mapping': {'SPEAKER_00': 'X'}})
 
-        # Second call з іншим embedding для того ж імені
+        # Second call with a different embedding for the same name
         tid2 = self._create_transcription_with_embedding(client, embedding=emb_v2)
         client.patch(f'/api/transcriptions/{tid2}/speakers',
                      json={'mapping': {'SPEAKER_00': 'X'}})
@@ -331,13 +331,13 @@ class TestVoiceFingerprintingFlow:
             ).fetchone()
             assert row['usage_count'] == 2
             stored = blob_to_embedding(row['embedding'])
-            # Після двох усереднених — компоненти ≈ рівні (0.71, 0.71, 0)
+            # After two averaged - the components are ≈ equal (0.71, 0.71, 0)
             assert stored[0] > 0
             assert stored[1] > 0
             assert stored[2] == pytest.approx(0.0, abs=1e-5)
 
     def test_patch_without_embedding_doesnt_crash(self, client):
-        """Якщо embedding=NULL у map (стара транскрипція до v7) — PATCH не падає."""
+        """If embedding=NULL in the map (an old transcription before v7) - PATCH does not fail."""
         tid = self._create_transcription_with_embedding(client, embedding=None)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',

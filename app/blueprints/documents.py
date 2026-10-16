@@ -1,19 +1,19 @@
-"""Підвантаження документів у RAG-архів (Phase 16A–16E).
+"""Loading documents into the RAG archive (Phase 16A–16E).
 
-- POST /api/documents/upload            — файл → текст → transcriptions
-- POST /api/documents/<id>/reparse      — переразібрати збережений оригінал (16E)
-- POST /api/documents/import-folder     — масовий імпорт з папки (фоновий job, 16E)
+- POST /api/documents/upload            - file → text → transcriptions
+- POST /api/documents/<id>/reparse      - re-parse the stored original (16E)
+- POST /api/documents/import-folder     - bulk import from a folder (background job, 16E)
 
-Документ зберігається як ОРИГІНАЛ (file_path) + розібраний текст у transcript_text
-з source_type='document'. Далі переіспользується ТОЙ САМИЙ фоновий enrichment-job,
-що й для аудіо-транскрипцій (chunk+embed локально + Claude-картка) — тож документ
-одразу стає повноцінним учасником RAG-пошуку, графа сутностей і напрямків.
+The document is stored as the ORIGINAL (file_path) + the parsed text in transcript_text
+with source_type='document'. Then the SAME background enrichment job is reused
+as for audio transcriptions (chunk+embed locally + Claude card) - so the document
+immediately becomes a full participant of RAG search, the entity graph and directions.
 
-Дедуп (16E): повторне завантаження того самого вмісту (content_hash) не створює
-дубль — повертається наявний запис (override через form 'force').
+Dedup (16E): re-uploading the same content (content_hash) does not create a
+duplicate - the existing record is returned (override via the form field 'force').
 
-Список/перегляд документів — через існуючі /api/history та /api/history/<id>
-(фільтр source_type='document').
+Listing/viewing documents goes through the existing /api/history and /api/history/<id>
+(filter source_type='document').
 """
 from __future__ import annotations
 
@@ -49,11 +49,11 @@ def _conn(db_path: str):
 
 
 # ============================================================
-# Опис таблиць (Phase 16C)
+# Table description (Phase 16C)
 # ============================================================
 
 def _table_preview(md: str, max_lines: int = 30) -> str:
-    """Зразок markdown-таблиці (заголовок + перші рядки) для опису через Claude."""
+    """A markdown table sample (header + first rows) for a Claude description."""
     lines = (md or "").splitlines()
     out = "\n".join(lines[:max_lines])
     if len(lines) > max_lines:
@@ -62,10 +62,10 @@ def _table_preview(md: str, max_lines: int = 30) -> str:
 
 
 def _describe_tabular(parsed: dict) -> int:
-    """Phase 16C: для xlsx/csv домішати NL-опис кожного аркуша (Claude) у текст
-    блоку — щоб таблиця стала знаходимою семантично. Мутує parsed (blocks + text).
-    Опційно: без ANTHROPIC_API_KEY або при помилці — лишаються тільки таблиці.
-    Returns к-сть аркушів, для яких згенеровано опис."""
+    """Phase 16C: for xlsx/csv mix an NL description of each sheet (Claude) into the text
+    of the block - so the table becomes semantically findable. Mutates parsed (blocks + text).
+    Optional: without ANTHROPIC_API_KEY or on error - only the tables remain.
+    Returns the number of sheets for which a description was generated."""
     blocks = parsed.get("blocks")
     if not blocks or parsed.get("doc_type") not in ("xlsx", "csv"):
         return 0
@@ -79,7 +79,7 @@ def _describe_tabular(parsed: dict) -> int:
         } for b in blocks]
         descs = text_polishing.describe_sheets(sheets).get("descriptions") or []
     except Exception as e:
-        logger.warning("describe_sheets не вдалось (продовжую з таблицями): %s", e)
+        logger.warning("describe_sheets failed (continuing with the tables): %s", e)
         return 0
 
     described = 0
@@ -98,7 +98,7 @@ def _describe_tabular(parsed: dict) -> int:
 
 
 # ============================================================
-# Спільні хелпери (upload / reparse / import)
+# Shared helpers (upload / reparse / import)
 # ============================================================
 
 def _structure_json(parsed: dict):
@@ -107,13 +107,13 @@ def _structure_json(parsed: dict):
 
 
 def _find_duplicate(db_path: str, content_hash: str):
-    """Існуючий документ з тим самим content_hash (дедуп, 16E). None якщо немає."""
+    """An existing document with the same content_hash (dedup, 16E). None if there is none."""
     if not content_hash:
         return None
     with _conn(db_path) as conn:
-        # T4.6: soft-deleted не рахується дублем — інакше повторне завантаження
-        # того самого файлу після delete назавжди «блокувалось» би дублем,
-        # якого користувач узагалі не бачить (undo-вікно ще не сплило).
+        # T4.6: a soft-deleted one does not count as a duplicate - otherwise re-uploading
+        # the same file after delete would be "blocked" forever by a duplicate
+        # the user cannot see at all (the undo window has not expired yet).
         row = conn.execute(
             "SELECT id, source_name FROM transcriptions "
             "WHERE content_hash = ? AND source_type = 'document' AND deleted_at IS NULL "
@@ -126,9 +126,9 @@ def _find_duplicate(db_path: str, content_hash: str):
 def _persist_document(db_path: str, *, source_name: str, filepath: str, parsed: dict,
                       category_id, parse_time: float,
                       title: str | None = None, description: str | None = None) -> int:
-    """INSERT документа у transcriptions. Returns transcription_id.
-    Спільний для upload і folder-import (не залежить від request context).
-    `title`/`description` — уже нормалізовані викликачем (editable-title-description-02)."""
+    """INSERT a document into transcriptions. Returns transcription_id.
+    Shared by upload and folder-import (does not depend on the request context).
+    `title`/`description` are already normalized by the caller (editable-title-description-02)."""
     parsed_at = datetime.now().isoformat(timespec='seconds')
     with _conn(db_path) as conn:
         c = conn.cursor()
@@ -153,9 +153,9 @@ def _persist_document(db_path: str, *, source_name: str, filepath: str, parsed: 
 
 
 def _submit_enrichment(transcription_id: int, db_path: str, force: bool = False) -> str:
-    """Поставити ТОЙ САМИЙ фоновий enrichment-job, що й для аудіо (chunk+embed +
-    Claude-картка). db_path передається явно — щоб працювало і поза request context
-    (folder-import worker). force=True — для reparse (текст змінився → re-embed)."""
+    """Queue the SAME background enrichment job as for audio (chunk+embed +
+    Claude card). db_path is passed explicitly - so it works outside the request context
+    too (the folder-import worker). force=True - for reparse (the text changed → re-embed)."""
     try:
         from app.services import enrichment
         if not (enrichment.any_available() and state.job_queue is not None):
@@ -177,13 +177,13 @@ def _submit_enrichment(transcription_id: int, db_path: str, force: bool = False)
         state.job_queue.submit("enrichment", _job, meta={"transcription_id": transcription_id})
         return "queued"
     except Exception as e:
-        logger.warning("Enrichment job не поставлено (продовжую): %s", e)
+        logger.warning("Enrichment job not queued (continuing): %s", e)
         return "error"
 
 
 def _save_original(file, original_name: str) -> str:
-    """Зберегти завантажений файл у DOCUMENTS_FOLDER з timestamp-префіксом.
-    Повертає абсолютний шлях. Захист від path traversal (як у /api/transcribe)."""
+    """Save the uploaded file to DOCUMENTS_FOLDER with a timestamp prefix.
+    Returns the absolute path. Path traversal protection (as in /api/transcribe)."""
     docs_dir = os.path.abspath(current_app.config.get('DOCUMENTS_FOLDER', 'documents'))
     os.makedirs(docs_dir, exist_ok=True)
 
@@ -206,7 +206,7 @@ def _save_original(file, original_name: str) -> str:
 
 @documents_bp.route('/api/documents/upload', methods=['POST'])
 def upload_document():
-    """Підвантажити документ → розібрати → (дедуп) → зберегти → enrich."""
+    """Upload a document → parse → (dedup) → save → enrich."""
     if 'document' not in request.files:
         return jsonify({"success": False, "error": tr('library.doc.err.no_file')}), 400
     file = request.files['document']
@@ -217,7 +217,7 @@ def upload_document():
         return jsonify({"success": False,
                         "error": tr('library.doc.err.unsupported', supported=supported)}), 400
 
-    # editable-title-description-02: валідуємо ДО парсингу/збереження файлу.
+    # editable-title-description-02: validate BEFORE parsing/saving the file.
     try:
         title = record_meta.normalize_title(request.form.get('title'))
         description = record_meta.normalize_description(request.form.get('description'))
@@ -232,24 +232,24 @@ def upload_document():
     except ValueError:
         return jsonify({"success": False, "error": tr('library.doc.err.bad_name')}), 400
     except Exception as e:
-        logger.error("Не вдалося зберегти документ: %s", e)
+        logger.error("Could not save the document: %s", e)
         return jsonify({"success": False, "error": tr('library.doc.err.save_failed')}), 500
 
-    # --- Парсинг (синхронно) ---
+    # --- Parsing (synchronous) ---
     t0 = time.time()
     try:
         parsed = document_parser.parse_document(filepath, filename=original_name)
     except document_parser.DocumentParseError as e:
         _safe_remove(filepath)
-        logger.info("Документ '%s' не розібрано: %s", original_name, e)
+        logger.info("Document '%s' was not parsed: %s", original_name, e)
         return jsonify({"success": False, "error": str(e)}), 422
     except Exception as e:
         _safe_remove(filepath)
-        logger.error("Помилка парсингу '%s': %s", original_name, e, exc_info=True)
+        logger.error("Parsing error for '%s': %s", original_name, e, exc_info=True)
         return jsonify({"success": False, "error": tr('library.doc.err.parse_failed')}), 500
     parse_time = round(time.time() - t0, 3)
 
-    # --- Дедуп (16E): до Claude-опису, щоб не палити виклик на дублі ---
+    # --- Dedup (16E): before the Claude description, so no call is burned on a duplicate ---
     if not force:
         dup = _find_duplicate(db_path, parsed.get("content_hash"))
         if dup:
@@ -263,7 +263,7 @@ def upload_document():
     _cat_raw = request.form.get('category_id')
     category_id = int(_cat_raw) if (_cat_raw and _cat_raw.isdigit()) else None
 
-    described_sheets = _describe_tabular(parsed)   # Phase 16C (опційно)
+    described_sheets = _describe_tabular(parsed)   # Phase 16C (optional)
     transcription_id = _persist_document(
         db_path, source_name=original_name, filepath=filepath, parsed=parsed,
         category_id=category_id, parse_time=parse_time,
@@ -272,7 +272,7 @@ def upload_document():
     state.metrics.inc("whisper_documents_total", doc_type=parsed["doc_type"])
     enrich_status = _submit_enrichment(transcription_id, db_path)
 
-    logger.info("Документ '%s' (%s, %d симв.) → tx=%d за %.2fs",
+    logger.info("Document '%s' (%s, %d chars) → tx=%d in %.2fs",
                 original_name, parsed["doc_type"], parsed["char_count"],
                 transcription_id, parse_time)
 
@@ -297,8 +297,8 @@ def upload_document():
 
 @documents_bp.route('/api/documents/<int:tid>/reparse', methods=['POST'])
 def reparse_document(tid: int):
-    """Переразібрати збережений оригінал документа. Корисно після встановлення
-    OCR/openpyxl/Claude-ключа або оновлення парсера. Форсує re-embed."""
+    """Re-parse the stored document original. Useful after installing
+    OCR/openpyxl/a Claude key or after a parser update. Forces re-embed."""
     db_path = _db_path()
     with _conn(db_path) as conn:
         row = tx_repo.get_by_id(
@@ -319,7 +319,7 @@ def reparse_document(tid: int):
     except document_parser.DocumentParseError as e:
         return jsonify({"success": False, "error": str(e)}), 422
     except Exception as e:
-        logger.error("Reparse '%s' помилка: %s", fname, e, exc_info=True)
+        logger.error("Reparse '%s' error: %s", fname, e, exc_info=True)
         return jsonify({"success": False, "error": tr('library.doc.err.parse_failed')}), 500
     parse_time = round(time.time() - t0, 3)
 
@@ -338,9 +338,9 @@ def reparse_document(tid: int):
         )
         conn.commit()
 
-    # текст змінився → форсуємо повне збагачення (re-embed + re-card)
+    # the text changed → force full enrichment (re-embed + re-card)
     enrich_status = _submit_enrichment(tid, db_path, force=True)
-    logger.info("Reparse tx=%d (%s, %d симв.)", tid, parsed["doc_type"], parsed["char_count"])
+    logger.info("Reparse tx=%d (%s, %d chars)", tid, parsed["doc_type"], parsed["char_count"])
     return jsonify({
         "success": True,
         "transcription_id": tid,
@@ -353,7 +353,7 @@ def reparse_document(tid: int):
 
 
 # ============================================================
-# Folder import (16E) — фоновий масовий імпорт
+# Folder import (16E) - background bulk import
 # ============================================================
 
 def _collect_documents(folder: str, recursive: bool) -> list[str]:
@@ -383,8 +383,8 @@ def _copy_into_docs(src: str, docs_dir: str) -> str:
 
 
 def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_id) -> dict:
-    """Worker (поза request context): парсить, дедупить, зберігає, ставить enrich
-    кожен файл. Прогрес — у SSE-канал 'doc_import'."""
+    """Worker (outside the request context): parses, dedups, saves, queues enrich
+    for each file. Progress goes to the 'doc_import' SSE channel."""
     imported = skipped = failed = 0
     total = len(files)
     for i, src in enumerate(files):
@@ -407,10 +407,10 @@ def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_i
                 _submit_enrichment(tid, db_path)
                 imported += 1
         except document_parser.DocumentParseError as e:
-            logger.info("[import] пропущено '%s': %s", src, e)
+            logger.info("[import] skipped '%s': %s", src, e)
             failed += 1
         except Exception as e:
-            logger.error("[import] помилка '%s': %s", src, e)
+            logger.error("[import] error '%s': %s", src, e)
             failed += 1
         try:
             state.sse_broker.publish("doc_import", "progress", {
@@ -421,7 +421,7 @@ def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_i
             pass
 
     summary = {"total": total, "imported": imported, "skipped": skipped, "failed": failed}
-    logger.info("[import] завершено: %s", summary)
+    logger.info("[import] finished: %s", summary)
     try:
         state.sse_broker.publish("doc_import", "complete", {"status": "completed", **summary})
     except Exception:
@@ -430,14 +430,13 @@ def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_i
 
 
 def _import_roots() -> list[str]:
-    """Дозволені кореневі директорії для import-folder (T1.3, Волна 1).
+    """Allowed root directories for import-folder (T1.3, Wave 1).
 
-    `RECALL_IMPORT_ROOTS` у `.env` — список абсолютних шляхів, розділених `;`.
-    Обрано `;`, а не POSIX `:`, бо `:` конфліктує з літерою диска (`C:\\...`)
-    на Windows. Порожньо/не задано → список порожній → import-folder
-    заборонений звідусіль (дефолт "заборонити, поки не дозволено" — безпечніше
-    за "дозволити все, крім списку").
-    """
+    `RECALL_IMPORT_ROOTS` in `.env` - a list of absolute paths separated by `;`.
+    `;` was chosen rather than POSIX `:` because `:` conflicts with the drive letter (`C:\\...`)
+    on Windows. Empty/unset → the list is empty → import-folder
+    is forbidden everywhere (the default is "forbid until allowed" - safer
+    than "allow everything except a list")."""
     raw = os.environ.get("RECALL_IMPORT_ROOTS", "")
     roots: list[str] = []
     for part in raw.split(";"):
@@ -449,13 +448,13 @@ def _import_roots() -> list[str]:
 
 @documents_bp.route('/api/documents/import-folder', methods=['POST'])
 def import_folder():
-    """Масовий імпорт усіх підтримуваних документів з папки (фоновий job).
-    Body: {path, recursive?, category_id?}. Результати зʼявляються в Історії.
+    """Bulk import of all supported documents from a folder (background job).
+    Body: {path, recursive?, category_id?}. Results appear in History.
 
-    T1.3 (Волна 1): `path` дозволений лише всередині allowlist-коренів з
-    `RECALL_IMPORT_ROOTS` (див. `_import_roots`) — без нього довільний path
-    у поєднанні з мережевим доступом до сервера давав примітив «прочитати
-    будь-який файл, доступний процесу» (.env, SSH-ключі тощо)."""
+    T1.3 (Wave 1): `path` is allowed only inside the allowlist roots from
+    `RECALL_IMPORT_ROOTS` (see `_import_roots`) - without it an arbitrary path
+    combined with network access to the server gave the primitive "read
+    any file the process can reach" (.env, SSH keys, etc.)."""
     data = request.get_json(silent=True) or {}
     folder = (data.get("path") or "").strip()
     if not folder:
@@ -497,7 +496,7 @@ def import_folder():
         return _run_folder_import(_files, _db, _docs, _cat)
 
     state.job_queue.submit("doc_import", _job, meta={"count": len(files)})
-    logger.info("[import] запущено: %d файлів з %s (recursive=%s)", len(files), folder, recursive)
+    logger.info("[import] started: %d files from %s (recursive=%s)", len(files), folder, recursive)
     return jsonify({"success": True, "started": True, "total": len(files),
                     "channel": "doc_import"})
 

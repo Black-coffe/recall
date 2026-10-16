@@ -1,4 +1,4 @@
-"""K5 k5-task-buttons: натиск кнопок брифінгу → commitments з журналом → новий ряд клавіатури."""
+"""K5 k5-task-buttons: a brief button press → commitments with a journal → a new keyboard row."""
 from __future__ import annotations
 
 import json
@@ -17,7 +17,7 @@ CHAT = "777"
 
 
 class Fake:
-    """Транспорт Bot API: пише виклики (метод, параметри), відповідає з ``replies[метод]``."""
+    """Bot API transport: records calls (method, params), answers from ``replies[method]``."""
 
     def __init__(self, replies=None, fail=()):
         self.calls, self.replies, self.fail = [], replies or {}, set(fail)
@@ -102,7 +102,7 @@ def test_undo_restores_task_and_three_buttons(db):
 def test_postpone_shows_choice_then_sets_due_date(db):
     f = Fake()
     ba.handle(_cq("p:1:11"), db_path=db, transport=f)
-    assert _status(db, 11) == ("open", None)            # вибір терміну ще нічого не міняє
+    assert _status(db, 11) == ("open", None)            # choosing a deadline changes nothing yet
     kb = {"inline_keyboard": _rows(f)}
     assert [b["text"] for b in kb["inline_keyboard"][0]][:3] == ["1 завтра", "+тиждень", "+місяць"]
     ba.handle(_cq("a:1:11:postpone:7", kb=kb), db_path=db, transport=f)
@@ -127,7 +127,7 @@ def test_repeat_press_on_stale_undo_answers_without_breaking(db):
     undo = _rows(f)[0][1]["callback_data"]
     ba.handle(_cq(undo), db_path=db, transport=f)
     edits = len(f.of("editMessageReplyMarkup"))
-    reply = ba.handle(_cq(undo), db_path=db, transport=f)   # той самий ↩ удруге
+    reply = ba.handle(_cq(undo), db_path=db, transport=f)   # the same ↩ a second time
     assert "останню" in reply and _status(db, 11)[0] == "open"
     assert len(f.of("editMessageReplyMarkup")) == edits
     assert "невідома" in ba.handle(_cq("a:1:11:знищити"), db_path=db, transport=f)
@@ -135,7 +135,7 @@ def test_repeat_press_on_stale_undo_answers_without_breaking(db):
 
 
 def test_late_press_applied_even_if_answer_refused(db):
-    """Натиск, зроблений поки ПК спав: Telegram уже не приймає answerCallbackQuery, зміна лишається."""
+    """A press made while the PC slept: Telegram no longer accepts answerCallbackQuery, the change stays."""
     f = Fake(fail={"answerCallbackQuery"})
     ba.handle(_cq("a:1:11:done"), db_path=db, transport=f)
     assert _status(db, 11)[0] == "done" and f.of("editMessageReplyMarkup")
@@ -164,14 +164,14 @@ def test_loop_survives_network_error(db):
         raise OSError("мережа лежить")
 
     p = ba.ButtonPoller(db_path=db, transport=transport, backoff=0)
-    p._loop()                                # повертається після stop, не кидає
+    p._loop()                                # returns after stop, does not raise
     assert len(calls) >= 2
 
 
 def test_queued_presses_keep_each_others_rows(db):
-    """Ревʼю раунду 1: натиски, що чекали, поки ПК спав, несуть ПОЧАТКОВУ клавіатуру.
+    """Review round 1: queued presses that waited while the PC slept carry the INITIAL keyboard.
 
-    Другий натиск не має повернути ряд першого до трьох кнопок і загубити його ↩."""
+    The second press must not return the first one's row to three buttons and lose its ↩."""
     f = Fake()
     ba.handle(_cq("a:1:11:done"), db_path=db, transport=f)
     ba.handle(_cq("a:2:12:cancelled"), db_path=db, transport=f)
@@ -179,15 +179,15 @@ def test_queued_presses_keep_each_others_rows(db):
     assert _status(db, 11)[0] == "done" and _status(db, 12)[0] == "cancelled"
     assert rows[0][0]["text"].startswith("1 ✅") and rows[0][1]["callback_data"].startswith("u:1:")
     assert rows[1][0]["text"].startswith("2 🚫") and rows[1][1]["callback_data"].startswith("u:2:")
-    # Інше повідомлення — своя клавіатура, не спільна.
+    # Another message — its own keyboard, not a shared one.
     ba.handle(_cq("p:1:11", message_id=9), db_path=db, transport=f)
     assert _rows(f)[1] == ba.task_row(2, 12)
 
 
 def test_queued_presses_on_same_task_show_latest_with_working_undo(db):
-    """Ревʼю раунду 2: ✅, потім 🚫 тієї ж задачі, обидва з ПОЧАТКОВОЮ клавіатурою.
+    """Review round 2: ✅, then 🚫 of the same task, both with the INITIAL keyboard.
 
-    Ряд шукається за номером задачі — показує останню дію, і її ↩ справді скасовує."""
+    The row is found by task number — it shows the last action, and its ↩ really undoes it."""
     f = Fake()
     ba.handle(_cq("a:1:11:done"), db_path=db, transport=f)
     ba.handle(_cq("a:1:11:cancelled"), db_path=db, transport=f)
@@ -197,7 +197,7 @@ def test_queued_presses_on_same_task_show_latest_with_working_undo(db):
     assert _status(db, 11)[0] == "done" and _rows(f)[0] == ba.task_row(1, 11)
 
 
-# --- english-i18n-08: кнопки й відповіді мовою налаштування ----------------------
+# --- english-i18n-08: buttons and replies in the language of the setting ----------------------
 
 def test_en_foreign_chat_refused_in_english(db, monkeypatch):
     monkeypatch.setenv("RECALL_UI_LANG", "en")
@@ -218,7 +218,7 @@ def test_en_row_after_done_and_postpone_labels(db, monkeypatch):
     labels = [b["text"] for b in ba.postpone_row(1, 11)]
     assert labels[:3] == ["1 tomorrow", "+week", "+month"]
     assert all(len(b["text"].encode()) <= 64 for b in ba.postpone_row(1, 11))
-    # callback_data однакові в обох мовах
+    # callback_data is the same in both languages
     monkeypatch.setenv("RECALL_UI_LANG", "uk")
     assert [b["callback_data"] for b in ba.postpone_row(1, 11)] == [
         b["callback_data"] for b in ba.postpone_row(1, 11, "en")]

@@ -1,8 +1,8 @@
-"""Шар коментарів, Волна 1: HTTP-контракт.
+"""Comments layer, Wave 1: HTTP contract.
 
-`state.job_queue` тут None, тож блюпринт індексує синхронно — це і перевіряє
-тест `test_create_indexes_synchronously_without_queue`: коментар, який ніколи
-не проіндексувався, гірший за повільний POST.
+`state.job_queue` is None here, so the blueprint indexes synchronously — and that is what the
+test `test_create_indexes_synchronously_without_queue` checks: a comment that was never
+indexed is worse than a slow POST.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def test_meta_exposes_kinds_and_weights(client_and_tx):
     c, *_ = client_and_tx
     d = c.get('/api/comments/meta').get_json()
     keys = [k['key'] for k in d['kinds']]
-    assert keys[0] == 'correction'          # найважчий — першим
+    assert keys[0] == 'correction'          # the heaviest — first
     assert d['default_kind'] == 'note'
     assert 'transcription' in d['targets'] and 'audio_download' in d['targets']
 
@@ -99,8 +99,8 @@ def test_edit_body_requeues_index(client_and_tx):
         'target_type': 'transcription', 'target_id': tid,
         'body': 'стара'}).get_json()['comment']['id']
     body = c.patch(f'/api/comments/{cid}', json={'body': 'нова'}).get_json()
-    # Правка скидає позначку, і блюпринт мусить переіндексувати одразу —
-    # інакше пошук віддавав би текст, якого на картці вже немає.
+    # An edit resets the mark, and the blueprint must reindex right away —
+    # otherwise search would return text that is no longer on the card.
     assert body['comment']['index_status'] == 'embedded'
 
 
@@ -200,7 +200,7 @@ def test_analyze_unknown_comment_is_404(client_and_tx):
 
 
 def test_create_links_graph_without_claude(client_and_tx):
-    """Шар А працює на інжесті сам: жодного ключа, жодної кнопки."""
+    """Layer A works on ingest by itself: no key, no button."""
     c, tid, _, db_path = client_and_tx
     conn = sqlite3.connect(db_path)
     conn.execute("INSERT INTO entities (type, canonical_name, normalized_name) "
@@ -218,8 +218,8 @@ def test_create_links_graph_without_claude(client_and_tx):
 
 
 def test_service_and_api_agree_on_kinds(client_and_tx):
-    """UI бере ваги з /api/comments/meta саме щоб не розійтись із ранжуванням —
-    тест фіксує, що ендпоінт віддає ті самі ваги, які застосовує retrieval."""
+    """The UI takes weights from /api/comments/meta precisely so as not to diverge from ranking —
+    the test pins that the endpoint gives the same weights that retrieval applies."""
     c, *_ = client_and_tx
     d = c.get('/api/comments/meta').get_json()
     assert {k['key']: k['weight'] for k in d['kinds']} == svc.KIND_WEIGHTS

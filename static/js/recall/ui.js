@@ -105,26 +105,26 @@
         }
         return window.Recall.state.categories;
     };
-    // Спільний резолвер шляху «Напрямок → Проєкт» з кешу (map: id -> node).
-    // Невідомий id або порожній кеш -> ''.
+    // Shared resolver of the "Category → Project" path from the cache (map: id -> node).
+    // Unknown id or empty cache -> ''.
     function _pathFromCats(cats, id) {
         if (id == null || id === '' || !cats || !cats.map[id]) return '';
         const c = cats.map[id];
         if (c.parent_id != null && cats.map[c.parent_id]) return cats.map[c.parent_id].name + ' → ' + c.name;
         return c.name;
     }
-    // "Напрямок → Проєкт" | "Напрямок" | "" (невідомий id). Читає
-    // window.Recall.state.categories — виклич UI.loadCategories() заздалегідь.
+    // "Category → Project" | "Category" | "" (unknown id). Reads
+    // window.Recall.state.categories — call UI.loadCategories() beforehand.
     UI.catPath = function (id) {
         return _pathFromCats(window.Recall.state.categories, id);
     };
     function _normName(s) {
         return String(s == null ? '' : s).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
     }
-    // Чіп/мітка (24): text = імʼя вузла, або повний шлях, якщо в дереві є
-    // ІНШИЙ вузол (будь-якого рівня) з такою самою назвою (порівняння без
-    // регістру/форми Unicode, пробіли стиснуті); title = повний шлях завжди.
-    // Невідомий id -> {text: '', title: ''}.
+    // Chip/label (24): text = node name, or the full path if the tree has
+    // ANOTHER node (of any level) with the same name (comparison is
+    // case/Unicode-form insensitive, whitespace collapsed); title = always the full path.
+    // Unknown id -> {text: '', title: ''}.
     UI.catLabel = function (id, cats) {
         cats = cats || window.Recall.state.categories;
         if (id == null || id === '' || !cats || !cats.map[id]) return { text: '', title: '' };
@@ -143,17 +143,17 @@
         return `<span class="rc-cat" title="${U.esc(label.title)}"><span class="rc-cat__dot" style="background:${U.esc(color)}"></span>${U.esc(label.text)}</span>`;
     };
 
-    // — Inline «створити напрямок прямо у виборі» (працює в будь-якому селекті) —
-    // Сентинел-значення опції «＋ Новий напрямок…».
+    // — Inline "create a category right in the picker" (works in any select) —
+    // Sentinel value of the option «＋ Новий напрямок…».
     UI.CAT_NEW = '__newcat__';
 
-    // Збудувати <option>-и для селекта напрямку з кешу (window.Recall.state.categories,
-    // має бути завантажений через UI.loadCategories). Дерево двох рівнів:
-    // кожен напрямок — свій <optgroup label="Напрямок">, усередині опція
-    // самого напрямку + опції його проєктів («— Проєкт», з відступом через
-    // текстовий префікс). opts.first: 'all' → «Усі напрямки», 'none' (деф.)
-    // → «Без напрямку», 'hide' → без провідної опції. Завжди додає
-    // «＋ Новий напрямок…» (опустити: opts.newOpt === false).
+    // Build <option>s for the category select from the cache (window.Recall.state.categories,
+    // must be loaded via UI.loadCategories). A two-level tree:
+    // each category gets its own <optgroup label="Напрямок">, inside it an option of
+    // the category itself + options of its projects («— Проєкт», indented via a
+    // text prefix). opts.first: 'all' → «Усі напрямки», 'none' (default)
+    // → «Без напрямку», 'hide' → no leading option. Always adds
+    // «＋ Новий напрямок…» (omit: opts.newOpt === false).
     UI.catOptions = function (selected, opts) {
         opts = opts || {};
         const list = (window.Recall.state.categories || {}).list || [];
@@ -178,15 +178,15 @@
         return html;
     };
 
-    // Скинути кеш напрямків і перезавантажити (після create/rename/delete/merge).
+    // Reset the category cache and reload (after create/rename/delete/merge).
     UI.bustCategories = function () {
         window.Recall.state.categories = null;
         return UI.loadCategories();
     };
 
-    // — Словник тегів (кешований, той самий патерн, що напрямки) —
-    // Помилка API НЕ кешується як «тегів немає»: {list, map, error:true} —
-    // порожній словник ≠ збій завантаження (мінор 10 р0, 24).
+    // — Tag dictionary (cached, same pattern as categories) —
+    // An API error is NOT cached as "no tags": {list, map, error:true} —
+    // an empty dictionary ≠ a load failure (minor 10 r0, 24).
     UI.loadTags = async function () {
         if (window.Recall.state.tags) return window.Recall.state.tags;
         try {
@@ -204,11 +204,11 @@
         window.Recall.state.tags = null;
         return UI.loadTags();
     };
-    // Гард кольору з БД (мінор 12 р1; 23 закрив на записі, 28 звів у один
-    // хелпер — раніше tagOptions мала власний літерал регулярки, що
-    // пропускав 5- і 7-значний hex, який сервер (`memory.py` _COLOR_RE)
-    // відкидає). Валідні форми: #RGB/#RGBA/#RRGGBB/#RRGGBBAA — ті самі, що
-    // й на сервері. Користуються tagChip, tagOptions і catChip.
+    // Guard for a color from the DB (minor 12 r1; 23 closed it on write, 28 merged into one
+    // helper — before that tagOptions had its own regex literal that
+    // let through a 5- and 7-digit hex, which the server (`memory.py` _COLOR_RE)
+    // rejects). Valid forms: #RGB/#RGBA/#RRGGBB/#RRGGBBAA — the same as
+    // on the server. Used by tagChip, tagOptions and catChip.
     const _COLOR_RE = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
     function _isValidColor(color) {
         return typeof color === 'string' && _COLOR_RE.test(color);
@@ -216,9 +216,9 @@
     function _cssColor(color) {
         return _isValidColor(color) ? color : 'var(--rc-ink-3)';
     }
-    // Чіп тега {id, name, color}. opts.onRemove(tag) — якщо задано, малює «×»
-    // і сам вішає клік. Повертає HTMLElement (не рядок) — щоб onRemove можна
-    // було прив'язати одразу, без пошуку елемента після вставки в DOM.
+    // Tag chip {id, name, color}. opts.onRemove(tag) — if given, draws «×»
+    // and attaches the click itself. Returns an HTMLElement (not a string) — so onRemove can
+    // be bound right away, without looking up the element after insertion into the DOM.
     UI.tagChip = function (tag, opts) {
         opts = opts || {};
         const color = _cssColor(tag.color);
@@ -229,27 +229,27 @@
         if (removable) chip.querySelector('.rc-tag__x').addEventListener('click', () => opts.onRemove(tag));
         return chip;
     };
-    // Пікер тегів (21). Повертає `<div class="rc-tagpick">` з прихованим
-    // `<select multiple class="rc-tagsel">` (кеш має бути завантажений через
-    // UI.loadTags; той самий HTML-фрагмент і сигнатура, що й раніше — шість
-    // sync()-екранів і рядок Telegram далі читають selectedOptions/change,
-    // жодних правок у них). selectedNames — масив назв (значення опцій —
-    // назви, не id: PUT /api/memory/<id>/tags працює з іменами). Видимий шар
-    // поверх селекта — чіпи-перемикачі (.rc-tagpick__chip), клік по них ловить
-    // глобальний делегований обробник нижче. Порожній словник — абзац-
-    // пояснення замість голого прямокутника-селекта.
+    // Tag picker (21). Returns `<div class="rc-tagpick">` with a hidden
+    // `<select multiple class="rc-tagsel">` (the cache must be loaded via
+    // UI.loadTags; the same HTML fragment and signature as before — six
+    // sync() screens and the Telegram row keep reading selectedOptions/change,
+    // no edits in them). selectedNames — an array of names (option values are
+    // names, not ids: PUT /api/memory/<id>/tags works with names). The visible layer
+    // on top of the select is toggle chips (.rc-tagpick__chip), a click on them is caught by
+    // the global delegated handler below. An empty dictionary — an explanatory
+    // paragraph instead of a bare select rectangle.
     UI.tagOptions = function (selectedNames) {
         const names = (selectedNames || []).map(String);
         const sel = new Set(names);
         const tagsState = window.Recall.state.tags || {};
         const list = tagsState.list || [];
         if (tagsState.error) {
-            // Збій UI.loadTags (24) — «немає тегів» була б хибною; окремий
-            // стан з «повторити» (делегований клік нижче: UI.bustTags() +
-            // перемалювання поточного екрана). Уже вибрані назви (28, мінор
-            // р1 п.11) лишаються selected-опціями прихованого select.rc-tagsel
-            // і текстом поруч — інакше фільтр тегів із URL мовчки зникав
-            // при наступному рендері/збереженні.
+            // A UI.loadTags failure (24) — "no tags" would be false; a separate
+            // state with "retry" (delegated click below: UI.bustTags() +
+            // redraw of the current screen). Already selected names (28, minor
+            // r1 item 11) stay as selected options of the hidden select.rc-tagsel
+            // and as text nearby — otherwise the tag filter from the URL silently vanished
+            // on the next render/save.
             const selOpts = names.map((n) => `<option value="${U.esc(n)}" selected>${U.esc(n)}</option>`).join('');
             const selText = names.length
                 ? `<p class="rc-tagpick__error-selected">${T('core.ui.tags.selected', { names: names.map(U.esc).join(', ') })}</p>`
@@ -265,8 +265,8 @@
                 + `<p class="rc-tagpick__empty">${T('core.ui.tags.empty')}</p></div>`;
         }
         const chips = list.map((t) => {
-            // На відміну від UI.tagChip тут немає безумовного inline-фону —
-            // невалідне значення просто НЕ виставляє --tag-color (CSS-дефолт
+            // Unlike UI.tagChip there is no unconditional inline background here —
+            // an invalid value simply does NOT set --tag-color (CSS default
             // .rc-tagpick__dot { background: var(--tag-color, var(--rc-ink-3)) }).
             const validColor = _isValidColor(t.color);
             const style = validColor ? ` style="--tag-color:${U.esc(t.color)}"` : '';
@@ -278,11 +278,11 @@
         return `<div class="rc-tagpick"><select multiple class="rc-tagsel">${selHtml}</select>`
             + `<div class="rc-tagpick__chips" role="group" aria-label="${T('core.ui.tags.filterAria')}">${chips}</div></div>`;
     };
-    // Перемальовує чіпи пікера тегів (21, 24) з поточного стану select.rc-tagsel
-    // (option.selected -> aria-pressed + клас is-active). Викликати після
-    // прямого виставлення option.selected у коді (applySaved у library.js,
-    // відкат у telegram.js) — клік по чіпу сам піднімає change, який ловить
-    // делегований слухач нижче (подвійний виклик ідемпотентний).
+    // Redraws the tag picker chips (21, 24) from the current state of select.rc-tagsel
+    // (option.selected -> aria-pressed + class is-active). Call after
+    // setting option.selected directly in code (applySaved in library.js,
+    // rollback in telegram.js) — a click on a chip raises change itself, which is caught by the
+    // delegated listener below (a double call is idempotent).
     UI.syncTagPicker = function (selectEl) {
         if (!selectEl) return;
         const pick = selectEl.closest('.rc-tagpick');
@@ -294,14 +294,14 @@
             btn.classList.toggle('is-active', on);
         });
     };
-    // Згорнута підказка «Що це?» біля нового фільтра/контролу. Повертає
-    // HTMLElement, вставляється поруч із контролом.
+    // A collapsed "What is this?" hint next to a new filter/control. Returns an
+    // HTMLElement, inserted next to the control.
     UI.hint = function (html) {
         return U.el('details', { class: 'rc-hint' }, `<summary>${T('core.ui.hint.what')}</summary>${html}`);
     };
 
-    // Перебудувати опції в усіх .rc-catsel на сторінці (зберігаючи поточний вибір)
-    // після зміни списку напрямків.
+    // Rebuild options in all .rc-catsel on the page (keeping the current choice)
+    // after the category list changes.
     UI.refreshCatSelects = function (root) {
         (root || document).querySelectorAll('select.rc-catsel').forEach(s => {
             const cur = s.value === UI.CAT_NEW ? '' : s.value;
@@ -314,9 +314,9 @@
         });
     };
 
-    // Модалка створення напрямку АБО проєкту всередині напрямку (селект
-    // «Напрямок»: порожньо = створюємо новий напрямок, обрано = створюємо
-    // проєкт під ним). Resolve → {id, name, color, parent_id} або null (скасовано).
+    // Modal for creating a category OR a project inside a category (select
+    // «Напрямок»: empty = create a new category, chosen = create
+    // a project under it). Resolve → {id, name, color, parent_id} or null (cancelled).
     UI.createCategoryModal = function (prefillName) {
         return new Promise((resolve) => {
             const ov = U.el('div', { class: 'rc-modal-ov' });
@@ -597,10 +597,10 @@
         });
     };
 
-    // Запис без власної назви: назва досі авто-імʼя сесії («Запис 2026-10-14 08:54»
-    // або фолбек «Запис rec_…»). Дивимось на ту назву, яку бачить людина
-    // (title, інакше source_name): транскрибація з Медіатеки копіює авто-імʼя
-    // в transcriptions.title, тож «title непорожній» ще не означає власну назву.
+    // A record without its own title: the title is still the session auto-name («Запис 2026-10-14 08:54»
+    // or the fallback «Запис rec_…»). We look at the title the person sees
+    // (title, otherwise source_name): transcription from the Media library copies the auto-name
+    // into transcriptions.title, so "title non-empty" does not yet mean its own title.
     const AUTO_NAME_RE = /^Запис (\d{4}-\d{2}-\d{2} \d{2}:\d{2}|rec_[0-9a-f]+)$/;
     UI.isUnnamedRecording = function (r) {
         if (!r || r.source_type !== 'recording') return false;
@@ -636,17 +636,17 @@
         return { close: remove };
     };
 
-    // Снапшот поточного значення перед відкриттям списку (для revert при скасуванні).
+    // Snapshot of the current value before opening the list (for revert on cancel).
     document.addEventListener('focusin', function (e) {
         const s = e.target;
         if (s && s.tagName === 'SELECT' && s.classList.contains('rc-catsel') && s.value !== UI.CAT_NEW)
             s._rcPrev = s.value;
     }, true);
 
-    // Глобальний перехоплювач «＋ Новий напрямок…» у будь-якому .rc-catsel.
-    // Capture-фаза + stopPropagation: власний change-хендлер в'юхи НЕ бачить
-    // сентинел; після створення ставимо реальний id і ре-діспатчимо звичайний
-    // change, щоб в'юха зреагувала так, ніби обрали новий напрямок.
+    // Global interceptor of «＋ Новий напрямок…» in any .rc-catsel.
+    // Capture phase + stopPropagation: the view's own change handler does NOT see the
+    // sentinel; after creation we set the real id and re-dispatch an ordinary
+    // change, so the view reacts as if a new category had been chosen.
     document.addEventListener('change', function (e) {
         const s = e.target;
         if (!s || s.tagName !== 'SELECT' || !s.classList.contains('rc-catsel')) return;
@@ -662,22 +662,22 @@
         });
     }, true);
 
-    // Делегований change на прихованому select.rc-tagsel (24): будь-яка зміна
-    // option.selected — з кліку по чіпу нижче чи прямим виставленням у view
-    // (applySaved, відкат Telegram) — перемальовує чіпи з єдиного джерела
-    // істини (BLOCK р5: чіпи більше не читаються з aria-pressed напряму).
+    // Delegated change on the hidden select.rc-tagsel (24): any change of
+    // option.selected — from a chip click below or set directly in a view
+    // (applySaved, Telegram rollback) — redraws the chips from a single source of
+    // truth (BLOCK r5: chips are no longer read from aria-pressed directly).
     document.addEventListener('change', function (e) {
         const s = e.target;
         if (!s || s.tagName !== 'SELECT' || !s.classList.contains('rc-tagsel')) return;
         UI.syncTagPicker(s);
     });
 
-    // Глобальний перехоплювач кліку по чіпу пікера тегів (.rc-tagpick__chip,
-    // 21): чіп — лише видимий шар, джерело істини лишається прихований
-    // select.rc-tagsel поруч (той самий патерн, що capture-обробник .rc-catsel
-    // вище). Клік перемикає відповідну <option> і піднімає change на селекті —
-    // слухач вище перемальовує чіпи, sync() шести екранів і рядок Telegram
-    // відпрацьовують без правок (C9).
+    // Global interceptor of a click on a tag picker chip (.rc-tagpick__chip,
+    // 21): the chip is only a visible layer, the source of truth stays the hidden
+    // select.rc-tagsel nearby (same pattern as the capture handler of .rc-catsel
+    // above). A click toggles the corresponding <option> and raises change on the select —
+    // the listener above redraws the chips, the sync() of six screens and the Telegram row
+    // work without edits (C9).
     document.addEventListener('click', function (e) {
         const btn = e.target.closest('.rc-tagpick__chip');
         if (!btn) return;
@@ -690,20 +690,20 @@
         sel.dispatchEvent(new Event('change', { bubbles: true }));
     });
 
-    // «Повторити» в .rc-tagpick__error (24): скинути кеш тегів і перемалювати
-    // поточний екран через роутер — синтетичний popstate замість
-    // router.navigate(поточний шлях) (навігація на той самий path — no-op),
-    // router.js не правиться.
+    // "Retry" in .rc-tagpick__error (24): reset the tag cache and redraw
+    // the current screen via the router — a synthetic popstate instead of
+    // router.navigate(current path) (navigation to the same path is a no-op),
+    // router.js is not edited.
     document.addEventListener('click', function (e) {
         const btn = e.target.closest('.rc-tagpick__retry');
         if (!btn) return;
         UI.bustTags().then(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
     });
 
-    // Посилання «Створіть перший у Налаштуваннях → Теги» з порожнього стану
-    // пікера (24): перехід через роутер + докрутка й спалах секції «Теги» —
-    // той самий патерн, що onboarding.js goTo (router.js/onboarding.js самі
-    // не правляться, goTo лишається приватною функцією того модуля).
+    // The link "Створіть перший у Налаштуваннях → Теги" from the empty state of
+    // the picker (24): navigation via the router + scroll and flash of the "Теги" section —
+    // the same pattern as onboarding.js goTo (router.js/onboarding.js themselves
+    // are not edited, goTo stays a private function of that module).
     document.addEventListener('click', function (e) {
         const a = e.target.closest('.rc-tagpick__empty a[href^="/settings#"]');
         if (!a) return;

@@ -321,3 +321,9 @@ def test_captures():
     assert cw.captures('zoom.exe', {'mode': 'include', 'apps': ['Zoom.exe']})
     assert not cw.captures('zoom.exe', {'mode': 'exclude', 'apps': ['zoom.exe']})
     assert not cw.captures('zoom.exe', None)
+
+
+def test_call_prompt_texts_have_english_variant():
+    from app.core.i18n import tr
+    assert tr('svc_recording.call.prompt.title', lang='en', label='Zoom') == 'Recall · call in Zoom'
+    assert tr('svc_recording.call.prompt.record', lang='en') == 'Record'

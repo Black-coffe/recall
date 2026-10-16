@@ -1,9 +1,9 @@
-"""Тести для register_recording — авто-реєстрації запису в Audio Library.
+"""Tests for register_recording — auto-registration of a recording in the Audio Library.
 
-Покривають корінь orphan-багу: реєстрація в audio_downloads винесена з
-фронтендного /save у спільний серверний хелпер, який кличе finalize-callback
-(у т.ч. при recovery). Ключове — ІДЕМПОТЕНТНІСТЬ: повторний finalize / save /
-recovery не плодять дублів.
+They cover the root of the orphan bug: the registration in audio_downloads was moved out of
+the frontend /save into a shared server helper that the finalize callback calls
+(including at recovery). The key point is IDEMPOTENCY: a repeated finalize / save /
+recovery does not produce duplicates.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def final_mp3(tmp_path):
-    """Реальний файл — register_recording перевіряє is_file() і stat().st_size."""
+    """A real file — register_recording checks is_file() and stat().st_size."""
     f = tmp_path / 'final.mp3'
     f.write_bytes(b'\x00' * 2048)
     return f
@@ -58,7 +58,7 @@ def test_register_creates_row(db_path, final_mp3):
     reg = register_recording(db_path, sid, _manifest(final_mp3))
     assert reg is not None
     assert reg['created'] is True
-    assert reg['name'] == 'Запис 2026-06-12 14:03'  # fallback на auto_name
+    assert reg['name'] == 'Запис 2026-06-12 14:03'  # fallback to auto_name
     assert reg['duration_sec'] == pytest.approx(123.4)
     assert reg['file_size'] == 2048
 
@@ -86,14 +86,14 @@ def test_name_precedence_manifest_name_over_auto(db_path, final_mp3):
     reg = register_recording(
         db_path, sid, _manifest(final_mp3, name='Ручна назва'),
     )
-    # manifest.name важливіший за auto_name, коли явної name немає
+    # manifest.name outranks auto_name when there is no explicit name
     assert reg['name'] == 'Ручна назва'
 
 
 # ---------------------------------------------------------------- idempotency
 
 def test_register_idempotent_no_duplicate(db_path, final_mp3):
-    """Повторний виклик (finalize-callback + потім /save) → один рядок."""
+    """A repeated call (finalize callback + then /save) → one row."""
     sid = 'rec_abc123def456'
     first = register_recording(db_path, sid, _manifest(final_mp3))
     second = register_recording(db_path, sid, _manifest(final_mp3))
@@ -105,7 +105,7 @@ def test_register_idempotent_no_duplicate(db_path, final_mp3):
 
 
 def test_register_existing_updates_title_on_explicit_name(db_path, final_mp3):
-    """Авто-реєстрація (auto_name) → потім ручний /save з назвою оновлює title."""
+    """Auto-registration (auto_name) → then a manual /save with a name updates the title."""
     sid = 'rec_abc123def456'
     auto = register_recording(db_path, sid, _manifest(final_mp3))  # auto_name
     manual = register_recording(db_path, sid, _manifest(final_mp3), name='Нова назва')
@@ -119,7 +119,7 @@ def test_register_existing_updates_title_on_explicit_name(db_path, final_mp3):
 
 
 def test_register_existing_keeps_title_without_explicit_name(db_path, final_mp3):
-    """Повторна авто-реєстрація не перетирає вже наявну назву."""
+    """A repeated auto-registration does not overwrite an already present name."""
     sid = 'rec_abc123def456'
     register_recording(db_path, sid, _manifest(final_mp3), name='Збережена')
     again = register_recording(db_path, sid, _manifest(final_mp3))  # no explicit
@@ -128,8 +128,8 @@ def test_register_existing_keeps_title_without_explicit_name(db_path, final_mp3)
 
 
 def test_youtube_id_unique_constraint_holds(db_path, final_mp3):
-    """youtube_id=recording_<sid> справді UNIQUE — другий прямий insert падає,
-    а хелпер цього уникає через pre-check."""
+    """youtube_id=recording_<sid> is really UNIQUE — a second direct insert fails,
+    and the helper avoids this through a pre-check."""
     sid = 'rec_abc123def456'
     register_recording(db_path, sid, _manifest(final_mp3))
     with pytest.raises(sqlite3.IntegrityError):
@@ -179,7 +179,7 @@ def test_register_stores_explicit_category(db_path, final_mp3):
 
 
 def test_register_looks_up_category_from_copilot_session(db_path, final_mp3):
-    """Напрямок, заданий при записі (copilot_sessions), підтягується автоматично."""
+    """A direction set at recording time (copilot_sessions) is pulled in automatically."""
     sid = 'rec_abc123def456'
     cid = _seed_category(db_path, 'Фонд')
     with get_db_connection(db_path) as conn:
@@ -188,15 +188,15 @@ def test_register_looks_up_category_from_copilot_session(db_path, final_mp3):
             (sid, cid),
         )
         conn.commit()
-    reg = register_recording(db_path, sid, _manifest(final_mp3))  # без явної category
+    reg = register_recording(db_path, sid, _manifest(final_mp3))  # without an explicit category
     assert reg['category_id'] == cid
     assert _rows(db_path, sid)[0]['category_id'] == cid
 
 
 def test_register_backfills_category_on_existing_row(db_path, final_mp3):
-    """Якщо рядок уже є без категорії, а потім зʼявляється — дозаповнюємо."""
+    """If a row already exists without a category and one appears later — we back-fill it."""
     sid = 'rec_abc123def456'
-    register_recording(db_path, sid, _manifest(final_mp3))  # без категорії
+    register_recording(db_path, sid, _manifest(final_mp3))  # without a category
     assert _rows(db_path, sid)[0]['category_id'] is None
     cid = _seed_category(db_path)
     again = register_recording(db_path, sid, _manifest(final_mp3), category_id=cid)
@@ -208,20 +208,20 @@ def test_register_backfills_category_on_existing_row(db_path, final_mp3):
 # ---------------------------------------------------------------- race (§12: auto-finalize vs /save)
 
 def test_register_survives_lost_insert_race(db_path, final_mp3, monkeypatch):
-    """Гонка: два виклики (auto-register при finalize і ручний /save) обидва
-    проходять SELECT як «рядка нема», обидва йдуть в INSERT. До фіксу другий
-    падав з IntegrityError (UNIQUE youtube_id); тепер ON CONFLICT DO NOTHING +
-    повторний SELECT — той, хто програв, працює з чужим рядком (created=False).
+    """A race: two calls (auto-register at finalize and a manual /save) both
+    pass the SELECT as «no row», both go to the INSERT. Before the fix the second
+    failed with IntegrityError (UNIQUE youtube_id); now ON CONFLICT DO NOTHING +
+    a repeated SELECT — the one who lost works with the other's row (created=False).
 
-    Симулюємо програш гонки: перший _find_existing повертає None (як бачив
-    потік до вставки конкурента), наступні — реальний результат.
+    We simulate losing the race: the first _find_existing returns None (as the
+    thread saw it before the competitor's insert), the following ones — the real result.
     """
     from app.services.recording import library as lib
 
     sid = 'rec_race0001'
     manifest = _manifest(final_mp3, session_id=sid)
 
-    # Конкурент уже вставив рядок (виграв гонку).
+    # The competitor has already inserted the row (won the race).
     first = register_recording(db_path, sid, manifest)
     assert first['created'] is True
 
@@ -231,17 +231,17 @@ def test_register_survives_lost_insert_race(db_path, final_mp3, monkeypatch):
     def racy_find(c, session_id, youtube_id):
         calls['n'] += 1
         if calls['n'] == 1:
-            return None  # SELECT встиг до вставки конкурента
+            return None  # the SELECT came before the competitor's insert
         return real_find(c, session_id, youtube_id)
 
     monkeypatch.setattr(lib, '_find_existing', racy_find)
 
-    # Той, хто програв гонку: не падає, бачить чужий рядок, оновлює назву.
+    # The one who lost the race: does not fail, sees the other's row, updates the name.
     second = register_recording(db_path, sid, manifest, name='Ручна назва')
     assert second is not None
     assert second['created'] is False
     assert second['download_id'] == first['download_id']
-    assert calls['n'] >= 2  # був повторний пошук після програного INSERT
+    assert calls['n'] >= 2  # there was a repeated lookup after the lost INSERT
 
     rows = _rows(db_path, sid)
     assert len(rows) == 1

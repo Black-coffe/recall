@@ -1,11 +1,11 @@
-"""Дублі аудіо/YouTube/записів: хеш на інжесті + офлайн-прохід (Хвиля A).
+"""Audio/YouTube/recording duplicates: hash on ingest + an offline pass (Wave A).
 
-Тестуються саме ті дві функції, якими користується інжест (`hash_for` +
-`find_original` — рівно та пара, що стоїть перед INSERT у
-`app/blueprints/transcription.py`), CLI-прохід `mark` — і сам ендпойнт
-`POST /api/transcribe` на library-шляху: `transcription_bp` піднімається
-окремим Flask-застосунком на тимчасовій БД із фейковим whisper, бойовий
-`whisper_history.db` не відкривається.
+It tests exactly the two functions that ingest uses (`hash_for` +
+`find_original` - precisely the pair standing before the INSERT in
+`app/blueprints/transcription.py`), the CLI pass `mark` - and the
+`POST /api/transcribe` endpoint itself on the library path: `transcription_bp` is brought up as
+a separate Flask app on a temporary DB with a fake whisper, the production
+`whisper_history.db` is not opened.
 """
 import sqlite3
 
@@ -54,11 +54,11 @@ def _hash_of(path, tid):
 
 
 # ============================================================
-# Міграція
+# Migration
 # ============================================================
 
 def test_migration_is_idempotent(db):
-    """Повторний init_database на тій самій БД не падає і колонку не дублює."""
+    """A repeated init_database on the same DB does not fail and does not duplicate the column."""
     init_database(db)
     conn = sqlite3.connect(db)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(transcriptions)")]
@@ -77,19 +77,19 @@ def test_hash_for_covers_audio_sources(source_type):
 
 @pytest.mark.parametrize("source_type", ["telegram", "document", "copilot"])
 def test_hash_for_skips_non_audio_sources(source_type):
-    """Telegram і документи свідомо поза дедупом — у них свої правила."""
+    """Telegram and documents are deliberately outside dedup - they have their own rules."""
     assert dedup_audio.hash_for(source_type, "Привіт, Андрію") is None
 
 
 def test_hash_for_empty_text_is_none():
-    """Порожнеча не робить записи дублями одне одного."""
+    """Emptiness does not make records duplicates of each other."""
     assert dedup_audio.hash_for("file", "") is None
     assert dedup_audio.hash_for("file", "   \n\n ") is None
     assert dedup_audio.hash_for("file", None) is None
 
 
 def test_hash_is_of_normalized_text():
-    """Різні переноси рядків і трейлінг-пробіли — той самий дзвінок."""
+    """Different line breaks and trailing spaces - the same call."""
     a = dedup_audio.hash_for("file", "Андрій: бюджет\nМикола: добре")
     b = dedup_audio.hash_for("file", "Андрій: бюджет   \r\nМикола: добре\n\n\n")
     assert a == b
@@ -101,7 +101,7 @@ def test_hash_differs_for_different_text():
 
 
 # ============================================================
-# find_original — шлях інжесту
+# find_original - the ingest path
 # ============================================================
 
 def test_find_original_none_when_unique(db):
@@ -124,7 +124,7 @@ def test_find_original_finds_existing_record(db):
 
 
 def test_find_original_chain_stays_flat(db):
-    """Третя копія вказує на оригінал, а не на другу копію."""
+    """The third copy points to the original, not to the second copy."""
     h = dedup_audio.hash_for("file", "Андрій: бюджет")
     first = _add(db, "Андрій: бюджет", content_hash=h)
     second = _add(db, "Андрій: бюджет", content_hash=h)
@@ -138,7 +138,7 @@ def test_find_original_chain_stays_flat(db):
 
 
 def test_find_original_ignores_soft_deleted(db):
-    """Видалений запис не може бути оригіналом — інакше копія посилалась би в нікуди."""
+    """A deleted record cannot be an original - otherwise the copy would point to nowhere."""
     h = dedup_audio.hash_for("file", "Андрій: бюджет")
     _add(db, "Андрій: бюджет", content_hash=h, deleted_at="2026-09-01 10:00:00")
     with get_db_connection(db) as conn:
@@ -146,7 +146,7 @@ def test_find_original_ignores_soft_deleted(db):
 
 
 def test_find_original_ignores_non_audio_rows(db):
-    """Той самий текст у Telegram не робить аудіо-запис дублем."""
+    """The same text in Telegram does not make an audio record a duplicate."""
     h = dedup_audio.hash_for("file", "Андрій: бюджет")
     _add(db, "Андрій: бюджет", source_type="telegram", content_hash=h)
     with get_db_connection(db) as conn:
@@ -161,7 +161,7 @@ def test_find_original_excludes_self(db):
 
 
 # ============================================================
-# mark_duplicates — офлайн-прохід
+# mark_duplicates - the offline pass
 # ============================================================
 
 def test_mark_dry_run_writes_nothing(db):
@@ -175,7 +175,7 @@ def test_mark_dry_run_writes_nothing(db):
     assert stats["marked"] == 0
     assert stats["pending_marks"] == 1
     assert _dup_of(db, second) is None
-    assert _hash_of(db, first) is None      # хеші теж не дописані
+    assert _hash_of(db, first) is None      # the hashes are not written either
 
 
 def test_mark_writes_duplicate_of_and_hashes(db):
@@ -186,7 +186,7 @@ def test_mark_writes_duplicate_of_and_hashes(db):
 
     assert stats["marked"] == 1
     assert _dup_of(db, second) == first
-    assert _dup_of(db, first) is None       # оригінал лишається чистим
+    assert _dup_of(db, first) is None       # the original stays clean
     assert _hash_of(db, first) == _hash_of(db, second) is not None
 
 
@@ -197,8 +197,8 @@ def test_mark_is_idempotent(db):
 
     again = dedup_audio.mark_duplicates(db, dry_run=False)
 
-    assert again["groups"] == 1             # група нікуди не зникла
-    assert again["marked"] == 0             # але писати вже нічого
+    assert again["groups"] == 1             # the group did not go anywhere
+    assert again["marked"] == 0             # but there is nothing left to write
     assert again["pending_hashes"] == 0
 
 
@@ -224,7 +224,7 @@ def test_mark_does_not_touch_telegram(db):
 
 
 def test_mark_groups_across_audio_source_types(db):
-    """Той самий дзвінок, залитий файлом і як YouTube, — одна група."""
+    """The same call, uploaded as a file and as YouTube, is one group."""
     first = _add(db, "Андрій: бюджет", source_type="file")
     second = _add(db, "Андрій: бюджет", source_type="youtube")
     dedup_audio.mark_duplicates(db, dry_run=False)
@@ -249,13 +249,13 @@ def test_cli_dry_run_after_subcommand(db, capsys):
     assert dedup_audio.main(["--db", db, "mark", "--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert f"оригінал #{first}" in out
-    assert f"дубль #{second}" in out
+    assert f"original #{first}" in out
+    assert f"duplicate #{second}" in out
     assert _dup_of(db, second) is None
 
 
 def test_cli_dry_run_before_subcommand(db, capsys):
-    """--dry-run рятує з будь-якого місця рядка (урок test-log-isolation-03)."""
+    """--dry-run works from any place in the line (lesson test-log-isolation-03)."""
     _add(db, "Андрій: бюджет")
     second = _add(db, "Андрій: бюджет")
 
@@ -276,16 +276,16 @@ def test_cli_without_dry_run_writes(db, capsys):
 
 
 # ============================================================
-# POST /api/transcribe (library-шлях) — ендпойнт-рівень (ремонт 4, review #7)
+# POST /api/transcribe (library path) - endpoint level (repair 4, review #7)
 # ============================================================
 #
-# Піднімаємо лише transcription_bp на порожній тимчасовій БД (patern
-# tests/test_audio_library_category.py) — жодного дотику до бойового
-# whisper_history.db. Whisper підмінюється фейком через app.state
-# (memory `mcp-stdio-no-heavy-models`: важке в тестах не імпортуємо).
+# We bring up only transcription_bp on an empty temporary DB (pattern of
+# tests/test_audio_library_category.py) - no contact with the production
+# whisper_history.db. Whisper is replaced by a fake via app.state
+# (memory `mcp-stdio-no-heavy-models`: we do not import heavy stuff in tests).
 
 class _FakeWhisperManager:
-    """Повертає той самий текст на кожен виклик — саме так ловиться дубль."""
+    """Returns the same text on every call - that is how a duplicate is caught."""
 
     def __init__(self, text):
         self._text = text
@@ -298,7 +298,7 @@ class _FakeWhisperManager:
 
 @pytest.fixture
 def endpoint_client(tmp_path, monkeypatch):
-    """transcription_bp на тимчасовій БД + фейковий whisper, job_queue=None."""
+    """transcription_bp on a temporary DB + a fake whisper, job_queue=None."""
     from flask import Flask
 
     from app import state
@@ -393,10 +393,10 @@ def test_endpoint_second_ingest_is_marked_duplicate(endpoint_client):
 
 
 def test_endpoint_dedup_ignores_whitespace(endpoint_client, monkeypatch):
-    """Пробіли/переноси навколо й усередині тексту не заважають дедупу.
+    """Spaces/line breaks around and inside the text do not get in the way of dedup.
 
-    Регістр НЕ входить у цю перевірку: `_normalize_text` (document_parser.py)
-    не робить casefold — див. `## Findings` цієї історії.
+    Case is NOT part of this check: `_normalize_text` (document_parser.py)
+    does not casefold - see `## Findings` of this story.
     """
     client, db_path, audio_download_id = endpoint_client
     from app import state
@@ -418,7 +418,7 @@ def test_endpoint_dedup_ignores_whitespace(endpoint_client, monkeypatch):
 
 
 class _SpyJobQueue:
-    """Лічильник submit'ів: сам job НЕ виконується (черга підмінена цілком)."""
+    """Submit counter: the job itself is NOT executed (the queue is fully replaced)."""
 
     def __init__(self):
         self.submitted = []
@@ -430,10 +430,10 @@ class _SpyJobQueue:
 
 def test_endpoint_duplicate_does_not_submit_enrichment_job(endpoint_client,
                                                            monkeypatch):
-    """Для дубля enrichment-job не ставиться — при тому що для оригіналу ставиться.
+    """No enrichment job is queued for a duplicate - while one is queued for the original.
 
-    Контрольне плече (перший запис) обовʼязкове: без нього перевірка була б
-    вакуумною — з `job_queue=None` черга порожня для будь-якого запису.
+    The control arm (the first record) is mandatory: without it the check would be
+    vacuous - with `job_queue=None` the queue is empty for any record.
     """
     client, db_path, audio_download_id = endpoint_client
 
@@ -447,7 +447,7 @@ def test_endpoint_duplicate_does_not_submit_enrichment_job(endpoint_client,
     r1 = _post_transcribe(client, audio_download_id)
     id1 = r1.get_json()["transcription_id"]
     assert [m.get("transcription_id") for _, m in spy.submitted] == [id1], (
-        "оригінал мусить отримати enrichment-job"
+        "the original must get an enrichment job"
     )
 
     r2 = _post_transcribe(client, audio_download_id)
@@ -457,5 +457,5 @@ def test_endpoint_duplicate_does_not_submit_enrichment_job(endpoint_client,
     assert _row(db_path, id2)["duplicate_of"] == id1
     assert data2["enrichment"]["status"] == "skipped_duplicate"
     assert [m.get("transcription_id") for _, m in spy.submitted] == [id1], (
-        f"для дубля #{id2} enrichment-job не мав ставитись"
+        f"no enrichment job should have been queued for duplicate #{id2}"
     )

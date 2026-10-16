@@ -1,9 +1,9 @@
-"""Тести звʼязування Telegram із графом сутностей (Волна 4.5.3).
+"""Tests of linking Telegram to the entity graph (Wave 4.5.3).
 
-Без моделі і без мережі. Головне, що перевіряється, — правило «згадка має
-виглядати власною назвою в самому тексті»: саме воно відділяє «Адам» від
-«документ» і «Том» від «тому». Без нього граф стає гіршим, ніж був, бо
-збагачення записало в аліаси звичайні слова.
+No model and no network. The main thing checked is the rule "a mention must
+look like a proper name in the text itself": it is what separates «Адам» from
+«документ» and «Том» from «тому». Without it the graph becomes worse than it was, because
+enrichment wrote ordinary words into the aliases.
 """
 import sqlite3
 
@@ -61,7 +61,7 @@ def _links(path):
 
 
 # ============================================================
-# Правило власної назви
+# The proper-name rule
 # ============================================================
 
 def test_capitalised_mention_is_linked(db):
@@ -71,21 +71,21 @@ def test_capitalised_mention_is_linked(db):
 
 
 def test_lowercase_mention_is_ignored(db):
-    """«документ» як аліас проєкту ловив кожен рахунок в архіві."""
+    """«документ» as a project alias caught every invoice in the archive."""
     _entity(db, "Стратегія розвитку області", etype="project", aliases=["документ"])
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("надішліть документ на пошту", names) == set()
 
 
 def test_common_word_colliding_with_name_is_ignored(db):
-    """«Тому» як аліас особи давав 144 збіги на слові «тому» (= через це)."""
+    """«Тому» as a person alias gave 144 matches on the word «тому» (= because of that)."""
     _entity(db, "Том", aliases=["Тому", "Тома"])
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("я тому і питаю про це", names) == set()
 
 
 def test_sentence_start_does_not_prove_a_name(db):
-    """Велика літера після крапки нічого не доводить."""
+    """A capital letter after a period proves nothing."""
     _entity(db, "Стратегія розвитку області", etype="project", aliases=["документ"])
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("Все готово. Документ надіслано.", names) == set()
@@ -93,7 +93,7 @@ def test_sentence_start_does_not_prove_a_name(db):
 
 
 def test_real_name_after_sentence_start_still_found(db):
-    """Але справжнє імʼя не має губитись через те, що стоїть у середині."""
+    """But a real name must not get lost because it stands in the middle."""
     eid = _entity(db, "Ковальчука", etype="project")
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("Все готово. По Ковальчука домовились.", names) == {eid}
@@ -107,14 +107,14 @@ def test_multiword_name_is_matched(db):
 
 
 def test_short_names_are_skipped(db):
-    """«Ок», «БХ» ловлять сміття і користі не дають."""
+    """«Ок», «БХ» catch junk and are of no use."""
     _entity(db, "БХ", etype="org")
     assert "бх" not in tg_entities.load_names(db)
 
 
 def test_topic_entities_are_not_linkable(db):
-    """2153 сутності типу topic — вільний текст («планування», «бюджет»):
-    вони зловлять половину архіву і нічого не означатимуть."""
+    """entities of type topic are free text («планування», «бюджет»):
+    they would catch half the archive and mean nothing."""
     _entity(db, "Планування", etype="topic")
     assert tg_entities.load_names(db) == {}
 
@@ -126,20 +126,20 @@ def test_word_boundary_is_respected(db):
 
 
 # ============================================================
-# Звʼязок вішається на НИТКУ
+# The link is hung on the THREAD
 # ============================================================
 
 def test_link_marks_only_the_message_with_the_mention(db):
-    """Спокуса була повісити сутність на всю нитку, але розширення до нитки вже
-    робить scope._expand_to_threads. Дубль у графі дав би 43 482 рядки замість
-    ~2 тисяч і зробив би meeting_count та list_stale_topics безглуздими."""
+    """The temptation was to hang the entity on the whole thread, but the expansion to the thread is already
+    done by scope._expand_to_threads. A duplicate in the graph would give 43 482 rows instead of
+    ~2 thousand and would make meeting_count and list_stale_topics meaningless."""
     eid = _entity(db, "Ковальчука", etype="project")
     _msg(db, "по Ковальчука треба інвестора", thread_id=1)
     _msg(db, "а скільки там виходить?", thread_id=1)
     _msg(db, "ок, беремо", thread_id=1)
     res = tg_entities.link_threads(db, dry_run=False)
     assert res["threads_with_mentions"] == 1
-    assert res["messages_linked"] == 1, "лише повідомлення зі згадкою"
+    assert res["messages_linked"] == 1, "only the message with the mention"
     assert {l["entity_id"] for l in _links(db)} == {eid}
     assert len(_links(db)) == 1
 
@@ -170,7 +170,7 @@ def test_link_is_idempotent(db):
 
 
 def test_link_records_its_provenance(db):
-    """Збіг рядків і витяг моделі — різні за надійністю речі."""
+    """A string match and a model extraction are things of different reliability."""
     _entity(db, "Ковальчука", etype="project")
     _msg(db, "по Ковальчука домовились", thread_id=1)
     tg_entities.link_threads(db, dry_run=False)
@@ -178,7 +178,7 @@ def test_link_records_its_provenance(db):
 
 
 def test_existing_claude_link_is_not_overwritten(db):
-    """Звʼязок від збагачення надійніший — у нього є salience і роль."""
+    """A link from enrichment is more reliable — it has salience and a role."""
     eid = _entity(db, "Ковальчука", etype="project")
     tid = _msg(db, "по Ковальчука домовились", thread_id=1)
     conn = sqlite3.connect(db)
@@ -195,7 +195,7 @@ def test_existing_claude_link_is_not_overwritten(db):
 
 
 def test_relink_drops_only_own_links(db):
-    """Перезапис прибирає свої звʼязки, чужі лишає."""
+    """A rewrite removes its own links and leaves foreign ones."""
     other = _entity(db, "Барселона", etype="org")
     tid = _msg(db, "тут нічого не згадано", thread_id=1)
     conn = sqlite3.connect(db)
@@ -208,7 +208,7 @@ def test_relink_drops_only_own_links(db):
 
 
 def test_messages_without_thread_are_skipped(db):
-    """Нитки ще не розкладені — звʼязувати нема по чому."""
+    """Threads are not split yet — there is nothing to link by."""
     _entity(db, "Ковальчука", etype="project")
     conn = sqlite3.connect(db)
     conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
@@ -232,19 +232,19 @@ def test_stats_report_coverage(db):
 
 
 # ============================================================
-# Звʼязування на інжесті (інкрементальний шлях)
+# Linking on ingest (the incremental path)
 # ============================================================
 
 @pytest.fixture(autouse=True)
 def _clean_names_cache():
-    """Кеш назв живе на рівні модуля, а кожен тест має свою тимчасову БД."""
+    """The names cache lives at module level, while each test has its own temporary DB."""
     tg_entities.reset_names_cache()
     yield
     tg_entities.reset_names_cache()
 
 
 def test_link_message_links_single_record(db):
-    """Нове повідомлення потрапляє в граф без повного проходу по архіву."""
+    """A new message gets into the graph without a full pass over the archive."""
     eid = _entity(db, "Ковальчука", etype="project")
     tid = _msg(db, "по Ковальчука домовились")
     res = tg_entities.link_message(db, tid)
@@ -254,7 +254,7 @@ def test_link_message_links_single_record(db):
 
 
 def test_link_message_is_idempotent(db):
-    """Повтор (напр. переембединг) не множить звʼязки."""
+    """A repeat (e.g. re-embedding) does not multiply links."""
     _entity(db, "Ковальчука", etype="project")
     tid = _msg(db, "по Ковальчука домовились")
     tg_entities.link_message(db, tid)
@@ -263,7 +263,7 @@ def test_link_message_is_idempotent(db):
 
 
 def test_link_message_forgets_mentions_removed_by_edit(db):
-    """Правка тексту знімає згадку: підписка MessageEdited веде сюди ж."""
+    """A text edit removes the mention: the MessageEdited subscription leads here too."""
     _entity(db, "Ковальчука", etype="project")
     tid = _msg(db, "по Ковальчука домовились")
     tg_entities.link_message(db, tid)
@@ -277,7 +277,7 @@ def test_link_message_forgets_mentions_removed_by_edit(db):
 
 
 def test_link_message_keeps_foreign_links(db):
-    """Звʼязок від Claude-збагачення надійніший — його не чіпаємо."""
+    """A link from Claude enrichment is more reliable — we do not touch it."""
     other = _entity(db, "Барселона", etype="org")
     tid = _msg(db, "тут нічого не згадано")
     conn = sqlite3.connect(db)
@@ -290,7 +290,7 @@ def test_link_message_keeps_foreign_links(db):
 
 
 def test_link_message_works_without_thread(db):
-    """Згадку доводить текст, а не нитка: збій розкладання не лишає запис поза графом."""
+    """The text proves the mention, not the thread: a split failure does not leave a record outside the graph."""
     eid = _entity(db, "Ковальчука", etype="project")
     conn = sqlite3.connect(db)
     cur = conn.execute(
@@ -305,7 +305,7 @@ def test_link_message_works_without_thread(db):
 
 
 def test_link_message_skips_non_telegram(db):
-    """Дзвінки й документи має збагачувати Claude, а не пошук написань."""
+    """Calls and documents must be enriched by Claude, not by a spelling search."""
     _entity(db, "Ковальчука", etype="project")
     conn = sqlite3.connect(db)
     cur = conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text) "
@@ -318,44 +318,44 @@ def test_link_message_skips_non_telegram(db):
 
 
 def test_names_cache_is_reused_and_resettable(db):
-    """Кеш потрібен, бо інакше кожне повідомлення читає 6200 назв."""
+    """The cache is needed, because otherwise every message reads 6200 names."""
     _entity(db, "Ковальчука", etype="project")
     first = tg_entities.names_for(db)
     _entity(db, "Барселона", etype="org")
-    assert tg_entities.names_for(db) is first          # нова сутність ще не видна
+    assert tg_entities.names_for(db) is first          # the new entity is not visible yet
     tg_entities.reset_names_cache()
     assert "барселона" in tg_entities.names_for(db)
 
 
 # ============================================================
-# Морфологічний матчер (історія 03) — вимкнений за замовчуванням
+# Morphological matcher (story 03) — off by default
 # ============================================================
 
 @pytest.fixture
 def morph_on(monkeypatch):
-    """Явно вмикає прапорець на час тесту."""
+    """Explicitly turns the flag on for the duration of the test."""
     monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
 
 
 @pytest.fixture
 def morph_off(monkeypatch):
-    """Явно ВИМИКАЄ прапорець. Потрібен явно, а не «за замовчуванням»: з
-    21.08.2026 `TG_ENTITIES_MORPH_ENABLED=1` стоїть у бойовому `.env`, і будь-який
-    тест у наборі, що підтягує config/dotenv, лишає його в `os.environ` — тест
-    про вимкнену гілку мусить володіти своїм середовищем, а не позичати його."""
+    """Explicitly turns the flag OFF. It is needed explicitly, not "by default": since
+    21.08.2026 `TG_ENTITIES_MORPH_ENABLED=1` is in the live `.env`, and any
+    test in the suite that pulls in config/dotenv leaves it in `os.environ` — a test
+    about the disabled branch must own its environment, not borrow it."""
     monkeypatch.delenv("TG_ENTITIES_MORPH_ENABLED", raising=False)
 
 
 def test_morph_disabled_by_default_leaves_inflected_form_unlinked(db, morph_off):
-    """Без прапорця «Юлією» не звʼязується — рівно поточна поведінка."""
+    """Without the flag «Юлією» is not linked — exactly the current behavior."""
     _entity(db, "Юлія")
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("домовились із Юлією про дзвінок", names) == set()
 
 
 def test_morph_enabled_links_inflected_forms(db, morph_on):
-    """Замір 14.08: «Юлією», «Тетяни», «Промприладом» — форми, які точний
-    матчер пропускає."""
+    """The 14.08 measurement: «Юлією», «Тетяни», «Промприладом» are forms that the exact
+    matcher misses."""
     julia = _entity(db, "Юлія")
     tetiana = _entity(db, "Тетяна")
     promprylad = _entity(db, "Промприлад", etype="org")
@@ -366,21 +366,21 @@ def test_morph_enabled_links_inflected_forms(db, morph_on):
 
 
 def test_morph_guard1_exact_wordform_wins_on_its_position(db, morph_on):
-    """Гард 1: токен, спожитий точним збігом (тут — багатослівним), закритий
-    для морфо-гілки — навіть коли основа ОДНОЗНАЧНО (без допомоги гарда 2)
-    вказує на ІНШУ сутність. Пара навмисно без спільної основи з "Дім Данс":
-    якщо прибрати гард 1, гард 2 цей випадок не зловить, і тест почервоніє."""
-    dim_dans = _entity(db, "Дім Данс", etype="project")  # точний ключ "дім данс"
-    dansy = _entity(db, "Дансі", etype="org")             # основа "данс" — та сама, що в токені "Данс"
+    """Guard 1: a token consumed by an exact match (here a multi-word one) is closed
+    to the morph branch — even when the stem UNAMBIGUOUSLY (without help from guard 2)
+    points to ANOTHER entity. The pair deliberately has no common stem with "Дім Данс":
+    if guard 1 is removed, guard 2 will not catch this case, and the test will go red."""
+    dim_dans = _entity(db, "Дім Данс", etype="project")  # exact key "дім данс"
+    dansy = _entity(db, "Дансі", etype="org")             # stem "данс" — the same as in the token "Данс"
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("команда Дім Данс перемогла", names) == {dim_dans}
 
 
 def test_morph_multiword_exact_closes_all_its_tokens():
-    """Відтворення з ревʼю: `exact_word_positions.add(i)` стояв лише під
-    `size == 1`, тож слово ВСЕРЕДИНІ багатослівного точного збігу лишалось
-    відкритим для морфо-гілки і зараховувалось ДРУГІЙ сутності. Одне
-    написання не можна зараховувати двом."""
+    """A reproduction from the review: `exact_word_positions.add(i)` stood only under
+    `size == 1`, so a word INSIDE a multi-word exact match stayed
+    open to the morph branch and was credited to a SECOND entity. One
+    spelling cannot be credited to two."""
     names = {"дім данс": 1, "данси": 2}
     stems = tg_entities._build_stems(names)
     assert tg_entities._mentions_core(
@@ -388,8 +388,8 @@ def test_morph_multiword_exact_closes_all_its_tokens():
 
 
 def test_morph_guard2_ambiguous_stem_is_rejected(db, morph_on):
-    """«Русланою» → і Руслан, і Руслана: основа неоднозначна, зв'язку нема.
-    Одну згадку не можна зарахувати двом (entity-merge-moves-names-to-aliases)."""
+    """«Русланою» → both «Руслан» and «Руслана»: the stem is ambiguous, no link.
+    One mention cannot be credited to two (entity-merge-moves-names-to-aliases)."""
     _entity(db, "Руслан")
     _entity(db, "Руслана")
     names = tg_entities.load_names(db)
@@ -397,15 +397,15 @@ def test_morph_guard2_ambiguous_stem_is_rejected(db, morph_on):
 
 
 def test_morph_guard3_all_caps_is_not_proof(db, morph_on):
-    """Гард 3: морфо-збіг проходить той самий `written_as_proper_noun` —
-    ALL-CAPS шапка не доказ, навіть коли основа однозначна."""
+    """Guard 3: a morph match passes the same `written_as_proper_noun` —
+    an ALL-CAPS header is not proof, even when the stem is unambiguous."""
     _entity(db, "Тетяна")
     names = tg_entities.load_names(db)
     assert tg_entities.find_mentions("ЗУСТРІЧ ЩОДО ТЕТЯНИ ЗАВТРА ВРАНЦІ", names) == set()
 
 
 def test_morph_link_message_writes_separate_source(db, morph_on):
-    """`SOURCE_MORPH` пишеться окремо від `SOURCE` в meeting_entities.source."""
+    """`SOURCE_MORPH` is written separately from `SOURCE` in meeting_entities.source."""
     julia = _entity(db, "Юлія")
     tid = _msg(db, "домовились із Юлією про дзвінок")
     res = tg_entities.link_message(db, tid)
@@ -417,8 +417,8 @@ def test_morph_link_message_writes_separate_source(db, morph_on):
 
 
 def test_morph_relink_replaces_only_its_own_rows(db, morph_on):
-    """Повторний прохід видаляє лише свої `thread_morph`-рядки: чужі (NULL) і
-    `thread_match` лишаються недоторканими."""
+    """A repeat pass deletes only its own `thread_morph` rows: foreign ones (NULL) and
+    `thread_match` stay untouched."""
     julia = _entity(db, "Юлія")
     other = _entity(db, "Барселона", etype="org")
     tid = _msg(db, "домовились із Юлією про дзвінок")
@@ -429,7 +429,7 @@ def test_morph_relink_replaces_only_its_own_rows(db, morph_on):
     conn.close()
 
     tg_entities.link_message(db, tid)
-    tg_entities.link_message(db, tid)     # ідемпотентно, свій рядок переписується
+    tg_entities.link_message(db, tid)     # idempotent, its own row is rewritten
 
     links = _links(db)
     assert len(links) == 2
@@ -440,15 +440,15 @@ def test_morph_relink_replaces_only_its_own_rows(db, morph_on):
 
 
 def test_morph_link_threads_does_not_touch_exact_match_rows(db, morph_on):
-    """Точний і морфологічний звʼязок на різних повідомленнях однієї нитки
-    не заважають одне одному при повторному проході."""
+    """An exact and a morphological link on different messages of one thread
+    do not interfere with each other on a repeat pass."""
     exact = _entity(db, "Ковальчука", etype="project")
     julia = _entity(db, "Юлія")
     _msg(db, "по Ковальчука домовились", thread_id=1)
     _msg(db, "уточнила Юлією питання", thread_id=1)
 
     tg_entities.link_threads(db, dry_run=False)
-    tg_entities.link_threads(db, dry_run=False)   # ідемпотентно
+    tg_entities.link_threads(db, dry_run=False)   # idempotent
 
     links = _links(db)
     assert len(links) == 2
@@ -458,8 +458,8 @@ def test_morph_link_threads_does_not_touch_exact_match_rows(db, morph_on):
 
 
 def test_morph_stats_reports_new_source(db, morph_on):
-    """`stats()` показує розріз за новим значенням `source` без окремої правки —
-    групування за фактичними значеннями в БД."""
+    """`stats()` shows the breakdown by the new `source` value without a separate edit —
+    grouping by the actual values in the DB."""
     _entity(db, "Юлія")
     tid = _msg(db, "домовились із Юлією про дзвінок")
     tg_entities.link_message(db, tid)
@@ -468,23 +468,23 @@ def test_morph_stats_reports_new_source(db, morph_on):
 
 
 def test_morph_stems_cache_is_reset_with_names_cache(db, morph_on):
-    """Основи кешуються разом із назвами (`stems_for`) і скидаються тим самим
+    """Stems are cached together with the names (`stems_for`) and reset by the same
     `reset_names_cache()`."""
     _entity(db, "Юлія")
     first = tg_entities.stems_for(db)
     _entity(db, "Роман")
-    assert tg_entities.stems_for(db) is first           # нова основа ще не видна
+    assert tg_entities.stems_for(db) is first           # the new stem is not visible yet
     tg_entities.reset_names_cache()
     assert "роман" in tg_entities.stems_for(db)
 
 
 def test_morph_stems_cache_recomputes_after_flag_flip(db, monkeypatch):
-    """Кеш, прогрітий, поки прапорець вимкнений, лишає слот основ `{}` — і
-    без перевірки стану прапорця цей порожній слот віддавався б і після
-    вмикання: `link_message` тоді видаляє свої `SOURCE_MORPH`-рядки і не має
-    чим їх переписати (стемс порожній, хоч прапорець уже ON)."""
+    """A cache warmed while the flag is off leaves the stems slot `{}` — and
+    without a check of the flag state this empty slot would be served after
+    turning it on too: `link_message` then deletes its `SOURCE_MORPH` rows and has nothing to
+    rewrite them with (the stems are empty although the flag is already ON)."""
     julia = _entity(db, "Юлія")
-    tg_entities.names_for(db)                          # прогрів кешу під OFF
+    tg_entities.names_for(db)                          # warming the cache under OFF
     monkeypatch.setenv("TG_ENTITIES_MORPH_ENABLED", "1")
     tid = _msg(db, "домовились із Юлією про дзвінок")
 

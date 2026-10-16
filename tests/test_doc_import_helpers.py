@@ -1,7 +1,7 @@
-"""Тести хелперів імпорту папки документів (Phase 16E).
+"""Tests for the document folder import helpers (Phase 16E).
 
-Лёгкі — app.blueprints.documents імпортується без torch (flask/utils лише).
-_collect_documents/_copy_into_docs не потребують app context.
+Lightweight - app.blueprints.documents is imported without torch (flask/utils only).
+_collect_documents/_copy_into_docs do not need an app context.
 """
 import os
 
@@ -11,10 +11,10 @@ from app.blueprints import documents as docs
 def test_collect_documents_non_recursive(tmp_path):
     (tmp_path / "a.md").write_text("x", encoding="utf-8")
     (tmp_path / "b.pdf").write_bytes(b"%PDF-1.4")
-    (tmp_path / "c.mp3").write_bytes(b"\x00")        # не документ
+    (tmp_path / "c.mp3").write_bytes(b"\x00")        # not a document
     sub = tmp_path / "sub"
     sub.mkdir()
-    (sub / "d.txt").write_text("y", encoding="utf-8")  # підпапка — не береться
+    (sub / "d.txt").write_text("y", encoding="utf-8")  # a subfolder - not picked up
 
     found = docs._collect_documents(str(tmp_path), recursive=False)
     names = sorted(os.path.basename(f) for f in found)

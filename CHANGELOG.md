@@ -5,6 +5,33 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.17.0] — 2026-10-16
+
+### Changed
+- **Code is in English** (spec `english-code`, part 3 of 3; council ESCALATE in round 2 on ask 4 — accepted by the
+  owner, see below). Comments, docstrings, log lines, CLI output and argparse help across `app/`, `mcp_server.py`,
+  `app.py`, `config.py`, `telegram_listener.py`, `evals/`, `scripts/`, `tools/` and the root scripts are English;
+  comments in the SPA JS/CSS, `sw.js`, `shell.html` and the PowerShell scripts too.
+- Tests: names, docstrings, comments and assert messages are English; Cyrillic test data stays on purpose (it is
+  what catches Cyrillic case-folding bugs).
+- MCP: all 41 tool descriptions and response texts are English; the MCP process runs with `RECALL_UI_LANG=en` and
+  sends `X-Recall-Lang: en` on proxied calls (the web UI setting is not affected).
+- `.env.example` and the settings registry descriptions are English.
+- User-facing server texts that were still Ukrainian-only (YouTube errors, local model availability, pipe run
+  errors, Telegram bot replies, transcript and co-pilot export labels, live-ask reasons) go through the uk/en
+  server catalog (`app/core/i18n_catalog/svc_*`).
+- Untouched by design: LLM prompts, text-parsing word patterns and regexes (deadline phrases, vocabulary,
+  secret masking), data written by migrations, names, uk dictionaries, chunk context prefixes (no re-embed).
+- Guard test `tests/test_code_english.py` (no Cyrillic in comments, docstrings and log calls of tracked Python)
+  and the path rule `.claude/rules/code-language.md`.
+
+### Known gaps (accepted)
+- Still Ukrainian in an English UI: the co-pilot "scope matches several directions" card
+  (`app/services/copilot/worker.py`), the job error after an app restart (`app/services/job_queue.py`) and the
+  co-pilot export title (`app/blueprints/copilot.py`, the catalog key exists but is unused).
+- Three test skip reasons are Ukrainian; the guard does not flag quoted Ukrainian prose, `print()`,
+  `warnings.warn` or a log message passed through a variable.
+
 ## [4.16.1] — 2026-10-16
 
 ### Changed

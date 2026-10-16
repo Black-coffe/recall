@@ -1,7 +1,7 @@
-/* Recall — i18n: Recall.t(), словники по областях, формати чисел/дат.
-   Вантажиться одразу після namespace.js; словники (i18n/<area>.js) — після нього.
-   Мова: data-ui-lang на <html> = uk|en → вона; auto → navigator.languages[0]
-   на «uk» → uk, інакше en. Без бібліотек і без fetch словників. */
+/* Recall — i18n: Recall.t(), per-area dictionaries, number/date formats.
+Loaded right after namespace.js; the dictionaries (i18n/<area>.js) come after it.
+Language: data-ui-lang on <html> = uk|en → that; auto → navigator.languages[0]
+on "uk" → uk, otherwise en. No libraries and no fetch of dictionaries. */
 (function () {
     'use strict';
     const R = window.Recall;

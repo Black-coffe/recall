@@ -1,8 +1,13 @@
 # services — `app/services/*` (hub)
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 
 Business logic outside HTTP. The map is split into slices of ≤80 lines; this file is only an index.
+Language (4.17.0): service code, comments, docstrings and logs are English (`.claude/rules/code-language.md`, guard
+`tests/test_code_english.py`: Cyrillic in comments/docstrings/logger-call strings fails, quotes ≤60 chars exempt). User-facing
+service texts go through `tr()` with uk/en entries in `app/core/i18n_catalog/svc_*.py`: `svc_boot`, `svc_embed`, `svc_llm`,
+`svc_media`, `svc_pipes`, `svc_recording`, `svc_retrieval`, `svc_tasks`, `svc_taxonomy`, `svc_telegram` (keys `<area>.<topic>.<name>`;
+modules auto-discovered by `i18n_catalog.load_modules()`, duplicate key → `ValueError`). Exempt: LLM prompts, parsing regexes, DB data.
 Separate map files: [copilot.md](copilot.md), [recording.md](recording.md).
 
 - [services-media.md](services-media.md) — transcription, YouTube, diarization, live, `vocabulary` (K1), audio dedup,

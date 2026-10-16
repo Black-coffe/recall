@@ -1,8 +1,8 @@
-"""Шар коментарів, Волна 6: стрічка для сторінки «Коментарі».
+"""Comments layer, Wave 6: the feed for the "Comments" page.
 
-Головне, що тут перевіряється, — не список, а ЗНАМЕННИК і ФАСЕТИ. Без них
-«5 виправлень» читається як повна картина, хоча це 5 із 200 — та сама пастка,
-через яку у зводі свого часу зʼявився `coverage`.
+The main thing checked here is not the list but the DENOMINATOR and the FACETS. Without them
+"5 corrections" reads as the full picture although it is 5 out of 200 — the same trap
+that once made `coverage` appear in the digest.
 """
 import sqlite3
 
@@ -57,13 +57,13 @@ def test_feed_returns_rows_total_and_facets(db):
 
 
 def test_facets_ignore_the_kind_filter(db):
-    """Обравши «виправлення», користувач має далі бачити, скільки решти —
-    інакше нема куди перемикатись."""
+    """After picking "corrections" the user must still see how many of the rest there are —
+    otherwise there is nowhere to switch."""
     tid = _add_tx(db)
     _seed(db, tid)
     d = comments.list_recent(db, kind="correction")
-    assert d["total"] == 2                      # знаменник ЗА фільтром
-    assert d["by_kind"]["note"] == 1            # фасети — без нього
+    assert d["total"] == 2                      # the denominator UNDER the filter
+    assert d["by_kind"]["note"] == 1            # facets — without it
 
 
 def test_facets_do_respect_other_filters(db):
@@ -89,7 +89,7 @@ def test_feed_names_media_card_and_falls_back(db):
     comments.create(db, "recording_session", "rec_z", "жива", source="live")
     names = {c["body"]: c["target_name"] for c in comments.list_recent(db)["comments"]}
     assert names["тут підрядник"] == "Аудіозапис"
-    # Тип без власного JOIN показується як «тип #ключ», а не порожнім рядком.
+    # A type without its own JOIN is shown as "type #key", not as an empty string.
     assert names["жива"] == "recording_session #rec_z"
 
 
@@ -152,6 +152,6 @@ def test_recent_endpoint_filters(client):
 
 
 def test_recent_endpoint_limit_is_bounded(client):
-    """Стеля потрібна: сторінка гортає, а не вивалює архів одним запитом."""
+    """A ceiling is needed: the page scrolls, it does not dump the archive in one request."""
     c, _ = client
     assert c.get('/api/comments/recent?limit=99999').get_json()["limit"] == 500

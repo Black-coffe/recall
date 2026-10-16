@@ -1,4 +1,4 @@
-"""Серверний шар перекладу: налаштування мови, tr/tr_n, паритет каталогу, скан ключів."""
+"""Server-side translation layer: language setting, tr/tr_n, catalog parity, key scan."""
 import ast
 import logging
 import re
@@ -124,7 +124,7 @@ def test_generic_500_localized():
     assert en == i18n.tr("core.error.internal", lang="en") and en != uk
 
 
-# ------------------------------------------------------------------ каталог
+# ------------------------------------------------------------------ catalog
 
 def _forms(value):
     return tuple(sorted(value)) if isinstance(value, dict) else None
@@ -138,15 +138,15 @@ def _vars(value):
 def test_catalog_parity():
     for module, messages in i18n_catalog.load_modules().items():
         for key, entry in messages.items():
-            assert set(entry) == {"uk", "en"}, f"{module}:{key}: потрібні рівно uk і en"
+            assert set(entry) == {"uk", "en"}, f"{module}:{key}: exactly uk and en are required"
             uk, en = entry["uk"], entry["en"]
-            assert isinstance(uk, dict) == isinstance(en, dict), f"{module}:{key}: форма різна"
+            assert isinstance(uk, dict) == isinstance(en, dict), f"{module}:{key}: shape differs"
             if isinstance(uk, dict):
-                assert set(uk) == {"one", "few", "many"}, f"{module}:{key}: uk-форми"
-                assert set(en) == {"one", "other"}, f"{module}:{key}: en-форми"
+                assert set(uk) == {"one", "few", "many"}, f"{module}:{key}: uk forms"
+                assert set(en) == {"one", "other"}, f"{module}:{key}: en forms"
             all_vars = set(_vars(uk) + _vars(en))
-            assert len(all_vars) == 1, f"{module}:{key}: різні {{vars}} у мовах/формах"
-            assert key.startswith(module + "."), f"{module}:{key}: префікс ключа = область"
+            assert len(all_vars) == 1, f"{module}:{key}: different {{vars}} across languages/forms"
+            assert key.startswith(module + "."), f"{module}:{key}: key prefix = area"
 
 
 def test_catalog_duplicate_key_fails(monkeypatch):

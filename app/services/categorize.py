@@ -1,15 +1,15 @@
-"""Авто-підказка напрямку (Phase 15C) — семантичний k-NN по розмічених транскриптах.
+"""Direction auto-suggestion (Phase 15C) - semantic k-NN over labelled transcripts.
 
-Для транскрипту: усереднюємо його chunk-embeddings у doc-вектор, шукаємо
-найсхожіші ВЖЕ розмічені (category_id IS NOT NULL) транскрипти і зважено
-голосуємо їхніми напрямками (вага голосу = cosine similarity). Без правил/
-ключових слів — самонавчається з ростом розмітки, повторно використовує ті самі
-embeddings, що й RAG-пошук.
+For a transcript: average its chunk embeddings into a doc vector, look for the
+most similar ALREADY labelled (category_id IS NOT NULL) transcripts and cast a
+weighted vote with their directions (vote weight = cosine similarity). No rules/
+keywords - it learns by itself as the labelling grows, and reuses the same
+embeddings as the RAG search.
 
-Холодний старт: поки розмічено <2 напрямків (з embeddings), будь-який класифікатор
-звівся б до одного класу і завжди пропонував би його. Тому повертаємо
-reason='insufficient_labels' — UI не нав'язує підказку, доки користувач не
-засіє кілька різних напрямків вручну.
+Cold start: while fewer than 2 directions are labelled (with embeddings), any classifier
+would collapse to a single class and always suggest it. So we return
+reason='insufficient_labels' - the UI does not push a suggestion until the user
+has seeded a few different directions by hand.
 """
 from __future__ import annotations
 
@@ -25,12 +25,12 @@ from app.services import embeddings
 
 logger = logging.getLogger(__name__)
 
-_KNN = 8                      # скільки найближчих сусідів голосують
-_MIN_LABELED_CATEGORIES = 2  # менше = cold-start, підказка не має сенсу
+_KNN = 8                      # how many nearest neighbours vote
+_MIN_LABELED_CATEGORIES = 2  # fewer = cold start, a suggestion makes no sense
 
 
 def _doc_vector(blobs: list[bytes]) -> Optional[np.ndarray]:
-    """Усереднити chunk-embeddings у єдиний нормалізований doc-вектор."""
+    """Average chunk embeddings into a single normalised doc vector."""
     vecs = [embeddings.blob_to_vec(b) for b in blobs]
     vecs = [v for v in vecs if v.shape[0] == embeddings.EMBED_DIM]
     if not vecs:
@@ -41,24 +41,24 @@ def _doc_vector(blobs: list[bytes]) -> Optional[np.ndarray]:
 
 
 def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict:
-    """Підказати напрямок транскрипту через k-NN по розмічених.
+    """Suggest a direction for a transcript via k-NN over the labelled ones.
 
     Returns:
       {"suggestion": {"category_id", "name", "confidence"},
        "candidates": [{"category_id","name","score"}...], "neighbors": int}
-      або {"suggestion": None, "reason": <code>, ...} якщо підказати не можна.
+      or {"suggestion": None, "reason": <code>, ...} if nothing can be suggested.
 
-    **Гард епохи (ADR-017, історія 05).** `chunks` не тримає власного
-    `embedding_model`/`embedding_version` — ці поля живуть на батьківському
-    `transcriptions` (одна пара на весь запис, атомарно з DELETE+INSERT чанків
-    у `chunk_and_embed_transcription`). Обидві вибірки — власні чанки запису й
-    розмічений корпус — тому фільтруються за поточною парою
-    (`embeddings.EMBED_MODEL`, `embeddings.EMBED_VERSION`) через `JOIN
-    transcriptions`: інакше під час переходу на нову епоху (`EMBED_VERSION`
-    2→3) функція мовчки порахувала б косинус між векторами різних епох —
-    геометрично безглузде число без жодної помилки. Якщо запис має власні
-    чанки, але не в поточній епосі, — `reason: "epoch_mixed"` замість тихого
-    сміття.
+    **Epoch guard (ADR-017, story 05).** `chunks` has no `embedding_model`/
+    `embedding_version` of its own - those fields live on the parent
+    `transcriptions` (one pair per whole record, atomic with DELETE+INSERT of the chunks
+    in `chunk_and_embed_transcription`). Both selections - the record's own chunks and
+    the labelled corpus - are therefore filtered by the current pair
+    (`embeddings.EMBED_MODEL`, `embeddings.EMBED_VERSION`) via `JOIN
+    transcriptions`: otherwise during a move to a new epoch (`EMBED_VERSION`
+    2->3) the function would silently compute a cosine between vectors of different epochs -
+    a geometrically meaningless number with no error at all. If a record has its own
+    chunks but not in the current epoch, `reason: "epoch_mixed"` is returned instead of quiet
+    garbage.
     """
     if not embeddings.is_available():
         return {"suggestion": None, "reason": "embeddings_unavailable"}
@@ -82,8 +82,8 @@ def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict
                 return {"suggestion": None, "reason": "epoch_mixed"}
             return {"suggestion": None, "reason": "not_embedded"}
 
-        # T4.6: не голосуємо embedding'ами soft-deleted транскриптів (undo-вікно
-        # ≠ дійсна розмітка).
+        # T4.6: do not vote with embeddings of soft-deleted transcripts (the undo window
+        # != a valid label).
         labeled = conn.execute(
             "SELECT ch.transcription_id AS tid, t.category_id AS cat, ch.embedding AS emb "
             "FROM chunks ch JOIN transcriptions t ON t.id = ch.transcription_id "
@@ -99,7 +99,7 @@ def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict
     if q is None:
         return {"suggestion": None, "reason": "dim_mismatch"}
 
-    # Групуємо чанки розмічених транскриптів → по одному doc-вектору на транскрипт.
+    # Group the chunks of labelled transcripts -> one doc vector per transcript.
     blobs_by_tid: dict[int, list] = defaultdict(list)
     cat_by_tid: dict[int, int] = {}
     for r in labeled:
@@ -120,7 +120,7 @@ def suggest_category(db_path: str, transcription_id: int, k: int = _KNN) -> dict
         return {"suggestion": None, "reason": "insufficient_labels",
                 "labeled_categories": len(distinct)}
 
-    # k найближчих сусідів за cosine, зважене голосування.
+    # k nearest neighbours by cosine, weighted vote.
     sims = sorted(((float(dv @ q), cat) for dv, cat in docs),
                   key=lambda x: x[0], reverse=True)[:k]
     votes: dict[int, float] = defaultdict(float)

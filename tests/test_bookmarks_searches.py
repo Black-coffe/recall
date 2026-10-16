@@ -1,4 +1,4 @@
-"""Phase 12.12: тести bookmarks + saved searches."""
+"""Phase 12.12: tests of bookmarks + saved searches."""
 from __future__ import annotations
 
 import json
@@ -67,7 +67,7 @@ class TestBookmarks:
         c, tx_id = client_and_tx
         c.post(f'/api/transcription/{tx_id}/bookmarks',
                json={'segment_index': 0, 'note': 'first'})
-        # Друге POST на той же segment_index — оновлює note
+        # A second POST on the same segment_index - updates the note
         r = c.post(f'/api/transcription/{tx_id}/bookmarks',
                    json={'segment_index': 0, 'note': 'updated'})
         assert r.status_code == 200
@@ -114,7 +114,7 @@ class TestBookmarks:
 
     def test_bookmarks_sorted_by_time(self, client_and_tx):
         c, tx_id = client_and_tx
-        # Create в reverse порядку — повинні повернутись sorted ASC
+        # Create in reverse order - they must come back sorted ASC
         c.post(f'/api/transcription/{tx_id}/bookmarks', json={'segment_index': 2})
         c.post(f'/api/transcription/{tx_id}/bookmarks', json={'segment_index': 0})
         c.post(f'/api/transcription/{tx_id}/bookmarks', json={'segment_index': 1})
@@ -174,7 +174,7 @@ class TestSavedSearches:
         c, _ = client_and_tx
         sid_a = c.post('/api/saved-searches', json={'name': 'A', 'query': {}}).get_json()['id']
         sid_b = c.post('/api/saved-searches', json={'name': 'B', 'query': {}}).get_json()['id']
-        # B використовуємо двічі
+        # We use B twice
         c.post(f'/api/saved-searches/{sid_b}/use')
         c.post(f'/api/saved-searches/{sid_b}/use')
         c.post(f'/api/saved-searches/{sid_a}/use')

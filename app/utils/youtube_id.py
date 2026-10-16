@@ -1,4 +1,4 @@
-"""YouTube URL → video ID parser. Чиста функція без I/O."""
+"""YouTube URL → video ID parser. Pure function without I/O."""
 import logging
 import re
 
@@ -6,17 +6,17 @@ logger = logging.getLogger(__name__)
 
 
 _PATTERNS = [
-    # Стандартные форматы
+    # Standard formats
     r'(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
     r'(?:youtu\.be\/)([a-zA-Z0-9_-]{11})',
     r'(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
-    # Live стримы
+    # Live streams
     r'(?:youtube\.com\/live\/)([a-zA-Z0-9_-]{11})',
     # YouTube Shorts
     r'(?:youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})',
-    # Mobile версии
+    # Mobile versions
     r'(?:m\.youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
-    # С timestamp и другими параметрами
+    # With timestamp and other parameters
     r'(?:youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})',
     # YouTube Music
     r'(?:music\.youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
@@ -24,9 +24,9 @@ _PATTERNS = [
 
 
 def extract_youtube_id(url: str):
-    """Извлекает YouTube video ID из URL.
+    """Extracts the YouTube video ID from a URL.
 
-    Поддерживает: standard, short (youtu.be), embed, live, shorts, music, mobile.
+    Supports: standard, short (youtu.be), embed, live, shorts, music, mobile.
 
     Returns:
         str (11-character video id) | None

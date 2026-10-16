@@ -1,15 +1,15 @@
-"""`grep_archive` — MCP-тулза (grep-explainability, історія 04).
+"""`grep_archive` — an MCP tool (grep-explainability, story 04).
 
-Тонка обгортка над `app.services.archive_grep.grep()` (історія 01) — тіло не
-переформатовує контракт C1, лише ловить `ValueError` (некоректний regex) і
-повертає {"error": ...} замість traceback.
+A thin wrapper over `app.services.archive_grep.grep()` (story 01) — the body does not
+reformat contract C1, it only catches `ValueError` (an invalid regex) and
+returns {"error": ...} instead of a traceback.
 
-Друга половина історії: `search_archive`/`ask_archive` передають `explain` у
-`_api` (params/body). Тут це перевіряється із замоканим `_api`, без мережі.
+The second half of the story: `search_archive`/`ask_archive` pass `explain` to
+`_api` (params/body). Here that is checked with a mocked `_api`, without network.
 
-Офлайн: тимчасова SQLite через `init_database`, без мережі й без важких
-моделей. Ключова умова — імпорт `mcp_server` не має тягнути `torch` навіть
-транзитивно (через `archive_grep`/`retrieval`) — див. `test_import_has_no_torch`.
+Offline: a temporary SQLite via `init_database`, no network and no heavy
+models. The key condition — importing `mcp_server` must not pull in `torch` even
+transitively (via `archive_grep`/`retrieval`) — see `test_import_has_no_torch`.
 """
 from __future__ import annotations
 
@@ -50,12 +50,12 @@ def _add_chunk(conn, transcription_id, chunk_index, text):
 
 
 def test_import_has_no_torch():
-    """Прямий доказ, а не припущення: torch не мав завантажитись, навіть
-    транзитивно через archive_grep/retrieval, лише тому, що mcp_server
-    імпортований. Перевіряється у СВІЖОМУ процесі — інакше в межах повного
-    `pytest -m "not slow"` інші модулі (whisper/ctranslate2 тощо) уже
-    затягнули torch у той самий sys.modules раніше, і перевірка нічого б
-    не довела про сам mcp_server."""
+    """Direct proof, not an assumption: torch must not have loaded, even
+    transitively via archive_grep/retrieval, merely because mcp_server was
+    imported. Checked in a FRESH process — otherwise within a full
+    `pytest -m "not slow"` other modules (whisper/ctranslate2 etc.) have already
+    pulled torch into the same sys.modules earlier, and the check would prove
+    nothing about mcp_server itself."""
     proc = subprocess.run(
         [sys.executable, "-c", "import sys; import mcp_server; print('torch' in sys.modules)"],
         cwd=str(Path(__file__).resolve().parent.parent),
@@ -66,8 +66,8 @@ def test_import_has_no_torch():
 
 
 def test_grep_archive_registered():
-    # Число тулз — інваріант реєстру й бакетів, окремо покритий
-    # tests/test_mcp_about.py; тут лише факт реєстрації grep_archive.
+    # The tool count is a registry/bucket invariant, covered separately by
+    # tests/test_mcp_about.py; here only the fact that grep_archive is registered.
     assert "grep_archive" in m._registered_tool_names()
 
 
@@ -100,14 +100,14 @@ def test_grep_archive_returns_c1_contract(db):
 
 
 def test_grep_archive_docstring_covers_all_truncation_reasons():
-    # знахідка 4 (Plan deltas D2): докстрінг — єдиний текст, за яким модель
-    # обирає тулзу і тлумачить truncated; мусить називати всі три причини,
-    # match_total і межу чанків, а не радити "підніми limit" на дедлайні.
+    # finding 4 (Plan deltas D2): the docstring is the only text by which the model
+    # picks the tool and interprets truncated; it must name all three reasons,
+    # match_total and the chunk boundary, not advise "raise limit" on a deadline.
     doc = m.grep_archive.__doc__
     assert doc is not None
     for token in ("max_scan", "deadline", "limit", "match_total", "arbitrary_scan_caveat",
                   "chunk_boundary_caveat"):
-        assert token in doc, f"докстрінг не згадує {token!r}"
+        assert token in doc, f"docstring does not mention {token!r}"
 
 
 def test_grep_archive_bad_regex_returns_error_not_traceback(db):

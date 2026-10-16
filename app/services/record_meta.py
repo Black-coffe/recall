@@ -1,16 +1,16 @@
-"""Власна назва й опис запису (`transcriptions.title` / `.description`).
+"""Own title and description of a record (`transcriptions.title` / `.description`).
 
-Контракт C2 спеки `editable-title-description`. Тут — нормалізація значень,
-читабельне імʼя запису (`display_name`) і точкове оновлення полів; жодного
-HTTP і жодної важкої залежності.
+Contract C2 of the spec `editable-title-description`. Here: value normalisation,
+a human-readable record name (`display_name`) and a point update of the fields; no
+HTTP and no heavy dependency.
 
-Модуль імпортується і з блупринтів, і зі stdio-MCP, тому в ньому **лише
-stdlib + `app.db.connection`**: `import torch` (чи будь-що, що тягне торч)
-підвішує stdio-сервер назавжди — памʼятка `mcp-stdio-no-heavy-models`.
+The module is imported both from blueprints and from the stdio MCP, so it has **only
+stdlib + `app.db.connection`**: `import torch` (or anything that pulls torch)
+hangs the stdio server forever (memory note `mcp-stdio-no-heavy-models`).
 
-`source_name` — провенанс (імʼя файлу, заголовок YouTube, превʼю
-TG-повідомлення): він НЕ перезаписується ні тут, ні в PATCH. Порожня назва
-означає `NULL` у `title`, а не копію `source_name`.
+`source_name` is provenance (file name, YouTube title, preview of a
+TG message): it is NOT overwritten here or in PATCH. An empty title
+means `NULL` in `title`, not a copy of `source_name`.
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ DESCRIPTION_MAX = 4000
 
 
 class _Unset:
-    """Сентинел «поле не передали» — щоб відрізнити його від явного `None`."""
+    """Sentinel "the field was not passed", to tell it from an explicit `None`."""
 
-    def __repr__(self) -> str:  # pragma: no cover - лише для логів/помилок
+    def __repr__(self) -> str:  # pragma: no cover - only for logs/errors
         return "UNSET"
 
     def __bool__(self) -> bool:
@@ -36,34 +36,40 @@ class _Unset:
 UNSET = _Unset()
 
 
-def _normalize(value: Any, limit: int, label: str) -> str | None:
+def _normalize(value: Any, limit: int, kind: str) -> str | None:
     if value is None or isinstance(value, _Unset):
         return None
     if not isinstance(value, str):
-        raise ValueError(f"{label} має бути текстом або порожнім значенням")
+        raise ValueError(_tr(f"svc_embed.meta.{kind}.not_text"))
     cleaned = value.strip()
     if not cleaned:
         return None
     if len(cleaned) > limit:
-        raise ValueError(f"{label} задовга: максимум {limit} символів")
+        raise ValueError(_tr(f"svc_embed.meta.{kind}.too_long", limit=limit))
     return cleaned
 
 
-def normalize_title(value: Any) -> str | None:
-    """`"  Зустріч  "` → `"Зустріч"`; порожнє/`None` → `None`; >200 → `ValueError`.
+def _tr(key: str, **vars) -> str:
+    # Lazy import: keeps the module free of Flask at import time (stdio MCP).
+    from app.core.i18n import tr
+    return tr(key, **vars)
 
-    Не-рядок (`123`, `[]`, `{}`) — теж `ValueError` (→ 400 у PATCH): мовчки
-    перетворити його на `NULL` означало б стерти назву на кривому запиті."""
-    return _normalize(value, TITLE_MAX, "Назва")
+
+def normalize_title(value: Any) -> str | None:
+    """`"  Зустріч  "` -> `"Зустріч"`; empty/`None` -> `None`; >200 -> `ValueError`.
+
+    A non-string (`123`, `[]`, `{}`) is also a `ValueError` (-> 400 in PATCH): silently
+    turning it into `NULL` would erase the title on a malformed request."""
+    return _normalize(value, TITLE_MAX, "title")
 
 
 def normalize_description(value: Any) -> str | None:
-    """Те саме для опису (стеля 4000). Переноси рядків усередині зберігаються."""
-    return _normalize(value, DESCRIPTION_MAX, "Опис")
+    """The same for the description (ceiling 4000). Line breaks inside are kept."""
+    return _normalize(value, DESCRIPTION_MAX, "description")
 
 
 def display_name(row: Mapping[str, Any]) -> str:
-    """Як запис називати людині: `title` → `source_name` → `Запис #id`."""
+    """How to name a record for a person: `title` -> `source_name` -> `Record #id`."""
     for key in ("title", "source_name"):
         try:
             value = row[key]
@@ -75,17 +81,17 @@ def display_name(row: Mapping[str, Any]) -> str:
         row_id = row["id"]
     except (KeyError, IndexError, TypeError):
         row_id = None
-    return f"Запис #{row_id}"
+    return _tr("svc_embed.meta.record_fallback", id=row_id)
 
 
 def update_meta(conn, transcription_id: int, *, title=UNSET, description=UNSET):
-    """Оновити лише передані поля запису. `None` — якщо запису нема або видалений.
+    """Update only the passed fields of a record. `None` if the record is missing or deleted.
 
-    Повертає ``{"id", "title", "description", "source_name", "display_name",
-    "changed"}``. ``changed`` — False, якщо нові значення збігаються зі старими
-    (тоді UPDATE не виконується взагалі, і `transcriptions_au` не смикає FTS).
-    Значення нормалізуються тут же, тож `ValueError` з `normalize_*` долітає
-    до викликача.
+    Returns ``{"id", "title", "description", "source_name", "display_name",
+    "changed"}``. ``changed`` is False if the new values match the old ones
+    (then no UPDATE is executed at all, and `transcriptions_au` does not poke FTS).
+    Values are normalised right here, so a `ValueError` from `normalize_*` reaches
+    the caller.
     """
     row = conn.execute(
         "SELECT id, title, description, source_name FROM transcriptions "
@@ -125,30 +131,30 @@ def update_meta(conn, transcription_id: int, *, title=UNSET, description=UNSET):
 
 
 def after_meta_update(transcription_id: int, *, changed: bool, db_path: str) -> None:
-    """Хук «мета запису змінилась»: назва й опис ідуть у контекстний префікс
-    чанків, тож після реальної правки чанки цього запису треба переембедити.
+    """Hook "the record meta changed": the title and description go into the chunk
+    context prefix, so after a real edit the chunks of this record must be re-embedded.
 
-    `changed=False` (PATCH тими самими значеннями) не робить нічого — інакше
-    кожне повторне збереження форми ганяло б GPU намарно.
+    `changed=False` (PATCH with the same values) does nothing; otherwise
+    every repeated form save would run the GPU for nothing.
 
-    `db_path` — обовʼязковий keyword: re-embed мусить цілити саме в ту БД, якою
-    правку й зробили (у PATCH — `current_app.config["DATABASE"]`). Дефолту
-    «бойова БД» тут нема свідомо — з ним будь-який виклик на тимчасовій БД
-    переписував би чанки бойового архіву.
+    `db_path` is a mandatory keyword: the re-embed must target exactly the DB in which
+    the edit was made (in PATCH, `current_app.config["DATABASE"]`). There is deliberately
+    no "live DB" default here: with it any call on a temporary DB
+    would rewrite the chunks of the live archive.
 
-    `reembed` імпортується ВСЕРЕДИНІ функції: він тягне `embeddings`, а той —
-    torch, і модуль верхнього рівня підвісив би stdio-MCP
-    (памʼятка `mcp-stdio-no-heavy-models`).
+    `reembed` is imported INSIDE the function: it pulls `embeddings`, and that pulls
+    torch, and a top-level import would hang the stdio MCP
+    (memory note `mcp-stdio-no-heavy-models`).
     """
     if not changed:
-        logger.debug("after_meta_update: id=%s без змін — re-embed не потрібен",
+        logger.debug("after_meta_update: id=%s unchanged; re-embed not needed",
                      transcription_id)
         return
     try:
         from app.services import reembed
         outcome = reembed.schedule_record_reembed(transcription_id, db_path=db_path)
-    except Exception:  # noqa: BLE001 — правка мети вже збережена, re-embed вторинний
-        logger.exception("after_meta_update: id=%s — не вдалось запланувати re-embed",
+    except Exception:  # noqa: BLE001 - the meta edit is already saved, re-embed is secondary
+        logger.exception("after_meta_update: id=%s - failed to schedule re-embed",
                          transcription_id)
         return
     logger.info("after_meta_update: id=%s re-embed → %s", transcription_id, outcome)

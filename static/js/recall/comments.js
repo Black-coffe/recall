@@ -1,24 +1,24 @@
-/* Recall — шар коментарів (Волна 1, UI).
+/* Recall — comments layer (Wave 1, UI).
 
-   Один компонент на всі поверхні: Бібліотека, Медіатека, сторінка транскрипту,
-   далі — задачі й сутності. Тримати його спільним обовʼязково: коментар має
-   виглядати й поводитись однаково скрізь, інакше «написати уточнення» стане
-   різною дією залежно від екрана.
+   One component for all surfaces: Library, Media library, transcript page,
+   later — tasks and entities. Keeping it shared is mandatory: a comment must
+   look and behave the same everywhere, otherwise "write a clarification" becomes
+   a different action depending on the screen.
 
-   Патерн — той самий, що вже є в Медіатеці (`.rc-aud__run`): клік по
-   іконці-лічильнику розгортає панель ПІД карткою, не забираючи зі сторінки.
-   Навігацію по картці це не ламає — панель зупиняє спливання кліку.
+   The pattern is the same as already exists in the Media library (`.rc-aud__run`): a click on the
+   counter icon expands the panel UNDER the card, without leaving the page.
+   This does not break navigation by the card — the panel stops click propagation.
 
-   Мова вводу не обмежується нічим: e5-large багатомовна, а `body` — звичайний
-   TEXT. Ніяких спелчекерів і транслітерацій. */
+   The input language is not restricted by anything: e5-large is multilingual, and `body` is a plain
+   TEXT. No spellcheckers and no transliteration. */
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
     const T = (k, v) => R.t(k, v);
 
-    // Довідник типів приходить із сервера (/api/comments/meta), а не дублюється
-    // тут: ваги задають ранжування, і розʼїзд константи між фронтом і
-    // ретрівалом означав би, що UI обіцяє пріоритет, якого пошук не дає.
+    // The type reference comes from the server (/api/comments/meta) and is not duplicated
+    // here: weights define the ranking, and a drift of the constant between the front and
+    // retrieval would mean the UI promises a priority the search does not give.
     let _meta = null;
     async function meta() {
         if (_meta) return _meta;
@@ -45,13 +45,13 @@
         question: T('knowledge.cmt.hint.question'),
     };
 
-    // ---- бейдж на картці ---------------------------------------------------
+    // ---- badge on the card ---------------------------------------------------
 
-    /* Три стани навмисно різні, бо означають різне:
-       0        — приглушений, це запрошення, а не сигнал;
-       >0       — акцент: на картці є що прочитати;
-       є correction — окремий (теплий) акцент: у записі щось СПРОСТОВАНО,
-                  і це найважливіше, що картка може про себе сказати. */
+    /* Three states are deliberately different, because they mean different things:
+       0        — muted, this is an invitation, not a signal;
+       >0       — accent: there is something to read on the card;
+       has correction — a separate (warm) accent: something in the record is DISPUTED,
+                  and that is the most important thing a card can say about itself. */
     function badgeHTML(count, hasCorrection) {
         const n = count || 0;
         const cls = 'rc-cmbtn' + (n ? ' is-has' : '') + (hasCorrection ? ' is-fix' : '');
@@ -63,20 +63,20 @@
         </button>`;
     }
 
-    /* Розставити лічильники по вже відрендереному списку одним запитом.
-       rows: [{id, el}] — el це вузол, у який вставити бейдж (або сам рядок). */
+    /* Place counters on an already rendered list with one request.
+       rows: [{id, el}] — el is the node to insert the badge into (or the row itself). */
     async function decorate(targetType, items, opts) {
         const o = opts || {};
         const ids = items.map(it => it.id).filter(v => v != null);
         if (!ids.length) return;
         let counts = {};
         try { counts = (await R.api.commentCounts(targetType, ids)).counts || {}; }
-        catch (_) { return; }   // лічильники — прикраса; без них картки цілі
+        catch (_) { return; }   // counters are decoration; the cards stay intact without them
         items.forEach(it => {
             const host = o.slot ? it.el.querySelector(o.slot) : it.el;
             if (!host) return;
-            // Сервер віддає {n, corrections} — третій стан бейджа («у записі
-            // щось спростовано») інакше був би недосяжним.
+            // The server returns {n, corrections} — the third badge state ("something in the
+            // record is disputed") would otherwise be unreachable.
             const c = counts[it.id] || counts[String(it.id)] || {};
             const n = c.n || 0;
             const old = host.querySelector('[data-act="comments"]');
@@ -91,7 +91,7 @@
         });
     }
 
-    // ---- панель ------------------------------------------------------------
+    // ---- panel ------------------------------------------------------------
 
     function fmtWhen(s) {
         return U.fmtDate ? U.fmtDate(s) : (s || '');
@@ -120,9 +120,9 @@
         </div>`;
     }
 
-    /* Похідні коментаря — задачі, які з нього витягнув Claude. Довантажуємо
-       окремо і лише для розібраних: список картки читається на кожен клік по
-       бейджу, а це майже завжди порожньо. */
+    /* Derivatives of a comment — tasks that Claude extracted from it. Loaded
+       separately and only for parsed ones: the card's list is read on every click on the
+       badge, and it is almost always empty. */
     async function loadDerived(el, cid) {
         const box = el.querySelector(`[data-derived="${cid}"]`);
         if (!box) return;
@@ -165,9 +165,9 @@
         </div>`;
     }
 
-    /* Розгорнути/згорнути панель під переданим елементом. host — рядок картки;
-       панель вставляється одразу після нього окремим вузлом, щоб не воювати з
-       layout самої картки. */
+    /* Expand/collapse the panel under the passed element. host — the card row;
+       the panel is inserted right after it as a separate node, so as not to fight the
+       layout of the card itself. */
     async function toggle(host, targetType, targetId, opts) {
         const o = opts || {};
         const existing = host.nextElementSibling;
@@ -176,8 +176,8 @@
             existing.remove();
             return null;
         }
-        // Одна панель на список: інакше екран швидко перетворюється на
-        // гармошку з десяти відкритих карток.
+        // One panel per list: otherwise the screen quickly turns into an
+        // accordion of ten open cards.
         const list = host.parentElement;
         if (list) list.querySelectorAll(':scope > .rc-cmpanel').forEach(p => p.remove());
 
@@ -192,8 +192,8 @@
         return panel;
     }
 
-    /* Відрендерити панель у ГОТОВИЙ контейнер — для сторінки транскрипту, де
-       вона живе постійно, а не розгортається під рядком. */
+    /* Render the panel into a READY container — for the transcript page, where
+       it lives permanently instead of expanding under a row. */
     async function mount(panel, targetType, targetId, opts) {
         const o = opts || {};
         let items = [];
@@ -263,9 +263,9 @@
                 try { await R.api.commentUpdate(cid, { body: text }); await reload(); }
                 catch (err) { UI.toast((err && err.message) || T('knowledge.cmt.fail'), 'error'); }
             });
-            // Розбір через Claude — платна дія, тож підтвердження обовʼязкове,
-            // а повторний розбір уже розібраного питаємо окремо: інакше
-            // випадковий другий клік коштує грошей мовчки.
+            // Parsing via Claude is a paid action, so confirmation is mandatory,
+            // and re-parsing of an already parsed item is asked separately: otherwise
+            // an accidental second click silently costs money.
             act('analyze').addEventListener('click', async () => {
                 const done = el.dataset.analyzed === '1';
                 const ok = await UI.confirmModal({
@@ -297,7 +297,7 @@
                 try {
                     await R.api.commentDelete(cid);
                     await reload();
-                    // Soft-delete — тож пропонуємо повернути, як усюди в Recall.
+                    // Soft-delete — so we offer to restore, as everywhere in Recall.
                     UI.actionToast(T('knowledge.cmt.deleted'), T('knowledge.cmt.undo'), async () => {
                         try { await R.api.commentRestore(cid); await reload(); }
                         catch (e) { UI.toast((e && e.message) || T('knowledge.cmt.restoreFail'), 'error'); }

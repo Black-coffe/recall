@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Порівняння двох прогонів `evals.gate --json-out` (Хвиля B, історія 06).
+"""Comparison of two `evals.gate --json-out` runs (Wave B, story 06).
 
-Рішення «перемикати боевую модель ембедингів чи ні» приймається за таблицею
-на ДВОХ `k` (урок `eval-verdict-flips-with-k` — вердикт перевертається від
-одного k) + per-item diff, а не за одним числом. Цей скрипт НІЧОГО не рахує
-й не міряє сам — лише читає два вже готові файли `--json-out` гейта
-(`evals/gate.py`) і зводить їх поруч. Сам гейт цей модуль не чіпає й не
-викликає; жодного звернення до БД чи retrieval тут немає.
+The decision "whether to switch the live embedding model or not" is made from a table
+over TWO `k` values (lesson `eval-verdict-flips-with-k`: the verdict flips from
+one k to another) + a per-item diff, not from a single number. This script computes
+and measures NOTHING itself; it only reads two ready-made gate `--json-out` files
+(`evals/gate.py`) and puts them side by side. It does not touch or call the gate itself;
+there is no access to the DB or retrieval here.
 
-Використання:
+Usage:
     python -m evals.compare A.json B.json [--label-a e5] [--label-b qwen3] \\
         [--json-out evals/compare_run.local.json]
 
-Провенанс гейта у `--json-out` — лише `db` (шлях знімка, на якому виміряно),
-`golden` (шлях набору) і `k`/`aggregate` (кількість пунктів, середній
-recall_at_k). Модель ембедингів, версія і прапорець `RAG_QUERY_REWRITE`
-(історія 07) у цей провенанс НЕ потрапляють (гейт про них не знає) — тому
-різницю між A і B називає людина через `--label-a/--label-b`, а не файл.
+Gate provenance in `--json-out` is only `db` (the path of the snapshot it was measured on),
+`golden` (the set path) and `k`/`aggregate` (item count, mean
+recall_at_k). The embedding model, version and the `RAG_QUERY_REWRITE` flag
+(story 07) do NOT end up in this provenance (the gate knows nothing about them), so
+the difference between A and B is named by a human via `--label-a/--label-b`, not by the file.
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Той самий трюк, що в evals/gate.py і evals/run_eval.py — працює і як
-# `python evals/compare.py`, і як `python -m evals.compare` без встановлення пакету.
+# The same trick as in evals/gate.py and evals/run_eval.py: works both as
+# `python evals/compare.py` and as `python -m evals.compare` without installing the package.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -45,18 +45,18 @@ def _load_result(path: str) -> dict:
 
 
 def _load_questions(golden_path: Optional[str]) -> dict:
-    """Найкраще зусилля: підвантажити текст питань з golden-set, на який
-    посилається прогін (поле ``golden`` у `--json-out`), щоб показати їх у
-    diff. Сам `--json-out` гейда текст питання не зберігає (лише ``id`` —
-    `evals/metrics.py::evaluate_item`) — якщо файл недосяжний, перейменований
-    чи змінився, повертаємо порожню мапу і diff показує лише id."""
+    """Best effort: load question text from the golden-set the run
+    refers to (the ``golden`` field in `--json-out`) in order to show it in the
+    diff. The gate's `--json-out` itself does not store question text (only ``id``,
+    `evals/metrics.py::evaluate_item`); if the file is unreachable, renamed
+    or changed, we return an empty map and the diff shows only ids."""
     if not golden_path:
         return {}
     try:
         items = golden_io.read_golden(golden_path)
-    except Exception as exc:  # noqa: BLE001 — best-effort прикраса diff'а,
-        # відсутність чи зіпсованість golden-файлу не має валити порівняння.
-        print(f"[compare] питання з {golden_path!r} недоступні: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - best-effort decoration of the diff,
+        # a missing or corrupted golden file must not break the comparison.
+        print(f"[compare] questions from {golden_path!r} unavailable: {exc}", file=sys.stderr)
         return {}
     return {str(it["id"]): it.get("question", "") for it in items}
 
@@ -90,14 +90,14 @@ def _per_item_map(result: dict, k: int) -> dict:
 
 def _provenance_lines(label: str, path: str, result: dict) -> list:
     lines = [f"[{label}] {path}"]
-    lines.append(f"  db (знімок):    {result.get('db')}")
+    lines.append(f"  db (snapshot):  {result.get('db')}")
     lines.append(f"  golden:         {result.get('golden')}")
     lines.append(f"  k:              {result.get('k')}")
-    lines.append(f"  verdict гейта:  {result.get('verdict')}")
+    lines.append(f"  gate verdict:   {result.get('verdict')}")
     try:
         mtime = os.path.getmtime(path)
         lines.append(
-            "  час (mtime файлу результату): "
+            "  time (mtime of the result file): "
             + datetime.fromtimestamp(mtime).isoformat(timespec="seconds"))
     except OSError:
         pass
@@ -112,30 +112,30 @@ def _provenance_lines(label: str, path: str, result: dict) -> list:
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("result_a", help="--json-out гейта, прогін A (напр. знімок на старій моделі)")
-    parser.add_argument("result_b", help="--json-out гейта, прогін B (напр. знімок після re-embed)")
-    parser.add_argument("--label-a", default="A", help="Підпис прогону A у таблиці/провенансі (default: A)")
-    parser.add_argument("--label-b", default="B", help="Підпис прогону B у таблиці/провенансі (default: B)")
-    parser.add_argument("--json-out", default=None, help="Записати структуроване порівняння у JSON")
+    parser.add_argument("result_a", help="gate --json-out, run A (e.g. a snapshot on the old model)")
+    parser.add_argument("result_b", help="gate --json-out, run B (e.g. a snapshot after re-embed)")
+    parser.add_argument("--label-a", default="A", help="Label of run A in the table/provenance (default: A)")
+    parser.add_argument("--label-b", default="B", help="Label of run B in the table/provenance (default: B)")
+    parser.add_argument("--json-out", default=None, help="Write the structured comparison to JSON")
     args = parser.parse_args(argv)
 
     try:
         result_a = _load_result(args.result_a)
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"[compare] не вдалось прочитати {args.result_a!r}: {exc}", file=sys.stderr)
+        print(f"[compare] could not read {args.result_a!r}: {exc}", file=sys.stderr)
         return 2
     try:
         result_b = _load_result(args.result_b)
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"[compare] не вдалось прочитати {args.result_b!r}: {exc}", file=sys.stderr)
+        print(f"[compare] could not read {args.result_b!r}: {exc}", file=sys.stderr)
         return 2
 
     ks_a = {int(k) for k in (result_a.get("k") or [])}
     ks_b = {int(k) for k in (result_b.get("k") or [])}
     common_k = sorted(ks_a & ks_b)
     if not common_k:
-        print(f"[compare] немає спільного k між {args.result_a!r} (k={sorted(ks_a)}) і "
-              f"{args.result_b!r} (k={sorted(ks_b)}) — порівнювати нічого.", file=sys.stderr)
+        print(f"[compare] no common k between {args.result_a!r} (k={sorted(ks_a)}) and "
+              f"{args.result_b!r} (k={sorted(ks_b)}) - nothing to compare.", file=sys.stderr)
         return 2
 
     questions = _load_questions(result_a.get("golden"))
@@ -179,18 +179,18 @@ def main(argv: Optional[list] = None) -> int:
         for line in _provenance_lines(label, path, result):
             print(line)
         print("-" * 70)
-    print("Модель/версія/rerank у --json-out гейта не записані (не входять у його "
-          "провенанс) — розрізняйте прогони через --label-a/--label-b.")
+    print("Model/version/rerank are not recorded in the gate --json-out (not part of its "
+          "provenance) - tell the runs apart via --label-a/--label-b.")
     print("-" * 70)
 
-    print(f"[compare] спільних пунктів: {common_count} "
-          f"(лише в {args.label_a}: {len(only_in_a)}, лише в {args.label_b}: {len(only_in_b)})")
+    print(f"[compare] common items: {common_count} "
+          f"(only in {args.label_a}: {len(only_in_a)}, only in {args.label_b}: {len(only_in_b)})")
     if only_in_a or only_in_b:
-        print(f"[compare] набори різняться — порівняння лише по перетину.")
+        print(f"[compare] the sets differ - comparing only on the intersection.")
         if only_in_a:
-            print(f"  лише в {args.label_a} (не порівняно): {', '.join(sorted(only_in_a))}")
+            print(f"  only in {args.label_a} (not compared): {', '.join(sorted(only_in_a))}")
         if only_in_b:
-            print(f"  лише в {args.label_b} (не порівняно): {', '.join(sorted(only_in_b))}")
+            print(f"  only in {args.label_b} (not compared): {', '.join(sorted(only_in_b))}")
     print("-" * 70)
 
     print(f"{'k':<4}{args.label_a:>10}{args.label_b:>10}{'Δ':>10}{'n':>6}")

@@ -1,31 +1,31 @@
-"""Ingest повідомлень з реального Telegram-акаунта (Phase 17B).
+"""Ingest of messages from a real Telegram account (Phase 17B).
 
-Архітектура: слухач (telegram_listener.py) — ОКРЕМИЙ процес (Telethon, asyncio),
-бо сесію Telethon (SQLite) не відкрити двома клієнтами, а Flask у debug ще й
-перезавантажується. Слухач ТОНКИЙ: ловить подію, СКАЧУЄ медіа на диск і POST'ить
-сюди по localhost. Уся важка робота (parse/OCR/транскрипція/embeddings/Claude)
-лишається у Flask-процесі, де моделі вже завантажені (один інстанс на GPU —
-без другої копії whisper/e5-large у пам'яті відеокарти).
+Architecture: the listener (telegram_listener.py) is a SEPARATE process (Telethon, asyncio),
+because a Telethon session (SQLite) cannot be opened by two clients, and Flask in debug also
+reloads. The listener is THIN: it catches the event, DOWNLOADS media to disk and POSTs
+here over localhost. All the heavy work (parse/OCR/transcription/embeddings/Claude)
+stays in the Flask process, where the models are already loaded (one instance on the GPU —
+no second copy of whisper/e5-large in video memory).
 
-POST /api/telegram/ingest  (тільки з localhost)
+POST /api/telegram/ingest  (localhost only)
   Body JSON: {kind, text?, caption?, file_path?, chat_id, chat_title, sender,
               message_id, date, link}
-  Маршрутизація за kind:
+  Routing by kind:
     text                 → transcript_text = text                  (sync)
     photo | document     → document_parser.parse_document (OCR/parse) (sync)
-    voice | audio        → фоновий job: whisper → persist → enrich   (queued)
-    video                → НЕ завантажується (рішення власника, tg-media-policy-01):
-                            рядок-заглушка з посиланням на повідомлення, без
-                            file_path, без whisper (sync)
-  Усі записи: source_type='telegram', tg_* провенанс, дедуп (chat_id,message_id),
-  category_id успадковується з tg_monitored_chats. Далі — той самий enrichment
-  (chunk+embed + Claude-картка), що й для аудіо/документів → запис одразу
-  повноцінний учасник RAG-пошуку, графа сутностей і напрямків.
+    voice | audio        → background job: whisper → persist → enrich   (queued)
+    video                → NOT downloaded (owner's decision, tg-media-policy-01):
+                            a stub row with a link to the message, no
+                            file_path, no whisper (sync)
+  All records: source_type='telegram', tg_* provenance, dedup (chat_id,message_id),
+  category_id inherited from tg_monitored_chats. Then the same enrichment
+  (chunk+embed + Claude card) as for audio/documents → the record is immediately
+  a full participant of RAG search, the entity graph and directions.
 
-POST /api/telegram/chats/toggle  (T2.6, тільки з localhost + shared-secret)
-  CLI-only twin до /api/telegram/chats: `telegram_listener.py enable/disable`
-  проксіює сюди замість прямого SQL-запису в окремому процесі — app.py
-  лишається єдиним писарем у SQLite (див. tg_chats_toggle нижче).
+POST /api/telegram/chats/toggle  (T2.6, localhost + shared-secret only)
+  CLI-only twin of /api/telegram/chats: `telegram_listener.py enable/disable`
+  proxies here instead of a direct SQL write in a separate process — app.py
+  stays the only SQLite writer (see tg_chats_toggle below).
 """
 from __future__ import annotations
 
@@ -51,15 +51,15 @@ from telegram_common import CONTROL_TOKEN_HEADER, control_token
 logger = logging.getLogger(__name__)
 telegram_bp = Blueprint('telegram', __name__)
 
-# kind → людський підпис для source_name коли немає тексту.
+# kind → human-readable label for source_name when there is no text.
 _KIND_LABEL = {
     "text": "повідомлення", "photo": "фото", "voice": "голосове",
     "audio": "аудіо", "video": "відео", "document": "документ",
 }
-_MEDIA_KINDS = {"voice", "audio"}               # потребують whisper (фоновий job)
+_MEDIA_KINDS = {"voice", "audio"}               # need whisper (background job)
 _PARSE_KINDS = {"photo", "document"}            # document_parser (sync)
-# "video" сюди свідомо НЕ входить (tg-media-policy-01): відео не завантажується
-# ніколи (жодного порогу за розміром/віком) — див. окрему гілку в ingest().
+# "video" is deliberately NOT here (tg-media-policy-01): video is never
+# downloaded (no threshold by size/age) — see the separate branch in ingest().
 
 
 def _db_path() -> str:
@@ -72,17 +72,17 @@ def _conn(db_path: str):
 
 
 def _schedule_reembed(ids, reason: str) -> dict:
-    """Поставити змінені записи в точковий re-embed (напрямок і теги їдуть у
-    контекстний префікс чанка). Помилка планувальника не валить запит —
-    правка вже збережена, re-embed вторинний. `reembed` — усередині функції:
-    він тягне `embeddings` (torch), памʼятка `mcp-stdio-no-heavy-models`."""
+    """Queue the changed records for a targeted re-embed (direction and tags go into the
+    chunk's context prefix). A scheduler error does not fail the request —
+    the edit is already saved, the re-embed is secondary. `reembed` is inside the function:
+    it pulls in `embeddings` (torch), note `mcp-stdio-no-heavy-models`."""
     if not ids:
         return {"mode": "none", "count": 0, "stale": 0}
     try:
         from app.services import reembed
         return reembed.schedule_records_reembed(ids, db_path=_db_path(), reason=reason)
-    except Exception:  # noqa: BLE001 — зміна вже в БД, re-embed вторинний
-        logger.exception("[tg] %s: не вдалось запланувати re-embed для %s записів",
+    except Exception:  # noqa: BLE001 — the change is already in the DB, the re-embed is secondary
+        logger.exception("[tg] %s: could not schedule a re-embed for %s records",
                          reason, len(ids))
         return {"mode": "none", "count": 0, "stale": 0}
 
@@ -92,16 +92,16 @@ def _is_localhost() -> bool:
 
 
 def _authorized() -> bool:
-    """Ingest захищений localhost + shared-secret (IP-перевірка спуфабельна,
-    інший локальний процес не має токена). Слухач шле той самий токен."""
+    """Ingest is protected by localhost + shared-secret (an IP check can be spoofed,
+    another local process has no token). The listener sends the same token."""
     if not _is_localhost():
         return False
     return request.headers.get(CONTROL_TOKEN_HEADER) == control_token()
 
 
 def _listener_call(path: str, method: str = "GET", body=None, timeout: int = 60):
-    """Виклик control-API слухача (Flask→listener). Returns (ok, data).
-    ok=False якщо слухач вимкнений/недоступний — UI покаже «оффлайн»."""
+    """Call the listener's control-API (Flask→listener). Returns (ok, data).
+    ok=False if the listener is off/unavailable — the UI will show «offline»."""
     cfg = current_app.config
     host = cfg.get('TELEGRAM_CONTROL_HOST', '127.0.0.1')
     port = cfg.get('TELEGRAM_CONTROL_PORT', 5051)
@@ -121,12 +121,12 @@ def _listener_call(path: str, method: str = "GET", body=None, timeout: int = 60)
 
 
 def _safe_media_path(file_path: str | None) -> str | None:
-    """Confine file_path під TELEGRAM_MEDIA_DIR. Ingest приймає шлях від клієнта
-    (слухач на тій самій машині), але інший локальний процес міг би підсунути
-    БУДЬ-ЯКИЙ файл диску (C:\\Windows\\…, чужі документи) → Recall прочитав би й
-    проіндексував його вміст у RAG = arbitrary file read. Тому пускаємо лише
-    файли з telegram_media/ — єдиного каталогу, куди пише слухач.
-    Повертає realpath якщо валідний, інакше None (як path-traversal guard у
+    """Confine file_path under TELEGRAM_MEDIA_DIR. Ingest accepts a path from the client
+    (the listener on the same machine), but another local process could slip in
+    ANY file on disk (C:\\Windows\\…, other people's documents) → Recall would read and
+    index its content into RAG = arbitrary file read. So we allow only
+    files from telegram_media/ — the only directory the listener writes to.
+    Returns the realpath if valid, otherwise None (like the path-traversal guard in
     documents._save_original)."""
     if not file_path:
         return None
@@ -135,7 +135,7 @@ def _safe_media_path(file_path: str | None) -> str | None:
 
 
 def _resolve_category(db_path: str, chat_id: int):
-    """category_id з tg_monitored_chats для цього чату (у який напрямок класти)."""
+    """category_id from tg_monitored_chats for this chat (which direction to put it in)."""
     if chat_id is None:
         return None
     with _conn(db_path) as conn:
@@ -146,7 +146,7 @@ def _resolve_category(db_path: str, chat_id: int):
 
 
 def _is_duplicate(db_path: str, chat_id, message_id) -> int | None:
-    """Існуючий запис цього повідомлення (real-time ↔ backfill перетин). tx_id або None."""
+    """The existing record of this message (real-time ↔ backfill overlap). tx_id or None."""
     if chat_id is None or message_id is None:
         return None
     with _conn(db_path) as conn:
@@ -158,22 +158,22 @@ def _is_duplicate(db_path: str, chat_id, message_id) -> int | None:
 
 
 def _meeting_date(iso_date: str | None) -> str | None:
-    """День розмови (локальний) з ISO-дати повідомлення — для meeting_date.
+    """The conversation day (local) from the message's ISO date — for meeting_date.
 
-    Без цього поля весь стек датує запис через
-    COALESCE(meeting_date, substr(created_at,1,10)), тобто моментом інжесту:
-    recency-буст (retrieval.py) вважає лютневу переписку свіжою, а parse_due
-    (commitments.py) розгортає «до пʼятниці» відносно дня завантаження. На
-    живих даних розбіжність була у 53% TG-записів, у 1067 — більш ніж на місяць.
+    Without this field the whole stack dates a record via
+    COALESCE(meeting_date, substr(created_at,1,10)), i.e. by the moment of ingest:
+    the recency boost (retrieval.py) considers February correspondence fresh, and parse_due
+    (commitments.py) expands «до пʼятниці» relative to the upload day. In
+    live data the discrepancy was in 53% of TG records, in 1067 of them by more than a month.
 
-    localtime, бо Telegram віддає UTC, а нас цікавить день, коли йшла розмова
-    (повідомлення після 21:00 UTC інакше поїхало б на добу назад)."""
+    localtime, because Telegram returns UTC, and we care about the day the conversation happened
+    (a message after 21:00 UTC would otherwise shift back by a day)."""
     if not iso_date:
         return None
     try:
         dt = datetime.fromisoformat(iso_date)
     except (TypeError, ValueError):
-        logger.debug("[tg] не розібрав дату %r — meeting_date лишається порожнім", iso_date)
+        logger.debug("[tg] could not parse date %r — meeting_date stays empty", iso_date)
         return None
     if dt.tzinfo is not None:
         dt = dt.astimezone()
@@ -181,7 +181,7 @@ def _meeting_date(iso_date: str | None) -> str | None:
 
 
 def _source_name(prov: dict, text: str, kind: str) -> str:
-    """Лейбл для Історії: [TG] чат: сніпет (або тип медіа)."""
+    """Label for History: [TG] chat: snippet (or the media type)."""
     chat = prov.get("chat_title") or f"chat {prov.get('chat_id')}"
     snippet = " ".join((text or "").split())[:60]
     if not snippet:
@@ -193,13 +193,13 @@ def _persist(db_path: str, *, kind: str, text: str, prov: dict, category_id,
              file_path: str | None, doc_type: str | None,
              segments_json: str | None, model_used: str | None,
              processing_time: float, structure_json: str | None = None) -> int:
-    """INSERT TG-повідомлення у transcriptions. Повертає transcription_id.
-    Не залежить від request context (викликається і з фонового job).
+    """INSERT a TG message into transcriptions. Returns transcription_id.
+    Does not depend on the request context (also called from a background job).
 
-    Гонку з паралельним інжестом того самого повідомлення (real-time проти
-    ремонту/догонки) ловимо на UNIQUE-індексі idx_tx_tg_msg, а не перевіркою
-    заздалегідь: між `_is_duplicate` і INSERT є вікно, і саме в нього раніше
-    прилітав IntegrityError, який валив фоновий job разом із повідомленням."""
+    A race with a parallel ingest of the same message (real-time against
+    repair/catch-up) is caught on the UNIQUE index idx_tx_tg_msg, not by a check
+    beforehand: there is a window between `_is_duplicate` and INSERT, and an IntegrityError
+    used to fly into it and fail the background job together with the message."""
     with _conn(db_path) as conn:
         c = conn.cursor()
         try:
@@ -227,16 +227,16 @@ def _persist(db_path: str, *, kind: str, text: str, prov: dict, category_id,
                 "SELECT id FROM transcriptions WHERE tg_chat_id = ? AND tg_message_id = ?",
                 (prov.get("chat_id"), prov.get("message_id"))).fetchone()
             if existing:
-                logger.info("[tg] гонка на (chat=%s msg=%s) — беру наявний tx=%d",
+                logger.info("[tg] race on (chat=%s msg=%s) — taking the existing tx=%d",
                             prov.get("chat_id"), prov.get("message_id"), existing["id"])
                 return existing["id"]
             raise
         tid = c.lastrowid
         chat_id = prov.get("chat_id")
         if chat_id is not None:
-            # Інжест успадковує НЕ ЛИШЕ category_id (див. _resolve_category
-            # вище) — теги, привʼязані до чату (`PUT .../<chat_id>/tags`),
-            # ретроактивно точнісінько так само, як і напрямок.
+            # Ingest inherits NOT ONLY category_id (see _resolve_category
+            # above) — tags bound to the chat (`PUT .../<chat_id>/tags`),
+            # retroactively in exactly the same way as the direction.
             cat_svc.inherit_chat_tags(conn, tid, chat_id)
         conn.commit()
     return tid
@@ -245,14 +245,14 @@ def _persist(db_path: str, *, kind: str, text: str, prov: dict, category_id,
 def _finalize_media(db_path: str, tid: int, *, kind: str, text: str, prov: dict,
                     segments_json: str | None, model_used: str | None,
                     processing_time: float) -> None:
-    """Дописати результат розпізнавання у ЗАЗДАЛЕГІДЬ створений рядок.
+    """Append the recognition result to a row created IN ADVANCE.
 
-    Рядок для медіа створюється синхронно на інжесті (заглушкою), а не в кінці
-    фонового job'а. Інакше повідомлення «в польоті» невидиме: `_is_duplicate`
-    його не бачить (два whisper-прогони на одному голосовому + IntegrityError),
-    watermark догонки його не враховує, а якщо app.py впаде посеред черги —
-    job_queue.recover_crashed лише позначить job 'crashed', НЕ перезапустить,
-    і повідомлення зникне без сліду."""
+    The row for media is created synchronously at ingest (as a stub), not at the end of the
+    background job. Otherwise an «in flight» message is invisible: `_is_duplicate`
+    does not see it (two whisper runs on one voice message + IntegrityError),
+    the catch-up watermark does not count it, and if app.py crashes mid-queue —
+    job_queue.recover_crashed only marks the job 'crashed', does NOT restart it,
+    and the message vanishes without a trace."""
     with _conn(db_path) as conn:
         conn.execute(
             "UPDATE transcriptions SET transcript_text = ?, source_name = ?, "
@@ -267,97 +267,97 @@ PARSE_FAILED = "parse_failed"
 
 
 def _parse_media(file_path: str, caption: str, kind: str):
-    """photo/document → document_parser (OCR для фото). М'яка деградація: якщо
-    парсер недоступний/впав — лишаємо caption (повідомлення не губиться), АЛЕ
-    запис позначається ``model_used = PARSE_FAILED`` і видний у coverage: так
-    862 фото роками лежали без тексту, і цього ніхто не бачив.
-    Текст із картинки маскується від паролів/токенів (ADR-030).
+    """photo/document → document_parser (OCR for photos). Soft degradation: if the
+    parser is unavailable/crashed — we keep the caption (the message is not lost), BUT
+    the record is marked ``model_used = PARSE_FAILED`` and is visible in coverage: that is how
+    862 photos lay for years without text and nobody saw it.
+    Text from the picture is masked against passwords/tokens (ADR-030).
     Returns (text, doc_type, structure_json, failed)."""
     from app.services import document_parser
     caption = (caption or "").strip()
     try:
         parsed = document_parser.parse_document(file_path, filename=os.path.basename(file_path))
-        body = (parsed.get("text") or "").strip()      # OCR-текст уже замаскований (document_parser)
+        body = (parsed.get("text") or "").strip()      # OCR text is already masked (document_parser)
         text = f"{caption}\n\n{body}".strip() if caption else body
         blocks = parsed.get("blocks")
         structure = json.dumps(blocks, ensure_ascii=False) if blocks else None
         return text, parsed.get("doc_type"), structure, False
     except document_parser.NoTextFound:
-        # звичайне фото без тексту — розбір вдався, позначати нема чого
+        # a plain photo without text — parsing succeeded, nothing to mark
         return caption or f"[{_KIND_LABEL.get(kind, kind)} без тексту]", kind, None, False
     except Exception as e:
-        logger.warning("[tg] розбір %s не вдався (%s) — лишаю caption, запис позначено %s",
+        logger.warning("[tg] parsing %s failed (%s) — keeping the caption, record marked %s",
                        kind, e, PARSE_FAILED)
         fallback = caption or f"[{_KIND_LABEL.get(kind, kind)} без тексту]"
         return fallback, kind, None, True
 
 
 def _link_entities(db_path: str, transcription_id: int) -> None:
-    """Звʼязати повідомлення з графом сутностей (Волна 4.5.3).
+    """Link a message to the entity graph (Wave 4.5.3).
 
-    Без цього кроку граф поповнювався лише ручним прогоном CLI, тобто кожне
-    нове повідомлення лишалось поза зрізом по проєкту й поза `list_stale_topics`
-    до наступного запуску вручну. Робота локальна й дешева (пошук написань у
-    тексті), моделі не потребує.
+    Without this step the graph was fed only by a manual CLI run, i.e. every
+    new message stayed outside the project slice and outside `list_stale_topics`
+    until the next manual run. The work is local and cheap (looking up spellings in
+    the text), it needs no model.
     """
     try:
         from app.services import tg_entities
         tg_entities.link_message(db_path, transcription_id)
     except Exception as exc:
-        # Граф — надбудова над записом, як і нитка: повідомлення вже в архіві
-        # й знаходиться пошуком. Ковтаємо, але з логом — мовчазний збій тут
-        # читався б як «сутностей у цьому чаті просто нема».
-        logger.warning("[tg] сутності для tx=%s не звʼязано: %s", transcription_id, exc)
+        # The graph is a superstructure over the record, like the thread: the message is already in the archive
+        # and is found by search. We swallow, but with a log — a silent failure here
+        # would read as «there are simply no entities in this chat».
+        logger.warning("[tg] entities for tx=%s not linked: %s", transcription_id, exc)
 
 
 def _submit_embed_only(transcription_id: int, db_path: str, force: bool = False) -> str:
-    """Phase 17: для Telegram ставимо ТІЛЬКИ локальні embeddings — БЕЗ Claude-картки.
-    Чат-повідомлення короткі: summary/сутності на однорядковику малокорисні, а на
-    тисячах backfill-повідомлень палять платний Claude API. Пошук/RAG працюють на
-    embeddings (локально, безкоштовно). Idempotent (embedded_at). db_path явно —
-    job_queue-воркер біжить поза app context."""
+    """Phase 17: for Telegram we queue ONLY local embeddings — NO Claude card.
+    Chat messages are short: summary/entities on a one-liner are of little use, and on
+    thousands of backfill messages they burn the paid Claude API. Search/RAG work on
+    embeddings (local, free). Idempotent (embedded_at). db_path is explicit —
+    the job_queue worker runs outside the app context."""
     try:
         from app.services import embeddings
         if not (embeddings.is_available() and state.job_queue is not None):
-            # Звʼязок із графом не потребує ані векторів, ані черги — інакше
-            # вимкнені embeddings мовчки лишали б повідомлення поза зрізами.
+            # Linking to the graph needs neither vectors nor the queue — otherwise
+            # disabled embeddings would silently leave messages outside the slices.
             _link_entities(db_path, transcription_id)
             return "unavailable"
 
         def _job(job, _tid=transcription_id, _db=db_path, _force=force):
             try:
                 res = embeddings.chunk_and_embed_transcription(_db, _tid, force=_force)
-                # Нитка (Волна 4.5) — ПІСЛЯ ембедингу: центроїд нитки будується з
-                # векторів її повідомлень, а до чанкінгу вектора ще немає. Рішення
-                # тут попереднє ('pending') і без моделі; остаточно сплеск розкладає
-                # tg_threads.resettle_pending, коли розмова стихне.
+                # The thread (Wave 4.5) comes AFTER the embedding: the thread centroid is built from
+                # its messages' vectors, and before chunking there is no vector yet. The decision
+                # here is provisional ('pending') and without a model; finally the burst is laid out by
+                # tg_threads.resettle_pending once the conversation calms down.
                 try:
                     from app.services import tg_threads
                     tg_threads.assign_incoming(_db, _tid)
                 except Exception as exc:
-                    # Нитка — надбудова: без неї пошук працює як у Волні 4, тож
-                    # збій тут не має валити ембединг самого повідомлення.
-                    logger.warning("[tg] нитку для tx=%s не визначено: %s", _tid, exc)
+                    # The thread is a superstructure: without it search works as in Wave 4, so
+                    # a failure here must not fail the embedding of the message itself.
+                    logger.warning("[tg] thread for tx=%s not determined: %s", _tid, exc)
                 return res
             finally:
-                # У `finally`, а не після ембедингу: якщо чанкінг КИНЕ (OOM на
-                # відеокарті, збій завантаження моделі), job піде у 'failed' і
-                # більше не повториться (`job_queue` не має ретраю) — а
-                # повідомлення лишиться поза графом назавжди, тобто рівно та
-                # тиха діра, заради якої цей виклик тут і зʼявився. Звʼязок із
-                # графом не потребує ані векторів, ані успіху ембедингу.
+                # In `finally`, not after the embedding: if chunking RAISES (OOM
+                # on the GPU, model load failure), the job goes to 'failed' and
+                # never repeats (`job_queue` has no retry) — and the
+                # message would stay outside the graph forever, i.e. exactly the
+                # silent hole this call was introduced for. Linking to the
+                # graph needs neither vectors nor the success of the embedding.
                 _link_entities(_db, _tid)
 
         state.job_queue.submit("tg_embed", _job, meta={"transcription_id": transcription_id})
         return "queued"
     except Exception as e:
-        logger.warning("TG embed job не поставлено (продовжую): %s", e)
-        _link_entities(db_path, transcription_id)   # див. гілку 'unavailable'
+        logger.warning("TG embed job not queued (continuing): %s", e)
+        _link_entities(db_path, transcription_id)   # see the 'unavailable' branch
         return "error"
 
 
 def _finish(db_path: str, tid: int, prov: dict):
-    """Спільний хвіст: лог + embed-only job (без Claude — див. _submit_embed_only)."""
+    """Shared tail: log + embed-only job (no Claude — see _submit_embed_only)."""
     enrich = _submit_embed_only(tid, db_path)
     logger.info("[tg] %s → tx=%d (chat=%s msg=%s) embed=%s",
                 prov.get("kind"), tid, prov.get("chat_id"), prov.get("message_id"), enrich)
@@ -384,7 +384,7 @@ def ingest():
         "message_id": message_id,
         "date": data.get("date"),
         "link": data.get("link"),
-        # Волна 4 — сигнали від Telegram (нитка, автор, альбом, правка).
+        # Wave 4 — signals from Telegram (thread, author, album, edit).
         "sender_id": data.get("sender_id"),
         "reply_to": data.get("reply_to"),
         "grouped_id": data.get("grouped_id"),
@@ -393,24 +393,24 @@ def ingest():
 
     db_path = _db_path()
 
-    # --- Дедуп: real-time і backfill можуть перетнутись по одному message_id ---
+    # --- Dedup: real-time and backfill may overlap on one message_id ---
     dup = _is_duplicate(db_path, chat_id, message_id)
     if dup:
         return jsonify({"success": True, "duplicate": True, "transcription_id": dup})
 
     category_id = _resolve_category(db_path, chat_id)
 
-    # --- Відео НІКОЛИ не завантажується (рішення власника, tg-media-policy-01:
-    # жодного порогу за розміром чи віком) — лишаємо рядок-заглушку з
-    # посиланням, щоб «у цьому чаті було відео» лишалось знахідним. file_path
-    # від слухача сюди й не приходить (telegram_listener.py не скачує його),
-    # але навіть якби прийшов — свідомо ігноруємо, whisper і
-    # extract_audio_from_video для відео не викликаються ніде в цьому шляху.
+    # --- Video is NEVER downloaded (owner's decision, tg-media-policy-01:
+    # no threshold by size or age) — we leave a stub row with a
+    # link so that «there was a video in this chat» stays findable. file_path
+    # does not come from the listener here at all (telegram_listener.py does not download it),
+    # but even if it did — we deliberately ignore it, whisper and
+    # extract_audio_from_video are not called anywhere in this path.
     if kind == "video":
         text = (caption or "").strip() or "[відео — не завантажено, лише посилання]"
-        # tg-media-policy-03: doc_type=kind (наявна конвенція деградованого
-        # шляху, telegram.py _parse_media) — інакше з підписом рядок виглядає
-        # звичайним текстовим повідомленням, бібліотека малює мітку саме з
+        # tg-media-policy-03: doc_type=kind (the existing convention of the degraded
+        # path, telegram.py _parse_media) — otherwise with a caption the row looks like
+        # an ordinary text message, the library draws the label exactly from
         # doc_type (static/js/recall/views/library.js).
         tid = _persist(db_path, kind=kind, text=text, prov=prov, category_id=category_id,
                        file_path=None, doc_type=kind, segments_json=None,
@@ -418,12 +418,12 @@ def ingest():
         try:
             state.metrics.inc("whisper_telegram_total", kind=kind)
         except Exception as e:
-            logger.debug("[tg] метрика whisper_telegram_total не інкрементована: %s", e)
+            logger.debug("[tg] metric whisper_telegram_total not incremented: %s", e)
         enrich = _finish(db_path, tid, prov)
         return jsonify({"success": True, "transcription_id": tid, "kind": kind,
                         "skipped": "video_not_downloaded", "enrichment": {"status": enrich}})
 
-    # --- Медіа з whisper → фоновий job (не блокуємо слухач) ---
+    # --- Media with whisper → background job (do not block the listener) ---
     if kind in _MEDIA_KINDS:
         file_path = _safe_media_path(file_path)
         if not file_path or not os.path.isfile(file_path):
@@ -432,15 +432,15 @@ def ingest():
         if state.job_queue is None:
             return jsonify({"success": False, "error": tr("telegram.err.queueDown")}), 503
 
-        # current_app валідний ТУТ (request context) — резолвимо моделі тепер і
-        # передаємо у job явно: воркер job_queue біжить у фоновому потоці БЕЗ
-        # app context (як і enrichment-job у documents.py).
+        # current_app is valid HERE (request context) — we resolve the models now and
+        # pass them into the job explicitly: the job_queue worker runs in a background thread WITHOUT
+        # an app context (like the enrichment job in documents.py).
         cfg = current_app.config
         model = cfg.get('TELEGRAM_WHISPER_MODEL', 'large-v3-turbo')
         language = cfg.get('TELEGRAM_WHISPER_LANG', 'uk')
 
-        # Рядок створюємо ЗАРАЗ, заглушкою: доки його немає, повідомлення
-        # невидиме для дедупу і для watermark догонки (див. _finalize_media).
+        # We create the row NOW, as a stub: while it does not exist, the message is
+        # invisible to dedup and to the catch-up watermark (see _finalize_media).
         placeholder = (caption or "").strip() or f"[{_KIND_LABEL.get(kind, kind)} — очікує розпізнавання]"
         tid = _persist(db_path, kind=kind, text=placeholder, prov=prov,
                        category_id=category_id, file_path=file_path, doc_type=None,
@@ -456,7 +456,7 @@ def ingest():
         return jsonify({"success": True, "queued": True, "kind": kind,
                         "transcription_id": tid})
 
-    # --- photo / document → парсимо синхронно (швидко, без GPU) ---
+    # --- photo / document → parse synchronously (fast, no GPU) ---
     if kind in _PARSE_KINDS:
         file_path = _safe_media_path(file_path)
         if not file_path or not os.path.isfile(file_path):
@@ -493,23 +493,23 @@ def ingest():
 
 
 def _delete_intermediate(path: str | None) -> None:
-    """Прибрати проміжний артефакт (напр. `_audio.mp3`, витягнутий з відео) —
-    він ніколи не потрібен сам по собі, на відміну від оригіналу. М'яка
-    деградація: файла вже нема / нема прав — лог, job не валимо."""
+    """Remove an intermediate artifact (e.g. `_audio.mp3` extracted from a video) —
+    it is never needed by itself, unlike the original. Soft
+    degradation: the file is already gone / no permission — log, do not fail the job."""
     if not path:
         return
     try:
         if os.path.isfile(path):
             os.remove(path)
     except OSError as e:
-        logger.warning("[tg] не вдалось видалити проміжний файл %s: %s", path, e)
+        logger.warning("[tg] could not remove the intermediate file %s: %s", path, e)
 
 
 def _delete_if_heavy(path: str | None, threshold_bytes: int, *, label: str) -> None:
-    """tg-media-policy-02: видалити `path`, якщо він важчий за `threshold_bytes`.
-    Дрібні оригінали лишаються на диску (рішення власника). Безпечно за
-    `get_original_file` (mcp_server.py) — деградує в original_available=False,
-    відсутній файл там не помилка."""
+    """tg-media-policy-02: remove `path` if it is heavier than `threshold_bytes`.
+    Small originals stay on disk (owner's decision). Safe thanks to
+    `get_original_file` (mcp_server.py) — degrades to original_available=False,
+    a missing file is not an error there."""
     if not path:
         return
     try:
@@ -518,49 +518,49 @@ def _delete_if_heavy(path: str | None, threshold_bytes: int, *, label: str) -> N
         size = os.path.getsize(path)
         if size > threshold_bytes:
             os.remove(path)
-            logger.info("[tg] %s видалено (%.1f МБ > поріг): %s",
+            logger.info("[tg] %s removed (%.1f MB > threshold): %s",
                         label, size / 1_048_576, path)
     except OSError as e:
-        logger.warning("[tg] не вдалось видалити %s %s: %s", label, path, e)
+        logger.warning("[tg] could not remove %s %s: %s", label, path, e)
 
 
 def _original_max_mb() -> int | None:
-    """Безпечне читання TELEGRAM_ORIGINAL_MAX_MB (tg-media-policy-03): хибне
-    (порожнє/нечислове) чи відʼємне значення НЕ валить job і НЕ видаляє
-    оригінал — просто пропускаємо видалення в цьому прогоні. `env_int`
-    (app/core/settings.py) — голий `int(env(name))`, і одне погане значення
-    в .env раніше кидало ValueError посеред фонового job без ретраю."""
+    """Safe reading of TELEGRAM_ORIGINAL_MAX_MB (tg-media-policy-03): a bad
+    (empty/non-numeric) or negative value does NOT fail the job and does NOT delete the
+    original — we just skip deletion in this run. `env_int`
+    (app/core/settings.py) is a bare `int(env(name))`, and one bad value
+    in .env used to raise ValueError in the middle of a background job with no retry."""
     try:
         threshold = _settings.env_int("TELEGRAM_ORIGINAL_MAX_MB")
     except (ValueError, TypeError) as e:
-        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB не число — оригінал не видаляю: %s", e)
+        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB is not a number — not deleting the original: %s", e)
         return None
     if threshold < 0:
-        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB=%d < 0 — оригінал не видаляю", threshold)
+        logger.warning("[tg] TELEGRAM_ORIGINAL_MAX_MB=%d < 0 — not deleting the original", threshold)
         return None
     return threshold
 
 
 def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, prov: dict,
                              db_path: str, model: str, language: str) -> dict:
-    """Фоновий job: (video→витяг аудіо) → whisper → дописати рядок → enrich.
-    Виконується у воркері job_queue (фоновий потік, БЕЗ Flask app context) —
-    тому ВСІ залежності (db_path, model, language) передаються явно, без
-    current_app. whisper_manager — module-singleton (state), GPU під semaphore."""
+    """Background job: (video→audio extraction) → whisper → append to the row → enrich.
+    Runs in a job_queue worker (a background thread, WITHOUT a Flask app context) —
+    so ALL dependencies (db_path, model, language) are passed explicitly, without
+    current_app. whisper_manager is a module singleton (state), the GPU is under a semaphore."""
     caption = (caption or "").strip()
 
     audio_fp = file_path
-    # tg-media-policy-03: `extracted` тримає намічений шлях _audio.mp3 НЕЗАЛЕЖНО
-    # від успіху витягу — ffmpeg може встигнути частково дописати файл навіть
-    # при провалі, і саме за цим шляхом _delete_intermediate прибирає сироту
-    # нижче. Раніше провал скидав `extracted = None`, і той частковий файл
-    # лишався на диску назавжди.
+    # tg-media-policy-03: `extracted` holds the intended _audio.mp3 path REGARDLESS
+    # of whether the extraction succeeded — ffmpeg may manage to partly write the file even
+    # on failure, and it is by this path that _delete_intermediate removes the orphan
+    # below. Earlier a failure reset `extracted = None`, and that partial file
+    # stayed on disk forever.
     extracted = None
     if kind == "video":
         from app.utils.audio import extract_audio_from_video
         extracted = os.path.splitext(file_path)[0] + "_audio.mp3"
         if not extract_audio_from_video(file_path, extracted, add_log=None):
-            logger.warning("[tg] не вдалось витягти аудіо з відео %s", file_path)
+            logger.warning("[tg] could not extract audio from video %s", file_path)
             audio_fp = None
         else:
             audio_fp = extracted
@@ -576,23 +576,23 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
                 audio_path=audio_fp, model_name=model, language=language,
                 decode_options=vocabulary.decode_options_for('telegram', db_path))
             if "error" in result:
-                logger.warning("[tg] whisper error на %s: %s", audio_fp, result["error"])
+                logger.warning("[tg] whisper error on %s: %s", audio_fp, result["error"])
             else:
                 text = (result.get("text") or "").strip()
-                # tg-media-policy-03: успіх — це непорожній текст, а не «нема
-                # ключа error». Whisper на глухому/битому аудіо повертає
-                # {"text": ""} без помилки; extraction_ok=True в цій гілці
-                # раніше давало право видаляти оригінал за самою заглушкою.
+                # tg-media-policy-03: success is non-empty text, not «no
+                # error key». Whisper on deaf/broken audio returns
+                # {"text": ""} without an error; extraction_ok=True in this branch
+                # used to give the right to delete the original on the strength of the stub alone.
                 if text:
                     extraction_ok = True
                 segs = result.get("segments")
                 if segs:
                     segments_json = json.dumps(segs, ensure_ascii=False)
         except Exception as e:
-            logger.error("[tg] транскрипція впала на %s: %s", audio_fp, e, exc_info=True)
+            logger.error("[tg] transcription failed on %s: %s", audio_fp, e, exc_info=True)
     processing_time = round(time.time() - t0, 2)
 
-    # caption завжди зберігаємо (часто несе суть голосового/відео)
+    # always keep the caption (it often carries the gist of the voice message/video)
     if caption:
         text = f"{caption}\n\n{text}".strip() if text else caption
     if not text:
@@ -602,33 +602,33 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
                     segments_json=segments_json, model_used=model,
                     processing_time=processing_time)
 
-    # tg-media-policy-02: проміжний _audio.mp3 (video→audio) — завжди сирота
-    # після витягу, незалежно від того, вдався whisper чи ні.
+    # tg-media-policy-02: the intermediate _audio.mp3 (video→audio) is always an orphan
+    # after extraction, regardless of whether whisper succeeded.
     _delete_intermediate(extracted)
-    # Оригінал — лише якщо текст видобуто (нема тексту, нема права викидати
-    # джерело) і лише важчий за поріг (дрібні лишаються, рішення власника).
+    # The original — only if text was extracted (no text, no right to throw away
+    # the source) and only if heavier than the threshold (small ones stay, owner's decision).
     if extraction_ok:
         threshold_mb = _original_max_mb()
         if threshold_mb is not None:
-            _delete_if_heavy(file_path, threshold_mb * 1_048_576, label="оригінал TG-медіа")
+            _delete_if_heavy(file_path, threshold_mb * 1_048_576, label="TG media original")
 
     try:
         state.metrics.inc("whisper_telegram_total", kind=kind)
     except Exception:
         pass
     enrich = _submit_embed_only(tid, db_path)
-    logger.info("[tg] %s → tx=%d транскрибовано за %.1fs embed=%s",
+    logger.info("[tg] %s → tx=%d transcribed in %.1fs embed=%s",
                 kind, tid, processing_time, enrich)
     return {"transcription_id": tid, "kind": kind, "chars": len(text)}
 
 
 # ============================================================
-# Управління (Phase 17C): статус / діалоги / моніторені чати / backfill
+# Management (Phase 17C): status / dialogs / monitored chats / backfill
 # ============================================================
 
 @telegram_bp.route('/api/telegram/status', methods=['GET'])
 def tg_status():
-    """Живий слухач? Хто залогінений? (проксі до control-API слухача)."""
+    """Is the listener alive? Who is logged in? (proxy to the listener's control-API)."""
     ok, data = _listener_call("/status", timeout=15)
     if not ok:
         return jsonify({"alive": False, **data})
@@ -637,8 +637,8 @@ def tg_status():
 
 @telegram_bp.route('/api/telegram/dialogs', methods=['GET'])
 def tg_dialogs():
-    """Список діалогів акаунта для вибору галочками (потребує живого слухача —
-    лише він тримає Telethon-сесію). Оффлайн → 503, UI підкаже запустити слухач."""
+    """List of the account's dialogs for picking with checkboxes (needs a live listener —
+    only it holds the Telethon session). Offline → 503, the UI will suggest starting the listener."""
     ok, data = _listener_call("/dialogs", timeout=60)
     if not ok:
         return jsonify({"success": False, **data}), 503
@@ -647,12 +647,12 @@ def tg_dialogs():
 
 @telegram_bp.route('/api/telegram/chats', methods=['GET'])
 def tg_chats():
-    """Моніторені чати з БД (працює навіть коли слухач вимкнений).
+    """Monitored chats from the DB (works even when the listener is off).
 
-    `?category_id=` — той самий фільтр, що й скрізь (контракт C2, через
-    `categories.filter_sql`): id напрямку розкривається в нього самого й усі
-    його проєкти, id проєкту (листка) дає лише його. Кожен рядок несе `tags`
-    (`categories.chat_tags`) — набір, який успадкує вся майбутня історія чату.
+    `?category_id=` — the same filter as everywhere (contract C2, via
+    `categories.filter_sql`): a direction id expands into itself and all
+    its projects, a project id (a leaf) gives only itself. Each row carries `tags`
+    (`categories.chat_tags`) — the set that all the chat's future history will inherit.
     """
     try:
         frag, params = cat_svc.filter_sql("m.category_id", request.args.get("category_id"))
@@ -675,9 +675,9 @@ def tg_chats():
 
 @telegram_bp.route('/api/telegram/chats', methods=['POST'])
 def tg_chats_upsert():
-    """Увімкнути/вимкнути чат + привязати напрямок. Часткове оновлення: лише
-    присутні в body поля змінюються. category_id=null → відвʼязати напрямок.
-    Запис прямо в БД → слухач підхопить на наступному refresh (≤30с)."""
+    """Enable/disable a chat + bind a direction. Partial update: only the
+    fields present in the body change. category_id=null → unbind the direction.
+    Written straight to the DB → the listener picks it up on the next refresh (≤30s)."""
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
         return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400
@@ -701,7 +701,7 @@ def tg_chats_upsert():
         cur = dict(cur) if cur else {}
         enabled = int(bool(data["enabled"])) if "enabled" in data else cur.get("enabled", 1)
         if "category_id" in data:
-            cat = category_id        # явно передано (можливо null = відвʼязати)
+            cat = category_id        # passed explicitly (possibly null = unbind)
         else:
             cat = cur.get("category_id")
         title = data.get("title", cur.get("title"))
@@ -723,23 +723,23 @@ def tg_chats_upsert():
 
 @telegram_bp.route('/api/telegram/chats/<int(signed=True):chat_id>/tags', methods=['PUT'])
 def tg_chat_tags_put(chat_id: int):
-    """Замінити НАБІР тегів чату (`{"tags": ["AI", "інвестори"]}`).
+    """Replace the chat's SET of tags (`{"tags": ["AI", "інвестори"]}`).
 
-    `int(signed=True)`, а не голий `int`: id груп і каналів у Telegram
-    відʼємні (`-100…`), а дефолтний конвертер Flask мінус не приймає — з ним
-    ендпоінт віддавав би 404 рівно на тих чатах, заради яких існує.
+    `int(signed=True)`, not a bare `int`: group and channel ids in Telegram
+    are negative (`-100…`), and Flask's default converter does not accept a minus — with it the
+    endpoint would return 404 exactly on the chats it exists for.
 
-    PUT, а не POST-додавання: тег чату — це властивість чату цілком, і зняття
-    його з карти мусить знятись із історії так само ретроактивно, як додавання
-    лягає на неї (`categories.apply_chat_tags` чіпає лише рядки з
-    `source='chat'`, ручний тег на конкретному повідомленні лишається).
+    PUT, not a POST-append: a chat tag is a property of the chat as a whole, and removing
+    it from the map must be removed from history just as retroactively as adding
+    lays it on (`categories.apply_chat_tags` touches only rows with
+    `source='chat'`, a manual tag on a specific message stays).
 
-    404 на неморніторений чат: теги без `tg_monitored_chats` висіли б на
-    `chat_id`, якого UI не показує, і зняти їх було б нічим.
+    404 on a non-monitored chat: tags without `tg_monitored_chats` would hang on a
+    `chat_id` the UI does not show, and there would be nothing to remove them with.
 
-    `records_changed` — скільки записів реально змінили набір тегів; рівно ці
-    id йдуть у точковий re-embed (теги в контекстному префіксі чанка), тож
-    повторний той самий PUT дає 0 і GPU не чіпає.
+    `records_changed` — how many records actually changed their tag set; exactly these
+    ids go to the targeted re-embed (tags are in the chunk's context prefix), so
+    a repeated identical PUT gives 0 and does not touch the GPU.
     """
     data = request.get_json(silent=True) or {}
     if "tags" not in data:
@@ -767,20 +767,20 @@ def tg_chat_tags_put(chat_id: int):
 
 @telegram_bp.route('/api/telegram/chats/toggle', methods=['POST'])
 def tg_chats_toggle():
-    """T2.6 (REMEDIATION_PLAN Волна 2): CLI-only upsert для
-    `telegram_listener.py enable/disable <chat_id>`. Раніше ці команди писали
-    в tg_monitored_chats НАПРЯМУ з окремого процесу (той самий SQLite-файл,
-    що й app.py, по WAL) — порушувало задокументований інваріант «лише app.py
-    пише в БД». Тепер слухач лише POST'ить сюди (як /api/telegram/ingest),
-    запис виконує Flask.
+    """T2.6 (REMEDIATION_PLAN Wave 2): CLI-only upsert for
+    `telegram_listener.py enable/disable <chat_id>`. Earlier these commands wrote
+    to tg_monitored_chats DIRECTLY from a separate process (the same SQLite file
+    as app.py, via WAL) — violating the documented invariant «only app.py
+    writes to the DB». Now the listener only POSTs here (like /api/telegram/ingest),
+    and Flask performs the write.
 
-    НАВМИСНО окремий ендпоінт від /api/telegram/chats (яким користується UI):
-    той захищений лише загальним auth-гейтом сесії (localhost/API-key), а тут
-    викликач — інший локальний ПРОЦЕС без браузерної сесії, тож потрібен той
-    самий shared-secret, що і в ingest (_authorized: localhost + X-Telegram-
-    Token). Семантика ідентична старому прямому SQL з телеграм_listener.py:
-    оновлює лише title/username/chat_type/enabled, category_id НЕ чіпає
-    (щоб не затерти прив'язку напрямку, зроблену в UI)."""
+    DELIBERATELY a separate endpoint from /api/telegram/chats (used by the UI):
+    that one is protected only by the general session auth gate (localhost/API-key), and here the
+    caller is another local PROCESS without a browser session, so the same
+    shared-secret as in ingest is needed (_authorized: localhost + X-Telegram-
+    Token). The semantics are identical to the old direct SQL from telegram_listener.py:
+    it updates only title/username/chat_type/enabled, does NOT touch category_id
+    (so as not to erase a direction binding made in the UI)."""
     if not _authorized():
         return jsonify({"success": False, "error": "forbidden"}), 403
     data = request.get_json(silent=True) or {}
@@ -817,7 +817,7 @@ def _iso_day(value: str | None) -> str | None:
 
 
 def _days_between(later: str | None, earlier: str | None) -> int | None:
-    """Різниця в днях між двома ISO-датами (обидві можуть бути None)."""
+    """Difference in days between two ISO dates (both may be None)."""
     if not later or not earlier:
         return None
     try:
@@ -829,43 +829,43 @@ def _days_between(later: str | None, earlier: str | None) -> int | None:
 
 
 def _coverage_verdict(row: dict, live: dict | None, listed: bool) -> str:
-    """Чому чат тихий: він справді спить чи слухач його не чує.
+    """Why a chat is quiet: is it really asleep or does the listener not hear it.
 
-    Саме на це не було відповіді ні у власника, ні в агента — «12 чатів мовчать
-    понад тиждень» однаково виглядало і як мертвий проєкт, і як зламаний інжест.
+    Neither the owner nor the agent had an answer to exactly this — «12 chats are silent
+    for over a week» looked the same as a dead project and as a broken ingest.
     """
     if live and live.get("migrated_to"):
-        return "migrated"          # chat_id змінився → у tg_monitored_chats мертвий id
+        return "migrated"          # chat_id changed → a dead id in tg_monitored_chats
     if not row.get("enabled"):
-        # Вимкнений чат МАЄ відставати — ми його свідомо не слухаємо. Без цієї
-        # гілки звіт кричав «відстав на 170 днів» про те, що працює як задумано,
-        # і справжні дві-три проблеми тонули серед хибних тривог.
+        # A disabled chat SHOULD lag — we deliberately do not listen to it. Without this
+        # branch the report screamed «lagging by 170 days» about something that works as designed,
+        # and the real two or three problems drowned among false alarms.
         return "not_monitored"
     if not listed:
-        return "not_listed"        # немає серед діалогів: вийшли/видалено/поза лімітом
+        return "not_listed"        # not among the dialogs: left/deleted/beyond the limit
     if not row.get("archived_msgs"):
         return "never_ingested"
     live_day = _iso_day((live or {}).get("last_message_date"))
     arch_day = _iso_day(row.get("archived_last_date"))
     if live_day and arch_day and live_day > arch_day:
-        return "behind"            # у Telegram новіше, ніж в архіві → слухач відстав
+        return "behind"            # Telegram has newer than the archive → the listener lagged
     return "ok"
 
 
 @telegram_bp.route('/api/telegram/coverage', methods=['GET'])
 def tg_coverage():
-    """Волна 1 «Бачити»: архів проти живого Telegram, по кожному моніторенему чату.
+    """Wave 1 «See»: the archive against live Telegram, for each monitored chat.
 
-    Живий курсор береться з проходу iter_dialogs у слухача (Dialog.message) —
-    без другої Telethon-сесії і без жодного зайвого запиту до Telegram.
+    The live cursor comes from the listener's iter_dialogs pass (Dialog.message) —
+    without a second Telethon session and without a single extra request to Telegram.
 
-    Слухач офлайн — НЕ помилка: повертаємо архівну половину (коли чат востаннє
-    потрапляв в архів), бо на питання «що ми знаємо про цей чат» вона відповідає
-    і без мережі. live=false у відповіді.
+    Listener offline is NOT an error: we return the archive half (when the chat last
+    reached the archive), because it answers the question «what do we know about this chat»
+    even without the network. live=false in the response.
 
-    Відставання в ПОВІДОМЛЕННЯХ рахуємо лише для супергруп (-100…): в legacy-групах
-    і особистих чатах message_id береться з глобальної послідовності акаунта, тож
-    арифметика по id там безглузда (на живих даних це 15 чатів з 19).
+    Lag in MESSAGES is counted only for supergroups (-100…): in legacy groups
+    and personal chats message_id comes from the account's global sequence, so
+    id arithmetic there is meaningless (in live data that is 15 chats of 19).
     """
     db_path = _db_path()
     with _conn(db_path) as conn:
@@ -888,7 +888,7 @@ def tg_coverage():
     out = []
     for row in rows:
         live = live_by_id.get(row["chat_id"])
-        listed = (not ok) or (live is not None)   # без слухача про «не в списку» не судимо
+        listed = (not ok) or (live is not None)   # without the listener we do not judge «not listed»
         entry = {
             "chat_id": row["chat_id"], "title": row["title"], "chat_type": row["chat_type"],
             "enabled": bool(row["enabled"]), "category_id": row["category_id"],
@@ -903,7 +903,7 @@ def tg_coverage():
                                       row["archived_last_date"]) if ok else None,
             "quiet_days": _days_between(datetime.now().isoformat(), row["archived_last_date"]),
         }
-        # Дельта по id — тільки там, де id послідовні всередині чату.
+        # Delta by id — only where ids are sequential inside the chat.
         if ok and str(row["chat_id"]).startswith("-100") and live and live.get("last_message_id"):
             entry["behind_messages"] = max(
                 0, int(live["last_message_id"]) - int(row["archived_last_id"] or 0))
@@ -918,7 +918,7 @@ def tg_coverage():
                 "SELECT COUNT(*) FROM transcriptions WHERE source_type = 'telegram' "
                 "AND model_used = ? AND deleted_at IS NULL", (PARSE_FAILED,)).fetchone()[0]
     except Exception:
-        logger.warning("[tg] coverage: лічильник нерозпізнаних медіа не прочитано", exc_info=True)
+        logger.warning("[tg] coverage: counter of unrecognized media not read", exc_info=True)
         media_unparsed = None
 
     return jsonify({
@@ -935,12 +935,12 @@ def tg_coverage():
 
 @telegram_bp.route('/api/telegram/edited', methods=['POST'])
 def tg_edited():
-    """Повідомлення виправили — оновити текст (Волна 4).
+    """A message was edited — update the text (Wave 4).
 
-    Раніше архів писався один раз і не лагодився: `_is_duplicate` при повторному
-    заході повертав наявний id і виходив БЕЗ оновлення тексту, а підписки на
-    MessageEdited не було взагалі. У робочих чатах правка-виправлення — норма
-    (сума, дата, адреса), і архів назавжди зберігав першу, хибну версію."""
+    Earlier the archive was written once and never fixed: `_is_duplicate` on a repeated
+    visit returned the existing id and exited WITHOUT updating the text, and there was no subscription to
+    MessageEdited at all. In work chats a correcting edit is the norm
+    (amount, date, address), and the archive forever kept the first, wrong version."""
     if not _authorized():
         return jsonify({"success": False, "error": "forbidden"}), 403
     data = request.get_json(silent=True) or {}
@@ -962,24 +962,24 @@ def tg_edited():
         if row and (row["transcript_text"] or "") == text:
             return jsonify({"success": True, "unchanged": True, "transcription_id": tid})
         conn.execute(
-            # embedded_at скидаємо: старий вектор описує стару редакцію, і без
-            # скидання пошук знаходив би текст, якого вже немає.
+            # we reset embedded_at: the old vector describes the old revision, and without
+            # the reset search would find text that no longer exists.
             "UPDATE transcriptions SET transcript_text = ?, tg_edit_date = ?, "
             "embedded_at = NULL WHERE id = ?",
             (text, data.get("edit_date"), tid))
         conn.commit()
     enrich = _submit_embed_only(tid, db_path, force=True)
-    logger.info("[tg] правка tx=%d (chat=%s msg=%s) embed=%s", tid, chat_id, message_id, enrich)
+    logger.info("[tg] edit tx=%d (chat=%s msg=%s) embed=%s", tid, chat_id, message_id, enrich)
     return jsonify({"success": True, "transcription_id": tid, "updated": True,
                     "enrichment": {"status": enrich}})
 
 
 @telegram_bp.route('/api/telegram/deleted', methods=['POST'])
 def tg_deleted():
-    """Повідомлення видалили — мʼяко прибрати з архіву (Волна 4).
+    """A message was deleted — softly remove it from the archive (Wave 4).
 
-    Без цього Recall цитує те, чого в чаті вже немає. deleted_at поважають і
-    пошук, і скоуп, тож запис одразу зникає з видачі."""
+    Without this Recall quotes what is no longer in the chat. deleted_at is respected by both
+    search and scope, so the record disappears from results immediately."""
     if not _authorized():
         return jsonify({"success": False, "error": "forbidden"}), 403
     data = request.get_json(silent=True) or {}
@@ -997,23 +997,23 @@ def tg_deleted():
         conn.commit()
         marked = cur.rowcount
     if marked:
-        logger.info("[tg] видалено автором: %d запис(ів) (chat=%s)", marked, chat_id)
+        logger.info("[tg] deleted by the author: %d record(s) (chat=%s)", marked, chat_id)
     return jsonify({"success": True, "marked": marked})
 
 
 def _is_supergroup(chat_id) -> bool:
-    """id послідовні всередині чату лише в супергрупах (-100…). У legacy-групах
-    і особистих чатах message_id береться з глобальної послідовності акаунта,
-    тож «дірка в id» там нічого не означає (15 чатів з 19 на живих даних)."""
+    """ids are sequential inside a chat only in supergroups (-100…). In legacy groups
+    and personal chats message_id comes from the account's global sequence,
+    so a «gap in ids» there means nothing (15 chats of 19 in live data)."""
     return str(chat_id).startswith("-100")
 
 
 def _missing_ids(db_path: str, chat_id: int, live_last_id: int | None = None) -> list[int]:
-    """id, яких бракує в архіві: дірки всередині [min…max] + хвіст до живого останнього.
+    """ids missing from the archive: gaps inside [min…max] + the tail up to the live last one.
 
-    Нижче min не лізем — це вже не ремонт, а догрузка історії (окремий backfill):
-    відрізняти «ми це втратили» від «ми туди ще не ходили» важливо, бо перше
-    полагодити треба, а друге — рішення власника.
+    We do not go below min — that is no longer repair but history loading (a separate backfill):
+    telling «we lost this» from «we have not been there yet» matters, because the first
+    must be fixed, and the second is the owner's decision.
     """
     with _conn(db_path) as conn:
         rows = conn.execute(
@@ -1021,7 +1021,7 @@ def _missing_ids(db_path: str, chat_id: int, live_last_id: int | None = None) ->
             "WHERE tg_chat_id = ? AND tg_message_id IS NOT NULL", (chat_id,)).fetchall()
     have = {int(r["mid"]) for r in rows}
     if not have:
-        return []                      # порожній чат — це backfill, не ремонт
+        return []                      # an empty chat is a backfill, not a repair
     lo, hi = min(have), max(have)
     missing = [i for i in range(lo, hi + 1) if i not in have]
     if live_last_id and live_last_id > hi:
@@ -1031,18 +1031,18 @@ def _missing_ids(db_path: str, chat_id: int, live_last_id: int | None = None) ->
 
 @telegram_bp.route('/api/telegram/repair', methods=['POST'])
 def tg_repair():
-    """Волна 3 «Полагодити минуле»: точковий ремонт дірок у супергрупі.
+    """Wave 3 «Repair the past»: targeted repair of gaps in a supergroup.
 
     Body: {chat_id, dry_run=false, max_messages=200}.
 
-    Тягне КОНКРЕТНІ відсутні id через get_messages(ids=…) — на місці видалених
-    Telegram віддає None, тож у відповіді `deleted` (видалив автор) відокремлено
-    від `ingested` (втратив слухач). Саме це уточнює оцінку «359 пропущено»,
-    яка досі була верхньою межею: дірка в id могла бути й стікером, і службовим
-    повідомленням, і видаленим.
+    Fetches SPECIFIC missing ids via get_messages(ids=…) — in place of deleted ones
+    Telegram returns None, so in the response `deleted` (deleted by the author) is separated
+    from `ingested` (lost by the listener). This refines the estimate «359 skipped»,
+    which until now was an upper bound: a gap in ids could also be a sticker,
+    and a service message, and a deleted one.
 
-    Пачка обмежена max_messages — виклик лишається обмеженим у часі, у відповіді
-    `remaining` показує, скільки ще лишилось (повторювати до нуля).
+    The batch is bounded by max_messages — the call stays time-bounded, and the response
+    `remaining` shows how many are left (repeat until zero).
     """
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
@@ -1088,7 +1088,7 @@ def tg_repair():
 
 @telegram_bp.route('/api/telegram/backfill', methods=['POST'])
 def tg_backfill():
-    """Догрузити історію чату (проксі до слухача; сам backfill — Phase 17D)."""
+    """Load a chat's history (proxy to the listener; the backfill itself — Phase 17D)."""
     data = request.get_json(silent=True) or {}
     if data.get("chat_id") is None:
         return jsonify({"success": False, "error": tr("telegram.err.chatIdRequired")}), 400

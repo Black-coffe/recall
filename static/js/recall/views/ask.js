@@ -5,8 +5,8 @@
     const R = window.Recall, U = R.util, UI = R.ui;
     let abortCtl = null, busy = false, state = null;
 
-    // C9: три різні осі фільтра — той самий текст пояснення, що й на
-    // Бібліотеці/Медіатеці/Задачах/Графі/Дослідженні.
+    // C9: three different filter axes — the same explanation text as on
+    // Library/Media library/Tasks/Graph/Research.
     const FILTER_HINT = () => R.t('knowledge.ask.filterHint');
 
     async function render(ctx) {
@@ -65,8 +65,8 @@
         if (preset.trim()) ask(ctx, preset);
     }
 
-    // Фільтри й питання живуть в URL — питання з тим самим зрізом можна
-    // переслати посиланням (deep-link відновлює і контроли, і запит).
+    // Filters and the question live in the URL — a question with the same slice can be
+    // sent as a link (the deep link restores both the controls and the query).
     function sync(question) {
         const p = new URLSearchParams();
         const q = (question || '').trim();
@@ -79,7 +79,7 @@
         R.router.replace('/ask' + (qs ? '?' + qs : ''));
     }
 
-    // Пояснення активного зрізу — для «нічого не знайшлось».
+    // Explanation of the active slice — for "nothing found".
     function filterExplain() {
         const bits = [];
         if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(R.t('knowledge.ask.explainIn', { path: p })); }
@@ -185,10 +185,10 @@
         });
     }
 
-    // 👍/👎 + замітка під відповіддю. Це не «лайк», а розмітка golden-set:
-    // раз на тиждень власник переносить звідси десяток питань у набір, і 👎
-    // йдуть туди першими. Без ask_id (лог не записався) блок не показуємо —
-    // кнопка, що нікуди не веде, гірша за її відсутність.
+    // 👍/👎 + a note under the answer. This is not a "like" but golden-set labeling:
+    // once a week the owner moves a dozen questions from here into the set, and 👎
+    // go there first. Without ask_id (the log was not written) we do not show the block —
+    // a button that leads nowhere is worse than its absence.
     function renderRating(ctx, askId) {
         const box = ctx.mount.querySelector('#rcAskRate');
         if (!box || !askId) return;

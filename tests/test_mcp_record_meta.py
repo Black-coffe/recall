@@ -1,13 +1,13 @@
-"""Спека editable-title-description, історія 04: `display_name`/`title`/`description`
-у read-тулзах MCP.
+"""Spec editable-title-description, story 04: `display_name`/`title`/`description`
+in the MCP read tools.
 
-Direct-DB тулзи (`get_transcript`, `list_recent`, ресурс `recall://transcript/{id}`)
-перевіряються на тимчасовій SQLite (`init_database`), без запущеного app.py.
-Проксі-тулзи (`search_archive`, `ask_archive`) перевіряються з замоканим `_api()` —
-тулз лише переупаковує JSON app.py, не рахує display_name сам, тож тест ловить
-саме втрату поля при переупакуванні, а не його обчислення.
+Direct-DB tools (`get_transcript`, `list_recent`, the resource `recall://transcript/{id}`)
+are checked on a temporary SQLite (`init_database`), without a running app.py.
+Proxy tools (`search_archive`, `ask_archive`) are checked with a mocked `_api()` —
+the tool only repackages the JSON of app.py and does not compute display_name itself, so the test catches
+exactly the loss of the field on repackaging, not its computation.
 
-Кириличні фікстури — той самий урок, що й у `tests/test_record_meta.py`
+Cyrillic fixtures — the same lesson as in `tests/test_record_meta.py`
 (`plan-dictated-sql-ignored-own-memory`).
 """
 from __future__ import annotations
@@ -89,7 +89,7 @@ def test_list_recent_exposes_meta(db):
 
 
 # ============================================================
-# Ресурс recall://transcript/{id} — заголовок
+# Resource recall://transcript/{id} — the heading
 # ============================================================
 
 def test_transcript_resource_header_uses_title(db):
@@ -106,7 +106,7 @@ def test_transcript_resource_header_falls_back_to_source_name(db):
 
 
 # ============================================================
-# Проксі: search_archive/ask_archive не губить display_name
+# Proxy: search_archive/ask_archive do not lose display_name
 # ============================================================
 
 def test_search_archive_passes_through_display_name(monkeypatch):
@@ -140,7 +140,7 @@ def test_ask_archive_passes_through_display_name_in_sources(monkeypatch):
 
 
 # ============================================================
-# about() — кількість тулзів не змінилась
+# about() — the tool count has not changed
 # ============================================================
 
 def test_about_bucket_sum_still_matches_registered_count():
@@ -150,16 +150,16 @@ def test_about_bucket_sum_still_matches_registered_count():
 
 
 # ============================================================
-# stdio-безпека: без torch на рівні модуля
+# stdio safety: no torch at module level
 # ============================================================
 
 def test_import_mcp_server_does_not_import_torch():
-    """Гейт-9 (знахідка 1): якщо перевіряти `sys.modules` у ТОМУ Ж процесі
-    pytest, результат залежить від порядку збирання файлів — `test_endpoints_smoke.py`
-    (раніше за абеткою) імпортує `app.py` -> `whisper_manager_new` -> torch,
-    і torch лишається в `sys.modules` для всіх наступних тестів. Свіжий
-    підпроцес (`sys.executable`) не успадковує це — саме ізоляцію обіцяла
-    ACC історії 04 (`python -c "import mcp_server"`)."""
+    """Gate-9 (finding 1): if `sys.modules` is checked in THE SAME pytest
+    process, the result depends on the file collection order — `test_endpoints_smoke.py`
+    (earlier alphabetically) imports `app.py` -> `whisper_manager_new` -> torch,
+    and torch stays in `sys.modules` for all subsequent tests. A fresh
+    subprocess (`sys.executable`) does not inherit that — exactly the isolation promised by
+    ACC of story 04 (`python -c "import mcp_server"`)."""
     proc = subprocess.run(
         [sys.executable, "-c",
          "import sys, mcp_server; sys.exit(1 if 'torch' in sys.modules else 0)"],
@@ -170,6 +170,6 @@ def test_import_mcp_server_does_not_import_torch():
         timeout=60,
     )
     assert proc.returncode == 0, (
-        f"mcp_server затягнув torch у sys.modules підпроцесу "
+        f"mcp_server pulled torch into sys.modules of the subprocess "
         f"(stdout={proc.stdout!r} stderr={proc.stderr!r})"
     )

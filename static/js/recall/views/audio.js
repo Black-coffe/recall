@@ -23,9 +23,9 @@
         { v: 'en', l: T('library.aud.lang.en') }, { v: 'ru', l: T('library.aud.lang.ru') },
     ];
 
-    // C9: спільна для екрана підказка + пояснення порожньої видачі (той самий
-    // текст, що й у library.js — дублюємо навмисно, спільний компонент фільтр-
-    // бару поза 09 не збираємо).
+    // C9: a hint shared by the screen + explanation of an empty result (the same
+    // text as in library.js — duplicated on purpose, we do not build a shared filter-bar
+    // component outside 09).
     const FILTER_HINT = T('library.filterHint');
 
     function filterExplain(st) {
@@ -39,14 +39,14 @@
     }
 
     let listEl = null, state = null, _models = null, cats = null;
-    // Phase 21: фоновий статус транскрипції. activeIds — id записів, що зараз
-    // транскрибуються (з /api/transcribe/active); lastActive — останній снапшот
-    // (щоб одразу маркувати свіжо-відрендерені рядки після load).
+    // Phase 21: background transcription status. activeIds — ids of records that are being
+    // transcribed right now (from /api/transcribe/active); lastActive — the last snapshot
+    // (to mark freshly rendered rows right after load).
     let pollTimer = null, activeIds = new Set(), lastActive = [];
-    // T5.6: pendingIds — id, для яких ми ЩОЙНО самі відправили /api/transcribe
-    // (fire-and-forget) і сервер ще не встиг зʼявити їх у /api/transcribe/active
-    // (поллінг раз на 2.5с). Дає миттєвий pill без затримки і не дає повторному
-    // кліку по тому самому рядку запустити другу транскрипцію тієї ж миті.
+    // T5.6: pendingIds — ids for which we ourselves JUST sent /api/transcribe
+    // (fire-and-forget) and the server has not yet had time to show them in /api/transcribe/active
+    // (polling once per 2.5s). Gives an instant pill without delay and stops a repeated
+    // click on the same row from starting a second transcription at the same moment.
     let pendingIds = new Set();
 
     async function loadModels() {
@@ -66,8 +66,8 @@
             tags: (ctx.query.tags || '').split(',').map(s => s.trim()).filter(Boolean),
             since: ctx.query.since || '',
             until: ctx.query.until || '',
-            // '0' — лише нетранскрибовані. Головна робота на цій сторінці:
-            // знайти те, що ще не перетворене на текст.
+            // '0' — only untranscribed. The main job on this page:
+            // find what is not yet turned into text.
             transcribed: ctx.query.transcribed === '0' ? '0' : '',
             page: parseInt(ctx.query.page, 10) || 1,
         };
@@ -153,8 +153,8 @@
             const n = counts ? (counts[s.c] || 0) : null;
             return `<button class="rc-chip${s.k === state.source_type ? ' is-active' : ''}" data-src="${s.k}">${s.label}${n != null ? ` <span class="rc-chip__n">${n}</span>` : ''}</button>`;
         }).join('');
-        // Зріз «залишок роботи» — окремо від джерел, бо це інша вісь фільтра
-        // (не «звідки прийшло», а «чи вже оброблено»).
+        // The "remaining work" slice — separate from the sources, because it is a different filter axis
+        // (not "where it came from" but "whether it is already processed").
         const un = counts ? (counts.untranscribed || 0) : 0;
         const trChip = un || state.transcribed === '0'
             ? `<span class="rc-filterbar__sep" aria-hidden="true"></span>
@@ -198,17 +198,17 @@
             }
             listEl.innerHTML = rows.map(rowHTML).join('');
             rows.forEach(d => bindRow(ctx, d));
-            // Коментар на файлі Медіатеки живе на самому файлі, а не на його
-            // транскрипті: транскрипта може ще не бути (це головний зріз цієї
-            // сторінки), а сказати про запис часто треба саме тоді.
+            // A comment on a Media library file lives on the file itself, not on its
+            // transcript: the transcript may not exist yet (this is the main slice of this
+            // page), and it is often exactly then that one needs to say something about the record.
             if (R.comments) {
                 R.comments.decorate('audio_download',
                     rows.map(d => ({ id: d.id, el: listEl.querySelector(`.rc-aud[data-id="${d.id}"]`) }))
                         .filter(x => x.el),
                     { slot: '.rc-aud__actions', position: 'beforeend' });
             }
-            applyMarks();           // одразу позначити рядки, що транскрибуються
-            startPolling(ctx);      // і тримати статус живим
+            applyMarks();           // mark rows that are being transcribed right away
+            startPolling(ctx);      // and keep the status alive
             if (pagerEl) {
                 pagerEl.innerHTML = pagerHTML(data);
                 pagerEl.querySelectorAll('[data-page]').forEach(b =>
@@ -221,7 +221,7 @@
 
     // ---- background transcription status (poll /api/transcribe/active) --------
     function startPolling(ctx) {
-        if (pollTimer) return;  // вже працює
+        if (pollTimer) return;  // already running
         pollTimer = setInterval(() => pollActive(ctx), 2500);
     }
     function stopPolling() {
@@ -235,8 +235,8 @@
         if (!ctx.isCurrent()) { stopPolling(); return; }
         const active = (data && data.active) || [];
         const nowIds = new Set(active.map(a => Number(a.audio_download_id)));
-        // завершення: був активним, тепер ні → перезавантажити (зʼявиться
-        // кнопка «Транскрипт» + напрямок із транскрипту).
+        // completion: was active, now not → reload (the
+        // «Транскрипт» button + the category from the transcript will appear).
         let completed = false;
         activeIds.forEach(id => { if (!nowIds.has(id)) completed = true; });
         activeIds = nowIds;
@@ -256,7 +256,7 @@
         const stage = entry && entry.stage === 'diarizing' ? T('library.aud.stage.diarizing') : T('library.aud.stage.transcribing');
         let pill = actions.querySelector('[data-act="tr-status"]');
         if (pill) { pill.querySelector('.rc-tr-stage').textContent = stage; return; }
-        // замінюємо «Транскрибувати» / «Транскрипт» на нерухомий статус-pill
+        // we replace «Транскрибувати» / «Транскрипт» with a static status pill
         const btn = actions.querySelector('[data-act="transcribe"]') || actions.querySelector('[data-act="open-tr"]');
         const pillHTML = `<span class="rc-btn rc-btn--sm is-transcribing" data-act="tr-status" title="${U.esc(T('library.aud.statusTitle'))}"><i class="fa-solid fa-spinner fa-spin"></i> <span class="rc-tr-stage">${stage}</span></span>`;
         if (btn) btn.outerHTML = pillHTML;
@@ -269,25 +269,25 @@
             ? `<img class="rc-rec__thumb" src="${U.esc(d.thumbnail_url)}" alt="" loading="lazy">`
             : `<i class="rc-rec__glyph ${U.SRC_ICON[st] || 'fa-solid fa-compact-disc'}" aria-hidden="true"></i>`;
         const dur = d.duration || d.recording_duration_sec;
-        // Порядок за корисністю для рішення «слухати / транскрибувати»:
-        // тривалість → автор → дата. Розмір файлу тут НЕ показуємо — він
-        // потрібен раз на рік при чистці диска, а важив стільки ж, скільки
-        // тривалість. Підпис джерела теж прибрано: «Локальний запис» поруч із
-        // бейджем ЗАПИС — дослівний повтор без жодної інформації.
+        // Order by usefulness for the "listen / transcribe" decision:
+        // duration → author → date. File size is NOT shown here — it is
+        // needed once a year when cleaning the disk, and weighed as much as
+        // duration. The source label is also removed: «Локальний запис» next to the
+        // «ЗАПИС» badge is a verbatim repeat with no information.
         const meta = [
             UI.srcBadge(st),
             d.has_video ? `<span class="rc-vidbadge">&#x1F4F9; ${T('library.aud.video')}</span>` : '',
             dur ? `<span class="rc-rec__sig">${U.fmtDuration(dur)}</span>` : '',
-            // `author` осмислений лише для YouTube (канал). Для локальних
-            // записів у БД лежить літерал «Локальний запис» — дослівний повтор
-            // бейджа ЗАПИС поруч, тобто нуль інформації на кожному рядку.
+            // `author` is meaningful only for YouTube (the channel). For local
+            // records the DB holds the literal «Локальний запис» — a verbatim repeat of the
+            // «ЗАПИС» badge next to it, i.e. zero information on every row.
             (st === 'youtube' && d.author) ? `<span>${U.esc(d.author)}</span>` : '',
             `<span>${U.fmtDate(d.created_at)}</span>`,
             d.transcription_id ? '' : `<span class="rc-rec__warn">${T('library.aud.noTranscriptBadge')}</span>`,
             state && state.category_id ? '' : UI.catChip(d.category_id),
         ].filter(Boolean).join('<span class="sep">·</span>');
-        // d.tags — таксономічні теги (C4, з привʼязаного транскрипту), НЕ
-        // плутати з d.youtube_tags (власні ключові слова відео на YouTube).
+        // d.tags — taxonomy tags (C4, from the linked transcript), NOT to be
+        // confused with d.youtube_tags (the video's own YouTube keywords).
         const tags = d.tags || [];
         const tagsHTML = tags.length
             ? `<div class="rc-tags" style="margin-top:6px">${tags.map(tg => `<span class="rc-tag"${tg.color ? ` style="border-color:${U.esc(tg.color)}"` : ''}>${U.esc(tg.name)}</span>`).join('')}</div>`
@@ -295,8 +295,8 @@
         const tr = d.transcription_id
             ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> ${T('library.aud.transcript')}</button>`
             : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.aud.transcribe')}</button>`;
-        // Запис без власної назви, але з транскриптом — локальна модель пропонує
-        // варіанти. Без транскрипту пропозиція прийде сама після транскрибації.
+        // A record without its own title but with a transcript — the local model proposes
+        // variants. Without a transcript the proposal arrives by itself after transcription.
         const name = d.transcription_id && UI.isUnnamedRecording(d)
             ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" title="${U.esc(T('library.aud.suggestTitle'))}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.aud.suggest')}</button>`
             : '';
@@ -350,7 +350,7 @@
             row.style.opacity = '0.4';
             row.querySelectorAll('button').forEach(b => b.disabled = true);
             try {
-                // Бекенд тепер повертає {success, id} (раніше {status, message}) — soft-delete, файл не стирається.
+                // The backend now returns {success, id} (previously {status, message}) — soft-delete, the file is not erased.
                 const res = await R.api.audioDelete(d.id);
                 const delId = (res && res.id) || d.id;
                 row.remove();
@@ -369,9 +369,9 @@
         });
     }
 
-    // Вікно «Назва й опис» картки Медіатеки. Пропозиції — лише коли є
-    // транскрипт (модель пише за ним); `first` — уже готові варіанти
-    // (автопропозиція після транскрибації), щоб не питати модель вдруге.
+    // The «Назва й опис» window of a Media library card. Proposals — only when there is
+    // a transcript (the model writes from it); `first` — already ready variants
+    // (auto-proposal after transcription), so as not to ask the model a second time.
     async function openAudioMeta(ctx, d, o) {
         o = o || {};
         const tid = o.transcriptionId || d.transcription_id;
@@ -395,12 +395,12 @@
         UI.toast(T('library.aud.saved'), 'success');
     }
 
-    // Після транскрибації запису без назви: чекаємо саммарі Claude (enrichment
-    // дописує його за ~1–2 хв, вхід за ним у рази точніший), стеля ~3 хв — далі
-    // варіанти з фрагментів транскрипту. Поки йде запис, сервер відповідає
-    // 409 RECORDING_ACTIVE (модель належить копілоту) — чекаємо кінця запису.
-    // Вікно відкривається вже з готовими варіантами і лише якщо власник досі
-    // на Медіатеці; для однієї картки — один раз.
+    // After transcribing a record without a title: we wait for the Claude summary (enrichment
+    // appends it in ~1–2 min, input based on it is several times more accurate), ceiling ~3 min — then
+    // variants from transcript fragments. While recording is going on, the server answers
+    // 409 RECORDING_ACTIVE (the model belongs to the copilot) — we wait for the end of the recording.
+    // The window opens already with ready variants and only if the owner is still
+    // on the Media library; for one card — once.
     const SUMMARY_POLL_MS = 10000, SUMMARY_WAIT_MS = 180000, RECORDING_POLL_MS = 30000;
     const autoNamed = new Set();
     async function autoSuggestAfterTranscribe(ctx, d, tid) {
@@ -423,7 +423,7 @@
             } catch (e) {
                 const code = e && e.body && e.body.error_code;
                 if (code !== 'RECORDING_ACTIVE') {
-                    // Модель недоступна тощо: відкриваємо вікно для ручного вводу з причиною.
+                    // The model is unavailable etc.: open the window for manual input with the reason.
                     if (ctx.isCurrent()) openAudioMeta(ctx, d, { transcriptionId: tid, autoSuggest: true });
                     return;
                 }
@@ -458,18 +458,18 @@
         });
     }
 
-    // T5.6: fire-and-forget — не чекаємо /api/transcribe (файли до 20GB, задача
-    // може йти довго). Одразу ховаємо інлайн-форму й показуємо той самий pill,
-    // що й для задач, знайдених поллінгом (markRowTranscribing) — реальну стадію
-    // (diarizing/…) підхопить startPolling/pollActive, тож подвійного UI немає.
-    // Завершення (успіх чи помилка) теж підхоплює поллінг (completed → load()),
-    // тож переходу на сторінку транскрипту тут більше немає — це узгоджує
-    // самостійно запущену транскрипцію з тими, що поллінг знаходить сам.
+    // T5.6: fire-and-forget — we do not wait for /api/transcribe (files up to 20GB, the task
+    // may take long). We hide the inline form right away and show the same pill
+    // as for tasks found by polling (markRowTranscribing) — the real stage
+    // (diarizing/…) will be picked up by startPolling/pollActive, so there is no double UI.
+    // Completion (success or error) is also picked up by polling (completed → load()),
+    // so there is no navigation to the transcript page here anymore — this reconciles
+    // a self-started transcription with those that polling finds on its own.
     function runTranscribe(ctx, row, run, d, model, language) {
-        if (activeIds.has(d.id) || pendingIds.has(d.id)) return;   // guard: не дублюємо задачу
+        if (activeIds.has(d.id) || pendingIds.has(d.id)) return;   // guard: do not duplicate the task
         pendingIds.add(d.id);
         run.hidden = true; run.innerHTML = '';
-        markRowTranscribing(d.id, null);   // миттєвий pill; реальну стадію дасть поллінг
+        markRowTranscribing(d.id, null);   // instant pill; polling will give the real stage
         UI.toast(T('library.aud.bgToast', { title: d.title || '' }), 'info');
 
         const fd = new FormData();
@@ -486,8 +486,8 @@
             UI.toast((err && err.message) || T('library.aud.trFail', { title: d.title || '' }), 'error');
         }).finally(() => {
             pendingIds.delete(d.id);
-            // якщо сервер так і не підхопив задачу (activeIds її не бачив) —
-            // прибираємо застряглий pill і повертаємо звичайні кнопки рядка.
+            // if the server never picked up the task (activeIds did not see it) —
+            // we remove the stuck pill and restore the row's normal buttons.
             if (ctx.isCurrent()) load(ctx);
         });
     }

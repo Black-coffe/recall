@@ -1,48 +1,45 @@
-"""Co-pilot — експорт сесії + дайджест для реінджесту (Phase 19, Крок 8).
+"""Co-pilot — session export + digest for re-ingest (Phase 19, Step 8).
 
-Зібрати все, що йшло паралельно під час дзвінка, в один документ: транскрипт з
-таймкодами + інлайн-нотатки ко-пілота (протиріччя / питання / уточнення / факти)
-з посиланнями на джерела архіву. Формати ``.md`` (для людей) і ``.json`` (для
-машин), узгоджено з наявним bulk-export (Phase 18).
+Gather everything that ran in parallel during the call into one document: the transcript with
+timecodes + inline co-pilot notes (contradictions / questions / clarifications / facts)
+with links to archive sources. Formats ``.md`` (for humans) and ``.json`` (for
+machines), consistent with the existing bulk-export (Phase 18).
 
-Окремо :func:`notes_digest` — стислий текст лише з підказок ко-пілота, який
-реінджеститься назад у RAG (``source_type='copilot'``), щоб аналітика ко-пілота
-сама стала пам'яттю для майбутніх дзвінків.
+Separately :func:`notes_digest` — a compact text of only the co-pilot hints, which is
+re-ingested back into RAG (``source_type='copilot'``), so that the co-pilot's analytics
+itself becomes memory for future calls.
 
-Чисті функції БЕЗ I/O: на вхід — ``timeline`` (з :meth:`CopilotService.get_timeline`)
-і ``transcript`` (сегменти+мета або None). Тестується офлайн.
+Pure functions WITHOUT I/O: the input is ``timeline`` (from :meth:`CopilotService.get_timeline`)
+and ``transcript`` (segments+meta or None). Tested offline.
 """
 from __future__ import annotations
 
 import json
 from typing import Optional
 
+from app.core.i18n import tr
 from app.utils.helpers import format_duration
 
 
-_KIND_MD = {
-    "contradiction": ("🔴", "ПРОТИРІЧЧЯ"),
-    "question": ("❓", "ПИТАННЯ"),
-    "clarification": ("💡", "УТОЧНЕННЯ"),
-    "fact": ("📌", "ФАКТ"),
-}
-_MODE_LBL = {"light": "лайт", "medium": "середній", "hard": "жорсткий"}
-_IMP_LBL = {"low": "низька", "medium": "середня", "high": "висока"}
+#: Insight kind → icon; the label comes from the catalog (svc_llm.cp_export.kind.*).
+_KIND_ICON = {"contradiction": "🔴", "question": "❓", "clarification": "💡", "fact": "📌"}
+_MODES = ("light", "medium", "hard")
+_IMPS = ("low", "medium", "high")
 
 
 def _ts(seconds) -> str:
-    # Канонічний форматер h:mm:ss / m:ss (app/utils/helpers); "--:--" для відсутнього.
+    # Canonical h:mm:ss / m:ss formatter (app/utils/helpers); "--:--" for a missing value.
     return "--:--" if seconds is None else format_duration(seconds)
 
 
 def _speaker(raw: Optional[str]) -> str:
     if raw == "self":
-        return "Ви"
+        return tr("svc_llm.cp_export.you")
     if raw == "other":
-        return "Інший"
+        return tr("svc_llm.cp_export.other")
     if raw and raw.startswith("SPEAKER_"):
         try:
-            return "Спікер " + str(int(raw.split("_")[1]) + 1)
+            return tr("svc_llm.cp_export.speaker_n", n=int(raw.split("_")[1]) + 1)
         except (ValueError, IndexError):
             return raw
     return raw or "?"
@@ -58,8 +55,8 @@ def _evidence_str(evidence: list) -> str:
 
 
 def collect_notes(events: list) -> list:
-    """Звести події інсайтів у нотатки. insight_local (база) + злиття з його
-    верифікацією (insight_verified з ref_event_id) + окремі sweep-інсайти."""
+    """Merge insight events into notes. insight_local (base) + merge with its
+    verification (insight_verified with ref_event_id) + standalone sweep insights."""
     verified_by_ref, sweep, locals_ = {}, [], []
     for e in events or []:
         if e.get("kind") == "insight_local":
@@ -68,7 +65,7 @@ def collect_notes(events: list) -> list:
             ref = (e.get("payload") or {}).get("ref_event_id")
             if ref is not None:
                 verified_by_ref[ref] = e
-            else:  # standalone safety-sweep finding (уже «перевірено»)
+            else:  # standalone safety-sweep finding (already "verified")
                 sweep.append(e)
     notes = []
     for e in locals_:
@@ -98,18 +95,22 @@ def collect_notes(events: list) -> list:
 
 def _meta_line(session: dict, agg: dict, notes: list) -> str:
     cfg = session.get("config") or {}
-    mode = _MODE_LBL.get(cfg.get("mode") or session.get("mode"), "—")
-    imp = _IMP_LBL.get(cfg.get("importance") or session.get("importance"), "—")
+    mode = cfg.get("mode") or session.get("mode")
+    mode = tr(f"svc_llm.cp_export.mode.{mode}") if mode in _MODES else "—"
+    imp = cfg.get("importance") or session.get("importance")
+    imp = tr(f"svc_llm.cp_export.imp.{imp}") if imp in _IMPS else "—"
     verified = sum(1 for n in notes if n["source"] == "api")
     cost = session.get("cost_estimate") or 0
-    return (f"*Режим: {mode} · важливість: {imp} · підказок: {len(notes)} "
-            f"(перевірено {verified}) · вартість: ${float(cost):.2f}*")
+    return tr("svc_llm.cp_export.meta", mode=mode, imp=imp, notes=len(notes),
+              verified=verified, cost=f"{float(cost):.2f}")
 
 
-#: Коментар оператора у вигляді, придатному для тієї ж стрічки, що й нотатки
-#: ко-пілота: у них спільна вісь — секунди від початку запису. Тому вони не
-#: додаються окремим хвостом, а стають на своє місце в діалозі: у вигрузці
-#: видно, ЩО саме говорили, коли оператор вписав своє уточнення.
+#: An operator comment in a form suitable for the same stream as the co-pilot
+#: notes: they share an axis — seconds from the start of the recording. So they are not
+#: appended as a separate tail, but take their place in the dialogue: the export
+#: shows WHAT was being said when the operator typed their clarification.
+#: The .md labels come from the catalog (svc_media.export.kind.*); this uk table serves only
+#: `notes_digest`, whose text is re-ingested into RAG (archive data, kept in the source language).
 _CM_LABEL = {
     "correction": "ВИПРАВЛЕННЯ", "decision": "РІШЕННЯ", "note": "НОТАТКА",
     "context": "КОНТЕКСТ", "question": "ПИТАННЯ",
@@ -117,35 +118,39 @@ _CM_LABEL = {
 
 
 def _comment_md(c: dict) -> str:
-    lbl = _CM_LABEL.get(c.get("kind"), "НОТАТКА")
-    pin = " · закріплено" if c.get("pinned") else ""
-    return f"✍ **{lbl}** (оператор{pin}): {(c.get('body') or '').strip()}"
+    kind = c.get("kind") if c.get("kind") in _CM_LABEL else "note"
+    pin = tr("svc_llm.cp_export.pinned") if c.get("pinned") else ""
+    return tr("svc_llm.cp_export.comment", label=tr(f"svc_media.export.kind.{kind}"),
+              pin=pin, body=(c.get("body") or "").strip())
 
 
 def build_markdown(timeline: dict, transcript: Optional[dict] = None,
                    comments: Optional[list] = None) -> str:
-    """Об'єднаний .md: шапка + теми + діалог з інлайн-нотатками + коментарі
-    оператора на своїх таймкодах + зведення підказок."""
+    """Combined .md: header + topics + dialogue with inline notes + operator
+    comments at their timecodes + hint summary."""
     session = timeline.get("session") or {}
     events = timeline.get("events") or []
     topics = timeline.get("topics") or []
     agg = timeline.get("aggregates") or {}
     notes = collect_notes(events)
     comments = comments or []
-    name = (transcript or {}).get("source_name") or f"Сесія #{session.get('id')}"
+    name = ((transcript or {}).get("source_name")
+            or tr("svc_llm.cp_export.session_n", id=session.get("id")))
 
-    out = [f"# Ко-пілот сесії — {name}", "", _meta_line(session, agg, notes), ""]
+    out = [f"# {tr('svc_llm.cp_export.title', name=name)}", "",
+           _meta_line(session, agg, notes), ""]
 
     if topics:
-        out.append("## Теми")
+        out.append(f"## {tr('svc_llm.cp_export.topics')}")
         for t in topics:
             span = f" ({_ts(t.get('first_ts'))}–{_ts(t.get('last_ts'))})" if t.get("first_ts") is not None else ""
-            out.append(f"- {t.get('label') or ('Тема ' + str(t.get('topic_index')))}{span}")
+            label = t.get("label") or tr("svc_llm.cp_export.topic_n", n=t.get("topic_index"))
+            out.append(f"- {label}{span}")
         out.append("")
 
-    # Діалог з інлайн-нотатками (merge сегментів і нотаток за таймкодом).
+    # Dialogue with inline notes (merge of segments and notes by timecode).
     segs = (transcript or {}).get("segments") or []
-    out.append("## Діалог, нотатки ко-пілота і коментарі оператора")
+    out.append(f"## {tr('svc_llm.cp_export.dialog')}")
     cm_items = [("cm", c.get("anchor_time"), c) for c in comments]
     if segs:
         merged = ([("seg", s.get("start"), s) for s in segs]
@@ -158,7 +163,7 @@ def build_markdown(timeline: dict, transcript: Optional[dict] = None,
                 out.append("  > " + _comment_md(obj))
             else:
                 out.append("  > " + _note_md(obj))
-    else:  # немає діалогу — лише нотатки й коментарі
+    else:  # no dialogue — only notes and comments
         merged = [("note", n["ts"], n) for n in notes] + cm_items
         merged.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 0))
         for typ, ts, obj in merged:
@@ -167,16 +172,16 @@ def build_markdown(timeline: dict, transcript: Optional[dict] = None,
     out.append("")
 
     if comments:
-        # Окремим зведенням, попереду підказок: підказки згенерувала модель, а
-        # це написала людина — при суперечності правильне друге.
-        out.append("## Коментарі оператора")
+        # As a separate summary, ahead of the hints: the hints were generated by the model, and
+        # this was written by a human — in case of a contradiction the latter is right.
+        out.append(f"## {tr('svc_llm.cp_export.comments')}")
         for c in comments:
             ts = _ts(c.get("anchor_time")) if c.get("anchor_time") is not None else "—"
             out.append(f"- [{ts}] " + _comment_md(c))
         out.append("")
 
     if notes:
-        out.append("## Зведення підказок")
+        out.append(f"## {tr('svc_llm.cp_export.summary')}")
         for n in notes:
             out.append(f"- [{_ts(n['ts'])}] " + _note_md(n))
         out.append("")
@@ -184,20 +189,23 @@ def build_markdown(timeline: dict, transcript: Optional[dict] = None,
 
 
 def _note_md(n: dict) -> str:
-    icon, lbl = _KIND_MD.get(n["kind"], ("•", n["kind"].upper()))
-    badge = "перевірено" if n["source"] == "api" else "локально"
+    icon = _KIND_ICON.get(n["kind"], "•")
+    lbl = (tr(f"svc_llm.cp_export.kind.{n['kind']}") if n["kind"] in _KIND_ICON
+           else n["kind"].upper())
+    badge = tr("svc_llm.cp_export.badge.verified" if n["source"] == "api"
+               else "svc_llm.cp_export.badge.local")
     if n.get("verdict") == "refuted":
-        badge = "спростовано"
+        badge = tr("svc_llm.cp_export.badge.refuted")
     conf = f" · {round(n['confidence'] * 100)}%" if n.get("confidence") is not None else ""
     ev = _evidence_str(n.get("evidence"))
-    ev_str = f" — джерела: {ev}" if ev else ""
+    ev_str = tr("svc_llm.cp_export.sources", sources=ev) if ev else ""
     return f"{icon} **{lbl}** ({badge}{conf}): {n['text']}{ev_str}"
 
 
 def build_json(timeline: dict, transcript: Optional[dict] = None,
                comments: Optional[list] = None) -> dict:
-    """Структурований експорт: мета + теми + діалог + нотатки + коментарі
-    оператора (для машин/реімпорту)."""
+    """Structured export: meta + topics + dialogue + notes + operator
+    comments (for machines/re-import)."""
     session = timeline.get("session") or {}
     notes = collect_notes(timeline.get("events") or [])
     segs = (transcript or {}).get("segments") or []
@@ -212,9 +220,9 @@ def build_json(timeline: dict, transcript: Optional[dict] = None,
         "dialog": [{"ts": s.get("start"), "speaker": _speaker(s.get("speaker")),
                     "text": (s.get("text") or "").strip()} for s in segs],
         "notes": notes,
-        # Окремим ключем, а не в notes: підказки згенерувала модель, коментарі
-        # написала людина. Змішавши їх, споживач втратив би саме ту різницю,
-        # заради якої коментарі й важать більше.
+        # As a separate key, not in notes: the hints were generated by the model, the comments
+        # were written by a human. Mixing them, the consumer would lose exactly the difference
+        # for which the comments matter more.
         "operator_comments": [
             {"ts": c.get("anchor_time"), "kind": c.get("kind"),
              "pinned": bool(c.get("pinned")), "text": c.get("body"),
@@ -226,12 +234,12 @@ def build_json(timeline: dict, transcript: Optional[dict] = None,
 
 def notes_digest(timeline: dict, transcript: Optional[dict] = None,
                  comments: Optional[list] = None) -> str:
-    """Стислий ТЕКСТ лише з підказок ко-пілота — для реінджесту в RAG. Групуємо за
-    типом, додаємо джерела; це стає шукабельною пам'яттю для майбутніх дзвінків.
+    """Compact TEXT of only the co-pilot hints — for re-ingest into RAG. Grouped by
+    kind, with sources added; this becomes searchable memory for future calls.
 
-    Коментарі оператора йдуть ПЕРШИМИ і окремим блоком: реінджест кладе цей
-    текст у RAG як звичайний запис, і те, що написала людина, має читатись
-    раніше за те, що припустила модель."""
+    Operator comments go FIRST and as a separate block: re-ingest puts this
+    text into RAG as a regular record, and what a human wrote should be read
+    before what the model assumed."""
     notes = collect_notes(timeline.get("events") or [])
     name = (transcript or {}).get("source_name") or f"Сесія #{(timeline.get('session') or {}).get('id')}"
     topics = [t.get("label") for t in (timeline.get("topics") or []) if t.get("label")]

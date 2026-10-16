@@ -1,7 +1,7 @@
-"""Tests для polish діаризованих транскриптів (Phase 10.7).
+"""Tests for polishing diarized transcripts (Phase 10.7).
 
-Покриваємо тільки pure-Python helper _format_diarized_input — справжній
-Claude API call мокати не варто, перевіряється end-to-end вручну.
+We cover only the pure-Python helper _format_diarized_input — the real
+Claude API call is not worth mocking, it is verified end-to-end by hand.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class TestFormatDiarizedInput:
 
     def test_self_with_named_speaker_uses_name(self):
         segs = [{'start': 0, 'end': 2, 'text': 'Привіт.', 'speaker': 'self'}]
-        # Якщо self явно мапиться на ім'я (не на 'Ви') — використовуємо
+        # If self is explicitly mapped to a name (not to 'Ви') — use it
         assert _format_diarized_input(segs, {'self': 'Андрій'}) == 'Андрій: Привіт.'
 
     def test_unknown_speaker_falls_back_to_question_mark(self):
@@ -100,7 +100,7 @@ class TestFormatDiarizedInput:
         assert _format_diarized_input(segs, {'SPEAKER_00': 'X'}) == 'X: Привіт'
 
     def test_format_is_deterministic_for_caching(self):
-        """Same input → same output bytes (важливо для prompt caching)."""
+        """Same input → same output bytes (important for prompt caching)."""
         segs = [
             {'start': 0, 'end': 2, 'text': 'A', 'speaker': 'SPEAKER_00'},
             {'start': 2, 'end': 4, 'text': 'B', 'speaker': 'SPEAKER_01'},

@@ -1,15 +1,15 @@
-"""Офлайн-проходи таксономії наскрізь (спека `directions-projects-tags`, історія 05).
+"""Offline taxonomy passes end to end (spec `directions-projects-tags`, story 05).
 
-Тут перевіряється не окрема функція, а ЛАНЦЮГ, який у житті розтягнутий у часі
-і саме тому рвався мовчки: карта чатів розкладає історію по проєктах і тегах →
-нове повідомлення того ж чату успадковує і те, і те → зріз за назвою напрямку
-бачить усе піддерево. Юніти кожної ланки живуть у `test_scope.py`
-(`apply_chat_categories`, `scope_filter_ids`) і `test_telegram.py`
-(`PUT …/tags`, інжест); дублювати їх тут нема сенсу.
+What is verified here is not a single function but a CHAIN that in real life is stretched in time
+and for that very reason broke silently: the chat map lays history out over projects and tags ->
+a new message of the same chat inherits both -> a slice by direction name
+sees the whole subtree. Unit tests of each link live in `test_scope.py`
+(`apply_chat_categories`, `scope_filter_ids`) and `test_telegram.py`
+(`PUT .../tags`, ingest); there is no point duplicating them here.
 
-Усе — на тимчасовій БД: жодного дотику до бойового архіву (Non-goals історії).
+Everything is on a temporary DB: no touching the live archive (Non-goals of the story).
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest -q tests/test_taxonomy_passes.py
 """
 from __future__ import annotations
@@ -30,8 +30,8 @@ CHAT_ID = -300
 
 @pytest.fixture()
 def app(tmp_path: Path, monkeypatch):
-    """Мінімальний Flask із TG-блюпринтом на tmp-БД: напрямок «Фонд Робота»,
-    моніторений чат без напрямку і дві його історичні репліки."""
+    """A minimal Flask with the TG blueprint on a tmp DB: direction «Фонд Робота»,
+    a monitored chat without a direction and two of its historical messages."""
     monkeypatch.setenv("TELEGRAM_CONTROL_TOKEN", "testtoken")
     db = str(tmp_path / "tax.db")
     init_database(db)
@@ -65,12 +65,12 @@ def _mapping(tmp_path: Path, rows: list[dict]) -> str:
 
 
 def test_chat_map_pass_then_new_message_then_scope(app, tmp_path: Path, monkeypatch):
-    """Карта → історія → нове повідомлення → зріз.
+    """Map -> history -> new message -> slice.
 
-    Ланка, яку це ловить: успадкування напрямку і успадкування тегів — різні
-    механізми (`tg_monitored_chats.category_id` проти `tg_chat_tags`), і поки
-    їх не перевірили одним проходом, «теги працюють як напрямки» лишалося
-    заявою.
+    The link this catches: inheriting the direction and inheriting the tags are different
+    mechanisms (`tg_monitored_chats.category_id` versus `tg_chat_tags`), and until
+    they were verified in one pass, "tags work like directions" remained
+    a claim.
     """
     db = app.config["DATABASE"]
     scheduled: list[tuple] = []
@@ -86,7 +86,7 @@ def test_chat_map_pass_then_new_message_then_scope(app, tmp_path: Path, monkeypa
 
     preview = scope.apply_chat_categories(db, mapping_path=path, dry_run=True)
     assert preview["records_recategorized"] == 2
-    assert scheduled == [], "--dry-run не планує re-embed"
+    assert scheduled == [], "--dry-run does not schedule re-embed"
     with get_db_connection(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 1
 
@@ -101,7 +101,7 @@ def test_chat_map_pass_then_new_message_then_scope(app, tmp_path: Path, monkeypa
         assert set(scheduled[0][0]) == {r[0] for r in conn.execute(
             "SELECT id FROM transcriptions")}
 
-    # Нове повідомлення того ж чату: напрямок і теги — з чату, без жодного проходу.
+    # A new message of the same chat: direction and tags come from the chat, with no pass at all.
     fresh = app.test_client().post(
         "/api/telegram/ingest",
         json={"kind": "text", "text": "свіжа репліка", "chat_id": CHAT_ID,
@@ -117,16 +117,16 @@ def test_chat_map_pass_then_new_message_then_scope(app, tmp_path: Path, monkeypa
             "WHERE rt.transcription_id = ? AND rt.source = 'chat'", (tid,))}
     assert inherited == {"AI", "інвестори"}
 
-    # Зріз за назвою НАПРЯМКУ бачить записи проєкту (піддерево, контракт C2).
+    # A slice by DIRECTION name sees the project's records (subtree, contract C2).
     by_direction = set(scope.scope_filter_ids(db, "Фонд Робота"))
     by_project = set(scope.scope_filter_ids(db, "Акмекорп"))
     assert tid in by_direction and by_direction == by_project
 
 
 def test_label_uncategorized_dry_run_writes_nothing(app, monkeypatch):
-    """Залишок (дзвінки/документи) розкладає той самий прохід — але `--dry-run`
-    лише показує план: підтвердження дає людина, а не скрипт. Реальний прохід
-    ставить змінені записи в точковий re-embed (контракт C7, як `apply_chat_categories`)."""
+    """The remainder (calls/documents) is laid out by the same pass - but `--dry-run`
+    only shows the plan: confirmation is given by a human, not a script. A real pass
+    puts the changed records into a targeted re-embed (contract C7, like `apply_chat_categories`)."""
     db = app.config["DATABASE"]
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO transcriptions (id, source_type, source_name, "
@@ -148,10 +148,10 @@ def test_label_uncategorized_dry_run_writes_nothing(app, monkeypatch):
 
     stats = scope.label_uncategorized(db, dry_run=True)
     assert stats["labeled"] == 1 and stats["samples"]
-    assert scheduled == [], "--dry-run не планує re-embed"
+    assert scheduled == [], "--dry-run does not schedule re-embed"
     with get_db_connection(db) as conn:
         assert conn.execute("SELECT category_id FROM transcriptions WHERE id = 99"
-                            ).fetchone()[0] is None, "--dry-run не пише"
+                            ).fetchone()[0] is None, "--dry-run writes nothing"
 
     scope.label_uncategorized(db)
     with get_db_connection(db) as conn:
@@ -159,7 +159,7 @@ def test_label_uncategorized_dry_run_writes_nothing(app, monkeypatch):
                             ).fetchone()[0] == 1
     assert scheduled == [([99], {"db_path": db, "reason": "label-rest"})]
 
-    # Повторний прохід: усе вже розмічено — re-embed не кличеться.
+    # Repeated pass: everything is already labelled - re-embed is not called.
     scheduled.clear()
     scope.label_uncategorized(db)
     assert scheduled == []

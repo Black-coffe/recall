@@ -1,4 +1,4 @@
-"""Одна назва запису в Бібліотеці, Медіатеці і сесії (спека recording-meta-suggest, історія 02)."""
+"""One record title in the Library, the Media library and the session (spec recording-meta-suggest, story 02)."""
 from __future__ import annotations
 
 import sqlite3
@@ -24,18 +24,18 @@ class FakeStore:
 
     def read(self, session_id):
         if self.fail:
-            raise RuntimeError("manifest зник")
+            raise RuntimeError("manifest vanished")
         return {"auto_name": "Запис 2026-10-14 08:54"}
 
     def set_name(self, session_id, name):
         if self.fail:
-            raise RuntimeError("manifest зник")
+            raise RuntimeError("manifest vanished")
         self.names[session_id] = name
         return {}
 
     def set_description(self, session_id, description):
         if self.fail:
-            raise RuntimeError("manifest зник")
+            raise RuntimeError("manifest vanished")
         self.descriptions[session_id] = description
         return {}
 

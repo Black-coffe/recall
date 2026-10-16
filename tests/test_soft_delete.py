@@ -1,16 +1,16 @@
-"""T4.6 (REMEDIATION_PLAN Волна 2, Варіант A): soft-delete одиничних видалень
-+ undo (restore) для transcriptions і audio_downloads + grace-purge.
+"""T4.6 (REMEDIATION_PLAN Wave 2, Option A): soft-delete of single deletions
++ undo (restore) for transcriptions and audio_downloads + grace purge.
 
-Покриваємо:
-- DELETE /api/history/<id> ставить deleted_at (не стирає рядок/файл).
-- Soft-deleted зникає з /api/history (list) і /api/history/<id> (get).
-- POST /api/history/<id>/restore повертає видимість.
-- DELETE /api/audio/downloads/<id> ставить deleted_at, файл НЕ стирається.
-- Soft-deleted аудіо зникає з /api/audio/downloads (list + counts).
-- POST /api/audio/downloads/<id>/restore повертає видимість.
-- retrieval.search (vector+FTS RRF) не бачить чанки soft-deleted транскрипту.
-- app.services.retention.purge_soft_deleted фізично прибирає прострочене
-  (файл + рядок), живе (deleted_at IS NULL) чи ще у grace — не чіпає.
+We cover:
+- DELETE /api/history/<id> sets deleted_at (does not erase the row/file).
+- A soft-deleted one disappears from /api/history (list) and /api/history/<id> (get).
+- POST /api/history/<id>/restore brings back visibility.
+- DELETE /api/audio/downloads/<id> sets deleted_at, the file is NOT erased.
+- Soft-deleted audio disappears from /api/audio/downloads (list + counts).
+- POST /api/audio/downloads/<id>/restore brings back visibility.
+- retrieval.search (vector+FTS RRF) does not see the chunks of a soft-deleted transcript.
+- app.services.retention.purge_soft_deleted physically removes the expired
+  (file + row), and leaves the live (deleted_at IS NULL) or still-in-grace ones alone.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class TestTranscriptionSoftDelete:
             row = conn.execute(
                 'SELECT deleted_at FROM transcriptions WHERE id = ?', (tid,)
             ).fetchone()
-        assert row is not None, "рядок має лишитись у БД (soft-delete)"
+        assert row is not None, "the row must stay in the DB (soft-delete)"
         assert row['deleted_at'] is not None
 
     def test_deleted_file_preserved_on_disk(self, client, tmp_path):
@@ -90,7 +90,7 @@ class TestTranscriptionSoftDelete:
         f.write_bytes(b'fake-audio')
         tid = _add_transcript(db_path, source_type='file', file_path=str(f))
         c.delete(f'/api/history/{tid}')
-        assert f.exists(), "файл НЕ має стиратись одразу — тільки при purge"
+        assert f.exists(), "the file must NOT be erased immediately - only on purge"
 
     def test_deleted_disappears_from_list(self, client):
         c, db_path = client
@@ -164,7 +164,7 @@ class TestAudioSoftDelete:
         r = c.delete(f'/api/audio/downloads/{aid}')
         assert r.status_code == 200
         assert r.get_json()['success'] is True
-        assert f.exists(), "аудіо-файл не має стиратись одразу"
+        assert f.exists(), "the audio file must not be erased immediately"
 
         with get_db_connection(db_path) as conn:
             row = conn.execute(
@@ -213,7 +213,7 @@ class TestAudioSoftDelete:
         c, db_path = client
         f = tmp_path / 'a.mp3'
         f.write_bytes(b'x')
-        yid = 'dQw4w9WgXcQ'  # 11-char valid-shaped id (extract_youtube_id вимагає це)
+        yid = 'dQw4w9WgXcQ'  # 11-char valid-shaped id (extract_youtube_id requires this)
         aid = _add_audio(db_path, file_path=str(f), youtube_id=yid)
         url = f'https://youtube.com/watch?v={yid}'
         r = c.post('/api/audio/check-duplicate', json={'url': url})
@@ -227,7 +227,7 @@ class TestAudioSoftDelete:
 # ---------------------------------------------------------------- retrieval (RAG)
 
 def test_retrieval_excludes_soft_deleted_chunks(tmp_path):
-    """Vector+FTS RRF-пошук не має повертати чанки soft-deleted транскрипту."""
+    """Vector+FTS RRF search must not return the chunks of a soft-deleted transcript."""
     from app.services import retrieval
 
     db_path = str(tmp_path / 'retrieval.db')
@@ -269,21 +269,21 @@ class TestPurgeSoftDeleted:
             cur = conn.execute(
                 "INSERT INTO transcriptions (source_type, source_name, file_path, "
                 "transcript_text, language, deleted_at) VALUES ('file', 'T', ?, 't', 'uk', ?)",
-                (str(f), time.time() - 999999),  # давно протухле
+                (str(f), time.time() - 999999),  # long expired
             )
             tid = cur.lastrowid
             conn.commit()
 
         stats = retention.purge_soft_deleted(db_path, grace_days=7)
         assert stats['transcriptions_purged'] == 1
-        assert not f.exists(), "прострочений soft-deleted файл має бути прибраний purge'ом"
+        assert not f.exists(), "an expired soft-deleted file must be removed by purge"
 
         with get_db_connection(db_path) as conn:
             row = conn.execute('SELECT id FROM transcriptions WHERE id = ?', (tid,)).fetchone()
         assert row is None
 
     def test_purge_keeps_fresh_soft_deleted(self, tmp_path):
-        """Soft-deleted, але ще в межах grace — purge НЕ чіпає."""
+        """Soft-deleted but still within grace - purge does NOT touch it."""
         db_path = str(tmp_path / 'purge2.db')
         init_database(db_path)
         f = tmp_path / 'fresh.mp3'
@@ -292,7 +292,7 @@ class TestPurgeSoftDeleted:
             conn.execute(
                 "INSERT INTO transcriptions (source_type, source_name, file_path, "
                 "transcript_text, language, deleted_at) VALUES ('file', 'T', ?, 't', 'uk', ?)",
-                (str(f), time.time()),  # щойно видалено
+                (str(f), time.time()),  # just deleted
             )
             conn.commit()
 

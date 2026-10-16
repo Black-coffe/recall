@@ -20,7 +20,7 @@ events_bp = Blueprint('events', __name__)
 
 @events_bp.route('/api/process/logs/<process_id>')
 def get_process_logs_api(process_id):
-    """Логи процесу (polling fallback для старого фронта)."""
+    """Process logs (polling fallback for the old frontend)."""
     logs = state.process_logs.get(process_id)
     for i, log in enumerate(logs):
         if log.get('elapsed') is not None and i > 0:
@@ -37,7 +37,7 @@ def get_process_logs_api(process_id):
 
 @events_bp.route('/api/events/<process_id>')
 def stream_events(process_id):
-    """SSE-канал на процес. Події: progress, log, segment, complete, error."""
+    """Per-process SSE channel. Events: progress, log, segment, complete, error."""
     history = []
     progress = state.download_progress.get(process_id)
     if progress:
@@ -58,7 +58,7 @@ def stream_events(process_id):
 
 @events_bp.route('/api/jobs', methods=['GET'])
 def list_jobs():
-    """Список задач. ?kind=youtube_download&active_only=true"""
+    """Task list. ?kind=youtube_download&active_only=true"""
     kind = request.args.get('kind')
     active_only = request.args.get('active_only', 'false').lower() == 'true'
     jobs = state.job_queue.list(kind=kind, active_only=active_only)

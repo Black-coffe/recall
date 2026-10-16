@@ -1,4 +1,4 @@
-"""Локальна vision-модель не тримає VRAM 30 хв після пачки кадрів
+"""The local vision model does not hold VRAM for 30 min after a batch of frames
 (docs/defects/local-llm-during-recording.md)."""
 from __future__ import annotations
 

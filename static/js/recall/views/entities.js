@@ -16,7 +16,7 @@
     // ---------- LIST ----------
     let listEl = null, lstate = null, cats = null;
     // T4.7: entities are paginated (backend gives total/limit/offset) — track
-    // the accumulated page(s) so "Завантажити ще" can append instead of
+    // // the accumulated page(s) so "Завантажити ще" can append instead of
     // silently capping the list at ENT_PAGE rows.
     const ENT_PAGE = 200;
     let entRows = [], entTotal = 0;
@@ -264,7 +264,7 @@
         oBtn.addEventListener('click', async () => {
             oBtn.disabled = true;
             try { await R.researchExport.runOriginals({ entity_id: e.id }, box, ctx); }
-            catch (_) { /* помилка вже у box */ }
+            catch (_) { /* error already shown in the box */ }
             finally { oBtn.disabled = false; }
         });
         sBtn.addEventListener('click', async () => {

@@ -1,54 +1,54 @@
-"""T1.2 (REMEDIATION_PLAN Волна 1): аутентифікаційний гейт на всі /api/*.
+"""T1.2 (REMEDIATION_PLAN Wave 1): authentication gate on all /api/*.
 
-Проблема: 0 перевірок особи на ~90 ендпоінтах (запис/видалення/експорт/
-дорогі Claude-виклики). Секретом досі захищений лише /api/telegram/ingest
-(shared-secret, telegram_common.py) і MCP --transport http (RECALL_MCP_KEY).
-У поєднанні з мережевим bind (Волна 0: дефолт 127.0.0.1, але opt-in
-RECALL_BIND_ALL існує) — вектор атаки для LAN-доступу без пароля.
+Problem: 0 identity checks on ~90 endpoints (recording/deletion/export/
+expensive Claude calls). Only /api/telegram/ingest was protected by a secret so far
+(shared-secret, telegram_common.py) and MCP --transport http (RECALL_MCP_KEY).
+Combined with a network bind (Wave 0: default 127.0.0.1, but the opt-in
+RECALL_BIND_ALL exists) — an attack vector for password-less LAN access.
 
-Рішення: ОДИН централізований `before_request`-гейт (не декоратор на кожен
-ендпоінт — їх ~90, легко забути новий). Патерн ключа скопійовано з наявного
-Telegram shared-secret (telegram_common.control_token) — не тягнемо
-flask-login/JWT заради single-user застосунку.
+Decision: ONE centralized `before_request` gate (not a decorator on every
+endpoint — there are ~90, easy to forget a new one). The key pattern is copied from the existing
+Telegram shared-secret (telegram_common.control_token) — we do not pull in
+flask-login/JWT for a single-user application.
 
-Логіка рішення (у порядку перевірки):
-  1. OPTIONS (CORS preflight) і шляхи поза allowlist'ом exempt — завжди crossed.
-  2. RECALL_LOCAL_TRUSTED (дефолт "1"/увімкнено) І запит з localhost
-     (request.remote_addr ∈ {127.0.0.1, ::1}) → пропускаємо БЕЗ ключа.
-     Це зберігає поточний UX: застосунок працює на своїй машині без пароля.
-  3. Інакше потрібен валідний ключ: RECALL_API_KEY має бути заданий у env,
-     і клієнт має прислати той самий ключ у заголовку X-Recall-Api-Key
-     (або Authorization: Bearer <key>). Порівняння — constant-time
-     (hmac.compare_digest), щоб не текти час порівняння.
-  4. Якщо RECALL_API_KEY НЕ заданий, а доступ не підпадає під local-trusted
-     (не localhost, або RECALL_LOCAL_TRUSTED=0) → fail-closed: 401 для
-     БУДЬ-ЯКОГО ключа/його відсутності. Без налаштованого ключа зовнішній
-     доступ заборонений за замовчуванням.
+Decision logic (in order of checking):
+  1. OPTIONS (CORS preflight) and paths outside the allowlist are exempt — always crossed.
+  2. RECALL_LOCAL_TRUSTED (default "1"/on) AND a request from localhost
+     (request.remote_addr ∈ {127.0.0.1, ::1}) → let through WITHOUT a key.
+     This preserves the current UX: the app works on its own machine without a password.
+  3. Otherwise a valid key is needed: RECALL_API_KEY must be set in env,
+     and the client must send the same key in the X-Recall-Api-Key header
+     (or Authorization: Bearer <key>). The comparison is constant-time
+     (hmac.compare_digest), so the comparison time does not leak.
+  4. If RECALL_API_KEY is NOT set and access does not fall under local-trusted
+     (not localhost, or RECALL_LOCAL_TRUSTED=0) → fail-closed: 401 for
+     ANY key / its absence. Without a configured key, external
+     access is denied by default.
 
-Allowlist (без auth, гейт узагалі не застосовується):
-  - усе, що НЕ починається з /api/  (SPA-шелл '/', /<path:_path>, /static/*,
-    /favicon.ico, /sw.js — вони й так не /api/*, тож правило "гейт лише на
-    /api/*" покриває їх автоматично)
-  - /api/health (health-check лишається відкритим для моніторингу)
-  - OPTIONS-запити (CORS preflight, інакше ламаємо CORS з app.py ~231)
+Allowlist (no auth, the gate is not applied at all):
+  - everything that does NOT start with /api/  (SPA shell '/', /<path:_path>, /static/*,
+    /favicon.ico, /sw.js — they are not /api/* anyway, so the rule "gate only on
+    /api/*" covers them automatically)
+  - /api/health (the health check stays open for monitoring)
+  - OPTIONS requests (CORS preflight, otherwise we break CORS from app.py ~231)
 
-Проксійований доступ (K5-04, власник 15.10.2026: «После включения Tailscale-доступа сервер
-vps-prod сможет открыть весь Recall без пароля, пока вы сами не закроете ему доступ.»):
-`tailscale serve` приводить запит з tailnet як 127.0.0.1, тож local-trusted пускав би ВЕСЬ
-tailnet. Запит із localhost, що несе X-Forwarded-For або Tailscale-User-Login, — проксійований:
-local-trusted на нього не діє, пускаємо лише IP з RECALL_PROXY_ALLOWED_IPS (перша адреса
-X-Forwarded-For; serve її перезаписує, клієнт не підробить) або валідний ключ. Пристрої
-розрізняємо за IP, не за Tailscale-User-Login: він однаковий для всіх нетегованих вузлів власника.
+Proxied access (K5-04, owner 15.10.2026: "After Tailscale access is turned on, the vps-prod
+server will be able to open all of Recall without a password until you yourself close its access."):
+`tailscale serve` delivers a tailnet request as 127.0.0.1, so local-trusted would let in the WHOLE
+tailnet. A localhost request carrying X-Forwarded-For or Tailscale-User-Login is proxied:
+local-trusted does not apply to it, we let in only IPs from RECALL_PROXY_ALLOWED_IPS (the first address of
+X-Forwarded-For; serve overwrites it, the client cannot forge it) or a valid key. Devices are
+told apart by IP, not by Tailscale-User-Login: it is the same for all untagged nodes of the owner.
 
-НЕ гейтиться тут: /api/telegram/ingest має ВЛАСНИЙ shared-secret механізм
-(X-Telegram-Token, telegram_common.control_token) — цей гейт додається
-ПОВЕРХ нього, а не замінює. У дефолтному режимі (RECALL_LOCAL_TRUSTED=1)
-listener::ingest() йде з localhost → local-trusted пропускає, поведінка не
-змінюється. Якщо оператор вимкне RECALL_LOCAL_TRUSTED (RECALL_LOCAL_TRUSTED=0)
-БЕЗ оновлення telegram_listener.py, щоб він теж слав X-Recall-Api-Key —
-ingest почне отримувати 401 від ЦЬОГО гейта (telegram_listener.py навмисно
-поза межами цієї задачі — не чіпали). Задокументовано як відома суміжна
-проблема у звіті T1.2, не виправлено тут.
+NOT gated here: /api/telegram/ingest has its OWN shared-secret mechanism
+(X-Telegram-Token, telegram_common.control_token) — this gate is added
+ON TOP of it, and does not replace it. In the default mode (RECALL_LOCAL_TRUSTED=1)
+listener::ingest() comes from localhost → local-trusted lets it through, behaviour does not
+change. If the operator turns off RECALL_LOCAL_TRUSTED (RECALL_LOCAL_TRUSTED=0)
+WITHOUT updating telegram_listener.py so that it also sends X-Recall-Api-Key —
+ingest will start getting 401 from THIS gate (telegram_listener.py is deliberately
+outside the scope of this task — not touched). Documented as a known adjacent
+problem in the T1.2 report, not fixed here.
 """
 from __future__ import annotations
 
@@ -62,26 +62,26 @@ from app.core import settings
 
 logger = logging.getLogger(__name__)
 
-# Заголовок за зразком telegram_common.CONTROL_TOKEN_HEADER ("X-Telegram-Token").
+# Header modelled on telegram_common.CONTROL_TOKEN_HEADER ("X-Telegram-Token").
 API_KEY_HEADER = "X-Recall-Api-Key"
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1"}
 
-# Шляхи /api/*, які лишаються відкритими без ключа (health-check для
-# моніторингу — не повинен вимагати авторизацію, інакше зовнішні
-# health-check'и/аптайм-монітори теж треба буде авторизовувати). /api/ready
-# (config-registry-profiles S3, ще не існує на момент S2) — той самий клас:
-# без auth, як /api/health.
+# /api/* paths that stay open without a key (the health check for
+# monitoring — must not require authorization, otherwise external
+# health checks/uptime monitors would also need authorizing). /api/ready
+# (config-registry-profiles S3, does not exist yet at the time of S2) — the same class:
+# no auth, like /api/health.
 _EXEMPT_API_PATHS = {"/api/health", "/api/ready"}
 
 
 def _local_trusted_enabled() -> bool:
-    """RECALL_LOCAL_TRUSTED; профіле-залежний дефолт живе в реєстрі
+    """RECALL_LOCAL_TRUSTED; the profile-dependent default lives in the registry
     (`app/core/settings.py::Setting.default_headless`, config-registry-fix-01):
-    desktop — "1" (як і було, застосунок працює на своїй машині без пароля);
-    headless — "0" (fail-closed — headless типово слухає ширше за одну машину,
-    localhost більше не мається на увазі довіреним). Явне значення змінної
-    середовища завжди має пріоритет над дефолтом профілю (settings.env)."""
+    desktop — "1" (as it was, the app works on its own machine without a password);
+    headless — "0" (fail-closed — headless typically listens wider than one machine,
+    localhost is no longer assumed to be trusted). An explicit value of the environment
+    variable always takes priority over the profile default (settings.env)."""
     return settings.env_bool("RECALL_LOCAL_TRUSTED")
 
 
@@ -98,12 +98,12 @@ _PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-User-Login")
 
 
 def _proxied_client() -> str | None:
-    """None — запит прямий; інакше IP клієнта за проксі ("" — проксі IP не назвав)."""
+    """None — the request is direct; otherwise the client IP behind a proxy ("" — the proxy did not name an IP)."""
     if not any(request.headers.get(h) for h in _PROXY_HEADERS):
         return None
     xff = (request.headers.get("X-Forwarded-For") or "").strip()
-    # serve робить Header.Set — рівно одна адреса. Ланцюжок означає інший проксі або
-    # підставлене значення: IP невідомий, далі лише ключ.
+    # serve does Header.Set — exactly one address. A chain means another proxy or
+    # a substituted value: the IP is unknown, from here on only the key.
     return "" if "," in xff else xff
 
 
@@ -113,8 +113,8 @@ def _proxy_allowed_ips() -> set[str]:
 
 
 def _extract_presented_key() -> str | None:
-    """X-Recall-Api-Key має пріоритет; Authorization: Bearer <key> — зручний фолбек
-    (напр. для клієнтів, що вже мають стандартну Bearer-обв'язку)."""
+    """X-Recall-Api-Key takes priority; Authorization: Bearer <key> — a convenient fallback
+    (e.g. for clients that already have the standard Bearer plumbing)."""
     header_key = request.headers.get(API_KEY_HEADER)
     if header_key:
         return header_key.strip()
@@ -128,8 +128,8 @@ def _is_exempt(path: str, method: str) -> bool:
     if method == "OPTIONS":
         return True
     if not path.startswith("/api/"):
-        # SPA-шелл ('/', deep-links), /static/*, /favicon.ico, /sw.js — усе
-        # це поза /api/* і так і мало лишатись доступним без ключа.
+        # SPA shell ('/', deep-links), /static/*, /favicon.ico, /sw.js — all
+        # of this is outside /api/* and was meant to stay accessible without a key.
         return True
     if path in _EXEMPT_API_PATHS:
         return True
@@ -143,12 +143,12 @@ def _is_authorized() -> bool:
             return True
         if client and client in _proxy_allowed_ips():
             return True
-        # Проксійований і не в списку — далі лише з ключем.
+        # Proxied and not in the list — from here on only with a key.
 
     configured = _configured_api_key()
     if not configured:
-        # Fail-closed: без налаштованого ключа зовнішній (не-local-trusted)
-        # доступ заборонений за замовчуванням.
+        # Fail-closed: without a configured key, external (non-local-trusted)
+        # access is denied by default.
         return False
 
     presented = _extract_presented_key()
@@ -158,17 +158,17 @@ def _is_authorized() -> bool:
 
 
 def register(app: Flask) -> None:
-    """Реєструє єдиний before_request-гейт на весь застосунок."""
+    """Registers the single before_request gate for the whole application."""
 
     if settings.profile() == "headless" and not _configured_api_key():
         logger.warning(
-            "Auth gate: profile=headless без RECALL_API_KEY — non-localhost "
-            "доступ буде відхилено (fail-closed), доки не задано ключ або "
-            "явно не увімкнено RECALL_LOCAL_TRUSTED=1."
+            "Auth gate: profile=headless without RECALL_API_KEY — non-localhost "
+            "access will be rejected (fail-closed) until a key is set or "
+            "RECALL_LOCAL_TRUSTED=1 is explicitly enabled."
         )
 
     @app.before_request
-    def _recall_auth_gate():  # noqa: ANN202 — Flask hook, без анотації повернення
+    def _recall_auth_gate():  # noqa: ANN202 — Flask hook, no return annotation
         if _is_exempt(request.path, request.method):
             return None
         if _is_authorized():

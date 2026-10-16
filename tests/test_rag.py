@@ -1,12 +1,12 @@
-"""Юніт-тести RAG «Запитай архів» (app/services/rag.py) — REMEDIATION_PLAN T7.5.
+"""Unit tests for the "Ask the archive" RAG (app/services/rag.py) -- REMEDIATION_PLAN T7.5.
 
-Офлайн: жодного реального виклику Anthropic API. Anthropic-клієнт і
-retrieval.search підмінюються фейками. Покриває:
-  - _fmt_time / _build_context (детермінований форматер контексту чанків)
-  - _build_request_kwargs (побудова payload'у + adaptive thinking)
-  - answer_question (нестрімова відповідь, мок _get_client/_stream_with_retry)
-  - answer_question_stream (SSE-кадри, включно з retry на транзиентній
-    помилці ДО першого delta і без retry ПІСЛЯ першого delta — T6.3)
+Offline: no real Anthropic API call. The Anthropic client and
+retrieval.search are replaced by fakes. Covers:
+  - _fmt_time / _build_context (the deterministic chunk context formatter)
+  - _build_request_kwargs (building the payload + adaptive thinking)
+  - answer_question (non-streaming answer, mock of _get_client/_stream_with_retry)
+  - answer_question_stream (SSE frames, including a retry on a transient
+    error BEFORE the first delta and no retry AFTER the first delta -- T6.3)
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class FakeFinalMessage:
 
 
 class _Transient(Exception):
-    """Симулює транзиентну помилку (5xx) без реального anthropic SDK об'єкта."""
+    """Simulates a transient error (5xx) without a real anthropic SDK object."""
     status_code = 529
 
 
@@ -52,7 +52,7 @@ class _NonRetryable(Exception):
 
 
 class ScriptedStreamCM:
-    """Один виклик client.messages.stream(**kwargs) — контекст-менеджер."""
+    """One call of client.messages.stream(**kwargs) -- a context manager."""
 
     def __init__(self, spec):
         self.spec = spec
@@ -177,17 +177,17 @@ def test_build_context_multiple_chunks_numbered_and_joined():
     ctx = rag._build_context(_sample_chunks())
     assert "[1] Мітинг" in ctx
     assert "[2] Документ" in ctx
-    assert ctx.count("\n\n") >= 1  # блоки розділені порожнім рядком
+    assert ctx.count("\n\n") >= 1  # blocks are separated by an empty line
 
 
 # ============================================================
-# order_citables — хронологія (історія 03)
+# order_citables -- chronology (story 03)
 # ============================================================
 
 def test_order_citables_sorts_rest_by_date_ascending_regardless_of_retrieval_order():
-    """Дві версії однієї домовленості з різними датами: контекст показує їх у
-    хронології (рання перша, пізня друга), НЕЗАЛЕЖНО від того, в якому порядку
-    їх віддав ретривал — тут навмисно пізніша йде в chunks першою."""
+    """Two versions of the same agreement with different dates: the context shows them in
+    chronology (early first, late second), REGARDLESS of the order in which
+    retrieval returned them -- here the later one deliberately comes first in chunks."""
     later = {"source_type": "meeting", "source_name": "Дзвінок 2",
               "meeting_date": "2026-06-10", "text": "Бюджет — 50000 грн (нова версія)."}
     earlier = {"source_type": "meeting", "source_name": "Дзвінок 1",
@@ -233,12 +233,12 @@ def test_system_prompt_states_later_version_wins():
 
 
 # ============================================================
-# order_citables — чанки однієї записи за chunk_index (історія 09)
+# order_citables -- chunks of one record by chunk_index (story 09)
 # ============================================================
 
 def test_order_citables_chunks_of_one_record_sorted_by_chunk_index_regardless_of_retrieval():
-    """Ретривал [A#7, B#1, A#2] (A і B — різні дати, A раніша) -> [A#2, A#7, B#1];
-    той самий результат при [B#1, A#7, A#2]."""
+    """Retrieval [A#7, B#1, A#2] (A and B have different dates, A is earlier) -> [A#2, A#7, B#1];
+    the same result for [B#1, A#7, A#2]."""
     a7 = {"source_type": "meeting", "source_name": "A#7", "transcription_id": 1,
           "meeting_date": "2026-05-12", "chunk_index": 7, "text": "a7"}
     a2 = {"source_type": "meeting", "source_name": "A#2", "transcription_id": 1,
@@ -251,8 +251,8 @@ def test_order_citables_chunks_of_one_record_sorted_by_chunk_index_regardless_of
 
 
 def test_order_citables_same_date_records_dont_interleave():
-    """Дві записи з однаковою датою: між ними — порядок ретривалу (перша поява),
-    всередині кожної — chunk_index, без перемежування."""
+    """Two records with the same date: between them -- the retrieval order (first appearance),
+    inside each -- chunk_index, without interleaving."""
     a3 = {"source_type": "meeting", "source_name": "A#3", "transcription_id": 1,
           "meeting_date": "2026-05-12", "chunk_index": 3, "text": "a3"}
     a1 = {"source_type": "meeting", "source_name": "A#1", "transcription_id": 1,
@@ -261,7 +261,7 @@ def test_order_citables_same_date_records_dont_interleave():
           "meeting_date": "2026-05-12", "chunk_index": 4, "text": "b4"}
     b0 = {"source_type": "meeting", "source_name": "B#0", "transcription_id": 2,
           "meeting_date": "2026-05-12", "chunk_index": 0, "text": "b0"}
-    # A з'явилась першою в ретривалі (a3) -> A цілком перед B, всередині за chunk_index
+    # A appeared first in retrieval (a3) -> A entirely before B, inside by chunk_index
     sources = rag.order_citables([a3, b4, a1, b0])
     assert [s["source_name"] for s in sources] == ["A#1", "A#3", "B#0", "B#4"]
 
@@ -312,8 +312,8 @@ def test_build_request_kwargs_explicit_non_adaptive_model_no_thinking():
 def test_build_request_kwargs_system_prompt_has_cache_control():
     kwargs, _ = rag._build_request_kwargs("q", _sample_chunks(), models_mod.HAIKU_4_5)
     assert kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
-    # system — статичний промпт-шаблон, питання/контекст туди НЕ підмішуються
-    # (інакше кожен запит мав би унікальний system і prompt-cache не спрацьовував би)
+    # system -- a static prompt template, the question/context are NOT mixed into it
+    # (otherwise every request would have a unique system and the prompt cache would not work)
     assert "q" not in kwargs["system"][0]["text"].split()
     assert kwargs["system"][0]["text"] == rag._RAG_SYSTEM_PROMPT
 
@@ -339,8 +339,8 @@ def test_answer_question_empty_question_skips_search(monkeypatch):
 
 
 def test_answer_question_passes_rewrite_flag_from_env_constant(monkeypatch):
-    """production-rag-wave-b-07: rag.py передає `rewrite=_QUERY_REWRITE_ENABLED`
-    (той самий патерн, що rerank) — env=1 -> True, за замовчуванням -> False."""
+    """production-rag-wave-b-07: rag.py passes `rewrite=_QUERY_REWRITE_ENABLED`
+    (the same pattern as rerank) -- env=1 -> True, by default -> False."""
     captured = {}
 
     def fake_search(db_path, q, top_k=8, category_id=None, **kw):
@@ -402,8 +402,8 @@ def test_answer_question_success_extracts_text_and_usage(monkeypatch):
 
 @pytest.mark.parametrize("channel,seen", [("mcp", False), ("ui", True)])
 def test_answer_question_mcp_hides_private_screen_text_before_claude(monkeypatch, channel, seen):
-    """mcp-visual-privacy-02: текст з екрана приватного запису не доходить до Claude з MCP;
-    інтерфейс Recall (ui) фільтр не зачіпає."""
+    """mcp-visual-privacy-02: text from the screen of a private record does not reach Claude from MCP;
+    the Recall interface (ui) is not affected by the filter."""
     from app.services import privacy
     screen = {"transcription_id": 77, "chunk_id": 900, "chunk_index": 40, "speaker": "екран",
               "section": "кадр 00:12:30", "text": "Позовна заява Петренко", "source_type": "recording",
@@ -503,18 +503,18 @@ def test_stream_passes_rewrite_flag_from_env_constant(monkeypatch):
 
 
 # ============================================================
-# production-rag-wave-b-08, Major 2: `RAG_QUERY_REWRITE` читається через
-# `settings.env_bool` в ОБОХ читачах (rag.py і retrieval.search) — жоден не
-# парсить прапорець власним набором істинних значень (ADR-008).
+# production-rag-wave-b-08, Major 2: `RAG_QUERY_REWRITE` is read through
+# `settings.env_bool` in BOTH readers (rag.py and retrieval.search) -- neither
+# parses the flag with its own set of truthy values (ADR-008).
 # ============================================================
 
 @pytest.fixture
 def _reload_rag_after():
-    """`_QUERY_REWRITE_ENABLED` рахується РАЗ на імпорті — тест нижче міняє
-    env через `importlib.reload`. Декларована ПЕРЕД `monkeypatch` у сигнатурі
-    тесту (LIFO: тіардаун monkeypatch — що відкочує env — іде ПЕРШИМ, тіардаун
-    цієї фікстури — ОСТАННІМ), тож reload тут бачить уже відновлений
-    (вимкнений) env і повертає модуль у дефолтний стан для решти сесії."""
+    """`_QUERY_REWRITE_ENABLED` is computed ONCE at import -- the test below changes
+    env via `importlib.reload`. Declared BEFORE `monkeypatch` in the test
+    signature (LIFO: the monkeypatch teardown -- which rolls env back -- goes FIRST, the teardown
+    of this fixture goes LAST), so the reload here sees the already restored
+    (disabled) env and returns the module to the default state for the rest of the session."""
     yield
     import importlib
     importlib.reload(rag)
@@ -526,9 +526,9 @@ def _reload_rag_after():
 ])
 def test_rag_query_rewrite_env_matches_retrieval_search_default(
         _reload_rag_after, monkeypatch, tmp_path, val, expected):
-    """Major 2: значення, з яким `search` отримує `rewrite=`, збігається з
-    дефолтом `retrieval.search(rewrite=None)` під тим самим env — обидва
-    читачі йдуть через `settings.env_bool`, жоден не парсить літералом."""
+    """Major 2: the value with which `search` receives `rewrite=` matches the
+    default of `retrieval.search(rewrite=None)` under the same env -- both
+    readers go through `settings.env_bool`, neither parses with a literal."""
     import importlib
     import sqlite3
 
@@ -556,7 +556,7 @@ def test_rag_query_rewrite_env_matches_retrieval_search_default(
     monkeypatch.setattr(query_rewrite, "rewrite_query",
                         lambda q, **kw: (called.append(q), [])[1])
 
-    # Незалежний вимір: дефолт retrieval.search(rewrite=None) під тим самим env.
+    # Independent measurement: the default of retrieval.search(rewrite=None) under the same env.
     rag.retrieval.search(db_path, "бюджет проєкту", rewrite=None)
     assert bool(called) is expected
 
@@ -606,15 +606,15 @@ def test_stream_retries_transient_error_before_first_delta(monkeypatch):
     monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: client)
 
     frames = _collect(rag.answer_question_stream(":memory:", "питання"))
-    assert client.messages.calls == 2, "мало відбутись 2 спроби (1 транзиентна помилка + успіх)"
+    assert client.messages.calls == 2, "2 attempts must have happened (1 transient error + success)"
     assert any(f.startswith("event: delta") and "ok" in f for f in frames)
     assert frames[-1].startswith("event: done")
     assert '"model": "claude-retry-ok"' in frames[-1]
 
 
 def test_stream_does_not_retry_after_first_delta_already_yielded(monkeypatch):
-    """T6.3: якщо хоч 1 delta вже пішов клієнту — повтор НЕБЕЗПЕЧНИЙ (дубль/пошкоджений вивід).
-    Помилка одразу прокидається як event:error, БЕЗ повторної спроби навіть якщо транзиентна."""
+    """T6.3: if even 1 delta has already gone to the client -- a retry is UNSAFE (duplicate/corrupted output).
+    The error is propagated at once as event:error, WITHOUT a retry even if transient."""
     _no_sleep(monkeypatch)
     chunks = _sample_chunks()
     monkeypatch.setattr(
@@ -628,7 +628,7 @@ def test_stream_does_not_retry_after_first_delta_already_yielded(monkeypatch):
     monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: client)
 
     frames = _collect(rag.answer_question_stream(":memory:", "питання"))
-    assert client.messages.calls == 1, "після виданого delta повтору НЕ мало бути"
+    assert client.messages.calls == 1, "there must have been no retry after the delta was emitted"
     assert any(f.startswith("event: delta") and "часткова" in f for f in frames)
     assert frames[-1].startswith("event: error")
 
@@ -644,12 +644,12 @@ def test_stream_non_retryable_error_propagates_immediately(monkeypatch):
     monkeypatch.setattr(rag.text_polishing, "_get_client", lambda: client)
 
     frames = _collect(rag.answer_question_stream(":memory:", "питання"))
-    assert client.messages.calls == 1, "4xx (не 429) не ретраїться"
+    assert client.messages.calls == 1, "4xx (not 429) is not retried"
     assert frames[-1].startswith("event: error")
 
 
 # ============================================================
-# Волна 4: переписка — НЕ мітинг
+# Wave 4: correspondence is NOT a meeting
 # ============================================================
 
 def _tg_chunk(**over):
@@ -667,8 +667,8 @@ def _tg_chunk(**over):
 
 
 def test_build_context_telegram_is_not_labelled_meeting():
-    """Раніше сюди йшло «Мітинг «[TG] чат: сніпет»» — тобто переважна більшість корпусу модель
-    переказувала як «на зустрічі ви вирішили», ще й не знаючи автора."""
+    """Earlier this took «Мітинг «[TG] чат: сніпет»» -- i.e. the model retold the vast majority of the corpus
+    as "at the meeting you decided", and without even knowing the author."""
     ctx = rag._build_context([_tg_chunk()])
     assert "Мітинг" not in ctx
     assert "Telegram" in ctx
@@ -679,7 +679,7 @@ def test_build_context_telegram_is_not_labelled_meeting():
 
 def test_build_context_telegram_mentions_reply_thread():
     ctx = rag._build_context([_tg_chunk(tg_reply_to=4721)])
-    assert "4721" in ctx, "нитка розмови має бути видима моделі"
+    assert "4721" in ctx, "the conversation thread must be visible to the model"
 
 
 def test_build_context_telegram_without_chat_title_falls_back():
@@ -688,13 +688,13 @@ def test_build_context_telegram_without_chat_title_falls_back():
 
 
 def test_build_context_meeting_branch_untouched():
-    """Звичайні мітинги мають лишитись рівно такими, як були."""
+    """Ordinary meetings must stay exactly as they were."""
     ctx = rag._build_context([_sample_chunks()[0]])
     assert "Мітинг" in ctx
 
 
 # ============================================================
-# Волна 4.5: нитка розмови у промпті
+# Wave 4.5: conversation thread in the prompt
 # ============================================================
 
 def _thread(**over):
@@ -715,12 +715,12 @@ def _thread(**over):
 
 def test_context_renders_thread_so_answer_travels_with_question():
     ctx = rag._build_context([_tg_chunk(thread=_thread())])
-    assert "09:00 до 11:00" in ctx, "відповідь має бути у промпті поруч із питанням"
+    assert "09:00 до 11:00" in ctx, "the answer must be in the prompt next to the question"
     assert "Узгодження зустрічі" in ctx
 
 
 def test_context_marks_the_found_message_inside_thread():
-    """Без позначки модель не відрізнить знахідку від контексту і цитуватиме сусіда."""
+    """Without a mark the model will not tell the finding from the context and will cite the neighbour."""
     ctx = rag._build_context([_tg_chunk(thread=_thread())])
     hit_line = [ln for ln in ctx.splitlines() if "Давайте в четвер" in ln][0]
     other = [ln for ln in ctx.splitlines() if "09:00 до 11:00" in ln][0]
@@ -734,7 +734,7 @@ def test_context_shows_how_much_of_thread_is_included():
 
 
 def test_context_without_thread_is_unchanged():
-    """Записи без нитки мають рендеритись рівно як у Волні 4."""
+    """Records without a thread must render exactly as in Wave 4."""
     ctx = rag._build_context([_tg_chunk()])
     assert "домовились про оплату" in ctx
     assert "Нитка" not in ctx
@@ -746,7 +746,7 @@ def test_context_ignores_empty_thread():
 
 
 # ============================================================
-# editable-title-description-03: запис називається власною назвою
+# editable-title-description-03: a record is called by its own title
 # ============================================================
 
 def test_build_context_names_record_by_display_name():
@@ -767,8 +767,8 @@ def test_build_context_falls_back_to_source_name_without_title():
 
 
 def test_sources_carry_display_name(monkeypatch):
-    """`sources[]` — це ті самі чанки з retrieval, тож нові ключі доїжджають
-    до клієнта крізь order_citables без окремої правки."""
+    """`sources[]` are the same chunks from retrieval, so the new keys reach
+    the client through order_citables without a separate change."""
     chunks = [{
         "source_type": "meeting", "source_name": "rec_1.mp3",
         "title": "Планерка Фонду", "display_name": "Планерка Фонду",
@@ -780,11 +780,11 @@ def test_sources_carry_display_name(monkeypatch):
 
 
 # ============================================================
-# directions-projects-tags-03: нові осі скоупу доїжджають у retrieval
+# directions-projects-tags-03: new scope axes reach retrieval
 # ============================================================
 
 def test_answer_question_passes_tags_since_until_to_search(monkeypatch):
-    """rag нічого не переосмислює: осі йдуть у `retrieval.search` як є."""
+    """rag changes nothing: the axes go into `retrieval.search` as is."""
     captured = {}
 
     def fake_search(db_path, q, top_k=8, category_id=None, **kw):
@@ -803,7 +803,7 @@ def test_answer_question_passes_tags_since_until_to_search(monkeypatch):
 
 
 def test_answer_question_without_new_axes_sends_none(monkeypatch):
-    """Старий виклик лишається старим викликом — жодного тихого звуження."""
+    """An old call stays an old call -- no silent narrowing."""
     captured = {}
 
     def fake_search(db_path, q, top_k=8, category_id=None, **kw):
@@ -832,7 +832,7 @@ def test_answer_question_stream_passes_tags_since_until(monkeypatch):
 
 
 def test_new_axes_do_not_change_sources_or_why(monkeypatch):
-    """`sources`/`why` — контракт S2: нові осі їх не чіпають."""
+    """`sources`/`why` -- contract S2: the new axes do not touch them."""
     chunks = _sample_chunks()
     monkeypatch.setattr(
         rag.retrieval, "search",

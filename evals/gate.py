@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Гейт retrieval на знімку БД (eval-gate, історія 01): `python -m evals.gate`.
+"""Retrieval gate on a DB snapshot (eval-gate, story 01): `python -m evals.gate`.
 
-Один k недостатньо (урок `eval-verdict-flips-with-k` — на k=8 регресія, на
-k=12 плюс): гейт завжди рахує ОБИДВА k і провалюється, якщо хоч один не
-проходить поріг чи регресує відносно базової лінії. Ганяється на ЗНІМКУ
-(`VACUUM INTO`, ADR-003) — жива БД відкривається лише щоб зняти з неї
-знімок (`evals/snapshot.py`), `retrieval.search` ніколи не бачить бойовий
-файл напряму, якщо не сказано інакше явно (`--no-snapshot --yes-live`).
+One k is not enough (lesson `eval-verdict-flips-with-k`: a regression at k=8, a
+gain at k=12): the gate always computes BOTH k and fails if either does not
+pass the threshold or regresses against the baseline. It runs on a SNAPSHOT
+(`VACUUM INTO`, ADR-003); the live DB is opened only to take a
+snapshot from it (`evals/snapshot.py`), and `retrieval.search` never sees the live
+file directly unless explicitly told otherwise (`--no-snapshot --yes-live`).
 
-Retrieval-only: жодного виклику Claude (`rag.answer_question`) тут немає —
-LLM-залежні метрики лишаються в `evals/run_eval.py` (A1 плану, платні,
-ручний запуск).
+Retrieval-only: there is no Claude call (`rag.answer_question`) here;
+LLM-dependent metrics stay in `evals/run_eval.py` (A1 of the plan, paid,
+manual run).
 
-Exit-коди (C3 плану, розширено D2/D3): `0` — пройдено; `1` — ВИКЛЮЧНО вердикт
-якості (поріг, падіння відносно лінії, регресія пункту); `2` — усе інше: нема
-golden, жива БД без `--yes-live`, невалідний golden-set, жоден пункт
-`status="labeled"` не оцінено на якомусь k, збій інфраструктури під час
-заміру (модель, знімок, диск), базова лінія іншого провенансу.
+Exit codes (plan C3, extended D2/D3): `0` - passed; `1` - EXCLUSIVELY a quality
+verdict (threshold, drop against the baseline, item regression); `2` - everything else: no
+golden, live DB without `--yes-live`, invalid golden-set, no
+`status="labeled"` item scored at some k, an infrastructure failure during
+measurement (model, snapshot, disk), a baseline of a different provenance.
 """
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-# Дозволяє запускати і як `python evals/gate.py`, і як `python -m evals.gate`
-# без встановлення пакету — той самий трюк, що в evals/run_eval.py.
+# Allows running both as `python evals/gate.py` and as `python -m evals.gate`
+# without installing the package - the same trick as in evals/run_eval.py.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -48,67 +48,67 @@ from evals import metrics as ev_metrics  # noqa: E402
 from evals import snapshot as ev_snapshot  # noqa: E402
 from evals.graph_links import is_live_db, open_readonly  # noqa: E402
 
-#: D15.3 — пороги виведені з калібрувальної лінії (`evals/baseline.local.json`),
-#: не задані з голови. Правило: `floor_0.05(виміряний recall_at_k − 2/n)`, де
-#: `n` — кількість `labeled`-пунктів лінії (`_derive_min_recall_threshold`
-#: нижче — та сама функція, викликана тут руками з заміряних чисел, бо
-#: файл лінії поза git і не існує до першого `--write-baseline`). Запас у
-#: ДВА пункти: при `n=15` один пункт важить 6.7 п.п., поріг вужчий за
-#: зернистість набору ловив би розмітку, а не ранжування.
-#: Замір 03.09.2026 (`evals/golden_set.local.json`, n=15, `--k 8,12`,
-#: знімок `whisper_history-20260903-145235.db` — архів живий і дрейфує
-#: під час роботи телеграм-слухача, тож це знімок, що ФАКТИЧНО пережив
-#: власний перезамір і саботаж, не перший знятий за сесію): recall_at_k@8=
-#: 0.32143, recall_at_k@12=0.53571 → поріг@8 = floor_0.05(0.32143 − 2/15) =
-#: floor_0.05(0.18810) = 0.15; поріг@12 = floor_0.05(0.53571 − 2/15) =
+#: D15.3 - thresholds derived from the calibration baseline (`evals/baseline.local.json`),
+#: not made up. Rule: `floor_0.05(measured recall_at_k - 2/n)`, where
+#: `n` is the number of `labeled` items of the baseline (`_derive_min_recall_threshold`
+#: below is the same function, called here by hand on the measured numbers, because
+#: the baseline file is outside git and does not exist until the first `--write-baseline`). The margin is
+#: TWO items: at `n=15` one item weighs 6.7 pp, a threshold narrower than
+#: the set's granularity would catch labelling, not ranking.
+#: Measurement of 03.09.2026 (`evals/golden_set.local.json`, n=15, `--k 8,12`,
+#: snapshot `whisper_history-20260903-145235.db` - the archive is live and drifts
+#: while the telegram listener works, so this is the snapshot that ACTUALLY survived
+#: its own re-measurement and sabotage, not the first one taken in the session): recall_at_k@8=
+#: 0.32143, recall_at_k@12=0.53571 -> threshold@8 = floor_0.05(0.32143 - 2/15) =
+#: floor_0.05(0.18810) = 0.15; threshold@12 = floor_0.05(0.53571 - 2/15) =
 #: floor_0.05(0.40238) = 0.40.
-#: ЦЕ ДЕТЕКТОР ОБВАЛУ, не критерій якості і не детектор саботажу (D15.4) —
-#: саботаж на k=8 абсолютний поріг не ловить у принципі (замір 03.09: чистий
-#: 39.3% → саботаж 42.9%, вище чистого, на іншому знімку тієї самої сесії).
-#: Саботаж ловить пунктова регресія проти лінії (`--max-item-regressions`,
-#: дефолт 0), не цей поріг.
+#: THIS IS A COLLAPSE DETECTOR, not a quality criterion and not a sabotage detector (D15.4):
+#: sabotage at k=8 is in principle not caught by an absolute threshold (measurement of 03.09: clean
+#: 39.3% -> sabotage 42.9%, above clean, on another snapshot of the same session).
+#: Sabotage is caught by the item-level regression against the baseline (`--max-item-regressions`,
+#: default 0), not by this threshold.
 _DEFAULT_MIN_RECALL = "8=0.15,12=0.40"
 _DEFAULT_MAX_DROP = 0.02
 _DEFAULT_MAX_ITEM_REGRESSIONS = 0
 
-#: Ремонтний раунд 1 (історія 13, знахідка при закритті історії 15): шлях, на
-#: який усі приклади `evals/README.md` пишуть і читають лінію, коли
-#: прапорці --baseline/--write-baseline цього ЗАПУСКУ про неї нічого не
-#: кажуть. Без цього конвенційного fallback прогін без прапорців (саботажний
-#: прогін, ручний замір, будь-який `python -m evals.gate --db ...`) не бачив
-#: живу лінію взагалі — і прунер вільно знищував знімок, на який вона
-#: показує (так S1 і померла). Шлях навмисно відносний до cwd — так само,
-#: як дефолт `--db` (`whisper_history.db`): гейт документовано ганяють з
-#: кореня репозиторію.
+#: Repair round 1 (story 13, finding on closing story 15): the path at
+#: which all the `evals/README.md` examples write and read the baseline, when
+#: the --baseline/--write-baseline flags of THIS RUN say nothing about it. Without this
+#: conventional fallback a run without flags (a sabotage
+#: run, a manual measurement, any `python -m evals.gate --db ...`) did not see
+#: the live baseline at all, and the pruner freely destroyed the snapshot it
+#: points to (this is how S1 died). The path is deliberately relative to cwd, the same
+#: as the `--db` default (`whisper_history.db`): the gate is documented as run from
+#: the repository root.
 _CONVENTIONAL_BASELINE_PATH = os.path.join("evals", "baseline.local.json")
 
 
 def _floor_grid(x: float, grid: float = 0.05) -> float:
-    """`floor(x/grid)*grid`, стійкий до похибки float — без epsilon
-    `0.30/0.05` дає `5.999999999999999` (не `6.0`), і межове значення
-    провалюється в сусідню комірку нижче (`0.30` → `0.25` замість `0.30`)."""
+    """`floor(x/grid)*grid`, robust to float error: without an epsilon
+    `0.30/0.05` gives `5.999999999999999` (not `6.0`), and a boundary value
+    falls into the neighbouring cell below (`0.30` -> `0.25` instead of `0.30`)."""
     return math.floor(x / grid + 1e-9) * grid
 
 
 def _derive_min_recall_threshold(recall_at_k: float, n: int) -> float:
-    """D15.3: правило виведення дефолтного `--min-recall` з калібрувальної
-    лінії — `floor_0.05(recall_at_k − 2/n)`. Чиста функція над числами
-    лінії (не читає файл сама), щоб тест міг перевірити САМЕ правило на
-    синтетичних `recall_at_k`/`n`, а не на переписаних константах."""
+    """D15.3: the rule for deriving the default `--min-recall` from the calibration
+    baseline - `floor_0.05(recall_at_k - 2/n)`. A pure function over the baseline's
+    numbers (does not read the file itself), so a test can check THE RULE on
+    synthetic `recall_at_k`/`n`, not on re-typed constants."""
     return _floor_grid(recall_at_k - 2.0 / n)
 
 
 def _protected_snapshot_paths(*baseline_paths: Optional[str]) -> list[str]:
-    """Знімки, названі живими базовими лініями (D20/знахідка 5), — `auto_snapshot`
-    не сміє їх прибрати, доки лінію не перезаписано. `--baseline` (проти чого
-    порівнюємо) і `--write-baseline` (ціль, яку цей прогін МОЖЕ не перезаписати
-    — D12: пишеться лише на PASS) обидва рахуються живими лініями. Побитий чи
-    відсутній файл лінії просто не додає нічого в захист (не крашить гейт).
+    """Snapshots named by live baselines (D20/finding 5); `auto_snapshot`
+    must not remove them until the baseline is overwritten. `--baseline` (what we
+    compare against) and `--write-baseline` (the target this run MAY not overwrite
+    - D12: it is written only on PASS) both count as live baselines. A broken or
+    missing baseline file simply adds nothing to the protection (does not crash the gate).
 
-    Ремонт 1: `_CONVENTIONAL_BASELINE_PATH` (`evals/baseline.local.json`)
-    перевіряється завжди, окрім переданих `baseline_paths` — прогін, який не
-    назвав жодного прапорця, все одно не сміє знищити лінію, що фізично лежить
-    на диску за конвенцією README."""
+    Repair 1: `_CONVENTIONAL_BASELINE_PATH` (`evals/baseline.local.json`)
+    is always checked, in addition to the passed `baseline_paths`: a run that
+    named no flag still must not destroy a baseline that physically lies
+    on disk by the README convention."""
     protected: list[str] = []
     seen: set[str] = set()
     for path in (*baseline_paths, _CONVENTIONAL_BASELINE_PATH):
@@ -131,13 +131,13 @@ def _protected_snapshot_paths(*baseline_paths: Optional[str]) -> list[str]:
 def _parse_k_list(spec: str) -> list[int]:
     ks = [int(x) for x in spec.split(",") if x.strip()]
     if not ks:
-        raise ValueError("--k: порожній список")
+        raise ValueError("--k: empty list")
     return ks
 
 
 def _parse_min_recall(spec: str) -> dict[int, float]:
-    """`"8=0.60,12=0.75"` → `{8: 0.60, 12: 0.75}`. k без запису в мапі —
-    поріг recall_at_k для нього просто не перевіряється."""
+    """`"8=0.60,12=0.75"` -> `{8: 0.60, 12: 0.75}`. A k with no entry in the map:
+    the recall_at_k threshold for it is simply not checked."""
     out: dict[int, float] = {}
     for part in spec.split(","):
         part = part.strip()
@@ -150,23 +150,23 @@ def _parse_min_recall(spec: str) -> dict[int, float]:
 
 @contextlib.contextmanager
 def _scratch_copy(db_path: str) -> Iterator[str]:
-    """Тимчасова копія знімка для виміру (D6/ADR-003) — `retrieval.search`
-    іде через `get_db_connection` (`PRAGMA journal_mode=WAL`), що мутує файл
-    лише відкриттям. Копія приймає цей побічний ефект на себе — файл, який
-    гейт звітує як `db_snapshot`, лишається байт-у-байт незмінним. Свідома
-    копія патерну `evals/graph_links.py::_scratch_copy` (не імпортуємо
-    приватне зі сусіднього модуля — той самий підхід, що
+    """A temporary copy of the snapshot for measurement (D6/ADR-003): `retrieval.search`
+    goes through `get_db_connection` (`PRAGMA journal_mode=WAL`), which mutates the file
+    merely by opening it. The copy takes this side effect upon itself: the file that the
+    gate reports as `db_snapshot` stays byte-for-byte unchanged. A deliberate
+    copy of the pattern `evals/graph_links.py::_scratch_copy` (we do not import
+    a private name from a neighbouring module: the same approach as
     `evals/build_golden.py::_scratch_copy`)."""
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
-        # copyfile лишається ВСЕРЕДИНІ try — інакше збій копіювання (диск
-        # повний, права) лишає порожню заглушку від mkstemp на диску назавжди.
+        # copyfile stays INSIDE the try; otherwise a copy failure (disk
+        # full, permissions) leaves an empty mkstemp stub on disk forever.
         shutil.copyfile(db_path, tmp_path)
-        # Знахідка 13: якщо джерело несе `-wal`/`-shm`, копія без них — це
-        # старіший стан, ніж committed (WAL тримає транзакції, ще не
-        # влиті в головний файл). Копія мусить представляти те саме
-        # зафіксоване наповнення, що й файл, чию ідентичність гейт звітує.
+        # Finding 13: if the source carries `-wal`/`-shm`, a copy without them is an
+        # older state than committed (the WAL holds transactions not yet
+        # flushed into the main file). The copy must represent the same
+        # committed content as the file whose identity the gate reports.
         for suffix in ("-wal", "-shm"):
             sidecar = db_path + suffix
             if os.path.exists(sidecar):
@@ -179,22 +179,22 @@ def _scratch_copy(db_path: str) -> Iterator[str]:
                 try:
                     os.remove(candidate)
                 except OSError as exc:
-                    print(f"[gate] не вдалося прибрати тимчасовий файл {candidate}: {exc}",
+                    print(f"[gate] failed to remove the temporary file {candidate}: {exc}",
                           file=sys.stderr)
 
 
 def _sabotage_pool(pool: list[dict], mode: str, k: int) -> list[dict]:
-    """Детерміновано (seed 0) ламає ПУЛ кандидатів ПЕРЕД відсіканням до k
-    (D1) — гарантовано витісняє КОЖНУ з перших k позицій пулу за межі нових
-    перших k, на будь-якому k (доведено тестом на дефолтних 8,12, не лише
-    на малих). `reverse` на пулі `4k` завжди задовольняє це (old index
-    `i` → new index `4k-1-i` ≥ `4k-1-(k-1)` = `3k` ≥ `k`). `shuffle` тепер
-    так само гарантує це навмисно: перші k позицій пулу («голова») і решта
-    («хвіст») тасуються НЕЗАЛЕЖНО, тоді хвіст ставиться ПЕРЕД головою — жоден
-    старий top-k елемент не потрапляє у нові перші k, доки в пулі є принаймні
-    k елементів поза старою головою (виконано: пул = 4k). Стара реалізація
-    (`random.Random(0).shuffle` над усім пулом) цієї гарантії не давала —
-    на дефолтних k=8/12 старий top-0 виживав у новому top-k (знахідка 1)."""
+    """Deterministically (seed 0) breaks the candidate POOL BEFORE cutting to k
+    (D1): it is guaranteed to push EVERY one of the pool's first k positions outside the new
+    first k, at any k (proved by a test on the default 8,12, not only
+    on small ones). `reverse` on a `4k` pool always satisfies this (old index
+    `i` -> new index `4k-1-i` >= `4k-1-(k-1)` = `3k` >= `k`). `shuffle` now
+    guarantees it too, deliberately: the pool's first k positions ("head") and the rest
+    ("tail") are shuffled INDEPENDENTLY, then the tail is placed BEFORE the head, so no
+    old top-k element lands in the new first k as long as the pool has at least
+    k elements outside the old head (satisfied: pool = 4k). The old implementation
+    (`random.Random(0).shuffle` over the whole pool) did not give this guarantee:
+    at the default k=8/12 the old top-0 survived into the new top-k (finding 1)."""
     pool = list(pool)
     if mode == "reverse":
         pool.reverse()
@@ -205,24 +205,24 @@ def _sabotage_pool(pool: list[dict], mode: str, k: int) -> list[dict]:
         rnd.shuffle(head)
         rnd.shuffle(tail)
         return tail + head
-    raise ValueError(f"невідомий --sabotage {mode!r}")
+    raise ValueError(f"unknown --sabotage {mode!r}")
 
 
 def _search(db_path: str, item: dict, k: int, *,
             sabotage: Optional[str], rerank: bool = False) -> tuple[list[dict], Optional[bool]]:
-    """Без саботажу (D4/знахідка 5) — те саме `top_k`, що продакшн: `k`, а не
-    зріз k із запиту `k*4` (стеля коментарів `_cap_comments` рахується від
-    `top_k`, тож більший запит пускає в топ те, чого продакшн туди не пустив
-    би). Саботаж лишається вправі просити більший пул — інструмент, а не
-    замір (Non-goals).
+    """Without sabotage (D4/finding 5): the same `top_k` as production: `k`, not
+    a slice of k from a `k*4` request (the comments ceiling `_cap_comments` is computed from
+    `top_k`, so a larger request lets into the top what production would not have
+    let in). Sabotage stays free to ask for a larger pool: it is a tool, not
+    a measurement (Non-goals).
 
-    `rerank` (18.09.2026) — другий етап `retrieval.search` тим самим
-    cross-encoder'ом, яким його вмикає RAG-чат (`rag.py` `_RERANK_ENABLED` з
-    `RECALL_RERANK_ENABLED`). Дефолт лишається False, щоб старі лінії й
-    прогони не змінили сенс заднім числом; вмикає його оператор прапорцем
-    `--rerank`, і прогін підписує себе в провенансі. `rerank_pool_size` не
-    передаємо — продакшн теж не передає, тобто пул береться з дефолту
-    `retrieval` і замір не розходиться з боєм ще й тут."""
+    `rerank` (18.09.2026): the second stage of `retrieval.search` with the same
+    cross-encoder that the RAG chat enables (`rag.py` `_RERANK_ENABLED` from
+    `RECALL_RERANK_ENABLED`). The default stays False so that old baselines and
+    runs do not change meaning retroactively; the operator enables it with the
+    `--rerank` flag, and the run signs itself in the provenance. We do not pass `rerank_pool_size`:
+    production does not either, i.e. the pool is taken from the default of
+    `retrieval` and the measurement does not diverge from production here either."""
     from app.services import retrieval
 
     if sabotage:
@@ -242,13 +242,13 @@ def _search(db_path: str, item: dict, k: int, *,
 
 
 def _filter_leak(conn: sqlite3.Connection, item: dict, chunks: list[dict]) -> Optional[int]:
-    """C8: скільки чанків видачі належать запису, що фільтр мав би не пускати
-    — доводить, що `category_id`/`tags` не пропускають чуже (доповнює
-    `recall_at_k`, який ловить лише «ховає своє»). `None`, якщо пункт не
-    задає жодної осі (нема що перевіряти). Ось чому це не метод
-    `ev_metrics.evaluate_item` (`evals/metrics.py` не в `## Files` цієї
-    історії) — чиста функція над результатом пошуку й тим самим `conn`, яким
-    гейт вже читає golden-set."""
+    """C8: how many chunks of the results belong to a record the filter should have kept out
+    - proves that `category_id`/`tags` do not let foreign records through (complements
+    `recall_at_k`, which catches only "hides its own"). `None` if the item
+    sets no axis (nothing to check). This is why it is not a method of
+    `ev_metrics.evaluate_item` (`evals/metrics.py` is not in the `## Files` of this
+    story): a pure function over the search result and the same `conn` the
+    gate already reads the golden-set with."""
     category_id = item.get("category_id")
     tags = item.get("tags") or []
     has_category_axis = isinstance(category_id, int)
@@ -292,10 +292,10 @@ def _filter_leak(conn: sqlite3.Connection, item: dict, chunks: list[dict]) -> Op
 
 
 def _item_hit(row: dict) -> Optional[bool]:
-    """"Пройдено" на пункт: усі задані критерії (recall_at_k повний,
-    source_name_hit True) виконані. `None`, якщо жодного критерію не
-    задано (напр. `status="negative"`) — такий пункт не бере участі ні в
-    порозі, ні в регресії відносно лінії."""
+    """"Passed" per item: all set criteria (recall_at_k full,
+    source_name_hit True) are met. `None` if no criterion is
+    set (e.g. `status="negative"`): such an item takes part neither in the
+    threshold nor in the regression against the baseline."""
     recall = row.get("recall_at_k")
     name_hit = row.get("source_name_hit")
     if recall is None and name_hit is None:
@@ -313,17 +313,17 @@ def _run_k(golden_items: list[dict], db_path: str, k: int, *,
            rerank: bool = False,
            leak_conn: Optional[sqlite3.Connection] = None
            ) -> tuple[list[dict], dict, dict, Optional[bool]]:
-    """Пункти зі `status="unlabeled"` пропускаються повністю (C1); `negative`
-    рахується (search запускається, лишається в per-item звіті), але не
-    входить у `aggregate`/`by_slice` (recall_at_k/source_name_hit — `None`,
-    `aggregate()` вже виключає `None`). Четвертий елемент — `vector_available`
-    цього прогону (D5/D6, знахідка 6): береться з першого виклику search, що
-    його повернув — стабільна властивість запуску (модель або є, або нема),
-    не по-пунктова.
+    """Items with `status="unlabeled"` are skipped entirely (C1); `negative`
+    is counted (search runs, it stays in the per-item report) but does not
+    enter `aggregate`/`by_slice` (recall_at_k/source_name_hit are `None`,
+    `aggregate()` already excludes `None`). The fourth element is the `vector_available`
+    of this run (D5/D6, finding 6): taken from the first search call that
+    returned it: a stable property of the run (the model is either there or not),
+    not per item.
 
-    `leak_conn` (C8) — read-only зʼєднання до тієї ж БД, що вимірюється
-    (`measure_db`): `row["filter_leak"]` — `None` для пунктів без
-    `category_id`/`tags`, інакше кількість чанків видачі поза фільтром."""
+    `leak_conn` (C8) is a read-only connection to the same DB being measured
+    (`measure_db`): `row["filter_leak"]` is `None` for items without
+    `category_id`/`tags`, otherwise the number of result chunks outside the filter."""
     rows = []
     vector_available: Optional[bool] = None
     for item in golden_items:
@@ -350,8 +350,8 @@ def _run_k(golden_items: list[dict], db_path: str, k: int, *,
 
 
 def _simplify_agg(agg: dict) -> dict:
-    """C2 baseline-формат: `{"recall_at_k", "source_name_hit_rate", "n"}`
-    замість вкладеного `{"mean","n"}` з `ev_metrics.aggregate`."""
+    """C2 baseline format: `{"recall_at_k", "source_name_hit_rate", "n"}`
+    instead of the nested `{"mean","n"}` from `ev_metrics.aggregate`."""
     return {
         "recall_at_k": agg["recall_at_k"]["mean"],
         "source_name_hit_rate": agg["source_name_hit_rate"]["mean"],
@@ -366,12 +366,12 @@ def _fmt_mean(d: dict) -> str:
 
 
 def _git_ignores(path: str) -> Optional[bool]:
-    """True — git реально ігнорує `path`, False — реально відстежить,
-    None — не вдалось визначити (шлях поза цим репозиторієм, git відсутній).
-    Знахідка 3 (review-round-2): filename-конвенція `.local.` сама по собі
-    неповна — `.gitignore` покриває лише `evals/*.local.json` напряму, не
-    корінь репо і не вкладені каталоги (`evals/runs/…`) — питаємо git, а не
-    вгадуємо шаблоном."""
+    """True - git really ignores `path`, False - really tracks it,
+    None - could not determine (path outside this repository, git absent).
+    Finding 3 (review-round-2): the filename convention `.local.` alone is
+    incomplete: `.gitignore` covers only `evals/*.local.json` directly, not
+    the repo root and not nested directories (`evals/runs/...`), so we ask git rather than
+    guess by pattern."""
     try:
         result = subprocess.run(
             ["git", "-C", str(_PROJECT_ROOT), "check-ignore", "-q", "--",
@@ -383,60 +383,60 @@ def _git_ignores(path: str) -> Optional[bool]:
         return True
     if result.returncode == 1:
         return False
-    return None  # 128 тощо — поза репо (напр. tmp_path тестів) чи інша помилка
+    return None  # 128 etc.: outside the repo (e.g. tests' tmp_path) or another error
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--golden", required=True, help="Шлях до golden-set (JSONL або legacy JSON)")
-    parser.add_argument("--db", default="whisper_history.db", help="Шлях до SQLite БД (default: whisper_history.db)")
-    parser.add_argument("--k", default="8,12", help="Список k через кому (default: 8,12)")
+    parser.add_argument("--golden", required=True, help="Path to the golden-set (JSONL or legacy JSON)")
+    parser.add_argument("--db", default="whisper_history.db", help="Path to the SQLite DB (default: whisper_history.db)")
+    parser.add_argument("--k", default="8,12", help="Comma-separated list of k (default: 8,12)")
     parser.add_argument("--min-recall", default=_DEFAULT_MIN_RECALL,
-                         help=f"k=поріг через кому (default: {_DEFAULT_MIN_RECALL})")
+                         help=f"k=threshold, comma-separated (default: {_DEFAULT_MIN_RECALL})")
     parser.add_argument("--max-drop", type=float, default=_DEFAULT_MAX_DROP,
-                         help=f"Макс. падіння mean recall_at_k відносно лінії (default: {_DEFAULT_MAX_DROP})")
+                         help=f"Max drop of mean recall_at_k against the baseline (default: {_DEFAULT_MAX_DROP})")
     parser.add_argument("--max-item-regressions", type=int, default=_DEFAULT_MAX_ITEM_REGRESSIONS,
-                         help=f"Макс. к-сть пунктів hit→miss відносно лінії (default: {_DEFAULT_MAX_ITEM_REGRESSIONS})")
-    parser.add_argument("--baseline", default=None, help="Базова лінія (C2) для порівняння і per-item diff")
-    parser.add_argument("--write-baseline", default=None, help="Записати поточний прогін як нову базову лінію (C2)")
+                         help=f"Max number of hit->miss items against the baseline (default: {_DEFAULT_MAX_ITEM_REGRESSIONS})")
+    parser.add_argument("--baseline", default=None, help="Baseline (C2) for comparison and the per-item diff")
+    parser.add_argument("--write-baseline", default=None, help="Write the current run as a new baseline (C2)")
     parser.add_argument("--rerank", action="store_true",
-                        help="Міряти З cross-encoder-реранкером (як RAG-чат при "
-                             "RECALL_RERANK_ENABLED=1). Дефолт — без нього; прапорець "
-                             "пишеться у провенанс, тож лінія без реранка і прогін з "
-                             "ним не порівнюються мовчки")
+                        help="Measure WITH the cross-encoder reranker (as the RAG chat does with "
+                             "RECALL_RERANK_ENABLED=1). The default is without it; the flag "
+                             "is written to the provenance, so a baseline without the reranker and a run with "
+                             "it are not silently compared")
     parser.add_argument("--sabotage", choices=["shuffle", "reverse"], default=None,
-                         help="Детерміновано зламати пул кандидатів перед відсіканням (C6) — для перевірки самого гейта")
+                         help="Deterministically break the candidate pool before cutting (C6), to test the gate itself")
     parser.add_argument("--no-snapshot", action="store_true",
-                         help="Не робити знімок (VACUUM INTO) — вимагає --yes-live для живої БД. "
-                              "На НЕ-живій цілі захисна копія (_scratch_copy) все одно "
-                              "застосовується попри цей прапорець (D16) — гейт скаже про це в рантаймі")
+                         help="Do not take a snapshot (VACUUM INTO); requires --yes-live for a live DB. "
+                              "On a NON-live target the protective copy (_scratch_copy) is still "
+                              "applied despite this flag (D16); the gate says so at runtime")
     parser.add_argument("--yes-live", action="store_true",
-                         help="Дозволити --no-snapshot на живій БД (Config.DATABASE)")
+                         help="Allow --no-snapshot on a live DB (Config.DATABASE)")
     parser.add_argument("--json-out", default=None,
-                         help="Записати повний результат у JSON (шлях мусить відповідати "
-                              "конвенції приватності *.local.*, D10)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Друкувати лише підсумковий рядок")
+                         help="Write the full result to JSON (the path must match "
+                              "the *.local.* privacy convention, D10)")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Print only the summary line")
     args = parser.parse_args(argv)
 
-    # D10/знахідка 19: --json-out пише реальні питання і transcription_id архіву —
-    # єдина нова поверхня без конвенції приватності. Вимагаємо *.local.* у назві
-    # І (знахідка 3) звіряємо з git напряму: сама лише назва не доводить, що
-    # шлях справді потрапляє під якесь правило .gitignore (корінь репо і
-    # вкладені каталоги на кшталт evals/runs/ під `evals/*.local.json` не
-    # підпадають). Якщо перевірити не вдалось (шлях поза репо — тести на
-    # tmp_path, чи git відсутній), рішення лишається на конвенції імені.
+    # D10/finding 19: --json-out writes real questions and archive transcription_ids;
+    # the only new surface without a privacy convention. We require *.local.* in the name
+    # AND (finding 3) check with git directly: the name alone does not prove that the
+    # path really falls under some .gitignore rule (the repo root and
+    # nested directories like evals/runs/ under `evals/*.local.json` do not
+    # fall under it). If the check could not be done (path outside the repo: tests on
+    # tmp_path, or git absent), the decision stays with the name convention.
     if args.json_out:
         name_ok = ".local." in Path(args.json_out).name
         git_ignored = _git_ignores(args.json_out)
         if not name_ok or git_ignored is False:
-            print(f"[gate] --json-out {args.json_out!r} не відповідає конвенції приватності "
-                  "*.local.* (напр. evals/gate_run.local.json) — пише реальні питання й "
-                  "transcription_id архіву в шлях без gitignore-правила.", file=sys.stderr)
+            print(f"[gate] --json-out {args.json_out!r} does not match the privacy convention "
+                  "*.local.* (e.g. evals/gate_run.local.json): it writes real questions and "
+                  "archive transcription_ids to a path with no gitignore rule.", file=sys.stderr)
             return 2
 
     if not os.path.exists(args.db):
-        print(f"[gate] БД не знайдено: {args.db}", file=sys.stderr)
+        print(f"[gate] DB not found: {args.db}", file=sys.stderr)
         return 2
 
     try:
@@ -449,8 +449,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     db = args.db
     if args.no_snapshot:
         if is_live_db(db) and not args.yes_live:
-            print(f"[gate] Відмова: {db!r} — бойова БД (Config.DATABASE). "
-                  "--no-snapshot без --yes-live заборонено — гейт має ганятись на знімку.",
+            print(f"[gate] Refused: {db!r} is the live DB (Config.DATABASE). "
+                  "--no-snapshot without --yes-live is forbidden: the gate must run on a snapshot.",
                   file=sys.stderr)
             return 2
         search_db = db
@@ -462,8 +462,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         conn = open_readonly(search_db)
-    except Exception as exc:  # noqa: BLE001 — довільна причина відкриття (пошкоджений файл тощо) → 2, не крах
-        print(f"[gate] не вдалось відкрити {search_db}: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - any reason for failing to open (corrupted file etc.) -> 2, not a crash
+        print(f"[gate] could not open {search_db}: {exc}", file=sys.stderr)
         return 2
     try:
         golden_items = golden_io.read_golden(args.golden, conn=conn)
@@ -477,25 +477,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         conn.close()
 
     if not golden_items:
-        print(f"[gate] golden-set {args.golden!r} порожній.", file=sys.stderr)
+        print(f"[gate] golden-set {args.golden!r} is empty.", file=sys.stderr)
         return 2
 
-    # D6/ADR-003 (знахідка 7): жоден вимір не тримає WAL-rw зʼєднання проти
-    # файлу, який гейт же й звітує як `db_snapshot` — retrieval.search іде
-    # проти тимчасової копії. Єдиний легальний обхід — `--no-snapshot
-    # --yes-live`, той самий, що вже документований у docstring модуля.
-    # D16: обхід легальний ЛИШЕ коли ціль справді жива БД — сама пара
-    # прапорців нічого не доводить (`is_live_db` вище перевіряє це тільки
-    # щоб відмовити `--no-snapshot` БЕЗ `--yes-live` на живій БД, рядок 295;
-    # на будь-якій НЕ-живій цілі, наведеній тими самими прапорцями, — знімку
-    # чи довільному файлу — `_scratch_copy` лишається обовʼязковим).
+    # D6/ADR-003 (finding 7): no measurement holds a WAL-rw connection against
+    # the file that the gate itself reports as `db_snapshot`; retrieval.search goes
+    # against a temporary copy. The only legal bypass is `--no-snapshot
+    # --yes-live`, the same one already documented in the module docstring.
+    # D16: the bypass is legal ONLY when the target really is the live DB; the flag
+    # pair alone proves nothing (`is_live_db` above checks this only
+    # to refuse `--no-snapshot` WITHOUT `--yes-live` on a live DB, line 295;
+    # on any NON-live target named by the same flags, a snapshot
+    # or an arbitrary file, `_scratch_copy` stays mandatory).
     skip_scratch = args.no_snapshot and args.yes_live and is_live_db(db)
-    # Знахідка 15: `--no-snapshot` мовчки не звільняв від захисної копії на
-    # НЕ-живій цілі (D16) — довідка тепер каже про це, і рантайм теж мусить.
+    # Finding 15: `--no-snapshot` silently did not exempt from the protective copy on a
+    # NON-live target (D16); the help now says so, and the runtime must too.
     if args.no_snapshot and not skip_scratch:
-        print(f"[gate] --no-snapshot: захисна копія (_scratch_copy) все одно "
-              f"застосовується — {db!r} не жива БД (Config.DATABASE), обхід "
-              "легальний лише на живій цілі разом з --yes-live.", file=sys.stderr)
+        print(f"[gate] --no-snapshot: the protective copy (_scratch_copy) is still "
+              f"applied - {db!r} is not the live DB (Config.DATABASE), the bypass is "
+              "legal only on a live target together with --yes-live.", file=sys.stderr)
     measure_cm = contextlib.nullcontext(search_db) if skip_scratch else _scratch_copy(search_db)
 
     rows_by_k: dict[int, dict[str, dict]] = {}
@@ -504,9 +504,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     vector_available: Optional[bool] = None
     try:
         with measure_cm as measure_db:
-            # C8: окреме read-only зʼєднання на тому самому файлі, що й пошук
-            # (не через retrieval.search — filter_leak рахується з готових
-            # чанків, а не всередині ранжування) — для subtree_ids/record_tags.
+            # C8: a separate read-only connection on the same file as the search
+            # (not through retrieval.search: filter_leak is computed from the ready
+            # chunks, not inside the ranking), for subtree_ids/record_tags.
             leak_conn = open_readonly(measure_db)
             try:
                 for k in ks:
@@ -520,34 +520,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                         vector_available = vec_avail
             finally:
                 leak_conn.close()
-    except Exception as exc:  # noqa: BLE001 — інфраструктура (модель не піднялась, знімок
-        # побитий, диск повний), не вердикт якості (D3/знахідка 4): 2, не 1 і не крах.
-        print(f"[gate] збій під час заміру: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - infrastructure (the model did not come up, the snapshot
+        # is broken, disk full), not a quality verdict (D3/finding 4): 2, not 1 and not a crash.
+        print(f"[gate] failure during measurement: {exc}", file=sys.stderr)
         return 2
 
-    # D2/знахідка 2: прогін, де на якомусь k нема жодного пункту
-    # status="labeled", — помилка даних, НІКОЛИ не PASS (навіть під -q). Саме
-    # це видає build_golden без розмітки: усе unlabeled → n=0 на кожному k.
+    # D2/finding 2: a run where at some k there is no item with
+    # status="labeled" is a data error, NEVER a PASS (even under -q). This is
+    # exactly what build_golden yields without labelling: all unlabeled -> n=0 at every k.
     empty_ks = [k for k in ks if agg_by_k[k]["total_items"] == 0]
     if empty_ks:
-        print(f"[gate] на k={','.join(str(k) for k in empty_ks)} немає жодного пункту "
-              "status=\"labeled\" — нема на чому рахувати вердикт (помилка даних, не PASS).",
+        print(f"[gate] at k={','.join(str(k) for k in empty_ks)} there is no item with "
+              "status=\"labeled\" - nothing to compute a verdict on (data error, not PASS).",
               file=sys.stderr)
         return 2
 
-    # D5 (знахідки 6, 13): провенанс поточного прогону — те, проти чого
-    # звіряється базова лінія ПЕРЕД тим, як їй дозволено видати вердикт.
+    # D5 (findings 6, 13): the provenance of the current run is what the
+    # baseline is checked against BEFORE it is allowed to give a verdict.
     snap_stat = os.stat(search_db)
     current_provenance = {
         "db_snapshot": {"path": os.path.abspath(search_db), "size": snap_stat.st_size,
                          "mtime": snap_stat.st_mtime},
         "vector_available": vector_available,
         "rerank": bool(args.rerank),
-        # Борг Хвилі B (`leftovers.md`, Descoped): `rewrite` гейт не вмикає
-        # прапорцем — `retrieval.search` читає гарячий env сам, — але прогін
-        # МУСИТЬ сказати, з чим він знятий, інакше дві лінії з різним
-        # RAG_QUERY_REWRITE зводяться мовчки. Резолвимо тим самим `env_bool`,
-        # що й retrieval.py:718 (ADR-008: одна реалізація на прапорець).
+        # Wave B debt (`leftovers.md`, Descoped): the gate does not enable `rewrite`
+        # with a flag (`retrieval.search` reads the hot env itself), but the run
+        # MUST say what it was taken with, otherwise two baselines with different
+        # RAG_QUERY_REWRITE are silently merged. We resolve it with the same `env_bool`
+        # as retrieval.py:718 (ADR-008: one implementation per flag).
         "rewrite": _settings.env_bool("RAG_QUERY_REWRITE"),
     }
 
@@ -557,14 +557,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             with open(args.baseline, "r", encoding="utf-8") as f:
                 baseline = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"[gate] базова лінія {args.baseline!r}: {exc}", file=sys.stderr)
+            print(f"[gate] baseline {args.baseline!r}: {exc}", file=sys.stderr)
             return 2
 
-        # Знахідка 6 (review-round-2): провенанс мусить покривати НАБІР, що
-        # вимірюється, а не лише БД — інакше лінія, знята над іншим
-        # golden-set (інші id/n), приймається як порівнянна лише тому, що
-        # знімок і vector_available/rerank збіглись, і mean_drop рахується
-        # проти чужих пунктів.
+        # Finding 6 (review-round-2): the provenance must cover the SET being
+        # measured, not just the DB; otherwise a baseline taken over another
+        # golden-set (other ids/n) is accepted as comparable only because the
+        # snapshot and vector_available/rerank matched, and mean_drop is computed
+        # against foreign items.
         current_ids = sorted({item_id for k in ks for item_id in rows_by_k[k]})
         base_snap = baseline.get("db_snapshot")
         provenance_ok = (
@@ -577,26 +577,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             and sorted((baseline.get("items") or {}).keys()) == current_ids
         )
         if not provenance_ok:
-            print(f"[gate] базова лінія {args.baseline!r} знята за іншим провенансом "
-                  "(знімок, vector_available/rerank або сам набір пунктів не збігається з "
-                  "поточним прогоном) — порівняння відмовлено, вердикт не видається (D5). "
-                  "Перезапишіть лінію --write-baseline на цьому наборі.", file=sys.stderr)
+            print(f"[gate] baseline {args.baseline!r} was taken with a different provenance "
+                  "(the snapshot, vector_available/rerank or the item set itself does not match "
+                  "the current run); comparison refused, no verdict is given (D5). "
+                  "Rewrite the baseline with --write-baseline on this set.", file=sys.stderr)
             return 2
 
-    # Знахідка 1 (review-round-2), історія 11: дві двері до PASS, що нічого
-    # не перевірив. `checked_this_k` фіксує, чи бодай ОДНА змістовна
-    # перевірка реально відбулась на цьому k — абсолютний поріг проти
-    # реального числа (recall_at_k АБО, за його відсутності,
-    # source_name_hit_rate — двері (б)) або звірка з лінією (mean_drop
-    # проти реального числа, або хоч один пункт зі спільним base_row —
-    # двері (а), де лінія знята на іншому k). Якщо жоден k не пройшов ЖОДНОЇ
-    # перевірки — вердикту немає (2), а не мовчазний PASS.
+    # Finding 1 (review-round-2), story 11: two doors to a PASS that checked
+    # nothing. `checked_this_k` records whether at least ONE substantive
+    # check really took place at this k: an absolute threshold against a
+    # real number (recall_at_k OR, if it is absent,
+    # source_name_hit_rate, door (b)) or a comparison with the baseline (mean_drop
+    # against a real number, or at least one item with a shared base_row,
+    # door (a), where the baseline was taken at another k). If no k passed ANY
+    # check, there is no verdict (2), not a silent PASS.
     failures: list[str] = []
     diff_lines: list[str] = []
     unchecked_ks: list[int] = []
-    # C8: сума `filter_leak` на кожному k — незалежно від recall/baseline,
-    # найголовніший FAIL цього гейта (фільтр пропустив чуже). Пункти без
-    # `category_id`/`tags` лишають `filter_leak=None` (не беруть участі).
+    # C8: the sum of `filter_leak` at each k, independent of recall/baseline,
+    # is this gate's most important FAIL (the filter let a foreign record through). Items without
+    # `category_id`/`tags` leave `filter_leak=None` (they do not take part).
     leak_totals: dict[int, int] = {}
     for k in ks:
         checked_this_k = False
@@ -616,11 +616,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if recall_mean < min_r:
                     failures.append(f"k={k}: recall_at_k {recall_mean:.3f} < min-recall {min_r:.3f}")
             elif hit_rate_mean is not None:
-                # Двері (б): пункти розмічені лише `expected_source_name_contains`
-                # (README радить це як стійкішу до дрейфу id альтернативу)
-                # лишають recall_at_k.mean = None на кожному пункті — поріг
-                # тоді звіряється проти source_name_hit_rate, інакше цей k не
-                # перевіряється взагалі і тотальний промах мовчки минається.
+                # Door (b): items labelled only with `expected_source_name_contains`
+                # (the README recommends this as an alternative more robust to id drift)
+                # leave recall_at_k.mean = None on every item; the threshold
+                # is then checked against source_name_hit_rate, otherwise this k is not
+                # checked at all and a total miss silently passes.
                 checked_this_k = True
                 if hit_rate_mean < min_r:
                     failures.append(
@@ -656,16 +656,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             unchecked_ks.append(k)
 
     if unchecked_ks:
-        print(f"[gate] на k={','.join(str(k) for k in unchecked_ks)} немає жодної змістовної "
-              "перевірки — ні абсолютного порогу (--min-recall) проти обчисленої метрики, ні "
-              "порівнюваного запису в базовій лінії для цього k — вердикту немає (помилка "
-              "конфігурації, не PASS).", file=sys.stderr)
+        print(f"[gate] at k={','.join(str(k) for k in unchecked_ks)} there is no substantive "
+              "check, neither an absolute threshold (--min-recall) against a computed metric, nor a "
+              "comparable record in the baseline for this k; there is no verdict (a "
+              "configuration error, not PASS).", file=sys.stderr)
         return 2
 
     verdict = "PASS" if not failures else "FAIL"
 
-    # D12/знахідка 15: --write-baseline НЕ пише лінію на вердикті FAIL —
-    # регресований прогін інакше мовчки стає новою істиною для порівняння.
+    # D12/finding 15: --write-baseline does NOT write a baseline on a FAIL verdict;
+    # otherwise a regressed run silently becomes the new truth for comparison.
     if args.write_baseline and verdict == "PASS":
         all_ids = sorted({item_id for k in ks for item_id in rows_by_k[k]})
         baseline_out = {
@@ -691,15 +691,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         with open(args.write_baseline, "w", encoding="utf-8") as f:
             json.dump(baseline_out, f, ensure_ascii=False, indent=2, sort_keys=True)
     elif args.write_baseline:
-        print(f"[gate] --write-baseline пропущено: вердикт FAIL "
-              f"(лінія {args.write_baseline!r} не перезаписана регресованим прогоном).",
+        print(f"[gate] --write-baseline skipped: verdict FAIL "
+              f"(baseline {args.write_baseline!r} not overwritten by a regressed run).",
               file=sys.stderr)
 
     if not args.quiet:
         print()
-        print(f"[gate] БД (пошук): {search_db}" + (f"  (знімок з {db})" if search_db != db else ""))
+        print(f"[gate] DB (search): {search_db}" + (f"  (snapshot of {db})" if search_db != db else ""))
         labeled_n = sum(1 for i in golden_items if i["status"] == "labeled")
-        print(f"[gate] golden-set: {args.golden} ({len(golden_items)} записів, {labeled_n} labeled)")
+        print(f"[gate] golden-set: {args.golden} ({len(golden_items)} records, {labeled_n} labeled)")
         print("-" * 60)
         for k in ks:
             agg = agg_by_k[k]
@@ -715,13 +715,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"  {line}")
         print("-" * 60)
         if args.write_baseline and verdict == "PASS":
-            print(f"[gate] базову лінію записано у {args.write_baseline}")
+            print(f"[gate] baseline written to {args.write_baseline}")
         for f_ in failures:
             print(f"  FAIL: {f_}")
 
-    # Конфігурація — у тому ж рядку, що й вердикт: знахідка 17.09.2026 у тому й
-    # була, що прогони без реранкера читали як бойові числа (50.0% проти 78.6%
-    # на k=8). Рядок під `-q` єдиний, тож підпис мусить бути саме тут.
+    # Configuration is on the same line as the verdict: the finding of 17.09.2026 was
+    # exactly that runs without the reranker were read as live numbers (50.0% vs 78.6%
+    # at k=8). The line under `-q` is the only one, so the signature must be right here.
     print(f"[gate] {verdict} k={','.join(str(k) for k in ks)}"
           f" [rerank={'on' if current_provenance['rerank'] else 'off'},"
           f" rewrite={'on' if current_provenance['rewrite'] else 'off'},"
@@ -742,10 +742,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for k in ks
             },
             "per_item": {str(k): list(rows_by_k[k].values()) for k in ks},
-            # Без цього два `--json-out` зводяться через `evals.compare` без
-            # жодної згадки, з якою конфігурацією знятий кожен (знахідка
-            # 17.09.2026). `compare` читає лише aggregate/per_item — зайвий
-            # ключ його не чіпає, але прогін тепер носить свій підпис у файлі.
+            # Without this, two `--json-out` files merged via `evals.compare` carry
+            # no mention of which configuration each was taken with (finding
+            # 17.09.2026). `compare` reads only aggregate/per_item, so an extra
+            # key does not touch it, but the run now carries its signature in the file.
             "provenance": current_provenance,
         }
         with open(args.json_out, "w", encoding="utf-8") as f:

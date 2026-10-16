@@ -1,16 +1,16 @@
-"""Варіанти власної назви й опису запису від локальної моделі (спека recording-meta-suggest).
+"""Variants of an own title and description of a record from the local model (spec recording-meta-suggest).
 
-Нічого не пише в БД: лише пропонує, а зберігає звичайний PATCH `/api/history/<id>`.
+Writes nothing to the DB: only suggests, and the usual PATCH `/api/history/<id>` saves.
 
-Вхід моделі — `summary_json` запису (саммарі Claude від enrichment), а якщо його ще
-нема — фрагменти транскрипту: початок, середина, кінець. Замір на #8677 (14.10.2026):
-за саммарі варіанти предметні, за фрагментами — загальні («Обсуждение проекта…»),
-тому `basis` повертається викликачу, і вікно чесно каже, з чого пропозиція.
+The model input is the record's `summary_json` (Claude's summary from enrichment), and if it is not
+there yet, transcript fragments: beginning, middle, end. A measurement on #8677 (14.10.2026):
+with a summary the variants are specific, with fragments they are generic ("Обсуждение проекта…"),
+so `basis` is returned to the caller, and the window honestly says what the suggestion is based on.
 
-Модель — `LOCAL_TITLE_MODEL` (MamayLM 12B: ~40 с, три варіанти справді різні; qwen2.5:7b
-за 10 с давала три майже однакові описи, qwen3.5:9b — порожній JSON).
+The model is `LOCAL_TITLE_MODEL` (MamayLM 12B: ~40 s, three variants really differ; qwen2.5:7b
+in 10 s gave three nearly identical descriptions, qwen3.5:9b an empty JSON).
 
-Лише stdlib + `local_llm` + `record_meta`: модуль не тягне torch.
+Only stdlib + `local_llm` + `record_meta`: the module does not pull torch.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from app.core import settings
+from app.core.i18n import tr
 from app.services import local_llm, record_meta
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ _QUOTES = "\"'«»„“”`"
 
 
 class SuggestError(RuntimeError):
-    """Контрольована причина, чому варіантів нема (текст — для людини)."""
+    """A controlled reason why there are no variants (the text is for a person)."""
 
     def __init__(self, message: str, status: int):
         super().__init__(message)
@@ -55,7 +56,7 @@ def _summary_parts(raw: Any) -> tuple[str, list[str]]:
     try:
         data = json.loads(raw) if isinstance(raw, str) else raw
     except (ValueError, TypeError):
-        logger.warning("meta_suggest: summary_json не JSON — беру фрагменти транскрипту")
+        logger.warning("meta_suggest: summary_json is not JSON; using transcript fragments")
         return "", []
     if not isinstance(data, dict):
         return "", []
@@ -74,7 +75,7 @@ def _excerpts(text: str) -> str:
 
 
 def build_context(row) -> tuple[str, str, bool]:
-    """(текст для моделі, basis, summary_ready) для рядка `transcriptions`."""
+    """(text for the model, basis, summary_ready) for a `transcriptions` row."""
     summary, points = _summary_parts(row["summary_json"])
     if summary:
         ctx = "Саммарі запису:\n" + summary
@@ -98,7 +99,7 @@ def _system_prompt(language: str | None) -> str:
 
 
 def clean_variants(values: Any, limit: int) -> list[str]:
-    """Прибрати порожні, дублі (без урахування регістру), лапки навколо; обрізати під ліміт."""
+    """Remove empty ones, duplicates (case-insensitive), surrounding quotes; trim to the limit."""
     out: list[str] = []
     seen: set[str] = set()
     if not isinstance(values, list):
@@ -122,29 +123,29 @@ def clean_variants(values: Any, limit: int) -> list[str]:
 
 
 def suggest(conn, transcription_id: int) -> dict:
-    """Варіанти назви й опису. Кидає :class:`SuggestError` (404/422/503)."""
+    """Title and description variants. Raises :class:`SuggestError` (404/422/503)."""
     row = conn.execute(
         "SELECT id, transcript_text, summary_json, language FROM transcriptions "
         "WHERE id = ? AND deleted_at IS NULL",
         (transcription_id,),
     ).fetchone()
     if row is None:
-        raise SuggestError("Транскрибування не знайдено", 404)
+        raise SuggestError(tr("svc_embed.suggest.not_found"), 404)
     if not (row["transcript_text"] or "").strip() and not row["summary_json"]:
-        raise SuggestError("У запису ще нема тексту транскрипту", 422)
+        raise SuggestError(tr("svc_embed.suggest.no_text"), 422)
 
     context, basis, summary_ready = build_context(row)
     model = settings.env("LOCAL_TITLE_MODEL") or None
     timeout = settings.env_float("LOCAL_TITLE_TIMEOUT")
-    # "0" — вивантажити модель одразу після відповіді: інакше 12B тримає VRAM
-    # ще LOCAL_LLM_KEEPALIVE (30 хв), і дзвінок, що почнеться в цей час,
-    # лишає копілот і live-транскрипцію без місця. Замір 14.10.2026: після
-    # виклику з keep_alive="0" у /api/ps лишається лише модель копілота.
+    # "0" unloads the model right after the answer: otherwise the 12B holds VRAM
+    # for another LOCAL_LLM_KEEPALIVE (30 min), and a call that starts in that time
+    # leaves the copilot and live transcription without room. Measurement 14.10.2026: after
+    # a call with keep_alive="0" only the copilot model is left in /api/ps.
     keep_alive = settings.env("LOCAL_TITLE_KEEPALIVE")
 
     ok, reason = local_llm.availability()
     if not ok:
-        raise SuggestError(f"Локальна модель недоступна: {reason}", 503)
+        raise SuggestError(tr("svc_embed.suggest.model_unavailable", reason=reason), 503)
     try:
         result = local_llm.generate_json(
             context, schema=_SCHEMA, system=_system_prompt(row["language"]),
@@ -152,20 +153,20 @@ def suggest(conn, transcription_id: int) -> dict:
             keep_alive=keep_alive,
         )
     except local_llm.LocalLLMError as e:
-        logger.warning("meta_suggest: id=%s — локальна модель не відповіла: %s",
+        logger.warning("meta_suggest: id=%s - local model did not respond: %s",
                        transcription_id, e)
-        raise SuggestError(f"Локальна модель не відповіла: {e}", 503) from e
+        raise SuggestError(tr("svc_embed.suggest.model_failed", error=e), 503) from e
 
     data = result.get("data") if isinstance(result, dict) else None
     data = data if isinstance(data, dict) else {}
     titles = clean_variants(data.get("titles"), record_meta.TITLE_MAX)
     descriptions = clean_variants(data.get("descriptions"), record_meta.DESCRIPTION_MAX)
     if not titles and not descriptions:
-        raise SuggestError("Модель повернула порожні варіанти — спробуйте ще раз", 503)
+        raise SuggestError(tr("svc_embed.suggest.empty"), 503)
 
     raw = result.get("raw") if isinstance(result, dict) else None
     used_model = (raw or {}).get("model") or model or local_llm.LOCAL_LLM_MODEL
-    logger.info("meta_suggest: id=%s basis=%s model=%s → %d назв, %d описів",
+    logger.info("meta_suggest: id=%s basis=%s model=%s → %d titles, %d descriptions",
                 transcription_id, basis, used_model, len(titles), len(descriptions))
     return {
         "titles": titles,

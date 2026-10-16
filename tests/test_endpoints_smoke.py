@@ -1,9 +1,9 @@
-"""Integration smoke-test для всех HTTP endpoints (Phase 5 safety net).
+"""Integration smoke test for all HTTP endpoints (Phase 5 safety net).
 
-Запускає Flask через test_client (in-process) — не блокує порт 5050.
-Тестує що ендпоінти не падають з 5xx, повертають очікувані формати.
+Runs Flask via test_client (in-process) — does not block port 5050.
+Tests that the endpoints do not fail with 5xx and return the expected formats.
 
-Запуск:
+Run:
     .venv/Scripts/python.exe -m pytest tests/test_endpoints_smoke.py -v
 """
 import os
@@ -12,22 +12,22 @@ import sys
 import pytest
 
 
-# Без CUDA-залежного імпорту: WHISPER_BACKEND=openai щоб не вантажити faster.
-# Але навіть openai whisper буде грузити модель, якщо її попросити.
-# Тому ми НЕ викликаємо /api/transcribe — тільки read-only ендпоінти.
+# Without CUDA-dependent imports: WHISPER_BACKEND=openai so as not to load faster.
+# But even openai whisper would load a model if asked.
+# So we do NOT call /api/transcribe — only read-only endpoints.
 
 @pytest.fixture(scope="module")
 def app_module():
-    """Імпортуємо app.py один раз на module — це довго через Whisper init.
+    """Import app.py once per module — this is slow because of Whisper init.
 
-    Конфлікт імен: пакет app/ затіняє app.py. Тому імпортуємо через
-    importlib.spec_from_file_location напряму з file path.
+    Name conflict: the app/ package shadows app.py. So we import via
+    importlib.spec_from_file_location directly from the file path.
     """
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, project_root)
     db_path = os.path.join(project_root, "whisper_history.db")
     if not os.path.exists(db_path):
-        pytest.skip(f"БД не знайдено за шляхом {db_path}, smoke-test пропущено")
+        pytest.skip(f"DB not found at {db_path}, smoke test skipped")
 
     import importlib.util
     app_py_path = os.path.join(project_root, "app.py")
@@ -43,7 +43,7 @@ def client(app_module):
     return app_module.app.test_client()
 
 
-# ===== Read-only endpoints (мають завжди працювати) =====
+# ===== Read-only endpoints (must always work) =====
 
 class TestReadOnlyEndpoints:
     def test_health(self, client):
@@ -59,7 +59,7 @@ class TestReadOnlyEndpoints:
         models = r.get_json()
         assert isinstance(models, list)
         assert len(models) > 0
-        # Кожна модель має name, info, downloaded
+        # Each model has name, info, downloaded
         for m in models:
             assert "name" in m
             assert "info" in m
@@ -75,7 +75,7 @@ class TestReadOnlyEndpoints:
         r = client.get("/api/system_stats")
         assert r.status_code == 200
         data = r.get_json()
-        # Має бути або snapshot з ts, або помилка
+        # Must be either a snapshot with ts, or an error
         assert "cpu_percent" in data or "error" in data
 
     def test_polish_availability(self, client):
@@ -83,13 +83,13 @@ class TestReadOnlyEndpoints:
         assert r.status_code == 200
         data = r.get_json()
         assert "available" in data
-        # Phase 4.4+: повинні бути models та default_model
+        # Phase 4.4+: must have models and default_model
         assert "default_model" in data
         assert "models" in data
         assert isinstance(data["models"], list)
 
     def test_active_library_transcriptions_empty(self, client):
-        """GET /api/transcribe/active повертає порожній список без активних джобів."""
+        """GET /api/transcribe/active returns an empty list when there are no active jobs."""
         r = client.get("/api/transcribe/active")
         assert r.status_code == 200
         data = r.get_json()
@@ -97,7 +97,7 @@ class TestReadOnlyEndpoints:
         assert isinstance(data["active"], list)
 
     def test_active_library_transcriptions_lifecycle(self, client, app_module):
-        """Запис у state.active_library_transcriptions виходить через endpoint."""
+        """An entry in state.active_library_transcriptions comes out through the endpoint."""
         from app import state
         store = state.active_library_transcriptions
         store[999] = {
@@ -113,7 +113,7 @@ class TestReadOnlyEndpoints:
             assert 999 in ids
         finally:
             store.pop(999, None)
-        # Після cleanup — не повертається
+        # After cleanup — not returned
         r = client.get("/api/transcribe/active")
         ids = [e['audio_download_id'] for e in r.get_json()['active']]
         assert 999 not in ids
@@ -124,7 +124,7 @@ class TestReadOnlyEndpoints:
         # Prometheus format — text/plain
         assert "text/plain" in r.content_type
         body = r.get_data(as_text=True)
-        # Має бути gauge для active_jobs
+        # There must be a gauge for active_jobs
         assert "whisper_active_jobs" in body
 
     def test_jobs_list(self, client):
@@ -150,11 +150,11 @@ class TestReadOnlyEndpoints:
         assert "total" in data
 
     def test_history_detail_has_related(self, client):
-        """GET /api/history/<id> тепер включає entities + action_items (для блоку
-        «Зв'язки» на сторінці транскрипту). Беремо перший наявний запис."""
+        """GET /api/history/<id> now includes entities + action_items (for the
+        "Connections" block on the transcript page). We take the first existing record."""
         lst = client.get("/api/history?per_page=1").get_json()
         if not lst.get("transcriptions"):
-            pytest.skip("Архів порожній — нема на чому перевіряти detail")
+            pytest.skip("Archive is empty — nothing to check the detail against")
         tid = lst["transcriptions"][0]["id"]
         r = client.get(f"/api/history/{tid}")
         assert r.status_code == 200
@@ -164,27 +164,27 @@ class TestReadOnlyEndpoints:
         assert "segments" in data and "speakers" in data
 
     def test_main_page(self, client):
-        """/ тепер віддає новий каркас Recall (shell + клієнтський роутер)."""
+        """/ now serves the new Recall shell (shell + client router)."""
         r = client.get("/")
         assert r.status_code == 200
         body = r.get_data(as_text=True)
-        # Новий shell: app-контейнер + завантажувач роутера.
+        # New shell: app container + router loader.
         assert 'class="rc-app' in body
         assert 'js/recall/router.js' in body
 
     def test_deep_link_serves_shell(self, client):
-        """Deep-link на не-API шлях віддає shell (холодний старт працює)."""
+        """A deep link on a non-API path serves the shell (cold start works)."""
         r = client.get("/transcript/2125-build-your-own")
         assert r.status_code == 200
         assert 'class="rc-app' in r.get_data(as_text=True)
 
     def test_unknown_api_returns_404_not_shell(self, client):
-        """Невідомий /api/* → 404, НЕ HTML-shell (інакше fetch-клієнти ламаються)."""
+        """An unknown /api/* → 404, NOT the HTML shell (otherwise fetch clients break)."""
         r = client.get("/api/does-not-exist")
         assert r.status_code == 404
         assert 'class="rc-app' not in r.get_data(as_text=True)
 
-# ===== Negative cases (мають повертати 4xx з error) =====
+# ===== Negative cases (must return 4xx with error) =====
 
 class TestNegativeCases:
     def test_history_invalid_id(self, client):
@@ -204,8 +204,8 @@ class TestNegativeCases:
         assert r.status_code == 400
 
     def test_polish_no_key_or_invalid_id(self, client):
-        # Якщо ANTHROPIC_API_KEY не встановлено → 400
-        # Якщо встановлено але id неіснуючий → 404
+        # If ANTHROPIC_API_KEY is not set → 400
+        # If set but the id does not exist → 404
         r = client.post("/api/transcription/999999/polish", json={})
         assert r.status_code in (400, 404)
 
@@ -219,7 +219,7 @@ class TestNegativeCases:
 
     def test_download_progress_unknown_id(self, client):
         r = client.get("/api/youtube/progress/nonexistent_download")
-        # Endpoint завжди повертає 200 з status: not_found
+        # The endpoint always returns 200 with status: not_found
         assert r.status_code == 200
         data = r.get_json()
         assert data["status"] == "not_found"
@@ -237,23 +237,23 @@ class TestSearchEndpoints:
         assert r.status_code == 200
 
     def test_history_filter_category_none(self, client):
-        # Phase 15D: 'none' → лише транскрипти без напрямку (category_id IS NULL).
+        # Phase 15D: 'none' → only transcripts without a direction (category_id IS NULL).
         r = client.get("/api/history?category_id=none&per_page=20")
         assert r.status_code == 200
         data = r.get_json()
         for tx in data["transcriptions"]:
-            assert tx["category_id"] is None, f"очікувано NULL, отримано {tx['category_id']}"
+            assert tx["category_id"] is None, f"expected NULL, got {tx['category_id']}"
 
     def test_history_filter_category_specific(self, client, app_module):
-        # Якщо у БД є хоч один transcripts з category_id — перевіримо інваріант.
-        # Фільтр напрямку з таксономією включає його проєкти (cat_svc.filter_sql),
-        # тож інваріант — «у піддереві», а не строга рівність id.
+        # If the DB has at least one transcript with a category_id — check the invariant.
+        # The direction filter with the taxonomy includes its projects (cat_svc.filter_sql),
+        # so the invariant is "in the subtree", not strict id equality.
         from app.db.connection import get_db_connection
         from app.services import categories as cat_svc
         all_resp = client.get("/api/history?per_page=100").get_json()
         labeled = [tx for tx in all_resp["transcriptions"] if tx.get("category_id")]
         if not labeled:
-            pytest.skip("у БД немає розмічених транскриптів — нічого перевіряти")
+            pytest.skip("no labelled transcripts in the DB — nothing to check")
         cid = labeled[0]["category_id"]
         with get_db_connection(app_module.app.config["DATABASE"]) as conn:
             subtree = set(cat_svc.subtree_ids(conn, cid))
@@ -263,27 +263,27 @@ class TestSearchEndpoints:
             assert tx["category_id"] in subtree
 
     def test_history_filter_category_invalid_is_400(self, client):
-        # Спека directions-projects-tags (02): category_id тепер іде через
-        # categories.parse_filter — не-цифра і не 'none'/'all' більше НЕ
-        # ігнорується мовчки (був би тихий filter_leak), а падає 400.
+        # Spec directions-projects-tags (02): category_id now goes through
+        # categories.parse_filter — a non-digit that is not 'none'/'all' is no longer
+        # silently ignored (it would be a quiet filter_leak), but fails with 400.
         r = client.get("/api/history?category_id=garbage&per_page=5")
         assert r.status_code == 400
         assert r.get_json()["success"] is False
 
     def test_history_search_punctuation_only(self, client):
-        # _sanitize_fts_query для "..." повертає '' → backend має повертати 0 результатів
+        # _sanitize_fts_query for "..." returns '' → the backend must return 0 results
         r = client.get("/api/history?search=...&per_page=5")
         assert r.status_code == 200
         data = r.get_json()
         assert data["total"] == 0
 
 
-# ===== Document upload (Phase 16A) — лише non-mutating валідація =====
+# ===== Document upload (Phase 16A) — non-mutating validation only =====
 
 class TestDocumentUpload:
-    """Перевіряємо, що ендпоінт зареєстровано і він відхиляє некоректний ввід.
-    Happy-path (реальне завантаження) НЕ тестуємо тут — він пише в живу БД і
-    тригерить GPU-embeddings; перевіряється вручну/окремо."""
+    """We check that the endpoint is registered and rejects invalid input.
+    The happy path (a real upload) is NOT tested here — it writes to the live DB and
+    triggers GPU embeddings; it is checked manually/separately."""
 
     def test_upload_no_file_returns_400(self, client):
         r = client.post("/api/documents/upload", data={})
@@ -311,9 +311,9 @@ class TestDocumentUpload:
 # ===== Co-pilot (Phase 19) — read-only + negative, non-mutating =====
 
 class TestCopilot:
-    """Ендпоінти живого ко-пілота. availability завжди 200; решта — 503 якщо
-    COPILOT_ENABLED=False, інакше коректні 404/400 на неіснуючому/поганому вводі.
-    Нічого не мутує (усі помилкові шляхи відсікаються до запису)."""
+    """Endpoints of the live co-pilot. availability is always 200; the rest — 503 if
+    COPILOT_ENABLED=False, otherwise correct 404/400 on nonexistent/bad input.
+    Mutates nothing (all error paths are cut off before any write)."""
 
     def _enabled(self, client):
         return client.get("/api/copilot/availability").get_json().get("enabled")
@@ -363,7 +363,7 @@ class TestCopilot:
         assert r.status_code == (404 if self._enabled(client) else 503)
 
 
-# ===== Document manage (Phase 16E) — non-mutating валідація =====
+# ===== Document manage (Phase 16E) — non-mutating validation =====
 
 class TestDocumentManage:
     def test_reparse_nonexistent_returns_404(self, client):
@@ -377,11 +377,11 @@ class TestDocumentManage:
         assert r.get_json()["success"] is False
 
     def test_import_folder_bad_dir_returns_400(self, client, monkeypatch, tmp_path):
-        # T1.3 (Волна 1): import-folder тепер гейтиться allowlist-коренями
-        # (RECALL_IMPORT_ROOTS) ще ДО перевірки isdir — див.
-        # tests/test_import_folder_allowlist.py для повного покриття гейта.
-        # Тут перевіряємо, що шлях, який ФОРМАЛЬНО у межах дозволеного
-        # кореня, але сам не існує, усе ще дає 400 "Папку не знайдено".
+        # T1.3 (Wave 1): import-folder is now gated by allowlist roots
+        # (RECALL_IMPORT_ROOTS) BEFORE the isdir check — see
+        # tests/test_import_folder_allowlist.py for full coverage of the gate.
+        # Here we check that a path that is FORMALLY inside an allowed
+        # root but does not exist itself still gives 400 "Папку не знайдено".
         monkeypatch.setenv("RECALL_IMPORT_ROOTS", str(tmp_path))
         missing = tmp_path / "no_such_subfolder_xyz123"
         r = client.post("/api/documents/import-folder", json={"path": str(missing)})
@@ -391,9 +391,9 @@ class TestDocumentManage:
         assert "папк" in body["error"].lower()
 
     def test_import_folder_no_allowlist_returns_403(self, client, monkeypatch):
-        # Дефолт "заборонити, поки не дозволено": порожній/не заданий
-        # RECALL_IMPORT_ROOTS → import-folder відхиляється звідусіль, ще до
-        # перевірки існування папки.
+        # Default "deny until allowed": an empty/unset
+        # RECALL_IMPORT_ROOTS → import-folder is rejected from everywhere, even before
+        # the folder existence check.
         monkeypatch.delenv("RECALL_IMPORT_ROOTS", raising=False)
         r = client.post("/api/documents/import-folder",
                         json={"path": "/no/such/folder/xyz123"})
@@ -403,13 +403,13 @@ class TestDocumentManage:
 
 
 class TestThreadSafeProgressStoreCleanup:
-    """T2.4 (Волна 2): _cleanup() не повинен витісняти активні операції.
+    """T2.4 (Wave 2): _cleanup() must not evict active operations.
 
-    Реалізація ThreadSafeProgressStore живе в app.py (не в app/ пакеті),
-    тож використовуємо вже прогрітий module-scoped app_module фікстуру
-    (як і решта цього файлу) замість ще одного повного імпорту app.py —
-    дивись tests/test_auth_gate.py навіщо НЕ варто плодити другий такий
-    імпорт (побічний ефект load_dotenv() б'є по інших тестах в сесії).
+    The ThreadSafeProgressStore implementation lives in app.py (not in the app/ package),
+    so we use the already warmed-up module-scoped app_module fixture
+    (like the rest of this file) instead of one more full import of app.py —
+    see tests/test_auth_gate.py for why NOT to spawn a second such
+    import (the load_dotenv() side effect hits other tests in the session).
     """
 
     def _make_store(self, app_module, max_size=3):
@@ -417,11 +417,11 @@ class TestThreadSafeProgressStoreCleanup:
 
     def test_active_entries_never_evicted_over_limit(self, app_module):
         store = self._make_store(app_module, max_size=3)
-        # Заповнюємо стор активними (не терминальними) операціями понад ліміт.
+        # Fill the store with active (non-terminal) operations beyond the limit.
         for i in range(5):
             store._data[f"active-{i}"] = {"status": "processing", "progress": i}
         store._cleanup()
-        # Жодна активна операція не має бути витіснена, навіть понад max_size.
+        # No active operation must be evicted, even beyond max_size.
         assert len(store._data) == 5
         for i in range(5):
             assert f"active-{i}" in store._data
@@ -433,7 +433,7 @@ class TestThreadSafeProgressStoreCleanup:
         store._data["active-1"] = {"status": "processing"}
         store._data["active-2"] = {"status": "queued"}
         store._cleanup()
-        # 4 записи > max_size=3 → мали витіснити найстаріший ТЕРМІНАЛЬНИЙ (done-1).
+        # 4 entries > max_size=3 → the oldest TERMINAL one (done-1) should have been evicted.
         assert "done-1" not in store._data
         assert "err-1" in store._data
         assert "active-1" in store._data
@@ -448,8 +448,8 @@ class TestThreadSafeProgressStoreCleanup:
         store._data["active-2"] = {"status": "processing"}
         store._data["active-3"] = {"status": "processing"}
         store._cleanup()
-        # Обидва терминальних мали піти, лишились лише 3 активних (> max_size=2,
-        # але втрачати активні заборонено).
+        # Both terminal ones should have gone, only 3 active ones remain (> max_size=2,
+        # but losing active ones is forbidden).
         assert "done-1" not in store._data
         assert "done-2" not in store._data
         assert len(store._data) == 3
@@ -457,7 +457,7 @@ class TestThreadSafeProgressStoreCleanup:
 
 
 class TestExecutorPoolSplit:
-    """T2.5 (Волна 2): live-critical (recording_finalize) і batch — окремі пули."""
+    """T2.5 (Wave 2): live-critical (recording_finalize) and batch — separate pools."""
 
     def test_live_and_batch_executors_are_distinct(self, app_module):
         assert app_module.executor is not app_module.live_executor

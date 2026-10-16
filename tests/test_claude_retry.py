@@ -1,12 +1,12 @@
-"""Тести retry-хелпера для викликів Claude API (REMEDIATION_PLAN Волна 3, T6.3).
+"""Tests of the retry helper for Claude API calls (REMEDIATION_PLAN Wave 3, T6.3).
 
-Покриваємо:
-- is_retryable_error: 429/5xx/529/мережа → True; 400/401/403/404 → False.
-- call_with_retry: 429 потім 200 → повертає результат другої спроби (1 retry).
-- call_with_retry: невалідний запит (400) НЕ ретраїться — падає одразу.
-- call_with_retry: ліміт спроб — не нескінченний, після вичерпання прокидає
-  останній виняток.
-- backoff_delay: монотонно зростає (exponential) і не перевищує max_delay.
+We cover:
+- is_retryable_error: 429/5xx/529/network → True; 400/401/403/404 → False.
+- call_with_retry: 429 then 200 → returns the result of the second attempt (1 retry).
+- call_with_retry: an invalid request (400) is NOT retried — fails immediately.
+- call_with_retry: the attempt limit is not infinite, after exhaustion it re-raises
+  the last exception.
+- backoff_delay: grows monotonically (exponential) and does not exceed max_delay.
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ from app.services.claude_retry import (
 
 
 class _FakeAPIStatusError(Exception):
-    """Мінімальний двійник anthropic.APIStatusError — без залежності від SDK
-    у тестовому import-графі (is_retryable_error перевіряє status_code
-    duck-typed, не isinstance на конкретний статус-клас)."""
+    """A minimal double of anthropic.APIStatusError — without a dependency on the SDK
+    in the test import graph (is_retryable_error checks status_code
+    duck-typed, not isinstance on a specific status class)."""
 
     def __init__(self, status_code: int, message: str = "boom"):
         super().__init__(message)
@@ -31,7 +31,7 @@ class _FakeAPIStatusError(Exception):
 
 
 class _FakeAPIConnectionError(Exception):
-    """Двійник мережевої помилки (timeout/обрив) — без status_code взагалі."""
+    """A double of a network error (timeout/disconnect) — without status_code at all."""
 
 
 # ---------------------------------------------------------------- is_retryable_error
@@ -50,10 +50,10 @@ class TestIsRetryableError:
 
     def test_real_anthropic_rate_limit_error_is_retryable(self):
         anthropic = pytest.importorskip("anthropic")
-        # RateLimitError у SDK інстанціюється з (message, response=..., body=...);
-        # найпростіше — сконструювати мінімальний об'єкт зі status_code, як
-        # робить is_retryable_error (duck-typed по .status_code, не isinstance
-        # конкретного підкласу окрім APIConnectionError).
+        # RateLimitError in the SDK is instantiated with (message, response=..., body=...);
+        # the simplest is to construct a minimal object with status_code, as
+        # is_retryable_error does (duck-typed on .status_code, not isinstance
+        # of a specific subclass other than APIConnectionError).
         exc = anthropic.APIStatusError.__new__(anthropic.RateLimitError)
         exc.status_code = 429
         assert is_retryable_error(exc) is True
@@ -80,7 +80,7 @@ class TestCallWithRetry:
         assert len(calls) == 1
 
     def test_429_then_200_retries_once_and_succeeds(self):
-        """Мок-клієнт: перший виклик 429, другий — успіх. Головний сценарій T6.3."""
+        """Mock client: the first call 429, the second — success. The main T6.3 scenario."""
         calls = {"n": 0}
 
         def fn():
@@ -93,7 +93,7 @@ class TestCallWithRetry:
         result = call_with_retry(fn, sleep=slept.append)
         assert result == {"content": "success after retry"}
         assert calls["n"] == 2
-        assert len(slept) == 1  # рівно один retry-sleep
+        assert len(slept) == 1  # exactly one retry sleep
 
     def test_529_overloaded_then_200_retries(self):
         calls = {"n": 0}
@@ -116,7 +116,7 @@ class TestCallWithRetry:
 
         with pytest.raises(_FakeAPIStatusError):
             call_with_retry(fn, sleep=lambda _s: None)
-        assert calls["n"] == 1  # жодного retry на невалідному запиті
+        assert calls["n"] == 1  # no retry on an invalid request
 
     def test_network_error_is_retried(self):
         anthropic = pytest.importorskip("anthropic")
@@ -132,7 +132,7 @@ class TestCallWithRetry:
         assert calls["n"] == 2
 
     def test_retry_limit_is_bounded_not_infinite(self):
-        """Персистентна 429 → рівно max_retries+1 спроб, потім прокидає виняток."""
+        """Persistent 429 → exactly max_retries+1 attempts, then raises the exception."""
         calls = {"n": 0}
 
         def fn():
@@ -141,27 +141,27 @@ class TestCallWithRetry:
 
         with pytest.raises(_FakeAPIStatusError):
             call_with_retry(fn, max_retries=2, sleep=lambda _s: None)
-        assert calls["n"] == 3  # 1 початкова спроба + 2 retry, не більше
+        assert calls["n"] == 3  # 1 initial attempt + 2 retries, no more
 
     def test_default_max_retries_is_small_bounded_value(self):
-        """Ліміт+backoff без нескінченного повтору — дефолт має бути малим числом."""
+        """Limit + backoff without infinite retry — the default must be a small number."""
         assert 1 <= DEFAULT_MAX_RETRIES <= 3
 
     def test_streaming_style_callable_reexecuted_fully_on_retry(self):
-        """Для стріму: fn() відкриває виклик ЗАНОВО щоразу (не резюмиться
-        середина) — перевіряємо, що side-effect (напр. 'відкриття стріму')
-        рахується стільки ж разів, скільки спроб."""
+        """For a stream: fn() opens the call ANEW every time (the middle is not
+        resumed) — we check that the side effect (e.g. 'stream opening')
+        is counted as many times as there are attempts."""
         opens = []
 
         def fn():
-            opens.append(len(opens))  # симулює client.messages.stream(...) відкриття
+            opens.append(len(opens))  # simulates the client.messages.stream(...) opening
             if len(opens) < 2:
                 raise _FakeAPIStatusError(500, "server error")
-            return "".join(str(x) for x in range(3))  # симулює зібраний текст стріму
+            return "".join(str(x) for x in range(3))  # simulates the assembled stream text
 
         result = call_with_retry(fn, sleep=lambda _s: None)
         assert result == "012"
-        assert opens == [0, 1]  # рівно 2 повних відкриття виклику
+        assert opens == [0, 1]  # exactly 2 full openings of the call
 
 
 # ---------------------------------------------------------------- backoff_delay
@@ -171,7 +171,7 @@ class TestBackoffDelay:
         d0 = backoff_delay(0, base_delay=1.0, max_delay=100.0)
         d1 = backoff_delay(1, base_delay=1.0, max_delay=100.0)
         d2 = backoff_delay(2, base_delay=1.0, max_delay=100.0)
-        # jitter (0..0.5) додається, тож порівнюємо мінімальні межі експоненти
+        # jitter (0..0.5) is added, so we compare the minimum bounds of the exponent
         assert d0 >= 1.0
         assert d1 >= 2.0
         assert d2 >= 4.0

@@ -1,29 +1,29 @@
 """Recording REST + SSE endpoints (Phase 9.5).
 
-Тонкий HTTP-шар над :class:`RecordingService`. Усе heavy-lifting
-(audio threads, fsync, finalize) виконує сервіс — тут лише валідація
-вхідних параметрів і JSON-відповіді.
+A thin HTTP layer over :class:`RecordingService`. All heavy lifting
+(audio threads, fsync, finalize) is done by the service; this layer only validates
+input parameters and builds JSON responses.
 
 Endpoints:
 
-- ``GET    /api/recording/devices``       — список mic + loopback (5s cache).
-- ``POST   /api/recording/start``         — нова сесія.
-- ``POST   /api/recording/<sid>/pause``   — пауза.
-- ``POST   /api/recording/<sid>/resume``  — продовжити.
-- ``POST   /api/recording/<sid>/stop``    — стоп + push finalize у фон.
-- ``POST   /api/recording/<sid>/discard`` — скасувати без finalize.
+- ``GET    /api/recording/devices``       — list of mic + loopback (5s cache).
+- ``POST   /api/recording/start``         — new session.
+- ``POST   /api/recording/<sid>/pause``   — pause.
+- ``POST   /api/recording/<sid>/resume``  — resume.
+- ``POST   /api/recording/<sid>/stop``    — stop + push finalize to the background.
+- ``POST   /api/recording/<sid>/discard`` — cancel without finalize.
 - ``GET    /api/recording/<sid>/state``   — snapshot.
-- ``GET    /api/recording/<sid>/live-transcript`` — снапшот live-preview сегментів (RAM).
+- ``GET    /api/recording/<sid>/live-transcript`` — snapshot of live-preview segments (RAM).
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
-- ``POST   /api/recording/<sid>/system-source`` — перенацілити системний звук (ADR-026 D3).
-- ``GET    /api/recording/apps``          — застосунки, що звучать зараз (C3).
-- ``GET    /api/recording/autoprompt``    — підказки дзвінка, що чекають відповіді (K2).
-- ``GET    /api/recording/autoprompt/<token>/<action>`` — кнопки сповіщення (одноразово).
-- ``POST   /api/recording/autoprompt/<id>/dismiss`` — «Не потрібно» з плашки.
-- ``GET    /api/recordings/active``       — усі живі сесії (для reattach).
+- ``POST   /api/recording/<sid>/system-source`` — retarget system audio (ADR-026 D3).
+- ``GET    /api/recording/apps``          — applications that are sounding now (C3).
+- ``GET    /api/recording/autoprompt``    — call prompts awaiting an answer (K2).
+- ``GET    /api/recording/autoprompt/<token>/<action>`` — notification buttons (one-shot).
+- ``POST   /api/recording/autoprompt/<id>/dismiss`` — «Not needed» from the banner.
+- ``GET    /api/recordings/active``       — all live sessions (for reattach).
 
-Якщо ``state.recording_service is None`` (RECORDING_ENABLED=False
-або ImportError) — кожен endpoint повертає 503.
+If ``state.recording_service is None`` (RECORDING_ENABLED=False
+or ImportError) — every endpoint returns 503.
 """
 from __future__ import annotations
 
@@ -57,17 +57,17 @@ logger = logging.getLogger(__name__)
 recording_bp = Blueprint('recording', __name__)
 
 
-# Cache для list_devices: енумерація WASAPI ~50ms. UI відкриває recorder-panel
-# часто — без кешу буде нагрузка. Інвалідація по часу + при start (бо девайси
-# можуть з'явитись/зникнути).
+# Cache for list_devices: WASAPI enumeration takes ~50ms. The UI opens the recorder panel
+# often — without a cache that would be load. Invalidation by time + on start (devices
+# may appear/disappear).
 _DEVICES_CACHE_TTL = 5.0
 _devices_cache: dict = {'ts': 0.0, 'data': []}
 _devices_lock = threading.Lock()
 
-# /save чекає на finalize. Зведення довгого запису (PCM→WAV→MP3, ~1 ГБ) для
-# годинної розмови триває значно довше за початкові 30с → /save віддавав 504, і
-# (у старому коді) запис не реєструвався. Бампнуто до 5 хв. Навіть якщо все одно
-# не встигне — finalize-callback авто-зареєструє запис у бібліотеці.
+# /save waits for finalize. Assembling a long recording (PCM→WAV→MP3, ~1 GB) for
+# an hour-long conversation takes much longer than the initial 30s → /save returned 504, and
+# (in the old code) the recording was not registered. Bumped to 5 min. Even if it still
+# does not make it, the finalize callback auto-registers the recording in the library.
 _SAVE_FINALIZE_DEADLINE_SEC = 300.0
 
 
@@ -82,18 +82,18 @@ def _service_unavailable():
 
 
 def _require_service():
-    """Декоратор-helper — повертає 503 якщо service None, інакше None."""
+    """Decorator helper — returns 503 if the service is None, otherwise None."""
     if state.recording_service is None:
         return _service_unavailable()
     return None
 
 
 def _internal_error_response(error_code: str):
-    """T7.4: відповідь на неочікуваний (не typed) виняток у recording-ендпоінтах.
+    """T7.4: response to an unexpected (not typed) exception in recording endpoints.
 
-    НЕ віддає str(exc) клієнту (могло текти шляхи файлів/деталі стеку) —
-    лише error_code + request_id для кореляції з traceback у логах (сам
-    traceback уже пішов через logger.exception(...) у виклику вище).
+    Does NOT return str(exc) to the client (it could leak file paths/stack details) —
+    only error_code + request_id for correlation with the traceback in the logs (the
+    traceback itself already went through logger.exception(...) in the call above).
     """
     return jsonify({
         'success': False,
@@ -104,8 +104,8 @@ def _internal_error_response(error_code: str):
 
 
 def _end_copilot_for(recording_session_id: str) -> None:
-    """Phase 19: завершити копілот-сесію, прив'язану до запису (якщо є).
-    Делегує єдиному хелперу копілота (C6); м'яко — не впливає на stop/discard."""
+    """Phase 19: end the copilot session bound to the recording (if any).
+    Delegates to the single copilot helper (C6); soft — does not affect stop/discard."""
     try:
         from app.blueprints.copilot import end_for_recording
         end_for_recording(recording_session_id)
@@ -122,7 +122,7 @@ def _unsupported_spec_response(e: Exception):
 
 
 def _copilot_active(recording_session_id: str) -> bool:
-    """Чи веде копілот цей запис (рядок copilot_sessions ще не 'ended')."""
+    """Whether the copilot is running this recording (the copilot_sessions row is not yet 'ended')."""
     if state.copilot_service is None:
         return False
     try:
@@ -137,13 +137,13 @@ def _copilot_active(recording_session_id: str) -> bool:
 
 @recording_bp.route('/api/recording/screens', methods=['GET'])
 def list_screens():
-    """Список моніторів для video-capture з опціональними thumbnails.
+    """List of monitors for video capture with optional thumbnails.
 
     Query params:
-    - ``thumbs=1`` — повертає data-uri thumbnail для кожного монітора (~320px).
+    - ``thumbs=1`` — returns a data-uri thumbnail for every monitor (~320px).
 
-    Ніколи не повертає 500: при будь-якій помилці (FFmpeg відсутній, ddagrab
-    недоступний, Windows < 10) — ``video_available=False, screens=[]``.
+    Never returns 500: on any error (FFmpeg missing, ddagrab
+    unavailable, Windows < 10) — ``video_available=False, screens=[]``.
     """
     err = _require_service()
     if err:
@@ -203,10 +203,10 @@ def screen_preview(monitor_index: int):
 
 @recording_bp.route('/api/recording/devices', methods=['GET'])
 def list_devices():
-    """Список input-девайсів (mic + loopback) з default-маркерами.
+    """List of input devices (mic + loopback) with default markers.
 
-    Cache 5 секунд — UI не повинен дзвонити WASAPI на кожне відкриття
-    panel'а. ``?force=1`` примусово оновлює.
+    Cached for 5 seconds — the UI must not call WASAPI on every opening of the
+    panel. ``?force=1`` forces a refresh.
     """
     err = _require_service()
     if err:
@@ -244,35 +244,35 @@ def list_devices():
 
 @recording_bp.route('/api/recording/start', methods=['POST'])
 def start_recording():
-    """Розпочати нову сесію.
+    """Start a new session.
 
     Body (JSON):
-    - ``mic_device_index`` (int|null): index з ``/devices``. Null = не пишемо mic.
-    - ``system_device_index`` (int|null): index loopback. Null = не пишемо system.
-    - ``mic_device_name`` (str, optional): для manifest.
-    - ``system_device_name`` (str, optional): для manifest.
+    - ``mic_device_index`` (int|null): index from ``/devices``. Null = do not record the mic.
+    - ``system_device_index`` (int|null): loopback index. Null = do not record system audio.
+    - ``mic_device_name`` (str, optional): for the manifest.
+    - ``system_device_name`` (str, optional): for the manifest.
 
-    Хоча б один з ``mic_device_index`` / ``system_device_index`` мусить
-    бути ненульовим.
+    At least one of ``mic_device_index`` / ``system_device_index`` must be
+    non-null.
 
     Response:
     - 200 ``{success, session_id, sse_url, state_url}``
-    - 400 якщо параметри невалідні
-    - 409 якщо вже є активна сесія
+    - 400 if the parameters are invalid
+    - 409 if there is already an active session
     """
     return _start_session(request.get_json(silent=True) or {})
 
 
 def _start_session(data: dict):
-    """Тіло старту — спільне для ``POST /start`` і кнопки «Записати» з підказки
-    дзвінка (K2): одна копія логіки, а не дві. Повертає те саме, що маршрут."""
+    """Start body — shared by ``POST /start`` and the «Record» button on the call
+    prompt (K2): one copy of the logic, not two. Returns the same as the route."""
     err = _require_service()
     if err:
         return err
 
     mic_idx = data.get('mic_device_index')
     sys_idx = data.get('system_device_index')
-    # Мова для live-preview transcribe. UI шле значення глобального
+    # Language for live-preview transcribe. The UI sends the value of the global
     # #languageSelect ('uk'/'ru'/'en'/'auto'). None / 'auto' / '' → auto-detect.
     live_lang = data.get('language')
     if isinstance(live_lang, str):
@@ -280,9 +280,9 @@ def _start_session(data: dict):
     else:
         live_lang = None
 
-    # ADR-026 D3: system_source {mode, apps}. 'all' (або відсутній) — сьогоднішній
-    # шлях через endpoint system_device_index; include/exclude вмикають системний
-    # потік і без девайса. Невалідний spec → 400 ДО будь-якого старту.
+    # ADR-026 D3: system_source {mode, apps}. 'all' (or absent) — today's
+    # path through the system_device_index endpoint; include/exclude enable the system
+    # stream even without a device. Invalid spec → 400 BEFORE any start.
     sys_spec = None
     raw_source = data.get('system_source')
     if raw_source is not None:
@@ -364,13 +364,13 @@ def _start_session(data: dict):
         logger.exception("start_recording crashed: %s", e)
         return _internal_error_response('INTERNAL')
 
-    # Інвалідація device cache — на наступному GET підвантажимо свіжі
+    # Invalidate the device cache — the next GET will load fresh ones
     with _devices_lock:
         _devices_cache['ts'] = 0.0
 
     # Phase 12.26+12.27: live transcribe + diariz preview.
-    # Запускаємо окремий worker per active stream — кожен emit-ує segments
-    # з speaker_label ('self' для mic, 'other' для system).
+    # Start a separate worker per active stream — each emits segments
+    # with speaker_label ('self' for mic, 'other' for system).
     if state.live_transcribe_worker is not None:
         try:
             manifest = state.recording_service.store.read(sid)
@@ -394,12 +394,12 @@ def _start_session(data: dict):
         except Exception as e:
             logger.warning("live_transcribe start failed: %s", e)
 
-    # Phase 19 (Co-pilot, Крок 1): якщо UI передав налаштування ко-пілота —
-    # створюємо копілот-сесію, прив'язану до запису. На Кроці 1 це лише
-    # persist налаштувань (вектор/режим/важливість/бюджет/лише-локально);
-    # live-аналіз додається у наступних кроках. М'яко: помилка тут не валить старт.
-    # C6: копілот один на процес — зайнятий іншим живим записом → запис уже
-    # стартував, відповідаємо 200 з copilot.error_code='COPILOT_BUSY'.
+    # Phase 19 (Co-pilot, Step 1): if the UI passed co-pilot settings —
+    # create a copilot session bound to the recording. At Step 1 this is only
+    # persistence of the settings (vector/mode/importance/budget/local-only);
+    # live analysis is added in the following steps. Soft: an error here does not fail the start.
+    # C6: one copilot per process — busy with another live recording → the recording has
+    # already started, respond 200 with copilot.error_code='COPILOT_BUSY'.
     copilot_session_id = None
     copilot_summary: dict = {'started': False}
     copilot_cfg = data.get('copilot')
@@ -408,7 +408,7 @@ def _start_session(data: dict):
         try:
             res = state.copilot_service.start(settings=copilot_cfg, recording_session_id=sid)
             copilot_session_id = res.get('copilot_session_id')
-            # Phase 19 Крок 2: підняти топік-трекер (фоновий потік на ембеддингах).
+            # Phase 19 Step 2: start the topic tracker (a background thread on embeddings).
             if copilot_session_id and state.copilot_worker is not None:
                 state.copilot_worker.start(
                     copilot_session_id=copilot_session_id,
@@ -473,7 +473,7 @@ _RETARGET_REASONS = ('user', 'auto_restore')
 
 @recording_bp.route('/api/recording/<session_id>/system-source', methods=['POST'])
 def set_system_source(session_id: str):
-    """Перенацілити системний звук живої сесії (ADR-026 D3, контракт C5).
+    """Retarget the system audio of a live session (ADR-026 D3, contract C5).
 
     Body: ``{mode: 'all'|'include'|'exclude', apps?: [exe], reason?: 'user'|'auto_restore'}``.
     """
@@ -518,8 +518,8 @@ def set_system_source(session_id: str):
 
 @recording_bp.route('/api/recording/apps', methods=['GET'])
 def list_apps():
-    """Застосунки, що звучать зараз, з позначкою, які живі записи їх пишуть (C3).
-    Ніколи не 500: будь-яка помилка → ``available: false``."""
+    """Applications that are sounding now, marked with which live recordings capture them (C3).
+    Never 500: any error → ``available: false``."""
     err = _require_service()
     if err:
         return err
@@ -531,7 +531,7 @@ def list_apps():
                 live_specs[sid] = state.recording_service.get_state(sid).get('system_source') or {}
             except Exception:
                 logger.debug("apps: state of %s unavailable", sid, exc_info=True)
-        # Сесія без системного потоку нічого з динаміків не пише.
+        # A session without a system stream records nothing from the speakers.
         live_specs = {sid: spec for sid, spec in live_specs.items() if spec}
         result = list_sounding_apps(live_specs=live_specs)
     except Exception as e:
@@ -543,13 +543,13 @@ def list_apps():
 # ---------------------------------------------------------------- call autoprompt (K2)
 
 def _call_watcher():
-    """``CallWatcher`` живе в ``app.extensions`` лише в процесі, що обслуговує запити
-    (app.py під ``__main__``, RECORDING_AUTOPROMPT); інакше ``None``."""
+    """``CallWatcher`` lives in ``app.extensions`` only in the process that serves requests
+    (app.py under ``__main__``, RECORDING_AUTOPROMPT); otherwise ``None``."""
     return current_app.extensions.get('call_watcher')
 
 
 def _autoprompt_page(title: str, text: str, code: int):
-    """Маленька сторінка для вкладки, яку відкрила кнопка сповіщення."""
+    """A small page for the tab opened by a notification button."""
     body = (
         f'<!doctype html><html lang="{request_lang()}"><meta charset="utf-8"><title>Recall</title>'
         '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">'
@@ -560,7 +560,7 @@ def _autoprompt_page(title: str, text: str, code: int):
 
 
 def _mic_for(endpoint: str | None) -> dict | None:
-    """Мікрофон, з якого захоплює сам дзвінок (імʼя endpoint'а його сесії), інакше дефолтний."""
+    """The microphone the call itself captures from (the endpoint name of its session), otherwise the default one."""
     try:
         mics = [d for d in state.recording_service.list_devices() if d.get('kind') == 'mic']
     except Exception as e:
@@ -582,7 +582,7 @@ def _mic_for(endpoint: str | None) -> dict | None:
 
 @recording_bp.route('/api/recording/autoprompt', methods=['GET'])
 def autoprompt_pending():
-    """Підказки дзвінка, що чекають відповіді (для плашки у вкладці, K2)."""
+    """Call prompts awaiting an answer (for the banner in the tab, K2)."""
     watcher = _call_watcher()
     if watcher is None:
         return jsonify({'success': True, 'enabled': False, 'prompts': []})
@@ -591,7 +591,7 @@ def autoprompt_pending():
 
 @recording_bp.route('/api/recording/autoprompt/<prompt_id>/dismiss', methods=['POST'])
 def autoprompt_dismiss(prompt_id: str):
-    """«Не потрібно» з плашки: підказка зникає, за цей дзвінок не повторюється."""
+    """«Not needed» from the banner: the prompt disappears and is not repeated for this call."""
     watcher = _call_watcher()
     if watcher is None or not watcher.dismiss(prompt_id):
         return jsonify({'success': False, 'error': tr('capture.rec.err.prompt_gone'), 'error_code': 'NOT_FOUND'}), 404
@@ -600,10 +600,10 @@ def autoprompt_dismiss(prompt_id: str):
 
 @recording_bp.route('/api/recording/autoprompt/<token>/<action>', methods=['GET'])
 def autoprompt_action(token: str, action: str):
-    """Кнопки сповіщення Windows відкривають цей URL у браузері. Токен = id підказки,
-    одноразовий і живе, поки живе його дзвінок або запис: без нього нічого не
-    стартує, тож чужий сайт запис не ввімкне. ``record`` стартує мікрофон + звук
-    лише цього застосунку тим самим кодом, що ``POST /start``."""
+    """Windows notification buttons open this URL in the browser. Token = prompt id,
+    one-shot and alive while its call or recording lives: without it nothing
+    starts, so a foreign site cannot turn a recording on. ``record`` starts the microphone + sound
+    of this application only, with the same code as ``POST /start``."""
     watcher = _call_watcher()
     info = watcher.consume(token, action) if watcher is not None else None
     if info is None:
@@ -643,32 +643,32 @@ def autoprompt_action(token: str, action: str):
 
 
 def stop_session(session_id: str, name: str | None = None) -> None:
-    """Стоп запису + live-транскрипції й копілота цього запису. Спільне для
-    ``POST /stop`` і автостопу K2, який кличе це з фонового потоку (без request-
-    контексту). ``SessionNotFoundError`` та інші помилки ``service.stop``
-    прокидаються викликачеві."""
+    """Stop the recording + live transcription and copilot of this recording. Shared by
+    ``POST /stop`` and the K2 autostop, which calls this from a background thread (without a request
+    context). ``SessionNotFoundError`` and other errors of ``service.stop``
+    are propagated to the caller."""
     state.recording_service.stop(session_id, name=name)
 
-    # Phase 12.26: Stop live transcribe worker ЦІЄЇ сесії (per-sid): живі воркери
-    # іншого запису не чекаємо. Повна транскрипція серіалізується з ними
-    # семафором WHISPER_MAX_PARALLEL=1 — їхня лента просто відстане (ADR-026, Ask 10).
+    # Phase 12.26: Stop the live transcribe worker of THIS session (per-sid): we do not wait for the live workers
+    # of another recording. Full transcription is serialized with them by the
+    # WHISPER_MAX_PARALLEL=1 semaphore — their ribbon just lags behind (ADR-026, Ask 10).
     if state.live_transcribe_worker is not None:
         try:
             state.live_transcribe_worker.stop(session_id, wait=True)
         except Exception as e:
             logger.warning("live_transcribe stop failed: %s", e)
 
-    # Phase 19: завершити копілот-сесію цього запису (якщо була).
+    # Phase 19: end the copilot session of this recording (if there was one).
     _end_copilot_for(session_id)
 
 
 @recording_bp.route('/api/recording/<session_id>/stop', methods=['POST'])
 def stop_recording(session_id: str):
-    """Зупинити запис. Body може містити:
-    - ``name`` (str|null) — назва запису, інакше використається auto_name.
+    """Stop the recording. The body may contain:
+    - ``name`` (str|null) — the recording name, otherwise auto_name is used.
 
-    Finalize іде у фоні (JobQueue) — UI слідкує через polling /state
-    або підписку SSE до приходу status='finalized'.
+    Finalize runs in the background (JobQueue) — the UI follows via polling /state
+    or an SSE subscription until status='finalized' arrives.
     """
     err = _require_service()
     if err:
@@ -696,22 +696,22 @@ def stop_recording(session_id: str):
 
 @recording_bp.route('/api/recording/<session_id>/save', methods=['POST'])
 def save_recording(session_id: str):
-    """Чекає на finalize і додає запис в Audio Library (audio_downloads).
+    """Waits for finalize and adds the recording to the Audio Library (audio_downloads).
 
     Body (JSON):
-    - ``name`` (str, optional) — назва запису. Якщо порожній — використовується
-      manifest.auto_name.
+    - ``name`` (str, optional) — the recording name. If empty —
+      manifest.auto_name is used.
 
-    Чекає до ``_SAVE_FINALIZE_DEADLINE_SEC`` секунд на ``status='finalized'``.
-    Якщо за цей час не дочекалися — повертає 504. Якщо session crashed — 500.
-    (Серверний finalize-callback однаково авто-реєструє запис у бібліотеці —
-    навіть якщо тут 504, запис зʼявиться в Аудіотеці за ~хвилину.)
+    Waits up to ``_SAVE_FINALIZE_DEADLINE_SEC`` seconds for ``status='finalized'``.
+    If it did not finish in that time — returns 504. If the session crashed — 500.
+    (The server finalize callback auto-registers the recording in the library anyway —
+    even if this is 504, the recording will appear in the Audio library in ~a minute.)
 
     Response:
     - 200 ``{success, download_id, file_path, name, duration_sec, file_size,
               recording_session_id}``
-    - 404 sid не знайдено
-    - 500 crashed або final.mp3 відсутній
+    - 404 sid not found
+    - 500 crashed or final.mp3 is missing
     - 504 timeout
     """
     err = _require_service()
@@ -719,8 +719,8 @@ def save_recording(session_id: str):
         return err
     data = request.get_json(silent=True) or {}
     name_input = (data.get('name') or '').strip() if isinstance(data.get('name'), str) else ''
-    # editable-title-description-02: опис стоп-екрана — валідуємо одразу,
-    # до очікування finalize.
+    # editable-title-description-02: stop-screen description — validate right away,
+    # before waiting for finalize.
     try:
         description_input = record_meta.normalize_description(data.get('description'))
     except ValueError as e:
@@ -765,7 +765,7 @@ def save_recording(session_id: str):
     name = name_input or manifest.get('name') or manifest.get('auto_name') \
         or f'Запис {session_id[:8]}'
 
-    # Persist назву в manifest (для recovery scenarios)
+    # Persist the name in the manifest (for recovery scenarios)
     try:
         store.set_name(session_id, name)
     except SessionStoreError:
@@ -778,10 +778,10 @@ def save_recording(session_id: str):
         else:
             manifest['description'] = description_input
 
-    # Реєстрація в audio_downloads через спільний хелпер. Ідемпотентно:
-    # серверний finalize-callback вже міг авто-зареєструвати цей запис —
-    # тоді отримаємо created=False і (за потреби) оновлену назву. Логіка
-    # insert'у єдина для обох шляхів (recording/library.py).
+    # Registration in audio_downloads through a shared helper. Idempotent:
+    # the server finalize callback may already have auto-registered this recording —
+    # then we get created=False and (if needed) an updated name. The insert
+    # logic is single for both paths (recording/library.py).
     from app.services.recording.library import register_recording
     db_path = current_app.config['DATABASE']
     try:
@@ -811,7 +811,7 @@ def save_recording(session_id: str):
 
 @recording_bp.route('/api/recording/<session_id>/discard', methods=['POST'])
 def discard_recording(session_id: str):
-    """Скасувати запис без збереження. Видаляє файли сесії повністю."""
+    """Cancel the recording without saving. Removes the session files completely."""
     err = _require_service()
     if err:
         return err
@@ -820,16 +820,16 @@ def discard_recording(session_id: str):
     except Exception as e:
         logger.exception("discard_recording crashed: %s", e)
         return _internal_error_response('INTERNAL')
-    # Phase 12.26: stop live worker (силою — discard не має finalize)
+    # Phase 12.26: stop the live worker (forcibly — discard has no finalize)
     if state.live_transcribe_worker is not None:
         try:
             state.live_transcribe_worker.stop(session_id, wait=False)
         except Exception:
             logger.debug(
-                "live_transcribe_worker.stop failed for %s (best-effort, discard триває)",
+                "live_transcribe_worker.stop failed for %s (best-effort, discard continues)",
                 session_id, exc_info=True,
             )
-    # Phase 19: завершити копілот-сесію цього запису (якщо була).
+    # Phase 19: end the copilot session of this recording (if there was one).
     _end_copilot_for(session_id)
     return jsonify({'success': True, 'session_id': session_id, 'status': 'discarded'})
 
@@ -838,7 +838,7 @@ def discard_recording(session_id: str):
 
 @recording_bp.route('/api/recording/<session_id>/state', methods=['GET'])
 def get_state_endpoint(session_id: str):
-    """Snapshot стану сесії (active або finalized)."""
+    """Snapshot of the session state (active or finalized)."""
     err = _require_service()
     if err:
         return err
@@ -851,27 +851,27 @@ def get_state_endpoint(session_id: str):
 
 # --------------------------------------------------------- live-transcript
 
-# Потолок сегментів за один виклик (замір Трека 3: ~72 інсайти за дзвінок,
-# з запасом на транскрипт). Contracts C1 (plan.md).
+# Segment ceiling per call (Track 3 measurement: ~72 insights per call,
+# with a margin for the transcript). Contracts C1 (plan.md).
 _LIVE_TRANSCRIPT_LIMIT = 400
 
 
 @recording_bp.route('/api/recording/<session_id>/live-transcript', methods=['GET'])
 def get_live_transcript(session_id: str):
-    """Снапшот preview-сегментів `LiveTranscribeWorker` (RAM-only).
+    """Snapshot of the `LiveTranscribeWorker` preview segments (RAM-only).
 
     Query:
-    - ``since_seq`` (int, опц.) — **рекомендований курсор** для
-      інкрементального опитування (MCP): повернути лише сегменти з
-      ``seq > since_seq``. Номер спільний для обох доріжок (mic/system) і
-      росте в порядку фактичного append'у, тому не губить сегменти
-      повільнішої доріжки (Story 06). Бери ``next_seq`` з відповіді як
-      ``since_seq`` наступного опиту.
-    - ``since_sec`` (float, опц.) — фільтр по часу початку сегмента
-      (``start > since_sec``). НЕ курсор для опитування: доріжки
-      транскрибуються незалежно у своєму темпі, тому сегмент з меншим
-      ``start`` може прийти ПІЗНІШЕ за вже відданий і буде втрачений при
-      опитуванні по часу.
+    - ``since_seq`` (int, optional) — **recommended cursor** for
+      incremental polling (MCP): return only segments with
+      ``seq > since_seq``. The number is shared by both tracks (mic/system) and
+      grows in the order of the actual append, so it does not lose segments of the
+      slower track (Story 06). Take ``next_seq`` from the response as
+      the ``since_seq`` of the next poll.
+    - ``since_sec`` (float, optional) — filter by segment start time
+      (``start > since_sec``). NOT a polling cursor: the tracks are
+      transcribed independently at their own pace, so a segment with a smaller
+      ``start`` may arrive LATER than one already returned and will be lost when
+      polling by time.
     """
     err = _require_service()
     if err:
@@ -913,7 +913,7 @@ def get_live_transcript(session_id: str):
 
     since_sec = request.args.get('since_sec', type=float)
     since_seq = request.args.get('since_seq', type=int)
-    # order_by='seq' — курсор рахує порядок append'у, не start (Story 06).
+    # order_by='seq' — the cursor counts append order, not start (Story 06).
     segments = state.live_transcribe_worker.get_preview(session_id, order_by='seq')
     if since_seq is not None:
         segments = [s for s in segments if s.get('seq', 0) > since_seq]
@@ -933,9 +933,9 @@ def get_live_transcript(session_id: str):
         'seq': s.get('seq'),
     } for s in segments]
     last_sec = max((s['start'] for s in out_segments), default=None)
-    # next_seq — курсор для наступного опиту. Якщо нових сегментів немає,
-    # лишаємо since_seq незмінним (а не max по всій сесії) — інакше усічені
-    # `truncated`-сегменти "проскочать" повз клієнта назавжди.
+    # next_seq — the cursor for the next poll. If there are no new segments,
+    # leave since_seq unchanged (not the max over the whole session) — otherwise truncated
+    # `truncated` segments would slip past the client forever.
     if out_segments:
         next_seq = out_segments[-1]['seq']
     else:
@@ -959,14 +959,14 @@ def get_live_transcript(session_id: str):
 
 @recording_bp.route('/api/recordings/recovered', methods=['GET'])
 def get_recovered_sessions():
-    """Список session_id що були recovery'ні при старті додатку.
-    UI показує banner і одразу робить ack — після цього список очищується.
+    """List of session_ids that were recovered at application start.
+    The UI shows a banner and immediately acks — after that the list is cleared.
     """
     err = _require_service()
     if err:
         return err
     log = state.recording_recovery_log or []
-    # Збираємо details із manifest'у для кожного recovered session
+    # Collect details from the manifest for every recovered session
     details = []
     for sid in log:
         try:
@@ -981,7 +981,7 @@ def get_recovered_sessions():
             })
         except Exception:
             logger.debug("recovered session manifest read failed for sid=%s", sid, exc_info=True)
-    # Auto-ack: очищаємо log після першого read'у щоб banner не з'являвся знову
+    # Auto-ack: clear the log after the first read so the banner does not appear again
     if request.args.get('ack', '1') == '1':
         state.recording_recovery_log = []
     return jsonify({
@@ -993,8 +993,8 @@ def get_recovered_sessions():
 
 @recording_bp.route('/api/recordings/active', methods=['GET'])
 def get_active_session():
-    """Усі живі сесії (C5). UI на init робить reattach до кожної; MCP обирає
-    сесію явно. ``session_id``/``state`` заповнені лише коли сесія рівно одна."""
+    """All live sessions (C5). On init the UI reattaches to each; MCP picks the
+    session explicitly. ``session_id``/``state`` are filled only when there is exactly one session."""
     err = _require_service()
     if err:
         return err
@@ -1004,12 +1004,12 @@ def get_active_session():
         try:
             snap = state.recording_service.get_state(sid)
         except SessionNotFoundError:
-            continue  # зупинилась між переліком і знімком
+            continue  # stopped between the listing and the snapshot
         snapshots[sid] = snap
         streams = snap.get('streams') or {}
         sessions.append({
             'session_id': sid,
-            'state': snap,  # повний знімок /state — SPA робить reattach по ньому
+            'state': snap,  # the full /state snapshot — the SPA reattaches from it
             'name': snap.get('name'),
             'auto_name': snap.get('auto_name'),
             'elapsed_seconds': snap.get('elapsed_seconds', 0.0),
@@ -1033,7 +1033,7 @@ def get_active_session():
 
 @recording_bp.route('/api/recording/<session_id>/stream', methods=['GET'])
 def stream_recording_events(session_id: str):
-    """SSE-канал для конкретної сесії.
+    """SSE channel for a specific session.
 
     Events:
     - ``level`` (10Hz): {streams: {mic: {peak, rms}, system: {...}}, elapsed}

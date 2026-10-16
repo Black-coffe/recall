@@ -1,24 +1,24 @@
-"""JobQueue — обёртка над ThreadPoolExecutor с состояниями и cancel.
+"""JobQueue — a wrapper over ThreadPoolExecutor with states and cancel.
 
-Каждый Job имеет:
+Each Job has:
   - id (UUID)
   - kind ('youtube_download' | 'transcription' | ...)
   - state (queued | running | completed | failed | cancelled | crashed)
   - created_at, started_at, finished_at
-  - error (опционально)
-  - meta (произвольный dict для UI: title, url, file_path, ...)
+  - error (optional)
+  - meta (arbitrary dict for the UI: title, url, file_path, ...)
 
-Cancel — кооперативный: внутри функции-задачи нужно проверять job.is_cancelled().
+Cancel is cooperative: the task function must check job.is_cancelled().
 
-Персистентність (T2.1): стан job'ів дублюється у таблицю ``jobs`` (міграція
-v26, ``app/db/migrations.py``) — dict у пам'яті лишається "гарячим" кешем
-поверх БД (читання /api/jobs не ходить у SQLite на кожен запит), а БД —
-джерело істини, що переживає рестарт/крах процесу. ``db_path`` не задано за
-замовчуванням (None) — персистентність вимкнена (напр. у тестах, що не
-піднімають повну БД); ``set_db_path()`` вмикає її явно (викликається з
-app.py в тому самому місці, де recording робить свій recovery). Запис у БД —
-best-effort: помилка персистентності ніколи не валить сам job (лише
-warning) — dict-кеш лишається джерелом правди для поточного процесу.
+Persistence (T2.1): job state is mirrored into the ``jobs`` table (migration
+v26, ``app/db/migrations.py``) — the in-memory dict stays a "hot" cache
+on top of the DB (reading /api/jobs does not hit SQLite on every request), while the DB is
+the source of truth that survives a process restart/crash. ``db_path`` is not set by
+default (None) — persistence is off (e.g. in tests that do not
+bring up a full DB); ``set_db_path()`` turns it on explicitly (called from
+app.py in the same place where recording does its recovery). The DB write is
+best-effort: a persistence error never fails the job itself (only a
+warning) — the dict cache stays the source of truth for the current process.
 """
 from __future__ import annotations
 
@@ -55,8 +55,8 @@ class Job:
         return self._cancel_event.is_set()
 
     def to_dict(self) -> Dict[str, Any]:
-        # Не використовуємо asdict() — він робить deepcopy, що падає на
-        # threading.Event/Future. Збираємо вручну з потрібних полів.
+        # We do not use asdict() — it does a deepcopy, which fails on
+        # threading.Event/Future. We collect manually from the needed fields.
         return {
             "id": self.id,
             "kind": self.kind,
@@ -70,22 +70,22 @@ class Job:
 
 
 class JobQueue:
-    """Реестр задач + удобный submit() поверх executor'а(ов).
+    """Job registry + a convenient submit() on top of the executor(s).
 
-    T2.5 (Волна 2): раніше всі job'и (транскрипція-суміжні, backfill,
-    doc_import, recording_finalize, ...) йшли крізь ОДИН
-    ``ThreadPoolExecutor(max_workers=2)`` — довгий batch (напр.
-    enrichment_backfill по всьому архіву) міг зайняти обидва воркери
-    надовго, і latency-критичний ``recording_finalize`` (юзер щойно
-    натиснув "стоп" і чекає на готовий файл) чекав у черзі за ним.
+    T2.5 (Wave 2): previously all jobs (transcription-related, backfill,
+    doc_import, recording_finalize, ...) went through ONE
+    ``ThreadPoolExecutor(max_workers=2)`` — a long batch (e.g.
+    enrichment_backfill over the whole archive) could occupy both workers
+    for a long time, and the latency-critical ``recording_finalize`` (the user has just
+    pressed "stop" and is waiting for the finished file) waited in the queue behind it.
 
-    Тепер підтримується ДРУГИЙ, окремий ``live_executor`` для набору
-    "live-critical" kind'ів (``live_kinds``) — типово лише
-    ``recording_finalize``. Усі інші kind'и, як і раніше, ідуть у основний
-    ``executor``. Реєстр job'ів (``self._jobs``), listing/get/cancel/
-    персистентність — СПІЛЬНІ для обох пулів (єдине джерело правди для
-    /api/jobs), змінюється лише те, У ЯКИЙ executor.submit() потрапляє
-    задача.
+    Now a SECOND, separate ``live_executor`` is supported for a set of
+    "live-critical" kinds (``live_kinds``) — by default only
+    ``recording_finalize``. All other kinds still go to the main
+    ``executor``. The job registry (``self._jobs``), listing/get/cancel/
+    persistence — are SHARED by both pools (a single source of truth for
+    /api/jobs); the only thing that changes is WHICH executor.submit() the
+    task goes to.
     """
 
     def __init__(self, executor, max_history: int = 200, db_path: Optional[str] = None,
@@ -109,7 +109,7 @@ class JobQueue:
     # -----------------------------------------------------
 
     def submit(self, kind: str, fn: Callable, *args, job_id: Optional[str] = None, meta: Optional[Dict] = None, **kwargs) -> Job:
-        """Запустить задачу. fn получает первым аргументом job, далее переданные args/kwargs."""
+        """Starts a task. fn receives the job as its first argument, then the passed args/kwargs."""
         jid = job_id or str(uuid.uuid4())[:20]
         job = Job(id=jid, kind=kind, meta=meta or {})
 
@@ -156,7 +156,7 @@ class JobQueue:
             jobs = [j for j in jobs if j.kind == kind]
         if active_only:
             jobs = [j for j in jobs if j.state in ("queued", "running")]
-        # Свежие сверху
+        # Newest first
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs
 
@@ -168,7 +168,7 @@ class JobQueue:
         if job.state in ("completed", "failed", "cancelled"):
             return False
         job._cancel_event.set()
-        # Если future ещё не стартовал — Future.cancel() может вернуть True.
+        # If the future has not started yet — Future.cancel() may return True.
         if job._future is not None:
             cancelled = job._future.cancel()
             if cancelled:
@@ -178,22 +178,22 @@ class JobQueue:
         return True
 
     # -----------------------------------------------------
-    # Persistence (T2.1) — таблиця jobs, міграція v26
+    # Persistence (T2.1) — jobs table, migration v26
     # -----------------------------------------------------
 
     def set_db_path(self, db_path: str) -> None:
-        """Вмикає персистентність у SQLite. Викликається один раз з app.py
-        (start-up, після init_database()) — до цього виклику submit()/cancel()
-        працюють як і раніше, лише в пам'яті (db_path=None за замовчуванням)."""
+        """Turns on persistence in SQLite. Called once from app.py
+        (start-up, after init_database()) — until this call submit()/cancel()
+        work as before, in memory only (db_path=None by default)."""
         self._db_path = db_path
 
     def _persist(self, job: Job) -> None:
-        """Best-effort upsert поточного стану job'а у таблицю jobs.
+        """Best-effort upsert of the job's current state into the jobs table.
 
-        Ніколи не кидає — помилка запису в БД (locked/відсутня таблиця у
-        старих тестових БД без міграцій) не має ламати фонову задачу, лише
-        логується warning'ом. dict (self._jobs) лишається джерелом правди
-        для живого процесу незалежно від успіху персистентності.
+        Never raises — a DB write error (locked/missing table in
+        old test DBs without migrations) must not break the background task, it is only
+        logged as a warning. The dict (self._jobs) stays the source of truth
+        for the live process regardless of persistence success.
         """
         if not self._db_path:
             return
@@ -220,20 +220,20 @@ class JobQueue:
                 )
                 conn.commit()
         except Exception as e:
-            logger.warning("JobQueue: persist job %s не вдався: %s", job.id, e)
+            logger.warning("JobQueue: persist job %s failed: %s", job.id, e)
 
     def recover_crashed(self) -> List[str]:
-        """Старт-логіка recovery (T2.1) — аналог recording
-        ``SessionStore.recover_orphaned()``: усі job'и, які на момент
-        попереднього завершення процесу мали state IN ('queued','running'),
-        не можуть бути завершені (executor/потоки не пережили рестарт) — тож
-        позначаються 'crashed' у БД і підвантажуються у dict-кеш, щоб одразу
-        бути видимими через /api/jobs, а не мовчки зникнути.
+        """Start-up recovery logic (T2.1) — analogous to recording
+        ``SessionStore.recover_orphaned()``: all jobs that, at the moment of
+        the previous process shutdown, had state IN ('queued','running')
+        cannot be completed (executor/threads did not survive the restart) — so they
+        are marked 'crashed' in the DB and loaded into the dict cache so they are immediately
+        visible via /api/jobs instead of silently vanishing.
 
-        Викликається один раз при старті app.py, ПІСЛЯ ``set_db_path()`` і
-        ПІСЛЯ ``init_database()`` (таблиця jobs мусить вже існувати).
-        Повертає список job_id, які потрапили в recovery (для логування,
-        як ``recording_service.recover_orphaned()``).
+        Called once at app.py startup, AFTER ``set_db_path()`` and
+        AFTER ``init_database()`` (the jobs table must already exist).
+        Returns the list of job_ids that went through recovery (for logging,
+        like ``recording_service.recover_orphaned()``).
         """
         if not self._db_path:
             return []
@@ -273,7 +273,7 @@ class JobQueue:
                     recovered.append(jid)
                 conn.commit()
         except Exception as e:
-            logger.warning("JobQueue: recover_crashed не вдався: %s", e)
+            logger.warning("JobQueue: recover_crashed failed: %s", e)
         return recovered
 
     # -----------------------------------------------------
@@ -281,7 +281,7 @@ class JobQueue:
     # -----------------------------------------------------
 
     def _cleanup_locked(self):
-        """Удаляет старые завершённые job'ы при переполнении (под уже взятым _lock)."""
+        """Removes old finished jobs on overflow (with _lock already held)."""
         if len(self._jobs) <= self._max_history:
             return
         finished = [

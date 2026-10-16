@@ -21,7 +21,7 @@ last-verified: 2026-10-15 (english-i18n 4.16.0: all `error`/`message` in jsonify
 - `/api/transcription/<id>/`: `audio` (:1298), `segments/merge` (:1352), `segments/split` (:1413), Claude:
   `polish` (:1559), `summarize` (:1638), `sentiment` (:1723), `translate` (:1776), `topics` (:1879).
 - `POST /api/export/<format>` (:2024): txt, srt, md, docx, json, pdf. `bulk_export`: json, txt, docx, md.
-  Name/title — `display_name`; a payload without `title/source_name/id` → a neutral fallback, not `Запис #None`.
+  Name/title — `display_name`; a payload without `title/source_name/id` → a neutral fallback, not "Record #None".
 - Video (`video-visual-timeline`, 4.10.0; :2443-2790): `POST <tid>/analyze-video` (:2443) JSON `{force, method
   thumbs|bisect, step, min_res, threshold, settle, ignore_regions, max_frames, ocr=true, describe=false,
   vision_backend local|claude}` → job `video_analysis` (`{job_id}` | `{ready:true}` | `already_running` | 200

@@ -1,14 +1,14 @@
-"""Двошарова таксономія: дерево напрямків + теги (`app/services/categories.py`).
+"""Two-layer taxonomy: direction tree + tags (`app/services/categories.py`).
 
-Спека `directions-projects-tags`, історія 01 (трасер). Зріз перевіряється
-наскрізь: міграція v45 на тимчасовій БД → сервіс (фільтр/дерево/письменники/
-теги) → HTTP через `test_client` окремого Flask-застосунку з `memory_bp`.
-Бойовий `whisper_history.db` не відкривається, `schedule_records_reembed`
-всюди замокано.
+Spec `directions-projects-tags`, story 01 (tracer). The slice is verified
+end to end: migration v45 on a temporary DB -> service (filter/tree/writers/
+tags) -> HTTP through the `test_client` of a separate Flask app with `memory_bp`.
+The live `whisper_history.db` is never opened, `schedule_records_reembed`
+is mocked everywhere.
 
-Фікстури кириличні — саме на кирилиці цей проєкт уже ловив баги порівняння
-(памʼятка `plan-dictated-sql-ignored-own-memory`): дерево тут «Фонд Робота»
-→ «Акмекорп»/«DOM», а не Foo → Bar.
+Fixtures are Cyrillic - it is on Cyrillic that this project has already caught comparison bugs
+(memory note `plan-dictated-sql-ignored-own-memory`): the tree here is «Фонд Робота»
+-> «Акмекорп»/«DOM», not Foo -> Bar.
 """
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ def conn(db):
 
 @pytest.fixture(autouse=True)
 def no_real_reembed(monkeypatch):
-    """Жоден тест цього файлу не ставить справжню задачу в чергу (сусідній
-    `test_endpoints_smoke` привʼязує живий `JobQueue` до `app.state`)."""
+    """No test in this file puts a real job into the queue (the neighbouring
+    `test_endpoints_smoke` binds a live `JobQueue` to `app.state`)."""
     from app.services import reembed
 
     calls: list[dict] = []
@@ -67,11 +67,11 @@ def client(db):
 
 
 def _tree(conn):
-    """Кириличне дерево: «Фонд Робота» → «Акмекорп», «DOM» + сусідній напрямок.
+    """Cyrillic tree: «Фонд Робота» -> «Акмекорп», «DOM» + a neighbouring direction.
 
-    «Фонд Робота» є серед засівів v15, тож беремо наявний вузол — саме так
-    дерево й зʼявиться в бойовій БД (розкладка наявних 29 імен, не створення
-    з нуля)."""
+    «Фонд Робота» is among the v15 seeds, so we take the existing node - this is exactly how the
+    tree will appear in the live DB (laying out the existing 29 names, not creating
+    from scratch)."""
     row = conn.execute("SELECT id FROM categories WHERE COALESCE(name_norm, name) = ?",
                        ("фонд робота",)).fetchone()
     fund = (cats.get_category(conn, row[0]) if row
@@ -100,17 +100,17 @@ def _select(conn, value, column="category_id"):
 
 
 # ============================================================
-# Ключ нормалізації (схему v45 перевіряє tests/test_migrations.py)
+# Normalisation key (the v45 schema is checked by tests/test_migrations.py)
 # ============================================================
 
 def test_norm_name_matches_legacy_key_of_existing_names(conn):
-    """`name_norm` наявних напрямків НЕ перераховується — новий нормалізатор
-    мусить давати той самий ключ, що старий `memory._norm_cat`."""
+    """`name_norm` of existing directions is NOT recomputed - the new normaliser
+    must give the same key as the old `memory._norm_cat`."""
     def legacy(name):
         return " ".join((name or "").strip().split()).casefold()
 
     seeded = conn.execute("SELECT name, name_norm FROM categories").fetchall()
-    assert seeded, "засіви напрямків мають бути в схемі"
+    assert seeded, "direction seeds must be in the schema"
     for name, name_norm in seeded:
         assert cats.norm_name(name) == name_norm == legacy(name)
     for name in ("  Фонд   Робота  ", "AI / професія", "Vector Рівне",
@@ -119,7 +119,7 @@ def test_norm_name_matches_legacy_key_of_existing_names(conn):
 
 
 # ============================================================
-# Фільтр і розбір
+# Filter and parsing
 # ============================================================
 
 def test_parse_filter_reads_all_none_and_ids():
@@ -134,9 +134,9 @@ def test_parse_filter_reads_all_none_and_ids():
 
 
 def test_parse_filter_gives_its_own_text_on_a_unicode_pseudo_digit():
-    """«²» проходить `str.isdigit()`, але `int()` на ньому падає сирим
-    «invalid literal for int()» — внутрішнім текстом у полі, яке читають
-    людина в тості й агент у відповіді тулза."""
+    """«²» passes `str.isdigit()`, but `int()` on it fails with a raw
+    «invalid literal for int()» - an internal text in a field read by
+    a person in a toast and by an agent in a tool response."""
     for bad in ("²", "½"):
         with pytest.raises(ValueError) as exc:
             cats.parse_filter(bad)
@@ -179,7 +179,7 @@ def test_list_tree_orders_projects_under_their_direction_and_sums_items(conn):
     _add_tx(conn, bar["id"])
     _add_tx(conn, bar["id"])
     _add_tx(conn, dom["id"])
-    _add_tx(conn, dom["id"], deleted_at=1700000000)      # soft-deleted не рахуємо
+    _add_tx(conn, dom["id"], deleted_at=1700000000)      # soft-deleted are not counted
 
     tree = cats.list_tree(conn)
     by_id = {n["id"]: n for n in tree}
@@ -208,7 +208,7 @@ def test_parse_tags_and_tags_sql(conn):
     rows = [r[0] for r in conn.execute(
         f"SELECT id FROM transcriptions t WHERE 1=1{sql}", params).fetchall()]
     assert rows == [tid] and other not in rows
-    # невідома назва звужує до порожнечі, а не ігнорується
+    # an unknown name narrows to empty, it is not ignored
     sql, params = cats.tags_sql("t.id", ["немаєтакого"])
     assert conn.execute(f"SELECT COUNT(*) FROM transcriptions t WHERE 1=1{sql}",
                         params).fetchone()[0] == 0
@@ -225,7 +225,7 @@ def test_date_sql_is_inclusive_and_rejects_garbage():
 
 
 # ============================================================
-# Письменники дерева
+# Tree writers
 # ============================================================
 
 def test_create_rejects_project_as_parent_and_casefold_duplicate(conn):
@@ -250,12 +250,12 @@ def test_update_category_tree_rules(conn):
         cats.update_category(conn, other["id"], parent_id=bar["id"])
     assert exc.value.code == "two_levels"
 
-    # напрямок із проєктами не може сам стати проєктом
+    # a direction with projects cannot itself become a project
     with pytest.raises(cats.CategoryError) as exc:
         cats.update_category(conn, fund["id"], parent_id=other["id"])
     assert exc.value.code == "two_levels"
 
-    # проєкт → напрямок
+    # project -> direction
     node, _ = cats.update_category(conn, dom["id"], parent_id=None)
     assert node["parent_id"] is None and node["level"] == "direction"
 
@@ -269,7 +269,7 @@ def test_rename_and_reparent_return_whole_subtree_ids(conn):
     _, ids = cats.update_category(conn, fund["id"], name="Фонд Робота 2.0")
     assert ids == sorted([t_fund, t_bar])
 
-    # колір сам по собі префікса не змінює
+    # colour by itself does not change the prefix
     _, ids = cats.update_category(conn, fund["id"], color="#123456")
     assert ids == []
 
@@ -305,7 +305,7 @@ def test_delete_nulls_refs_in_all_four_tables(conn):
                  "VALUES ('sess-1', ?)", (fund["id"],))
     conn.commit()
 
-    # спершу переносимо проєкти — інакше 409 (has_projects)
+    # first move the projects - otherwise 409 (has_projects)
     cats.update_category(conn, bar["id"], parent_id=other["id"])
     cats.update_category(conn, dom["id"], parent_id=other["id"])
     cats.delete_category(conn, fund["id"])
@@ -349,15 +349,15 @@ def test_set_category_returns_only_really_changed_ids(conn):
 
 
 # ============================================================
-# Теги
+# Tags
 # ============================================================
 
 def test_set_tags_creates_missing_tags_and_reports_change(conn):
     tid = _add_tx(conn)
     assert cats.set_tags(conn, tid, add=["інвестори", "гроші"]) is True
-    assert cats.set_tags(conn, tid, add=["інвестори"]) is False          # без змін
+    assert cats.set_tags(conn, tid, add=["інвестори"]) is False          # no change
     assert [t["name"] for t in cats.tags_for(conn, [tid])[tid]] == ["гроші", "інвестори"]
-    assert cats.set_tags(conn, tid, remove=["Гроші"]) is True            # регістр не важить
+    assert cats.set_tags(conn, tid, remove=["Гроші"]) is True            # case does not matter
     assert [t["name"] for t in cats.tags_for(conn, [tid])[tid]] == ["інвестори"]
     assert cats.set_tags(conn, tid, remove=["немаєтакого"]) is False
 
@@ -379,17 +379,17 @@ def test_apply_chat_tags_backfills_history_and_unbinds_only_chat_source(conn):
     outside = _add_tx(conn, source_type="telegram", tg_chat_id=888)
     deleted = _add_tx(conn, source_type="telegram", tg_chat_id=chat_id,
                       deleted_at="2026-01-01T00:00:00")
-    cats.set_tags(conn, a, add=["інвестори"], source="manual")   # ручний — недоторканний
+    cats.set_tags(conn, a, add=["інвестори"], source="manual")   # manual - untouchable
 
     changed = cats.apply_chat_tags(conn, chat_id, ["інвестори", "Фонд"])
-    assert changed == [a, b]                       # a отримав «Фонд», b — обидва
-    assert deleted not in changed                  # видалений запис — не живий
+    assert changed == [a, b]                       # a got «Фонд», b - both
+    assert deleted not in changed                  # a deleted record is not live
     assert cats.tags_for(conn, [deleted])[deleted] == []
     assert cats.tags_for(conn, [outside])[outside] == []
 
     changed = cats.apply_chat_tags(conn, chat_id, [])
-    assert changed == [a, b]                       # обидва втратили «Фонд»
-    # …але ручний «інвестори» на `a` відвʼязування чату НЕ знімає
+    assert changed == [a, b]                       # both lost «Фонд»
+    # ...but the manual «інвестори» on `a` is NOT removed by the chat detach
     assert [t["name"] for t in cats.tags_for(conn, [a])[a]] == ["інвестори"]
     assert conn.execute("SELECT source FROM record_tags WHERE transcription_id = ?",
                         (a,)).fetchone()[0] == "manual"
@@ -425,11 +425,11 @@ def test_delete_and_merge_tags_return_touched_records(conn):
     a, b, c = _add_tx(conn), _add_tx(conn), _add_tx(conn)
     cats.set_tags(conn, a, add=["інвестори"])
     cats.set_tags(conn, b, add=["Інвестор"])
-    cats.set_tags(conn, c, add=["інвестори", "Інвестор"])   # мав обидва тег
+    cats.set_tags(conn, c, add=["інвестори", "Інвестор"])   # had both tags
     keep = cats.ensure_tag(conn, "інвестори")
     dup = cats.ensure_tag(conn, "Інвестор")
 
-    # `c` теж повертається: його набір тегів звузився з двох імен до одного.
+    # `c` is returned too: its tag set narrowed from two names to one.
     assert cats.merge_tags(conn, keep["id"], dup["id"]) == [b, c]
     assert [t["name"] for t in cats.tags_for(conn, [b])[b]] == ["інвестори"]
     assert [t["name"] for t in cats.tags_for(conn, [c])[c]] == ["інвестори"]
@@ -475,7 +475,7 @@ def test_update_tag_rejects_bad_name_via_shared_guard(conn):
 
 
 # ============================================================
-# HTTP (контракт C4, частина «Категорії»)
+# HTTP (contract C4, part "Categories")
 # ============================================================
 
 def test_http_create_project_and_reject_project_as_parent(client, db):
@@ -492,7 +492,7 @@ def test_http_create_project_and_reject_project_as_parent(client, db):
     assert deep.status_code == 400
     assert deep.get_json()["code"] == "two_levels"
 
-    # неіснуючий батько — теж криве тіло запиту, а не 404 вузла з URL
+    # a nonexistent parent is also a malformed request body, not the 404 of a node from the URL
     orphan = client.post("/api/memory/categories",
                          json={"name": "Сирота", "parent_id": 99999})
     assert orphan.status_code == 400 and orphan.get_json()["code"] == "bad_parent"
@@ -509,7 +509,7 @@ def test_http_get_returns_tree_with_level_and_totals(client, db):
     assert order.index(bar["id"]) == order.index(fund["id"]) + 1
     assert by_id[bar["id"]]["level"] == "project"
     assert by_id[fund["id"]]["items_total"] == 1
-    assert by_id[bar["id"]]["count"] == 1          # сумісність із чинним SPA
+    assert by_id[bar["id"]]["count"] == 1          # compatible with the current SPA
 
 
 def test_http_patch_parent_id_reports_reembed(client, db, no_real_reembed):
@@ -543,8 +543,8 @@ def test_http_patch_rejects_self_parent_and_missing_node(client, db):
 def test_http_create_and_patch_reject_same_bad_parent_id_with_same_text(client, db):
     with get_db_connection(db) as conn:
         fund, bar, dom, other = _tree(conn)
-    # "²" — унікодна псевдоцифра: `str.isdigit()` каже True, `int()` падає
-    # `ValueError` — раніше це був 500, а не 400 (Мінор 5).
+    # "²" is a Unicode pseudo-digit: `str.isdigit()` says True, `int()` raises
+    # `ValueError` - earlier this was a 500, not a 400 (Minor 5).
     for bad in ("abc", -1, "²", True):
         post = client.post("/api/memory/categories",
                            json={"name": "X", "parent_id": bad})
@@ -559,8 +559,8 @@ def test_http_create_and_patch_reject_same_bad_parent_id_with_same_text(client, 
 
 
 def test_http_patch_category_id_and_bulk_category_reject_unicode_pseudo_digits(client, db):
-    """`"²"`/`"½"` проходять `str.isdigit()` частково (лише перше), але
-    `int()` — ні в обох: ловимо 400 замість 500/тихого скидання (Мінор 5/6)."""
+    """`"²"`/`"½"` pass `str.isdigit()` partially (only the first), but
+    `int()` - neither of them: we catch a 400 instead of a 500/quiet reset (Minor 5/6)."""
     with get_db_connection(db) as conn:
         fund, bar, dom, other = _tree(conn)
         tid = _add_tx(conn, bar["id"])
@@ -571,7 +571,7 @@ def test_http_patch_category_id_and_bulk_category_reject_unicode_pseudo_digits(c
     with get_db_connection(db) as conn:
         cid = conn.execute("SELECT category_id FROM transcriptions WHERE id = ?",
                            (tid,)).fetchone()[0]
-    assert cid == bar["id"]      # без змін
+    assert cid == bar["id"]      # unchanged
 
     b = client.post("/api/memory/transcriptions/bulk-category",
                     json={"ids": [tid], "category_id": "½"})
@@ -579,7 +579,7 @@ def test_http_patch_category_id_and_bulk_category_reject_unicode_pseudo_digits(c
     with get_db_connection(db) as conn:
         cid2 = conn.execute("SELECT category_id FROM transcriptions WHERE id = ?",
                             (tid,)).fetchone()[0]
-    assert cid2 == bar["id"]     # bulk-category не обнулила напрямок мовчки
+    assert cid2 == bar["id"]     # bulk-category did not silently null the direction
 
 
 def test_http_bulk_category_rejects_string_ids_instead_of_list(client, db):
@@ -593,7 +593,7 @@ def test_http_bulk_category_rejects_string_ids_instead_of_list(client, db):
     with get_db_connection(db) as conn:
         cid = conn.execute("SELECT category_id FROM transcriptions WHERE id = ?",
                            (tid,)).fetchone()[0]
-    assert cid == bar["id"]      # рядок не розсипався на цифри [1, 2, 3]
+    assert cid == bar["id"]      # the string did not fall apart into digits [1, 2, 3]
 
 
 def test_http_bulk_category_null_still_clears_direction(client, db, no_real_reembed):
@@ -654,7 +654,7 @@ def test_http_writers_schedule_reembed_with_config_db_path(client, db, no_real_r
                                    "reason": "category_changed"}
     assert r.get_json()["reembed"]["count"] == 1
 
-    # повторне призначення того самого напрямку re-embed не ставить
+    # re-assigning the same direction does not schedule a re-embed
     client.patch(f"/api/memory/transcriptions/{one}/category",
                  json={"category_id": bar["id"]})
     assert no_real_reembed[-1]["ids"] == [one]
@@ -681,12 +681,12 @@ def test_http_transcription_category_404_on_unknown_record(client, db):
 
 
 # ============================================================
-# Межа модуля
+# Module boundary
 # ============================================================
 
 def test_importing_categories_does_not_pull_torch():
-    """`categories` імпортує stdio-MCP; torch на рівні модуля вішає сервер
-    назавжди (памʼятка `mcp-stdio-no-heavy-models`)."""
+    """`categories` is imported by the stdio MCP; torch at module level hangs the server
+    forever (memory note `mcp-stdio-no-heavy-models`)."""
     proc = subprocess.run(
         [sys.executable, "-c",
          "import sys, app.services.categories; "
@@ -695,13 +695,13 @@ def test_importing_categories_does_not_pull_torch():
         creationflags=NO_WINDOW, timeout=60,
     )
     assert proc.returncode == 0, (
-        f"app.services.categories затягнув torch у sys.modules підпроцесу "
+        f"app.services.categories pulled torch into sys.modules of the subprocess "
         f"(stdout={proc.stdout!r} stderr={proc.stderr!r})")
 
 
 def test_suggested_tags_json_survives_roundtrip_with_cyrillic(conn):
-    """JSON підказок має лишатись читабельним (ensure_ascii=False) — його
-    дивляться очима в БД під час розбору проблем."""
+    """The suggestions JSON must stay readable (ensure_ascii=False) - it is
+    looked at with eyes in the DB when diagnosing problems."""
     tid = _add_tx(conn)
     cats.set_suggested_tags(conn, tid, ["інвестори", "кошторис"])
     raw = conn.execute("SELECT suggested_tags_json FROM transcriptions WHERE id = ?",
@@ -710,13 +710,13 @@ def test_suggested_tags_json_survives_roundtrip_with_cyrillic(conn):
 
 
 # ============================================================
-# v47: однойменні вузли в різних напрямках (історія 20)
+# v47: same-named nodes in different directions (story 20)
 # ============================================================
 
 def _pair_of_markets(conn):
-    """«Маркетинг» під «Фонд Робота» і «Маркетинг» під «Фріланс».
+    """«Маркетинг» under «Фонд Робота» and «Маркетинг» under «Фріланс».
 
-    Обидва напрямки засіяні міграцією v15 — саме так виглядає жива БД."""
+    Both directions are seeded by migration v15 - this is what the live DB looks like."""
     fund = cats.get_category(conn, conn.execute(
         "SELECT id FROM categories WHERE name_norm = 'фонд робота'").fetchone()[0])
     free = cats.get_category(conn, conn.execute(
@@ -727,8 +727,8 @@ def _pair_of_markets(conn):
 
 
 def test_same_project_name_lives_under_two_directions(conn):
-    """Головне, заради чого v47: два «Маркетинги» в різних напрямках
-    співіснують і мають різні непорожні `slug`."""
+    """The main point of v47: two «Маркетинги» in different directions
+    coexist and have different non-empty `slug`s."""
     fund, free, m_fund, m_free = _pair_of_markets(conn)
     assert m_fund["id"] != m_free["id"]
     assert m_fund["parent_id"] == fund["id"] and m_free["parent_id"] == free["id"]
@@ -736,8 +736,8 @@ def test_same_project_name_lives_under_two_directions(conn):
 
 
 def test_duplicate_among_siblings_names_the_direction(conn):
-    """Третій «Маркетинг» у тому ж напрямку — `duplicate`, і текст каже, ДЕ
-    зайнято (інакше 409 не відрізнити від 409 сусіднього напрямку)."""
+    """A third «Маркетинг» in the same direction is `duplicate`, and the text says WHERE
+    it is taken (otherwise a 409 is indistinguishable from a 409 of a neighbouring direction)."""
     fund, free, m_fund, _ = _pair_of_markets(conn)
     with pytest.raises(cats.CategoryError) as exc:
         cats.create_category(conn, "МАРКЕТИНГ", parent_id=fund["id"])
@@ -756,8 +756,8 @@ def test_duplicate_direction_still_says_direction(conn):
 
 
 def test_direction_may_share_name_with_a_foreign_project(conn):
-    """Напрямок «Маркетинг» поруч із проєктом «Маркетинг» чужого напрямку —
-    дозволено: брати — це лише напрямки між собою."""
+    """A direction «Маркетинг» next to a project «Маркетинг» of a foreign direction -
+    allowed: siblings are only directions among themselves."""
     _pair_of_markets(conn)
     node = cats.create_category(conn, "Маркетинг")
     assert node["parent_id"] is None and node["level"] == "direction"
@@ -768,26 +768,26 @@ def test_reparent_into_taken_name_and_rename_to_sibling_are_duplicates(conn):
     fund, free, m_fund, m_free = _pair_of_markets(conn)
     bar = cats.create_category(conn, "Акмекорп", parent_id=free["id"])
 
-    # переїзд «Маркетинга» з Фрілансу під Фонд, де такий проєкт уже є
+    # moving «Маркетинг» from «Фріланс» under «Фонд», where such a project already exists
     with pytest.raises(cats.CategoryError) as exc:
         cats.update_category(conn, m_free["id"], parent_id=fund["id"])
     assert exc.value.code == "duplicate" and "Фонд Робота" in str(exc.value)
     assert exc.value.conflict["id"] == m_fund["id"]
 
-    # перейменування на назву брата
+    # renaming to a sibling's name
     with pytest.raises(cats.CategoryError) as exc:
         cats.update_category(conn, bar["id"], name="маркетинг")
     assert exc.value.code == "duplicate" and exc.value.conflict["id"] == m_free["id"]
 
-    # а переїзд під напрямок, де такої назви немає, — дозволений
+    # while moving under a direction where there is no such name is allowed
     moved, _ = cats.update_category(conn, bar["id"], parent_id=fund["id"])
     assert moved["parent_id"] == fund["id"]
 
 
 def test_duplicate_is_caught_in_python_before_the_index(conn):
-    """Перевірка серед братів спрацьовує ДО запису: клієнт бачить
-    `CategoryError`, а не `IntegrityError` від `idx_categories_parent_name`,
-    і зайвого рядка в таблиці не лишається."""
+    """The sibling check fires BEFORE the write: the client sees
+    `CategoryError`, not `IntegrityError` from `idx_categories_parent_name`,
+    and no stray row is left in the table."""
     fund, _, _, _ = _pair_of_markets(conn)
     before = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
     with pytest.raises(cats.CategoryError):
@@ -808,8 +808,8 @@ def test_resolve_node_takes_a_full_path_and_a_unique_bare_name(conn):
 
 
 def test_resolve_node_on_a_namesake_raises_ambiguous_with_paths(conn):
-    """Ніколи «перший», ніколи тихе обʼєднання, ніколи порожньо: кілька
-    збігів — це перелік шляхів, який клієнт може показати і передати назад."""
+    """Never "the first", never a quiet merge, never empty: several
+    matches are a list of paths that the client can show and pass back."""
     _pair_of_markets(conn)
     with pytest.raises(cats.CategoryError) as exc:
         cats.resolve_node(conn, "МАРКЕТИНГ")
@@ -819,24 +819,24 @@ def test_resolve_node_on_a_namesake_raises_ambiguous_with_paths(conn):
 
 
 def test_resolve_node_prefers_the_exact_canonical_path_of_a_direction(conn):
-    """Старшинство (хвиля 7): точний канонічний шлях — раніше за голу назву.
+    """Precedence (wave 7): the exact canonical path comes before the bare name.
 
-    Канонічний шлях напрямку — це його гола назва, тож «Маркетинг» при
-    напрямку «Маркетинг» поруч із чужим проєктом «Фріланс → Маркетинг» дає
-    напрямок. Без цього правила напрямок-тезка недосяжний текстом назавжди:
-    його власний `path` повертався б тим самим `ambiguous`."""
+    The canonical path of a direction is its bare name, so «Маркетинг» with a
+    direction «Маркетинг» next to a foreign project «Фріланс → Маркетинг» gives the
+    direction. Without this rule a same-named direction is unreachable by text forever:
+    its own `path` would return the same `ambiguous`."""
     fund, free, m_fund, m_free = _pair_of_markets(conn)
     direction = cats.create_category(conn, "Маркетинг")
     assert cats.resolve_node(conn, "Маркетинг") == direction["id"]
     assert cats.resolve_node(conn, "  МАРКЕТИНГ ") == direction["id"]
     assert cats.resolve_node(conn, "Фріланс → Маркетинг") == m_free["id"]
     assert cats.resolve_node(conn, "Фонд Робота → Маркетинг") == m_fund["id"]
-    assert cats.resolve_node(conn, "А → Б → В") is None, "третього рівня немає"
+    assert cats.resolve_node(conn, "А → Б → В") is None, "there is no third level"
 
 
 def test_every_ambiguous_candidate_resolves_back_to_its_own_node(conn):
-    """Перелік, який сам себе повертає в `ambiguous`, — глухий кут: клієнту
-    нема чого передати назад. Кожен кандидат мусить розвʼязуватись."""
+    """A list that returns itself into `ambiguous` is a dead end: the client
+    has nothing to pass back. Every candidate must resolve."""
     fund, free, m_fund, m_free = _pair_of_markets(conn)
     with pytest.raises(cats.CategoryError) as exc:
         cats.resolve_node(conn, "Маркетинг")
@@ -845,10 +845,10 @@ def test_every_ambiguous_candidate_resolves_back_to_its_own_node(conn):
 
 
 def test_every_path_from_list_tree_resolves_back_to_its_node(conn):
-    """Круговорот канонічної назви на фікстурі З ТЕЗКАМИ: `path` кожного вузла
-    дерева повертається саме в цей вузол."""
+    """Round trip of the canonical name on a fixture WITH NAMESAKES: the `path` of every tree
+    node resolves back to exactly this node."""
     fund, free, m_fund, m_free = _pair_of_markets(conn)
-    cats.create_category(conn, "Маркетинг")                       # напрямок-тезка
+    cats.create_category(conn, "Маркетинг")                       # a namesake direction
     cats.create_category(conn, "Акмекорп", parent_id=free["id"])
     tree = cats.list_tree(conn)
     assert len(tree) > 3
@@ -857,8 +857,8 @@ def test_every_path_from_list_tree_resolves_back_to_its_node(conn):
 
 
 def test_a_node_name_may_not_contain_the_path_separator(conn):
-    """`→` у назві ламає шлях з обох боків (сам вузол не резолвиться, а шлях
-    його дитини стає тричастинним) — `bad_name` ДО запису, таблиця без змін."""
+    """`→` in a name breaks the path from both sides (the node itself does not resolve, and the path
+    of its child becomes three-part) - `bad_name` BEFORE the write, the table unchanged."""
     fund, _, _, _ = _pair_of_markets(conn)
     before = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
     with pytest.raises(cats.CategoryError) as exc:
@@ -878,14 +878,14 @@ def test_a_node_name_may_not_contain_the_path_separator(conn):
 
 
 def test_path_separator_rule_is_unconditional_but_plain_reparent_stays_allowed(conn):
-    """Правило `→` безумовне (ADR-023 §E п. 2): reparent без перейменування теж
-    його перевіряє, а звичайний вузол переїжджає, як і раніше."""
+    """The `→` rule is unconditional (ADR-023 §E p. 2): reparent without a rename checks
+    it too, while a regular node moves as before."""
     fund, free, _, _ = _pair_of_markets(conn)
     node = cats.create_category(conn, "Акмекорп", parent_id=fund["id"])
     moved, _ = cats.update_category(conn, node["id"], parent_id=free["id"])
     assert moved["parent_id"] == free["id"]
 
-    # Вузол, якого через API не створити (легасі-рядок напряму в таблиці).
+    # A node that cannot be created via the API (a legacy row directly in the table).
     cur = conn.execute("INSERT INTO categories (name, name_norm, sort_order, parent_id) "
                        "VALUES ('Старе → Імʼя', 'старе → імʼя', 99, ?)", (fund["id"],))
     conn.commit()
@@ -895,9 +895,9 @@ def test_path_separator_rule_is_unconditional_but_plain_reparent_stays_allowed(c
 
 
 def test_chat_map_writers_leave_nothing_behind_with_commit_false(conn):
-    """Письменники на шляху карти чатів з `commit=False` не комітять неявно:
-    `rollback()` викликача прибирає вузол, напрямок записів і теги чату
-    (на цьому стоїть `--dry-run` як той самий прохід із відкотом)."""
+    """Writers on the chat-map path with `commit=False` do not commit implicitly:
+    the caller's `rollback()` removes the node, the records' direction and the chat tags
+    (`--dry-run` stands on this as the same pass with a rollback)."""
     fund = cats.get_category(conn, conn.execute(
         "SELECT id FROM categories WHERE name_norm = 'фонд робота'").fetchone()[0])
     cur = conn.execute(
@@ -921,7 +921,7 @@ def test_chat_map_writers_leave_nothing_behind_with_commit_false(conn):
 def test_list_tree_carries_the_canonical_path_of_every_node(conn):
     fund, free, m_fund, m_free = _pair_of_markets(conn)
     paths = {n["id"]: n["path"] for n in cats.list_tree(conn)}
-    assert all(paths.values()), "жоден вузол не лишається без path"
+    assert all(paths.values()), "no node is left without a path"
     assert paths[fund["id"]] == "Фонд Робота"
     assert paths[m_fund["id"]] == "Фонд Робота → Маркетинг"
     assert paths[m_free["id"]] == "Фріланс → Маркетинг"
@@ -935,8 +935,8 @@ def test_node_path_of_direction_and_project(conn):
 
 
 def test_parse_date_error_is_ukrainian_and_mentions_the_format():
-    """Сире `Invalid isoformat string` бачили і людина в тості, і агент у полі
-    `error` MCP-тулза — обидва однаково безпорадно."""
+    """The raw `Invalid isoformat string` was seen both by a person in a toast and by an agent in the
+    `error` field of an MCP tool - equally helpless for both."""
     with pytest.raises(ValueError) as exc:
         cats.parse_date("not-a-date")
     text = str(exc.value)
@@ -1023,9 +1023,9 @@ def _record_in(conn, cid: int, name: str) -> int:
 
 def test_http_reparent_alone_schedules_reembed_of_the_whole_subtree(
         client, db, no_real_reembed):
-    """Переїзд проєкту без перейменування — така сама підстава для точкового
-    re-embed, як rename: шлях «Напрямок → Проєкт» стоїть у контекстному
-    префіксі чанка, тож після reparent вектори тезок розходяться саме по ньому."""
+    """Moving a project without a rename is the same ground for a targeted
+    re-embed as rename: the path «Direction -> Project» sits in the chunk context
+    prefix, so after a reparent the vectors of namesakes diverge exactly by it."""
     from app.services import embeddings
     with get_db_connection(db) as conn:
         fund = cats.get_category(conn, conn.execute(
@@ -1049,12 +1049,12 @@ def test_http_reparent_alone_schedules_reembed_of_the_whole_subtree(
     assert "Фонд Робота → Маркетинг" not in prefix
 
 
-# --- неоднозначний `project` на вході питання ---------------------------
+# --- ambiguous `project` in the question input ---------------------------
 
 @pytest.fixture
 def ask_client(client, monkeypatch):
-    """`/api/memory/ask` з замоканими ключем і самим RAG: тест про те, ЩО
-    доходить до `rag`, а не про відповідь моделі."""
+    """`/api/memory/ask` with a mocked key and a mocked RAG: a test about WHAT
+    reaches `rag`, not about the model's answer."""
     from app.services import enrichment, rag
     monkeypatch.setattr(enrichment, "is_available", lambda: True)
     calls: list[dict] = []
@@ -1073,7 +1073,7 @@ def test_http_ask_refuses_an_ambiguous_project_before_calling_rag(ask_client, db
     body = r.get_json()
     assert body["error"] == "ambiguous"
     assert body["candidates"] == ["Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
-    assert ask_client.rag_calls == [], "rag не мав бути викликаний"
+    assert ask_client.rag_calls == [], "rag must not have been called"
 
 
 def test_http_ask_accepts_a_full_path_project(ask_client, db):
@@ -1088,3 +1088,17 @@ def test_http_ask_accepts_a_full_path_project(ask_client, db):
 
     from app.services import scope
     assert scope.scope_filter_ids(db, "Фріланс → Маркетинг") == [rec]
+
+
+def test_category_error_text_follows_ui_language(conn, monkeypatch):
+    """User-facing tree/tag errors come from the `svc_taxonomy` catalog in the UI language."""
+    monkeypatch.setenv("RECALL_UI_LANG", "en")
+    with pytest.raises(cats.CategoryError) as exc:
+        cats.ensure_tag(conn, "   ")
+    assert exc.value.code == "bad_name"
+    assert str(exc.value) == "Empty tag name"
+
+    monkeypatch.setenv("RECALL_UI_LANG", "uk")
+    with pytest.raises(cats.CategoryError) as exc_uk:
+        cats.ensure_tag(conn, "   ")
+    assert str(exc_uk.value) == "Порожня назва тега"

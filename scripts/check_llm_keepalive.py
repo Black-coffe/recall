@@ -1,9 +1,9 @@
-"""Карточка docs/defects/local-llm-during-recording.md: виклик локальної моделі з явною
-`model=` без `keep_alive=` — модель тримає VRAM ще LOCAL_LLM_KEEPALIVE (30 хв) після
-відповіді, і дзвінок, що почнеться в цей час, лишає копілот і транскрипцію без місця.
+"""Defect card docs/defects/local-llm-during-recording.md: a local-model call with an explicit
+`model=` but no `keep_alive=` keeps the model in VRAM for another LOCAL_LLM_KEEPALIVE (30 min) after
+the reply, and a call that starts in that window leaves the copilot and transcription without room.
 
-Використання: check_llm_keepalive.py <file.py | dir> — exit 1, якщо є такий виклик.
-Модель копілота (без `model=`) не чіпаємо: вона й так живе у VRAM.
+Usage: check_llm_keepalive.py <file.py | dir> - exit 1 if there is such a call.
+The copilot model (without `model=`) is left alone: it lives in VRAM anyway.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def offenders(path: Path) -> list[str]:
             continue
         kws = {k.arg for k in node.keywords if k.arg}
         if "model" in kws and "keep_alive" not in kws:
-            out.append(f"{path}:{node.lineno}: {name}(model=…) без keep_alive=")
+            out.append(f"{path}:{node.lineno}: {name}(model=...) without keep_alive=")
     return out
 
 

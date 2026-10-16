@@ -1,12 +1,12 @@
-"""SSE broker — pub/sub для серверных событий.
+"""SSE broker — pub/sub for server events.
 
-Поток:
-- Backend дёргает broker.publish(channel_id, event_dict).
-- Подписчики (SSE endpoint) получают события через broker.subscribe(channel_id),
-  который возвращает blocking iterator поверх queue.Queue.
-- Подключение разрывается → подписчик удаляется.
+Flow:
+- The backend calls broker.publish(channel_id, event_dict).
+- Subscribers (the SSE endpoint) receive events via broker.subscribe(channel_id),
+  which returns a blocking iterator over queue.Queue.
+- The connection drops → the subscriber is removed.
 
-Простая in-memory реализация, потокобезопасная. Для multi-process потребуется Redis.
+Simple in-memory, thread-safe implementation. Multi-process would need Redis.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class SSEBroker:
-    """Очередь подписчиков на канал, идентифицируемый строкой (обычно process_id)."""
+    """Subscriber queues per channel, identified by a string (usually process_id)."""
 
     def __init__(self, queue_maxsize: int = 200):
         self._lock = threading.Lock()
@@ -31,13 +31,13 @@ class SSEBroker:
         self._queue_maxsize = queue_maxsize
 
     def publish(self, channel_id: str, event: str, data: Any) -> None:
-        """Опубликовать событие. event — имя SSE-события (например 'progress', 'log', 'segment')."""
+        """Publish an event. event is the SSE event name (for example 'progress', 'log', 'segment')."""
         if not channel_id:
             return
         payload = {"event": event, "data": data, "ts": time.time()}
         with self._lock:
             subs = list(self._subscribers.get(channel_id, []))
-        # send без _lock, чтобы медленный subscriber не блокировал publish
+        # send without _lock so a slow subscriber does not block publish
         for q in subs:
             try:
                 q.put_nowait(payload)
@@ -45,9 +45,9 @@ class SSEBroker:
                 logger.warning(f"SSE queue full for channel {channel_id}, dropping event {event}")
 
     def subscribe(self, channel_id: str, history: Optional[List[Dict]] = None) -> queue.Queue:
-        """Подписаться. Возвращает Queue — её итерируем в endpoint'е."""
+        """Subscribe. Returns a Queue — iterated in the endpoint."""
         q: queue.Queue = queue.Queue(maxsize=self._queue_maxsize)
-        # Положить начальную "историю" (если есть) — например, накопленные логи процесса.
+        # Put in the initial "history" (if any) — for example, the process logs accumulated so far.
         if history:
             for h in history:
                 try:
@@ -73,12 +73,12 @@ class SSEBroker:
     def stream_events(self, channel_id: str, history: Optional[List[Dict]] = None,
                       keepalive_seconds: float = 15.0,
                       end_event: str = "complete") -> Iterator[bytes]:
-        """Generator для Flask SSE response. Шлёт SSE-форматированные байты (UTF-8).
+        """Generator for the Flask SSE response. Sends SSE-formatted bytes (UTF-8).
 
-        Завершается, когда:
-          - получено событие с event == end_event;
-          - либо клиент дисконнектится (Flask закроет генератор).
-        Keepalive comments идут раз в `keepalive_seconds` для удержания соединения.
+        Ends when:
+          - an event with event == end_event is received;
+          - or the client disconnects (Flask closes the generator).
+        Keepalive comments are sent every `keepalive_seconds` to hold the connection open.
         """
         q = self.subscribe(channel_id, history=history)
         try:
@@ -101,5 +101,5 @@ class SSEBroker:
             self.unsubscribe(channel_id, q)
 
 
-# Глобальный broker (один на процесс)
+# Global broker (one per process)
 broker = SSEBroker()

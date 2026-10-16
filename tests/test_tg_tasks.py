@@ -1,10 +1,10 @@
-"""Тести зобовʼязань з переписки (Волна 5.1).
+"""Tests for commitments from conversations (Wave 5.1).
 
-Обидві моделі мокаються — офлайн, без Ollama і без Claude. Перевіряється те,
-що на живих даних коштує дорого: задача чіпляється до КОНКРЕТНОГО повідомлення
-(інакше 5.2 «куди написати» не існує), повторний прогін не плодить дублів і не
-чіпає чужі рядки, водяний знак стримує локальні виклики, а збій будь-якої з
-моделей не валить прохід і не псує дані.
+Both models are mocked — offline, without Ollama and without Claude. We check what
+is expensive on live data: a task attaches to a SPECIFIC message
+(otherwise 5.2 «where to write» does not exist), a repeated run does not breed duplicates and does not
+touch foreign rows, the watermark restrains local calls, and a failure of either
+model does not fail the pass and does not corrupt data.
 """
 import sqlite3
 
@@ -23,7 +23,7 @@ def db(tmp_path):
 
 def _seed(path, *, chat_id=-100, title="Робочий чат", thread_id=1,
           label="Договір", messages=()):
-    """messages = [(sender, text)] — хронологічно, по одному на день."""
+    """messages = [(sender, text)] — chronologically, one per day."""
     conn = sqlite3.connect(path)
     conn.execute("INSERT OR IGNORE INTO tg_threads (id, chat_id, label, status, "
                  "msg_count, last_date) VALUES (?, ?, ?, 'open', 0, "
@@ -72,7 +72,7 @@ def _items(path):
 
 
 # ============================================================
-# Триаж
+# Triage
 # ============================================================
 
 def test_triage_writes_verdict_and_watermark(db, monkeypatch):
@@ -86,12 +86,12 @@ def test_triage_writes_verdict_and_watermark(db, monkeypatch):
                        "WHERE id = 1").fetchone()
     conn.close()
     assert row[0] == tg_tasks.VERDICT_YES
-    assert row[1] == 1, "водяний знак = скільки повідомлень бачили"
+    assert row[1] == 1, "the watermark = how many messages were seen"
     assert row[2]
 
 
 def test_triaged_thread_is_not_a_candidate_again(db, monkeypatch):
-    """Нитка, що не змінилась, не витрачає модель повторно."""
+    """A thread that has not changed does not spend the model again."""
     _seed(db, messages=[("Адам", "ок")])
     _fake_triage(monkeypatch, False)
     tg_tasks.triage_thread(db, 1)
@@ -99,7 +99,7 @@ def test_triaged_thread_is_not_a_candidate_again(db, monkeypatch):
 
 
 def test_grown_thread_is_retriaged(db, monkeypatch):
-    """Домовленість могла прозвучати вже ПІСЛЯ вердикту."""
+    """An agreement could have been voiced AFTER the verdict."""
     _seed(db, messages=[("Адам", "привіт")])
     _fake_triage(monkeypatch, False)
     tg_tasks.triage_thread(db, 1)
@@ -108,7 +108,7 @@ def test_grown_thread_is_retriaged(db, monkeypatch):
 
 
 def test_triage_failure_leaves_thread_a_candidate(db, monkeypatch):
-    """Збій моделі — не вердикт «зобовʼязань немає»."""
+    """A model failure is not a «no commitments» verdict."""
     from app.services import local_llm
 
     _seed(db, messages=[("Адам", "надішлю")])
@@ -132,21 +132,21 @@ def test_triage_all_degrades_without_ollama(db, monkeypatch):
 
 
 def test_triage_text_previews_documents(db):
-    """Документ на 88 тис. символів не має витіснити розмову з промпта."""
+    """An 88-thousand-character document must not push the conversation out of the prompt."""
     _seed(db, messages=[("Адам", "д" * 5000), ("Юля", "ок")])
     from app.db.connection import get_db_connection
     with get_db_connection(db) as conn:
         text = tg_tasks._triage_text(tg_tasks.thread_messages(conn, 1))
-    assert "Юля: ок" in text, "останнє повідомлення видно"
+    assert "Юля: ок" in text, "the last message is visible"
     assert len(text) < 5000
 
 
 # ============================================================
-# Витяг
+# Extraction
 # ============================================================
 
 def test_task_is_attached_to_the_message_that_voiced_it(db, monkeypatch):
-    """Без цього немає 5.2: у задачі має бути видно, куди саме написати."""
+    """Without this 5.2 does not exist: the task must show where exactly to write."""
     ids = _seed(db, messages=[("Адам", "хто зробить кошторис?"),
                               ("Юля", "я зроблю до пʼятниці"),
                               ("Адам", "дякую")])
@@ -158,20 +158,20 @@ def test_task_is_attached_to_the_message_that_voiced_it(db, monkeypatch):
 
     items = _items(db)
     assert len(items) == 1
-    assert items[0]["transcription_id"] == ids[1], "повідомлення Юлі, а не перше в нитці"
+    assert items[0]["transcription_id"] == ids[1], "Yulia's message, not the first in the thread"
     assert items[0]["owner_name"] == "Юля"
     assert items[0]["source"] == tg_tasks.SOURCE
 
 
 def test_due_is_expanded_from_the_message_date(db, monkeypatch):
-    """Строк рахується від дати РЕПЛІКИ, а не від сьогодні (Трек 1)."""
+    """The deadline is counted from the date of the REPLY, not from today (Track 1)."""
     _seed(db, messages=[("Юля", "зроблю завтра")])
     _fake_claude(monkeypatch, [{"task": "Зробити", "owner": "Юля", "due": "завтра",
                                 "due_date": None, "msg": 1}])
     tg_tasks.extract_thread(db, 1)
     item = _items(db)[0]
     assert item["due"] == "завтра"
-    assert item["due_date"] == "2026-06-02", "наступний день після дати повідомлення"
+    assert item["due_date"] == "2026-06-02", "the day after the message date"
 
 
 def test_model_iso_date_wins_over_parser(db, monkeypatch):
@@ -192,7 +192,7 @@ def test_unknown_msg_number_falls_back_to_last_message(db, monkeypatch):
 
 
 def test_placeholder_owner_becomes_null(db, monkeypatch):
-    """Рядок «null» як імʼя виконавця — це не виконавець (урок Волни 4.5.2)."""
+    """The string «null» as an assignee name is not an assignee (lesson of Wave 4.5.2)."""
     _seed(db, messages=[("Юля", "зроблю")])
     _fake_claude(monkeypatch, [{"task": "Зробити", "owner": "null", "due": None, "msg": 1}])
     tg_tasks.extract_thread(db, 1)
@@ -208,7 +208,7 @@ def test_empty_task_text_is_dropped(db, monkeypatch):
 
 
 def test_rerun_replaces_own_rows_and_spares_foreign(db, monkeypatch):
-    """Повторний прогін не плодить дублів і не стирає задачі з картки дзвінка."""
+    """A repeated run does not breed duplicates and does not erase a task from a call card."""
     ids = _seed(db, messages=[("Юля", "зроблю")])
     conn = sqlite3.connect(db)
     conn.execute("INSERT INTO action_items (transcription_id, task, status) "
@@ -238,12 +238,12 @@ def test_extract_failure_leaves_thread_a_candidate(db, monkeypatch):
     monkeypatch.setattr(text_polishing, "extract_chat_tasks", _boom)
     res = tg_tasks.extract_thread(db, 1)
     assert res["status"] == "retry_needed"
-    assert tg_tasks.extract_candidates(db) == [1], "нитка чекає наступного проходу"
+    assert tg_tasks.extract_candidates(db) == [1], "the thread waits for the next pass"
     assert _items(db) == []
 
 
 def test_only_triaged_threads_are_extracted(db, monkeypatch):
-    """Гард Волни 0 знімається вибірково, а не цілком."""
+    """The Wave 0 guard is lifted selectively, not entirely."""
     _seed(db, messages=[("Адам", "новина дня")], thread_id=1, label="Новини")
     _seed(db, messages=[("Юля", "зроблю")], thread_id=2, label="Кошторис")
     _fake_triage(monkeypatch, False)
@@ -254,7 +254,7 @@ def test_only_triaged_threads_are_extracted(db, monkeypatch):
 
 
 def test_grown_thread_is_extracted_again(db, monkeypatch):
-    """Нові повідомлення — це нові домовленості (або скасування старих)."""
+    """New messages are new agreements (or cancellations of old ones)."""
     _seed(db, messages=[("Юля", "зроблю")])
     _fake_triage(monkeypatch, True)
     tg_tasks.triage_thread(db, 1)
@@ -273,7 +273,7 @@ def test_unchanged_thread_is_not_extracted_twice(db, monkeypatch):
     tg_tasks.triage_thread(db, 1)
     _fake_claude(monkeypatch, [{"task": "Зробити", "owner": "Юля", "msg": 1}])
     tg_tasks.extract_thread(db, 1)
-    tg_tasks.triage_thread(db, 1)          # повторний триаж без нових повідомлень
+    tg_tasks.triage_thread(db, 1)          # repeated triage without new messages
     assert tg_tasks.extract_candidates(db) == []
 
 

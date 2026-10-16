@@ -1,4 +1,4 @@
-"""Охорона повноти перекладу: немає кириличних літералів у SPA/шаблоні/jsonify, серверні помилки локалізуються."""
+"""Translation completeness guard: no Cyrillic literals in the SPA/template/jsonify, server errors are localized."""
 import ast
 import re
 from html.parser import HTMLParser
@@ -10,8 +10,8 @@ from flask import Flask
 ROOT = Path(__file__).resolve().parent.parent
 CYR = re.compile("[А-Яа-яІіЇїЄєҐґЁёЪъЫыЭэ]")
 
-# (шлях відносно кореня, фрагмент літерала) -> причина. Додавати лише НЕ-текст інтерфейсу.
-# (файл, предикат літерала) -> причина. Лише НЕ-текст інтерфейсу.
+# (path relative to the root, literal fragment) -> reason. Add only NON-interface text.
+# (file, literal predicate) -> reason. Only NON-interface text.
 _LANG_NAMES = {"'Українська'", "'Русский'", "'English'"}
 JS_ALLOW = [
     ("static/js/recall/util.js", lambda s: len(s) <= 8, "таблиця транслітерації слагів (1 літера)"),
@@ -29,7 +29,7 @@ JS_ALLOW = [
 
 
 def _skip_template(src, i):
-    """i — позиція відкриваючого бектика; повертає позицію після закриваючого (з вкладеними ${ {} `` })."""
+    """i — position of the opening backtick; returns the position after the closing one (with nested ${ {} `` })."""
     n, j = len(src), i + 1
     while j < n:
         ch = src[j]
@@ -59,7 +59,7 @@ def _skip_template(src, i):
 
 
 def _js_literals(src):
-    """Повертає (рядок, літерал) для рядкових/шаблонних літералів і регексів; коментарі пропускає."""
+    """Returns (string, literal) for string/template literals and regexes; skips comments."""
     out, i, n, line = [], 0, len(src), 1
     prev = ""
     while i < n:
@@ -109,7 +109,7 @@ def test_no_cyrillic_literals_in_spa_scripts():
         for line, lit in _js_literals(p.read_text(encoding="utf-8")):
             if CYR.search(lit) and not _allowed_js(rel, lit):
                 bad.append(f"{rel}:{line}: {lit[:70]}")
-    assert not bad, "Кириличні літерали поза словниками:\n" + "\n".join(bad)
+    assert not bad, "Cyrillic literals outside the dictionaries:\n" + "\n".join(bad)
 
 
 class _Shell(HTMLParser):
@@ -143,7 +143,7 @@ def test_shell_html_text_is_marked_for_translation():
     src = re.sub(r"\{#.*?#\}", "", src, flags=re.S)
     p = _Shell()
     p.feed(src)
-    assert not p.bad, "Кирилиця поза data-i18n у shell.html:\n" + "\n".join(p.bad)
+    assert not p.bad, "Cyrillic outside data-i18n in shell.html:\n" + "\n".join(p.bad)
 
 
 def _py_files():
@@ -159,7 +159,7 @@ def test_no_cyrillic_literals_in_jsonify_calls():
                 for sub in ast.walk(node):
                     if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and CYR.search(sub.value):
                         bad.append(f"{p.name}:{sub.lineno}: {sub.value[:60]}")
-    assert not bad, "Кирилиця в jsonify:\n" + "\n".join(bad)
+    assert not bad, "Cyrillic in jsonify:\n" + "\n".join(bad)
 
 
 def test_invalid_input_errors_are_english_with_header(monkeypatch, tmp_path):

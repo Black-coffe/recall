@@ -1,21 +1,21 @@
-/* Recall — «Коментарі»: усе, що власник сам написав про свій архів.
+/* Recall — «Коментарі»: everything the owner wrote about their own archive.
 
-   Це не ще один список записів. Бібліотека показує, ЩО потрапило в архів;
-   ця сторінка — що власник про нього ДУМАЄ: де запис бреше, що вирішено,
-   що лишилось питанням. Тому головна вісь тут не дата й не джерело, а ТИП
-   коментаря: «виправлення» — це перелік місць, де архів вводить в оману, і
-   такий зріз коштує дорожче за будь-який інший.
+   This is not yet another list of records. The Library shows WHAT got into the archive;
+   this page shows what the owner THINKS about it: where a record lies, what is decided,
+   what remains a question. So the main axis here is not the date or the source but the TYPE
+   of the comment: a «виправлення» is a list of places where the archive misleads, and
+   such a slice is worth more than any other.
 
-   Фільтри й сторінка живуть в URL (deep-linkable), як у Бібліотеці. */
+   Filters and the page live in the URL (deep-linkable), as in the Library. */
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
     const T = (k, v) => R.t(k, v);
     const PER_PAGE = 30;
 
-    // Порядок = вага в ранжуванні (див. /api/comments/meta). «Усі» першим,
-    // далі від найважчого типу до найлегшого — щоб перший осмислений зріз
-    // під рукою був саме той, який найдорожчий.
+    // Order = weight in ranking (see /api/comments/meta). «Усі» first,
+    // then from the heaviest type to the lightest — so that the first meaningful slice
+    // at hand is exactly the most valuable one.
     const KINDS = [
         { k: '', label: T('knowledge.cmv.kind.all') },
         { k: 'correction', label: T('knowledge.cmv.kind.correction') },
@@ -101,9 +101,9 @@
         R.router.replace('/comments' + (q ? '?' + q : ''));
     }
 
-    // Лічильники на чипах рахуються БЕЗ фільтра за типом (так їх віддає
-    // сервер) — інакше, обравши «виправлення», ви бачили б «решта 0» і не
-    // могли б оцінити, куди перемикатись.
+    // Counters on the chips are counted WITHOUT the type filter (that is how the
+    // server returns them) — otherwise, after choosing «виправлення», you would see "rest 0" and
+    // could not judge where to switch.
     function renderKinds() {
         const box = document.getElementById('rcCmKinds');
         if (!box) return;
@@ -116,7 +116,7 @@
         }).join('');
     }
 
-    // ISO-дата «N днів тому» — сервер фільтрує по created_at >= since.
+    // ISO date "N days ago" — the server filters by created_at >= since.
     function sinceParam() {
         if (!state.days) return undefined;
         const d = new Date(Date.now() - parseInt(state.days, 10) * 86400000);
@@ -169,10 +169,10 @@
 
     const KIND_LABEL = (R.comments && R.comments.KIND_LABEL) || {};
 
-    // Куди веде клік. Коментар на сесії запису, яку ще не транскрибували,
-    // відкривати нікуди — така картка живе лише на сторінці запису, поки
-    // дзвінок іде. Показуємо, але не робимо клікабельним: мертве посилання
-    // гірше за його відсутність.
+    // Where a click leads. A comment on a recording session that has not been transcribed yet
+    // has nowhere to open — such a card lives only on the recording page while the
+    // call is going. We show it but do not make it clickable: a dead link
+    // is worse than its absence.
     function hrefFor(c) {
         if (c.target_type === 'transcription') return '/transcript/' + U.slug(c.target_ref, c.target_name);
         if (c.target_type === 'audio_download') return '/audio';

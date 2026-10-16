@@ -1,30 +1,30 @@
-"""Boot-time reconcile осиротілих записів у бібліотеку (audio_downloads).
+"""Boot-time reconcile of orphaned recordings into the library (audio_downloads).
 
-Кожен старт Recall проходить по ``recordings/sessions/*`` і гарантує, що
-кожна фіналізована сесія **присутня і коректна** в Медіатеці
-(``audio_downloads``) — БЕЗ транскрибації. Транскрибувати чи ні — юзер
-вирішує сам у UI (кнопка «Транскрибувати» на рядку Медіатеки).
+On every Recall start it walks ``recordings/sessions/*`` and guarantees that
+every finalized session is **present and correct** in the Media library
+(``audio_downloads``) — WITHOUT transcription. Whether to transcribe is
+decided by the user in the UI (the «Транскрибувати» button on a Media library row).
 
-Робить три речі (усі ідемпотентні, безпечні для повтору на кожному старті
-і навіть двічі під debug-reloader'ом):
+It does three things (all idempotent, safe to repeat on every start
+and even twice under the debug reloader):
 
-1. **Реєстрація сиріт** — фіналізовану сесію, якої зовсім немає в
-   ``audio_downloads``, вписуємо (через :func:`register_recording`).
-   Назва: ``manifest.name`` → ``auto_name`` → ``Запис <sid[:8]>`` (як у
-   register_recording). Якщо власної назви нема — лишиться дата-плейсхолдер
-   (``auto_name`` = ``Запис YYYY-MM-DD HH:MM``), тобто «дата створення як назва».
-2. **Лікування мертвих шляхів** — після переїзду/перейменування кореня
-   проєкту (Whisper → Recall) ``file_path`` у БД вказує на неіснуючий файл.
-   :meth:`SessionStore.read` лікує шлях у поверненому manifest (live, не на
-   диск), тож беремо звідти актуальний ``final_mp3_path`` і оновлюємо
-   ``audio_downloads.file_path`` (+ ``transcriptions.file_path`` цього
-   запису), інакше play/транскрибація з бібліотеки б'ються об мертвий шлях.
-3. **Синхронізація назви** — якщо в бібліотеці досі auto-name плейсхолдер, а
-   в manifest вже є справжня назва (юзер перейменував сесію після
-   авто-реєстрації), підтягуємо назву в ``audio_downloads.title``. Реальну
-   (не-плейсхолдерну) назву в бібліотеці НІКОЛИ не перезаписуємо.
+1. **Registering orphans** — a finalized session that is not in
+   ``audio_downloads`` at all is inserted (via :func:`register_recording`).
+   Name: ``manifest.name`` → ``auto_name`` → ``Запис <sid[:8]>`` (as in
+   register_recording). If there is no custom name, the date placeholder stays
+   (``auto_name`` = ``Запис YYYY-MM-DD HH:MM``), i.e. "creation date as the name".
+2. **Healing dead paths** — after a move/rename of the project root
+   (Whisper → Recall) ``file_path`` in the DB points to a nonexistent file.
+   :meth:`SessionStore.read` heals the path in the returned manifest (live, not to
+   disk), so we take the current ``final_mp3_path`` from there and update
+   ``audio_downloads.file_path`` (+ the ``transcriptions.file_path`` of this
+   recording), otherwise play/transcription from the library hit a dead path.
+3. **Name synchronization** — if the library still has an auto-name placeholder and
+   the manifest already has a real name (the user renamed the session after
+   auto-registration), we pull the name into ``audio_downloads.title``. A real
+   (non-placeholder) name in the library is NEVER overwritten.
 
-Ніколи не транскрибує і нічого не видаляє.
+It never transcribes and never deletes anything.
 """
 from __future__ import annotations
 
@@ -39,14 +39,14 @@ from app.services.recording.session_store import STATUS_FINALIZED
 
 logger = logging.getLogger(__name__)
 
-# auto-name плейсхолдери, які МОЖНА перезаписати справжньою назвою з manifest:
+# auto-name placeholders that CAN be overwritten with a real name from the manifest:
 #   "Запис 2026-06-26 14:05"  (auto_name)
-#   "Запис 2026-06-26 14:05" з 'T' замість пробілу
+#   "Запис 2026-06-26 14:05" with 'T' instead of a space
 _AUTO_DATE_TITLE = re.compile(r'^Запис\s+\d{4}-\d{2}-\d{2}[ T]\d{2}[:_]\d{2}\b')
 
 
 def _is_placeholder_title(title, manifest) -> bool:
-    """True, якщо назва в бібліотеці — авто-плейсхолдер (можна оновити)."""
+    """True if the library title is an auto placeholder (it can be updated)."""
     t = (title or '').strip()
     if not t:
         return True
@@ -55,15 +55,15 @@ def _is_placeholder_title(title, manifest) -> bool:
     auto = (manifest.get('auto_name') or '').strip()
     if auto and t == auto:
         return True
-    # fallback "Запис <sid[:8]>" з register_recording
+    # fallback "Запис <sid[:8]>" from register_recording
     if t.startswith('Запис ') and len(t) <= len('Запис ') + 8:
         return True
     return False
 
 
 def _healed_final(manifest) -> str | None:
-    """Актуальний шлях до фінального mp3 (manifest уже path-healed через
-    SessionStore.read). None — якщо файлу нема (порожній/аборт-запис)."""
+    """The current path to the final mp3 (the manifest is already path-healed through
+    SessionStore.read). None — if there is no file (an empty/aborted recording)."""
     fp = manifest.get('final_mp3_path')
     return fp if fp and os.path.isfile(fp) else None
 
@@ -71,7 +71,7 @@ def _healed_final(manifest) -> str | None:
 def _reconcile_one(db_path: str, store, sid: str, stats: dict) -> None:
     manifest = store.read(sid)  # path-healed live
     if manifest.get('status') != STATUS_FINALIZED:
-        return  # у бібліотеку йдуть лише фіналізовані сесії
+        return  # only finalized sessions go into the library
     final = _healed_final(manifest)
 
     with get_db_connection(db_path) as conn:
@@ -81,7 +81,7 @@ def _reconcile_one(db_path: str, store, sid: str, stats: dict) -> None:
             (sid, f'recording_{sid}'),
         ).fetchone()
 
-    # --- сирота: зовсім немає в бібліотеці ---
+    # --- orphan: not in the library at all ---
     if row is None:
         reg = register_recording(db_path, sid, manifest)
         if reg is None:
@@ -89,12 +89,12 @@ def _reconcile_one(db_path: str, store, sid: str, stats: dict) -> None:
         elif reg.get('created'):
             stats['registered'] += 1
             logger.info(
-                "reconcile: сироту %s підтягнуто в бібліотеку (id=%s, name=%r)",
+                "reconcile: orphan %s pulled into the library (id=%s, name=%r)",
                 sid, reg.get('download_id'), reg.get('name'),
             )
         return
 
-    # --- існує: лікуємо шлях + синхронізуємо назву ---
+    # --- exists: heal the path + synchronize the name ---
     sets, vals = [], []
     cur_fp = row['file_path']
     if final and cur_fp != final and (not cur_fp or not os.path.isfile(cur_fp)):
@@ -118,9 +118,9 @@ def _reconcile_one(db_path: str, store, sid: str, stats: dict) -> None:
             )
             conn.commit()
 
-    # --- заодно лікуємо мертвий file_path у transcriptions цього запису ---
-    # (щоб «оригінальний файл»/re-transcribe з Архіву теж не бились об старий
-    #  Whisper-шлях). Тільки якщо знаємо живий final.
+    # --- also heal the dead file_path in the transcriptions of this recording ---
+    # (so that the «original file»/re-transcribe from the Archive does not hit the old
+    #  Whisper path either). Only if we know the live final.
     if final:
         with get_db_connection(db_path) as conn:
             trows = conn.execute(
@@ -143,14 +143,14 @@ def _reconcile_one(db_path: str, store, sid: str, stats: dict) -> None:
 
 
 def reconcile_recordings(db_path: str, store) -> dict:
-    """Пройти всі сесії і привести Медіатеку у відповідність до диска.
+    """Walk all sessions and bring the Media library in line with the disk.
 
     Args:
-        db_path: шлях до SQLite (``app.config['DATABASE']``).
-        store: :class:`SessionStore` (енумерація + path-healing).
+        db_path: path to SQLite (``app.config['DATABASE']``).
+        store: :class:`SessionStore` (enumeration + path healing).
 
     Returns:
-        dict-статистика: ``scanned, registered, path_healed, title_synced,
+        dict statistics: ``scanned, registered, path_healed, title_synced,
         tx_path_healed, skipped_no_file, errors``.
     """
     stats = {
@@ -160,14 +160,14 @@ def reconcile_recordings(db_path: str, store) -> dict:
     try:
         sessions = store.list_all()
     except Exception as e:
-        logger.warning("reconcile_recordings: не вдалося перелічити сесії: %s", e)
+        logger.warning("reconcile_recordings: could not list sessions: %s", e)
         return stats
 
-    # Приглушуємо legacy-warning "manifest version=1" від session_store: sweep
-    # читає ВСІ сесії щостарту, тож без цього кожен бут — стіна з ~75 WARNING'ів
-    # про старі манифести (відомо-безпечні). Реальні помилки читання ми ловимо
-    # нижче per-session і логуємо самі; зіпсовані манифести list_all() вже
-    # відсіяв з власним warning.
+    # We silence the legacy warning "manifest version=1" from session_store: the sweep
+    # reads ALL sessions on every start, so without this every boot is a wall of ~75 WARNINGs
+    # about old manifests (known safe). Real read errors we catch
+    # below per session and log ourselves; corrupted manifests list_all() has already
+    # filtered out with its own warning.
     _ss_logger = logging.getLogger('app.services.recording.session_store')
     _prev_level = _ss_logger.level
     _ss_logger.setLevel(logging.ERROR)
@@ -180,17 +180,17 @@ def reconcile_recordings(db_path: str, store) -> dict:
             try:
                 _reconcile_one(db_path, store, sid, stats)
             except Exception as e:
-                # одна зламана сесія не має зривати весь sweep
+                # one broken session must not break the whole sweep
                 stats['errors'] += 1
                 logger.warning(
-                    "reconcile_recordings: сесію %s пропущено через помилку: %s", sid, e,
+                    "reconcile_recordings: session %s skipped due to an error: %s", sid, e,
                 )
     finally:
         _ss_logger.setLevel(_prev_level)
 
     changed = stats['registered'] + stats['path_healed'] + stats['title_synced'] + stats['tx_path_healed']
     if changed:
-        logger.info("reconcile_recordings: приведено бібліотеку до диска — %s", stats)
+        logger.info("reconcile_recordings: library brought in line with the disk — %s", stats)
     else:
-        logger.debug("reconcile_recordings: змін не потрібно (%s)", stats)
+        logger.debug("reconcile_recordings: no changes needed (%s)", stats)
     return stats

@@ -1,22 +1,22 @@
-"""Дослідження бренду / великий експорт (Phase 18).
+"""Brand research / large export (Phase 18).
 
-Збирає з УСІХ оцифрованих джерел (аудіо-транскрипти, документи, Telegram,
-YouTube, записи) кожну згадку бренду/теми і віддає у двох формах:
+Collects from ALL digitised sources (audio transcripts, documents, Telegram,
+YouTube, recordings) every mention of a brand/topic and returns it in two forms:
 
-  1. ОРИГІНАЛИ (0 токенів, без AI) — суцільний markdown: для кожної згадки
-     дослівний фрагмент (місце згадки ± контекст) + провенанс (коли/хто/звідки)
-     + посилання на оригінал (Recall / file:// / абсолютний шлях) + лінк на
-     повну стенограму. Структуровано за датою згори вниз (свіже — вище).
+  1. ORIGINALS (0 tokens, no AI) - a continuous markdown: for each mention
+     the verbatim fragment (the place of the mention +- context) + provenance (when/who/from where)
+     + a link to the original (Recall / file:// / absolute path) + a link to
+     the full transcript. Structured by date top to bottom (fresh - higher).
 
-  2. САММАРІ (дешева модель, тільки по знайдених фрагментах) — Claude (Haiku
-     за замовч.) робить структурований звіт map-reduce'ом ВИКЛЮЧНО по витягнутих
-     фрагментах (не по цілих стенограмах) → мінімум токенів.
+  2. SUMMARY (cheap model, only over the found fragments) - Claude (Haiku
+     by default) makes a structured report by map-reduce EXCLUSIVELY over the extracted
+     fragments (not whole transcripts) -> a minimum of tokens.
 
-Пошук — лексичний: FTS5 звужує кандидатів (швидко), потім Python-сканування
-по підрядку у transcript_text/сегментах дає точні фрагменти і лічильник згадок.
-Користувач задає варіанти написання через кому (Horeca, хорека, HoReCa).
+The search is lexical: FTS5 narrows the candidates (fast), then a Python scan
+by substring in transcript_text/segments gives exact fragments and the mention counter.
+The user sets spelling variants separated by commas («Horeca, хорека, HoReCa»).
 
-НЕ залежить від flask app context — приймає db_path явно (тестовно).
+Does NOT depend on the flask app context - takes db_path explicitly (testable).
 """
 from __future__ import annotations
 
@@ -37,17 +37,17 @@ from app.services.categories import (
 
 logger = logging.getLogger(__name__)
 
-# --- Контекст фрагментів ---
-SEG_CTX = 2                 # ± сегментів навколо згадки (аудіо)
-TEXT_CTX_CHARS = 400        # ± символів навколо згадки (текст/документи)
-SHORT_TEXT = 800            # коротший текст беремо цілком (TG-повідомлення)
-MAX_RECORDS = 3000          # запобіжник
-MAX_FRAGMENTS_PER_RECORD = 12  # щоб один багатослівний запис не роздув файл
+# --- Fragment context ---
+SEG_CTX = 2                 # +- segments around a mention (audio)
+TEXT_CTX_CHARS = 400        # +- characters around a mention (text/documents)
+SHORT_TEXT = 800            # shorter text is taken whole (TG messages)
+MAX_RECORDS = 3000          # safety cap
+MAX_FRAGMENTS_PER_RECORD = 12  # so that one wordy record does not bloat the file
 
-# --- Саммарі (map-reduce) ---
-SUMMARY_BATCH_CHARS = 40000  # ~12k токенів на батч → один виклик Haiku
+# --- Summary (map-reduce) ---
+SUMMARY_BATCH_CHARS = 40000  # ~12k tokens per batch -> one Haiku call
 
-# Тарифи ($/Mtok) — спільне джерело з copilot/escalate (app/services/pricing.py).
+# Rates ($/Mtok) - a shared source with copilot/escalate (app/services/pricing.py).
 from app.services.pricing import MODEL_PRICES as _PRICES
 from app.services import models as _models
 from app.services.claude_retry import call_with_retry
@@ -66,11 +66,11 @@ SRC_LABEL = {
 
 
 # ============================================================
-# Терміни / FTS
+# Terms / FTS
 # ============================================================
 
 def parse_terms(q: str) -> list[str]:
-    """'Horeca, хорека ; HoReCa' → ['Horeca', 'хорека', 'HoReCa'] (дедуп, без порожніх)."""
+    """'Horeca, хорека ; HoReCa' -> ['Horeca', 'хорека', 'HoReCa'] (deduped, no empties)."""
     if not q:
         return []
     raw = re.split(r"[,;\n]+", q)
@@ -87,7 +87,7 @@ def parse_terms(q: str) -> list[str]:
 
 
 def _fts_query(terms: list[str]) -> str:
-    """OR-запит FTS5: кожен термін як фраза в лапках. Лапки всередині екрануємо."""
+    """FTS5 OR query: each term as a quoted phrase. Quotes inside are escaped."""
     parts = []
     for t in terms:
         safe = t.replace('"', '""').strip()
@@ -97,9 +97,9 @@ def _fts_query(terms: list[str]) -> str:
 
 
 def entity_terms(db_path: str, entity_id: int) -> "tuple[str, list[str]] | None":
-    """Сутність → (канонічне ім'я, [канон + усі псевдоніми]) для лексичного
-    пошуку згадок. None, якщо сутності немає. Псевдоніми = «варіанти написання»,
-    які користувач інакше вводив би вручну на /research."""
+    """Entity -> (canonical name, [canon + all aliases]) for a lexical
+    mention search. None if there is no entity. Aliases = "spelling variants"
+    that the user would otherwise type by hand on /research."""
     with get_db_connection(db_path) as conn:
         ent = conn.execute("SELECT canonical_name FROM entities WHERE id = ?", (entity_id,)).fetchone()
         if not ent:
@@ -119,17 +119,17 @@ def entity_terms(db_path: str, entity_id: int) -> "tuple[str, list[str]] | None"
 def _candidate_ids(conn, fts_q: str, category_id, *,
                    tags: "list[str] | None" = None,
                    since: "str | None" = None, until: "str | None" = None) -> list[int]:
-    """ID транскриптів-кандидатів через FTS5, з фільтром напрямку/тегів/періоду.
+    """Candidate transcript IDs via FTS5, with a direction/tags/period filter.
 
-    T4.6: soft-deleted виключаємо завжди (не лише коли задано category_id).
-    Напрямок id розкривається на нього і його проєкти (`categories.filter_sql`);
-    теги — OR по назвах; період — включно по обох межах.
+    T4.6: soft-deleted are always excluded (not only when category_id is given).
+    The direction id expands to itself and its projects (`categories.filter_sql`);
+    tags - OR over names; period - inclusive on both bounds.
     """
     cat_frag, cat_params = filter_sql("category_id", category_id)
     tags_frag, tags_params = tags_sql("id", tags or [])
     date_frag, date_params = date_sql("COALESCE(meeting_date, created_at)", since, until)
-    # `+rowid`: інакше список id іде у FTS5 як обмеження і MATCH ганяється на
-    # кожен id окремо (fts-filter-pushdown; 0.39 с → 0.001 с на знімку).
+    # `+rowid`: otherwise the id list goes into FTS5 as a constraint and MATCH runs for
+    # each id separately (fts-filter-pushdown; 0.39 s -> 0.001 s on the snapshot).
     sql = ("SELECT rowid FROM transcriptions_fts WHERE transcriptions_fts MATCH ? "
            "AND +rowid IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL"
            + cat_frag + tags_frag + date_frag + ")")
@@ -139,17 +139,17 @@ def _candidate_ids(conn, fts_q: str, category_id, *,
 
 
 # ============================================================
-# Витяг фрагментів
+# Fragment extraction
 # ============================================================
 
-# Підрядок ловить словоформи (ліцензія→ліцензії), але короткі терміни ("BH",
-# "Акме") так чіпляли б чужі слова. Тому ≤3 символи матчимо за межею слова (\b),
-# довші — підрядком (toleruє відмінювання й OCR-хвости).
+# A substring catches word forms ("ліцензія" -> "ліцензії"), but short terms ("BH",
+# "Акме") would hook foreign words that way. So <=3 characters are matched at a word boundary (\b),
+# longer ones as a substring (tolerates inflection and OCR tails).
 _SHORT_TERM = 3
 
 
 def _build_matchers(terms: list[str]) -> list:
-    """[('sub', lowterm) | ('re', compiled)] — по матчеру на термін."""
+    """[('sub', lowterm) | ('re', compiled)] - one matcher per term."""
     out = []
     for t in terms:
         t = t.strip()
@@ -186,7 +186,7 @@ def _count_mentions(text: str, matchers: list) -> int:
 
 
 def _iter_positions(text: str, matchers: list):
-    """Yield (start, end) кожної згадки (для вікон контексту у суцільному тексті)."""
+    """Yield (start, end) of each mention (for context windows in continuous text)."""
     low = text.lower()
     for kind, v in matchers:
         if kind == "sub":
@@ -203,7 +203,7 @@ def _iter_positions(text: str, matchers: list):
 
 
 def _speaker_map(conn, tid: int) -> dict:
-    """{raw_label: name} для транскрипту (лише названі спікери)."""
+    """{raw_label: name} for a transcript (named speakers only)."""
     rows = conn.execute(
         "SELECT m.raw_label, s.name FROM transcription_speaker_map m "
         "JOIN speakers s ON s.id = m.speaker_id WHERE m.transcription_id = ?",
@@ -231,12 +231,12 @@ def _fmt_ts(sec) -> str:
 
 
 def _fragments_from_segments(segments: list, matchers: list, spmap: dict) -> list[str]:
-    """Діапазони сегментів навколо згадок (± SEG_CTX), злиті. Кожен фрагмент —
-    рядки '[mm:ss] Імʼя: текст'."""
+    """Segment ranges around mentions (+- SEG_CTX), merged. Each fragment is
+    lines '[mm:ss] Name: text'."""
     hits = [i for i, s in enumerate(segments) if _any_match(s.get("text", ""), matchers)]
     if not hits:
         return []
-    # Інтервали [i-ctx, i+ctx], злити перетин/суміжні.
+    # Intervals [i-ctx, i+ctx], merge overlapping/adjacent ones.
     ranges: list[list[int]] = []
     for i in hits:
         a, b = max(0, i - SEG_CTX), min(len(segments) - 1, i + SEG_CTX)
@@ -261,8 +261,8 @@ def _fragments_from_segments(segments: list, matchers: list, spmap: dict) -> lis
 
 
 def _fragments_from_text(text: str, matchers: list) -> list[str]:
-    """Вікна ± TEXT_CTX_CHARS навколо кожної згадки у суцільному тексті,
-    приклеєні до меж слів і злиті при перетині."""
+    """Windows +- TEXT_CTX_CHARS around each mention in continuous text,
+    snapped to word boundaries and merged on overlap."""
     if not text:
         return []
     spans: list[list[int]] = []
@@ -279,7 +279,7 @@ def _fragments_from_text(text: str, matchers: list) -> list[str]:
             merged.append([a, b])
     out = []
     for a, b in merged[:MAX_FRAGMENTS_PER_RECORD]:
-        # притиснути до меж слів
+        # snap to word boundaries
         if a > 0:
             sp = text.find(" ", a)
             a = sp + 1 if 0 <= sp < b else a
@@ -294,7 +294,7 @@ def _fragments_from_text(text: str, matchers: list) -> list[str]:
 
 
 def _record_who(row) -> str:
-    """Коротка лінія 'хто/звідки' за типом джерела."""
+    """Short 'who/from where' line by source type."""
     st = row["source_type"]
     if st == "telegram":
         bits = []
@@ -323,11 +323,11 @@ def _abs_path(file_path: Optional[str]) -> Optional[str]:
 def collect(db_path: str, q: str, category_id=None, display=None, *,
            tags: "list[str] | None" = None,
            since: "str | None" = None, until: "str | None" = None) -> dict:
-    """Знайти всі згадки і витягти фрагменти (БЕЗ AI). display — гарна назва
-    для заголовків (напр. канонічне ім'я сутності). `tags`/`since`/`until` —
-    ті самі осі C4, що й в /api/history (напрямок id вже розкритий на проєкти
-    викликачем через `categories.parse_filter`). Returns dict з records
-    (за датою спадно), terms, display і stats. Кожен record:
+    """Find all mentions and extract fragments (NO AI). display - a nice name
+    for headings (e.g. the entity's canonical name). `tags`/`since`/`until` -
+    the same C4 axes as in /api/history (the direction id is already expanded to projects
+    by the caller via `categories.parse_filter`). Returns a dict with records
+    (by date descending), terms, display and stats. Each record:
       {id, source_type, title, date_display, date_sort, who, category_name,
        file_path(abs|None), mentions, fragments[str], title_only}."""
     terms = parse_terms(q)
@@ -342,7 +342,7 @@ def collect(db_path: str, q: str, category_id=None, display=None, *,
                      conn.execute("SELECT id, name FROM categories").fetchall()}
         ids = _candidate_ids(conn, fts_q, category_id, tags=tags, since=since, until=until)
         if len(ids) > MAX_RECORDS:
-            logger.warning("[research] %d кандидатів > MAX_RECORDS=%d — зрізаю", len(ids), MAX_RECORDS)
+            logger.warning("[research] %d candidates > MAX_RECORDS=%d - truncating", len(ids), MAX_RECORDS)
             ids = ids[:MAX_RECORDS]
 
         records = []
@@ -378,7 +378,7 @@ def collect(db_path: str, q: str, category_id=None, display=None, *,
                 "title_only": not fragments,
             })
 
-    # Свіже згори: за date_sort спадно, далі id спадно.
+    # Fresh on top: by date_sort descending, then id descending.
     records.sort(key=lambda r: (r["date_sort"], r["id"]), reverse=True)
 
     by_source: dict = {}
@@ -395,12 +395,12 @@ def collect(db_path: str, q: str, category_id=None, display=None, *,
 
 
 # ============================================================
-# Markdown — оригінали
+# Markdown - originals
 # ============================================================
 
 def _highlight(text: str, terms: list[str]) -> str:
-    """Виділити згадки **жирним** (case-insensitive), не ламаючи markdown.
-    Короткі терміни (≤3) — за межею слова, як і пошук."""
+    """Highlight mentions in **bold** (case-insensitive) without breaking markdown.
+    Short terms (<=3) - at a word boundary, like the search."""
     if not terms:
         return text
     parts = []
@@ -412,7 +412,7 @@ def _highlight(text: str, terms: list[str]) -> str:
 
 
 def _file_links_md(rec: dict, base_url: str) -> str:
-    """Три способи дістатись оригіналу: Recall / file:// / абсолютний шлях."""
+    """Three ways to reach the original: Recall / file:// / absolute path."""
     app_link = f"[Відкрити в Recall]({base_url}transcript/{rec['id']})"
     ap = rec.get("file_path")
     if not ap:
@@ -429,7 +429,7 @@ def _file_links_md(rec: dict, base_url: str) -> str:
 
 
 def _fmt_date_human(s: str) -> str:
-    """'2026-05-29 14:03:11' → '2026-05-29 14:03'; дата-онлі лишаємо як є."""
+    """'2026-05-29 14:03:11' -> '2026-05-29 14:03'; date-only is left as is."""
     if not s:
         return ""
     s = str(s)
@@ -501,7 +501,7 @@ def _by_source_line(by_source: dict) -> str:
 
 
 # ============================================================
-# Саммарі — map-reduce по фрагментах (дешева модель)
+# Summary - map-reduce over fragments (cheap model)
 # ============================================================
 
 _SUMMARY_SYSTEM = """Ти — аналітик, що готує стислий бізнес-звіт по бренду/темі на основі
@@ -531,7 +531,7 @@ _REDUCE_SYSTEM = """Ти зводиш кілька часткових консп
 
 
 def _summary_blocks(records: list[dict]) -> list[str]:
-    """Текстові блоки по записах (тільки фрагменти, без markdown-highlight)."""
+    """Text blocks per record (fragments only, no markdown highlight)."""
     blocks = []
     for i, rec in enumerate(records, 1):
         if rec["title_only"]:
@@ -579,7 +579,7 @@ def _call_claude(client, model: str, system: str, user: str, timeout: float = 18
         with client.with_options(timeout=timeout).messages.stream(**kwargs) as stream:
             return stream.get_final_message()
 
-    # Retry на транзиентних помилках (429/5xx/timeout) — T6.3.
+    # Retry on transient errors (429/5xx/timeout) - T6.3.
     final = call_with_retry(_do, what="research-summary")
     text = "".join(b.text for b in final.content if b.type == "text").strip()
     u = final.usage
@@ -599,10 +599,10 @@ def summarize_stream(db_path: str, q: str, category_id=None,
                      model: Optional[str] = None, display=None, *,
                      tags: "list[str] | None" = None,
                      since: "str | None" = None, until: "str | None" = None) -> Iterator[str]:
-    """SSE: огляд по бренду через map-reduce (тільки фрагменти, дешева модель).
-    display — гарна назва для заголовка (напр. ім'я сутності). `tags`/`since`/
-    `until` — прокидаються в `collect` без переосмислення.
-    Події: start → progress* → done{markdown,...} | error."""
+    """SSE: brand overview via map-reduce (fragments only, cheap model).
+    display - a nice name for the heading (e.g. the entity name). `tags`/`since`/
+    `until` - passed through to `collect` without reinterpretation.
+    Events: start -> progress* -> done{markdown,...} | error."""
     terms = parse_terms(q)
     if not terms:
         yield _sse("error", {"error": "Порожній запит"})

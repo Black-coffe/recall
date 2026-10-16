@@ -1,7 +1,7 @@
-"""Тести для app/repositories/* (T7.2, перший інкремент).
+"""Tests for app/repositories/* (T7.2, first increment).
 
-Той самий підхід, що й test_migrations.py: тимчасова SQLite БД у tmp_path
-через init_database(), без flask app-контексту.
+The same approach as test_migrations.py: a temporary SQLite DB in tmp_path
+via init_database(), without a flask app context.
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def test_get_by_id_select_star_returns_all_columns(tmp_path):
         assert row is not None
         assert row["id"] == tid
         assert row["source_name"] == "meet.mp3"
-        # SELECT * — усі колонки схеми присутні, у т.ч. ті, що ми явно не питали
+        # SELECT * — all schema columns are present, including those we did not explicitly ask for
         assert "transcript_text" in row.keys()
         assert "enriched_at" in row.keys()
     finally:
@@ -110,7 +110,7 @@ def test_get_many_by_ids_returns_matching_rows_with_requested_columns(tmp_path):
     try:
         tid1 = _insert_transcription(conn, source_name="a.mp3")
         tid2 = _insert_transcription(conn, source_name="b.mp3")
-        _insert_transcription(conn, source_name="c.mp3")  # не в вибірці
+        _insert_transcription(conn, source_name="c.mp3")  # not in the selection
 
         rows = tx_repo.get_many_by_ids(conn, [tid1, tid2], columns=("id", "segments"))
         assert {r["id"] for r in rows} == {tid1, tid2}

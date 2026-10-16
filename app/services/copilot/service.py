@@ -1,12 +1,12 @@
-"""Co-pilot — CopilotService (Phase 19, Крок 1).
+"""Co-pilot — CopilotService (Phase 19, Step 1).
 
-Тонкий persist-шар над ``copilot_sessions``. Singleton у ``app.state.copilot_service``
-(поряд з recording_service / live_transcribe_worker). На Кроці 1 — лише CRUD
-сесії (start/get_state/end); фоновий аналіз (топіки, диспетчер, ескалація) —
-окремий CopilotWorker у Кроках 2+.
+A thin persist layer over ``copilot_sessions``. Singleton in ``app.state.copilot_service``
+(next to recording_service / live_transcribe_worker). At Step 1 — only session
+CRUD (start/get_state/end); background analysis (topics, dispatcher, escalation) is the
+separate CopilotWorker in Steps 2+.
 
-НЕ залежить від flask app context — приймає db_path у конструкторі (як
-enrichment/embeddings приймають db_path явно), щоб лишатись тестованим.
+Does NOT depend on the flask app context — takes db_path in the constructor (as
+enrichment/embeddings take db_path explicitly), to stay testable.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class CopilotBusyError(Exception):
-    """Копілот уже веде інший живий запис (C6: один власник на процес)."""
+    """The copilot is already driving another live recording (C6: one owner per process)."""
 
     def __init__(self, owner_session_id: str):
         super().__init__(f"copilot busy on recording {owner_session_id}")
@@ -32,13 +32,13 @@ class CopilotBusyError(Exception):
 
 
 class CopilotService:
-    """Контролер копілот-сесій. Один інстанс на процес."""
+    """Co-pilot session controller. One instance per process."""
 
     def __init__(self, db_path: str,
                  is_recording_active: Optional[Callable[[str], bool]] = None):
         self._db_path = db_path
         self._lock = threading.RLock()
-        # None (тести, boot без recording) → кожен active-рядок вважаємо живим.
+        # None (tests, boot without recording) → treat every active row as live.
         self.is_recording_active = is_recording_active
 
     def _is_live(self, recording_session_id: str) -> bool:
@@ -48,12 +48,12 @@ class CopilotService:
 
     def start(self, settings: Optional[dict] = None,
               recording_session_id: Optional[str] = None) -> dict:
-        """Створити копілот-сесію зі знімком резолвлених налаштувань.
+        """Create a copilot session with a snapshot of the resolved settings.
 
         Returns {"copilot_session_id", "config": <resolved settings>}.
 
-        Raises CopilotBusyError, якщо активна копілот-сесія іншого запису, який
-        ще живий. Active-рядки, чий запис уже зник, закриваються тут же.
+        Raises CopilotBusyError if there is an active copilot session of another recording that
+        is still live. Active rows whose recording is already gone are closed right here.
         """
         cfg = copilot_config.resolve_settings(settings)
         with self._lock, get_db_connection(self._db_path) as conn:
@@ -73,7 +73,7 @@ class CopilotService:
                     "ended_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'ended'",
                     (row["id"],),
                 )
-                logger.info("[copilot] сесія %s закрита: запис %s уже не живий",
+                logger.info("[copilot] session %s closed: recording %s is no longer live",
                             row["id"], row["recording_session_id"])
             cur = conn.execute(
                 "INSERT INTO copilot_sessions "
@@ -90,7 +90,7 @@ class CopilotService:
             conn.commit()
             sid = cur.lastrowid
         logger.info(
-            "[copilot] сесія %s створена (rec=%s, mode=%s, importance=%s, api=%s, "
+            "[copilot] session %s created (rec=%s, mode=%s, importance=%s, api=%s, "
             "budget=$%.2f, category=%s)",
             sid, recording_session_id, cfg["mode"], cfg["importance"],
             cfg["api_enabled"], cfg["budget_usd"], cfg["category_id"],
@@ -98,7 +98,7 @@ class CopilotService:
         return {"copilot_session_id": sid, "config": cfg}
 
     def get_transcript_brief(self, transcription_id: Optional[int]) -> Optional[dict]:
-        """Сегменти+мета транскрипту для експорту сесії (Крок 8). None якщо нема."""
+        """Transcript segments+meta for the session export (Step 8). None if absent."""
         if not transcription_id:
             return None
         with get_db_connection(self._db_path) as conn:
@@ -116,15 +116,15 @@ class CopilotService:
         return d
 
     def link_transcription(self, copilot_session_id: int, transcription_id: int) -> None:
-        """Прив'язати копілот-сесію до створеного транскрипту (Крок 7) — щоб таймлайн
-        ко-пілота відкривався зі сторінки транскрипту. Idempotent."""
+        """Bind the copilot session to the created transcript (Step 7) — so that the co-pilot
+        timeline opens from the transcript page. Idempotent."""
         with self._lock, get_db_connection(self._db_path) as conn:
             conn.execute("UPDATE copilot_sessions SET transcription_id = ? WHERE id = ?",
                          (transcription_id, copilot_session_id))
             conn.commit()
 
     def get_by_transcription(self, transcription_id: int) -> Optional[dict]:
-        """Копілот-сесія, прилінкована до транскрипту (остання). None якщо нема."""
+        """The copilot session linked to a transcript (the latest). None if absent."""
         with get_db_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT * FROM copilot_sessions WHERE transcription_id = ? "
@@ -132,8 +132,8 @@ class CopilotService:
         return dict(row) if row else None
 
     def get_timeline(self, copilot_session_id: int) -> Optional[dict]:
-        """Повна історична доріжка сесії для таймлайну (Крок 7): сесія + теми +
-        події (відсортовані за таймкодом) + агрегати. None якщо сесію не знайдено."""
+        """Full historical track of a session for the timeline (Step 7): session + topics +
+        events (sorted by timecode) + aggregates. None if the session is not found."""
         session = self.get_state(copilot_session_id)
         if session is None:
             return None
@@ -165,8 +165,8 @@ class CopilotService:
         }
 
     def get_feedback_stats(self) -> dict:
-        """Агрегати дій оператора (👍/👎/pin/dismiss/escalate) — сигнал для
-        калібрування порогів (Крок 9). Безпечно: лише читання, без сесій теж 0."""
+        """Aggregates of operator actions (👍/👎/pin/dismiss/escalate) — a signal for
+        calibrating thresholds (Step 9). Safe: read-only, 0 even without sessions."""
         out = {"thumbs_up": 0, "thumbs_down": 0, "pin": 0, "dismiss": 0,
                "escalate": 0, "sessions": 0}
         try:
@@ -183,28 +183,28 @@ class CopilotService:
         return out
 
     def get_feedback_by_confidence_bucket(self, bucket_width: float = 0.1) -> dict:
-        """Агрегувати дії оператора (👍/👎/pin/dismiss/escalate) ЗА confidence-
-        бакетами ІНСАЙТУ, над яким діяли (T6.8, замикає обірваний цикл
-        feedback→калібрування з REMEDIATION_PLAN). Кожна operator_action-подія
-        лінкує на первинний insight_local/insight_verified через
-        ``payload.ref_event_id`` (див. :meth:`log_action`) — беремо звідти
-        ``confidence`` і рахуємо, скільки 👍/👎 припадає на кожен діапазон
-        впевненості.
+        """Aggregate operator actions (👍/👎/pin/dismiss/escalate) BY the confidence
+        buckets of the INSIGHT acted on (T6.8, closes the broken
+        feedback→calibration loop from REMEDIATION_PLAN). Each operator_action event
+        links to the primary insight_local/insight_verified via
+        ``payload.ref_event_id`` (see :meth:`log_action`) — we take ``confidence``
+        from there and count how many 👍/👎 fall on each confidence
+        range.
 
-        НЕ змінює жодних дефолтів (escalate_threshold/min_unanchored_conf у
-        copilot/config.py) — лише дає ЧИСЛА для періодичного ручного перегляду.
-        Наприклад, високий thumbs_down_ratio у бакеті 0.6-0.7 — сигнал, що
-        escalate_threshold варто підняти; людина вирішує й бампає константу.
+        Changes NO defaults (escalate_threshold/min_unanchored_conf in
+        copilot/config.py) — only gives NUMBERS for a periodic manual review.
+        For example, a high thumbs_down_ratio in the 0.6-0.7 bucket is a signal that
+        escalate_threshold should be raised; a human decides and bumps the constant.
 
         Returns {
             "bucket_width": float,
             "buckets": [{"range": "0.6-0.7", "lo": 0.6, "hi": 0.7,
                          "thumbs_up": int, "thumbs_down": int, "pin": int,
                          "dismiss": int, "escalate": int, "total": int,
-                         "thumbs_down_ratio": float|None}, ...],  # лише непорожні, за зростанням lo
-            "unlinked": int,  # дії без resolvable ref_event_id/confidence (не рахуються в buckets)
+                         "thumbs_down_ratio": float|None}, ...],  # non-empty only, ascending lo
+            "unlinked": int,  # actions without a resolvable ref_event_id/confidence (not counted in buckets)
         }
-        Безпечно: лише читання; порожня БД → buckets=[], unlinked=0.
+        Safe: read-only; empty DB → buckets=[], unlinked=0.
         """
         width = bucket_width if bucket_width and bucket_width > 0 else 0.1
         n_buckets = max(1, round(1.0 / width))
@@ -263,7 +263,7 @@ class CopilotService:
         return {"bucket_width": width, "buckets": out_buckets, "unlinked": unlinked}
 
     def list_sessions(self, *, limit: int = 50, offset: int = 0) -> list:
-        """Список копілот-сесій (новіші перші) для огляду «що підказував ко-пілот»."""
+        """List of copilot sessions (newest first) for the "what the co-pilot suggested" overview."""
         with get_db_connection(self._db_path) as conn:
             rows = conn.execute(
                 "SELECT s.id, s.recording_session_id, s.transcription_id, s.category_id, "
@@ -281,9 +281,9 @@ class CopilotService:
 
     def update_settings(self, copilot_session_id: int, *, mode: Optional[str] = None,
                         importance: Optional[str] = None) -> Optional[dict]:
-        """Перерезолвити налаштування сесії на льоту (Крок 6). Зміна режиму зберігає
-        api/бюджет; зміна важливості застосовує її дефолти (тир API/бюджет/модель).
-        Повертає новий резолвлений config або None, якщо сесію не знайдено."""
+        """Re-resolve session settings on the fly (Step 6). A mode change keeps
+        api/budget; an importance change applies its defaults (API tier/budget/model).
+        Returns the new resolved config or None if the session is not found."""
         snap = self.get_state(copilot_session_id)
         if not snap:
             return None
@@ -293,7 +293,7 @@ class CopilotService:
             "importance": importance or cur.get("importance"),
             "category_id": cur.get("category_id"),
         }
-        if importance is None:  # лише режим → зберегти явний вибір api/бюджету
+        if importance is None:  # mode only → keep the explicit api/budget choice
             raw["api_enabled"] = cur.get("api_enabled")
             raw["budget_usd"] = cur.get("budget_usd")
         cfg = copilot_config.resolve_settings(raw)
@@ -306,12 +306,12 @@ class CopilotService:
                  json.dumps(cfg, ensure_ascii=False), copilot_session_id),
             )
             conn.commit()
-        logger.info("[copilot] сесія %s переналаштована (mode=%s, importance=%s, api=%s)",
+        logger.info("[copilot] session %s reconfigured (mode=%s, importance=%s, api=%s)",
                     copilot_session_id, cfg["mode"], cfg["importance"], cfg["api_enabled"])
         return cfg
 
     def get_state(self, copilot_session_id: int) -> Optional[dict]:
-        """Snapshot сесії (з розпарсеним config). None якщо не знайдено."""
+        """Session snapshot (with the parsed config). None if not found."""
         with get_db_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT * FROM copilot_sessions WHERE id = ?", (copilot_session_id,)
@@ -326,7 +326,7 @@ class CopilotService:
         return d
 
     def get_by_recording(self, recording_session_id: str) -> Optional[dict]:
-        """Активна копілот-сесія для даного запису (остання). None якщо нема."""
+        """The active copilot session for a given recording (the latest). None if absent."""
         with get_db_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT * FROM copilot_sessions WHERE recording_session_id = ? "
@@ -334,13 +334,13 @@ class CopilotService:
             ).fetchone()
         return dict(row) if row else None
 
-    # ---------------------------------------------- топіки / події (Крок 2)
+    # ---------------------------------------------- topics / events (Step 2)
 
     def upsert_topic(self, copilot_session_id: int, topic_index: int,
                      label: Optional[str] = None, centroid_bytes: Optional[bytes] = None,
                      first_ts: Optional[float] = None, last_ts: Optional[float] = None) -> int:
-        """Створити або оновити топік-блок сесії (унікальний по
-        (session, topic_index)). Повертає copilot_topics.id."""
+        """Create or update a session topic block (unique by
+        (session, topic_index)). Returns copilot_topics.id."""
         with self._lock, get_db_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT id FROM copilot_topics WHERE copilot_session_id = ? AND topic_index = ?",
@@ -366,7 +366,7 @@ class CopilotService:
         return tid
 
     def get_category_name(self, category_id: Optional[int]) -> Optional[str]:
-        """Назва напрямку (для профілю диспетчера). None якщо нема/не знайдено."""
+        """Direction name (for the dispatcher profile). None if absent/not found."""
         if not category_id:
             return None
         with get_db_connection(self._db_path) as conn:
@@ -377,8 +377,8 @@ class CopilotService:
 
     def update_topic_retrieval(self, copilot_session_id: int, topic_index: int,
                                chunks: list) -> None:
-        """Закешувати RAG-чанки теми (для повернення до теми — Крок 3). Топік-рядок
-        має вже існувати (його створює upsert_topic на shift/return)."""
+        """Cache the topic's RAG chunks (for returning to a topic — Step 3). The topic row
+        must already exist (it is created by upsert_topic on shift/return)."""
         with self._lock, get_db_connection(self._db_path) as conn:
             conn.execute(
                 "UPDATE copilot_topics SET retrieval_cache_json = ? "
@@ -389,7 +389,7 @@ class CopilotService:
 
     def get_topic_retrieval(self, copilot_session_id: int,
                             topic_index: int) -> Optional[list]:
-        """Закешовані RAG-чанки теми або None."""
+        """Cached RAG chunks of the topic or None."""
         with get_db_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT retrieval_cache_json FROM copilot_topics "
@@ -409,7 +409,7 @@ class CopilotService:
                   payload: Optional[dict] = None, tokens_in: Optional[int] = None,
                   tokens_out: Optional[int] = None,
                   operator_action: Optional[str] = None) -> int:
-        """Записати подію в історичну доріжку copilot_events. Повертає id."""
+        """Write an event into the historical track copilot_events. Returns id."""
         with get_db_connection(self._db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO copilot_events "
@@ -425,9 +425,9 @@ class CopilotService:
 
     def add_usage(self, copilot_session_id: int, *, tokens_in: int = 0,
                   tokens_out: int = 0, cache_read: int = 0, cost: float = 0.0) -> dict:
-        """Атомарно додати облік одного API-виклику до сесії. Повертає нові підсумки
-        + чи вичерпано бюджет (хард-стоп → деградація в локальний-only, Крок 5).
-        budget_usd <= 0 трактуємо як «без ліміту» (коли api_enabled)."""
+        """Atomically add the accounting of one API call to the session. Returns the new totals
+        + whether the budget is exhausted (hard stop → degradation to local-only, Step 5).
+        budget_usd <= 0 is treated as "no limit" (when api_enabled)."""
         with self._lock, get_db_connection(self._db_path) as conn:
             conn.execute(
                 "UPDATE copilot_sessions SET tokens_in = tokens_in + ?, "
@@ -456,9 +456,9 @@ class CopilotService:
     def log_action(self, copilot_session_id: int, action: str, *,
                    ref_event_id: Optional[int] = None, ts_offset_sec: Optional[float] = None,
                    payload: Optional[dict] = None) -> int:
-        """Записати дію оператора над карткою (dismiss/pin/thumbs_up/thumbs_down/
-        escalate) — для тюнінгу й історії (Крок 4). ref_event_id лінкує на інсайт,
-        над яким діяли. escalate підбере Крок 5."""
+        """Record an operator action on a card (dismiss/pin/thumbs_up/thumbs_down/
+        escalate) — for tuning and history (Step 4). ref_event_id links to the insight
+        acted on. escalate is picked up by Step 5."""
         p = dict(payload or {})
         if ref_event_id is not None:
             p["ref_event_id"] = ref_event_id
@@ -468,8 +468,8 @@ class CopilotService:
 
     def end(self, copilot_session_id: int,
             transcription_id: Optional[int] = None) -> bool:
-        """Завершити сесію (status='ended'). Опційно прилінкувати transcription_id
-        (коли транскрипт створено після finalize). Idempotent."""
+        """Finish the session (status='ended'). Optionally link transcription_id
+        (when the transcript is created after finalize). Idempotent."""
         with self._lock, get_db_connection(self._db_path) as conn:
             if transcription_id is not None:
                 conn.execute(
@@ -484,5 +484,5 @@ class CopilotService:
             conn.commit()
         ended = cur.rowcount > 0
         if ended:
-            logger.info("[copilot] сесія %s завершена", copilot_session_id)
+            logger.info("[copilot] session %s ended", copilot_session_id)
         return ended

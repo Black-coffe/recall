@@ -1,7 +1,7 @@
-"""Тести для app.utils.paths (T1.5, Волна 1) — спільна path-traversal утиліта.
+"""Tests for app.utils.paths (T1.5, Wave 1) — the shared path-traversal utility.
 
-safe_path_within/safe_path_within_any замінили ad-hoc
-os.path.abspath(...).startswith(...) перевірки, продубльовані вручну в
+safe_path_within/safe_path_within_any replaced the ad-hoc
+os.path.abspath(...).startswith(...) checks, duplicated by hand in
 documents.py / transcription.py / telegram.py.
 """
 import os
@@ -40,8 +40,8 @@ class TestSafePathWithin:
 
     def test_sibling_directory_with_matching_prefix_is_rejected(self, tmp_path):
         # base_dir = ".../base", candidate = ".../base_evil/secret.txt" —
-        # голий startswith('.../base') хибно пропустив би це; перевірка
-        # межі по os.sep має відхилити.
+        # a bare startswith('.../base') would wrongly let this through; the
+        # boundary check by os.sep must reject.
         base = tmp_path / "base"
         base.mkdir()
         evil = tmp_path / "base_evil"
@@ -60,8 +60,8 @@ class TestSafePathWithin:
         assert safe_path_within(None, os.path.join(base_dir, "f.txt")) is None
 
     def test_nonexistent_candidate_within_base_is_still_allowed(self, base_dir):
-        # Файл ще не створений (наприклад, ціль завантаження) — все одно ОК,
-        # якщо резолвиться всередину base.
+        # The file is not created yet (e.g. an upload target) — still OK,
+        # if it resolves inside base.
         target = os.path.join(base_dir, "not_yet_created.bin")
         assert not os.path.exists(target)
         assert safe_path_within(base_dir, target) is not None

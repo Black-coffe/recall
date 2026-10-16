@@ -1,4 +1,4 @@
-"""Каталог серверних текстів: область transcript (transcription.py, bookmarks.py)."""
+"""Catalog of server texts: the transcript area (transcription.py, bookmarks.py)."""
 MESSAGES: dict = {
     "transcript.bm.name_len": {
         "uk": "name 1-100 символів",

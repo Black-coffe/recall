@@ -1,11 +1,11 @@
-"""Module-level singletons для blueprints.
+"""Module-level singletons for blueprints.
 
-Заповнюються в app.py під час ініціалізації. Blueprints імпортують
-звідси, щоб уникнути циркулярних import'ів з app.py.
+Populated in app.py during initialization. Blueprints import
+from here to avoid circular imports with app.py.
 
-Це pragmatic Flask-паттерн (як `flask.current_app`, але з простішим
-доступом без application context). Підходить для single-instance
-deployment'у.
+This is a pragmatic Flask pattern (like `flask.current_app`, but with simpler
+access without an application context). Suitable for a single-instance
+deployment.
 """
 from typing import Any, Optional
 
@@ -15,16 +15,16 @@ whisper_manager: Any = None
 # Concurrency
 executor: Any = None  # batch pool (T2.5): youtube/audio download, doc_import,
 # enrichment(_backfill), tg_embed/tg_transcribe, video_analysis
-live_executor: Any = None  # T2.5: live-critical pool — зараз лише recording_finalize
+live_executor: Any = None  # T2.5: live-critical pool — currently only recording_finalize
 job_queue: Any = None
 
 # Stores (Phase 2)
 download_progress: Any = None
 process_logs: Any = None
 sse_broker: Any = None
-# Active /api/transcribe jobs кореновані за audio_download_id (source='library').
-# dict[int, {audio_download_id, started_at, stage, progress}]. Live-state для UI:
-# показувати «транскрибується» на картці у Audio Library.
+# Active /api/transcribe jobs keyed by audio_download_id (source='library').
+# dict[int, {audio_download_id, started_at, stage, progress}]. Live state for the UI:
+# show "transcribing" on the card in the Audio Library.
 active_library_transcriptions: Any = None
 
 # Background services
@@ -37,35 +37,35 @@ limiter: Any = None
 ffmpeg_available: bool = False
 cfg: Any = None
 
-# config-registry-profiles S2/S3: фази boot-у app.py пишуть сюди по мірі
-# готовності; story 03 (`GET /api/ready`) лише читає. Дефолти — «ще не готово»/
-# «вимкнено», щоб /api/ready віддавав 503 до завершення відповідної фази,
-# навіть якщо запит прилетів у крихітне вікно між `import app` і кінцем boot-у.
+# config-registry-profiles S2/S3: the app.py boot phases write here as they
+# become ready; story 03 (`GET /api/ready`) only reads. Defaults are "not ready yet"/
+# "disabled", so /api/ready returns 503 until the corresponding phase completes,
+# even if a request arrives in the tiny window between `import app` and the end of boot.
 #
-# `migrations` навмисно відсутній у контракті (робота-contract-03, знахідка
-# 9 звіту S3): шлях до 'error' недосяжний — `app/db/migrations.py` перекидає
-# виняток, а `app.py` його не ловить, тож процес падає до робота ще до
-# першого запиту. Поле, у якого немає жодного реального стану, не входить
-# у контракт.
+# `migrations` is deliberately absent from the contract (робота-contract-03, finding
+# 9 of the S3 report): the path to 'error' is unreachable — `app/db/migrations.py` rethrows
+# the exception, and `app.py` does not catch it, so the process dies before робота, even before the
+# first request. A field with no real state does not belong
+# in the contract.
 робота: dict = {
     "database": "pending",  # 'ok' | 'error' | 'pending'
     "job_queue": {"bound": False, "recovered": 0},
     "whisper": {"preload": "disabled", "model": None},  # preload: disabled|loading|ready|failed
-    "embeddings": {"loaded": False},  # інформаційне — e5 вантажиться ліниво, готовність не блокує
+    "embeddings": {"loaded": False},  # informational — e5 loads lazily, робота is not blocked
     "telegram": "disabled",  # 'disabled' | 'starting' | 'running' | 'absent'
-    "boot_finished": False,  # True лише після завершення всіх фаз boot-у; входить в `ready`.
+    "boot_finished": False,  # True only after all boot phases finish; part of `ready`.
 }
 
 # Phase 9: System audio recording
 recording_service: Any = None  # RecordingService instance
-# Phase 9.10: список session_id які були recovery'ні при старті.
-# UI показує banner з цим списком, після подяки очищається.
+# Phase 9.10: list of session_ids that were recovered at startup.
+# The UI shows a banner with this list, cleared after acknowledgement.
 recording_recovery_log: Any = None
 # Phase 12.26 (Big Bet): live transcribe worker
 live_transcribe_worker: Any = None
-# Phase 19 (Co-pilot): живий ко-пілот дзвінка — persist + (далі) live-аналіз
+# Phase 19 (Co-pilot): the live call co-pilot — persist + (later) live analysis
 copilot_service: Any = None  # CopilotService instance
-copilot_worker: Any = None   # CopilotWorker (топік-трекінг на ембеддингах, Крок 2)
+copilot_worker: Any = None   # CopilotWorker (topic tracking on embeddings, Step 2)
 
 # Function singletons (Phase 5)
 add_log: Any = None  # add_process_log: callable(pid, stage, msg, progress, status)
@@ -77,7 +77,7 @@ RATE_LIMIT_POLISH: str = '20/hour'
 
 
 def init(**kwargs):
-    """Bulk-set singletons. Викликається з app.py після initialization."""
+    """Bulk-set singletons. Called from app.py after initialization."""
     g = globals()
     for k, v in kwargs.items():
         if k not in g:

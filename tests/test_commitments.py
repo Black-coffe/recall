@@ -1,8 +1,8 @@
-"""Тести зобовʼязань (Трек 1, app/services/commitments.py).
+"""Tests of commitments (Track 1, app/services/commitments.py).
 
-Кейси парсера взяті з РЕАЛЬНИХ значень `action_items.due` живого архіву
-(426 різних формулювань; тут — головна маса + межові випадки), щоб парсер
-перевірявся проти того, що модель насправді пише, а не проти уявлень автора.
+The parser cases are taken from REAL `action_items.due` values of the live archive
+(426 distinct phrasings; here — the bulk plus edge cases), so that the parser
+is checked against what the model actually writes, not against the author's assumptions.
 """
 from __future__ import annotations
 
@@ -16,31 +16,31 @@ from app.db.migrations import init_database
 from app.services import commitments as cm
 
 
-# Якір — четвер 14.05.2026 (щоб «четвер» ≠ сьогодні і було видно перенос).
+# Anchor — Thursday 14.05.2026 (so that «четвер» != today and the shift is visible).
 ANCHOR = "2026-05-14"
 
 
 @pytest.mark.parametrize("raw,expected_date,expected_prec", [
-    # --- відносні дні ---
+    # --- relative days ---
     ("сьогодні", "2026-05-14", cm.P_DAY),
     ("сегодня", "2026-05-14", cm.P_DAY),
     ("завтра", "2026-05-15", cm.P_DAY),
     ("післязавтра", "2026-05-16", cm.P_DAY),
-    ("сьогодні-завтра", "2026-05-15", cm.P_DAY),        # діапазон → пізніша межа
+    ("сьогодні-завтра", "2026-05-15", cm.P_DAY),        # range -> the later bound
     ("сьогодні ввечері", "2026-05-14", cm.P_DAY),
     ("завтра до 11:30", "2026-05-15", cm.P_DAY),
     ("сьогодні, 14:00", "2026-05-14", cm.P_DAY),
-    # --- дні тижня (якір — четвер) ---
-    ("четвер", "2026-05-21", cm.P_DAY),                 # строго ПІСЛЯ якоря
+    # --- weekdays (anchor is Thursday) ---
+    ("четвер", "2026-05-21", cm.P_DAY),                 # STRICTLY after the anchor
     ("п'ятниця", "2026-05-15", cm.P_DAY),
     ("до понеділка", "2026-05-18", cm.P_DAY),
     ("до четверга", "2026-05-21", cm.P_DAY),
     ("наступний вівторок", "2026-05-19", cm.P_DAY),
-    ("наступна п'ятниця", "2026-05-22", cm.P_DAY),      # не завтра, а через тиждень
+    ("наступна п'ятниця", "2026-05-22", cm.P_DAY),      # not tomorrow but a week later
     ("понеділок-вівторок", "2026-05-19", cm.P_DAY),
     ("вихідні", "2026-05-16", cm.P_DAY),
-    # --- тижні ---
-    ("цього тижня", "2026-05-15", cm.P_WEEK),           # пʼятниця поточного
+    # --- weeks ---
+    ("цього тижня", "2026-05-15", cm.P_WEEK),           # Friday of the current one
     ("кінець тижня", "2026-05-15", cm.P_WEEK),
     ("до кінця тижня", "2026-05-15", cm.P_WEEK),
     ("наступний тиждень", "2026-05-22", cm.P_WEEK),
@@ -50,25 +50,25 @@ ANCHOR = "2026-05-14"
     ("протягом тижня", "2026-05-21", cm.P_WEEK),
     ("через 2 тижні", "2026-05-28", cm.P_WEEK),
     ("протягом 1-2 днів", "2026-05-16", cm.P_DAY),
-    # --- місяці / квартали ---
+    # --- months / quarters ---
     ("кінець місяця", "2026-05-31", cm.P_MONTH),
     ("цього місяця", "2026-05-31", cm.P_MONTH),
     ("червень", "2026-06-30", cm.P_MONTH),
-    ("січень 2026", "2026-01-31", cm.P_MONTH),          # явний рік поважаємо, навіть у минулому
-    ("січень", "2027-01-31", cm.P_MONTH),               # без року і вже минув → наступний
+    ("січень 2026", "2026-01-31", cm.P_MONTH),          # an explicit year is respected, even in the past
+    ("січень", "2027-01-31", cm.P_MONTH),               # no year and already past -> next
     ("5 січня", "2027-01-05", cm.P_DAY),
     ("21 квітня 2026", "2026-04-21", cm.P_DAY),
     ("1 квітня 2026", "2026-04-01", cm.P_DAY),
     ("до середини січня 2026", "2026-01-15", cm.P_WEEK),
     ("Q3 2026", "2026-09-30", cm.P_QUARTER),
     ("Q1 2026", "2026-03-31", cm.P_QUARTER),
-    ("Q1", "2027-03-31", cm.P_QUARTER),                 # квартал у минулому → наступний рік
-    # --- абсолютні ---
+    ("Q1", "2027-03-31", cm.P_QUARTER),                 # quarter in the past -> next year
+    # --- absolute ---
     ("2025-03-28", "2025-03-28", cm.P_DAY),
     ("27.03.2026", "2026-03-27", cm.P_DAY),
     ("07.04.2026 (вівторок)", "2026-04-07", cm.P_DAY),
     ("2025-04", "2025-04-30", cm.P_MONTH),
-    # --- класи без точної дати ---
+    # --- classes without an exact date ---
     ("якнайшвидше", "2026-05-17", cm.P_SOON),
     ("найближчим часом", "2026-05-17", cm.P_SOON),
     ("найближчі дні", "2026-05-17", cm.P_SOON),
@@ -76,18 +76,18 @@ ANCHOR = "2026-05-14"
     ("якомога швидше", "2026-05-17", cm.P_SOON),
     ("кілька днів", "2026-05-17", cm.P_SOON),
     ("до наступної зустрічі", None, cm.P_NEXT_MEETING),
-    # --- термін, привʼязаний до події: дати немає принципово ---
+    # --- a deadline tied to an event: there is no date by design ---
     ("після дзвінка з Acmecorp", None, cm.P_EVENT),
     ("після свят", None, cm.P_EVENT),
-    ("після завтрашньої стратсесії", None, cm.P_EVENT),   # не «завтра»!
+    ("після завтрашньої стратсесії", None, cm.P_EVENT),   # not «завтра»!
     ("до зустрічі з Толіком", None, cm.P_EVENT),
-    # --- добові/скорочені форми ---
+    # --- day-level/abbreviated forms ---
     ("наступний день", "2026-05-15", cm.P_DAY),
     ("до кінця наступного дня", "2026-05-15", cm.P_DAY),
     ("ранок наступного дня", "2026-05-15", cm.P_DAY),
     ("до кінця дня", "2026-05-14", cm.P_DAY),
     ("пн-вт", "2026-05-19", cm.P_DAY),
-    ("з 15-го числа", "2026-05-15", cm.P_DAY),            # найближче 15-те після 14.05
+    ("з 15-го числа", "2026-05-15", cm.P_DAY),            # the nearest 15th after 14.05
     ("наступна зустріч", None, cm.P_NEXT_MEETING),
     ("до наступного дзвінка", None, cm.P_NEXT_MEETING),
     ("щомісяця", None, cm.P_RECURRING),
@@ -98,23 +98,23 @@ def test_parse_due_real_values(raw, expected_date, expected_prec):
 
 @pytest.mark.parametrize("raw", ["", None, "коли буде готово", "як домовились", "???"])
 def test_parse_due_unrecognized(raw):
-    """Нерозпізнане лишається нерозпізнаним — краще None, ніж вигадана дата."""
+    """Unrecognized stays unrecognized — better None than an invented date."""
     assert cm.parse_due(raw, ANCHOR) == (None, None)
 
 
 def test_parse_due_anchor_shifts_relative():
-    """«Завтра» рахується від дати ЗУСТРІЧІ, а не від сьогодні."""
+    """«Завтра» is counted from the MEETING date, not from today."""
     assert cm.parse_due("завтра", "2026-01-31")[0] == "2026-02-01"
-    assert cm.parse_due("завтра", "2024-02-28")[0] == "2024-02-29"   # високосний
+    assert cm.parse_due("завтра", "2024-02-28")[0] == "2024-02-29"   # leap year
 
 
 def test_parse_due_absolute_without_anchor():
-    """Без якоря абсолютні дати все одно розбираються."""
+    """Without an anchor absolute dates are still parsed."""
     assert cm.parse_due("2026-03-01", None) == ("2026-03-01", cm.P_DAY)
 
 
 # ============================================================
-# Offline-проходи на тимчасовій БД
+# Offline passes on a temporary DB
 # ============================================================
 
 def _seed(db: str, rows: list[dict], *, meeting_date: str = "2026-05-14") -> None:
@@ -133,10 +133,10 @@ def _seed(db: str, rows: list[dict], *, meeting_date: str = "2026-05-14") -> Non
                 "owner_entity_id, due, status) VALUES (?, ?, ?, ?, ?, ?)",
                 (r.get("tid", 1), r["task"], r.get("owner_name"), r.get("owner_entity_id"),
                  r.get("due"), r.get("status", "open")))
-            # Текст зустрічі, з якої задача взялась, у бою ЗАВЖДИ в індексі —
-            # інакше нема звідки взятись і самій задачі. Без цього рядка тести
-            # перевіряли б стан, якого не буває, а `dropped_commitments` не мав
-            # би за чим міряти рідкість слів (`_rare_terms` вимагає df > 0).
+            # The text of the meeting the task came from is ALWAYS in the index in production —
+            # otherwise the task itself would have nowhere to come from. Without this row the tests
+            # would check a state that never occurs, and `dropped_commitments` would have
+            # nothing to measure word rarity by (`_rare_terms` requires df > 0).
             conn.execute(
                 "INSERT INTO chunks (transcription_id, chunk_index, text) VALUES (?, ?, ?)",
                 (r.get("tid", 1), n, r.get("chunk_text", f"обговорили: {r['task']}")))
@@ -174,7 +174,7 @@ def test_backfill_due_is_idempotent(db: str):
     assert rows["Незрозуміле"] == (None, None)
 
     second = cm.backfill_due(db)
-    assert second["updated"] == 0, "повторний прохід не має нічого переписувати"
+    assert second["updated"] == 0, "a repeated pass must not rewrite anything"
 
 
 def test_backfill_dry_run_writes_nothing(db: str):
@@ -218,7 +218,7 @@ def test_dedup_marks_repeats_keeps_latest(db: str):
                            "WHERE dup_of IS NOT NULL").fetchone()
         keep = conn.execute("SELECT id, transcription_id FROM action_items "
                             "WHERE id = ?", (dup["dup_of"],)).fetchone()
-    assert keep["transcription_id"] == 1, "канонічною лишається задача зі свіжішої зустрічі"
+    assert keep["transcription_id"] == 1, "the task from the fresher meeting stays canonical"
 
 
 def test_mark_stale_skips_future_deadline(db: str):
@@ -228,8 +228,8 @@ def test_mark_stale_skips_future_deadline(db: str):
         {"task": "Свіжа", "due": "завтра", "tid": 1},
     ])
     cm.backfill_due(db)
-    # today фіксуємо явно: інакше тест залежав би від дати прогону (зустріч
-    # 2026-05-14 з часом сама стає «старою»).
+    # We fix today explicitly: otherwise the test would depend on the run date (the meeting
+    # 2026-05-14 becomes "old" on its own over time).
     res = cm.mark_stale(db, days=30, today=date(2026, 5, 20))
     assert res["marked"] == 1
     with get_db_connection(db) as conn:
@@ -239,7 +239,7 @@ def test_mark_stale_skips_future_deadline(db: str):
 
 
 def test_list_commitments_windows(db: str):
-    """Вікна рахуються від переданого 'сьогодні' — тест не залежить від дати прогону."""
+    """Windows are counted from the passed 'today' — the test does not depend on the run date."""
     _seed(db, [
         {"task": "Цього тижня", "due": "2026-05-14", "owner_name": "Андрій"},
         {"task": "Наступного тижня", "due": "2026-05-19", "owner_name": "Юлія"},
@@ -247,7 +247,7 @@ def test_list_commitments_windows(db: str):
         {"task": "Без дати", "due": "коли завгодно", "owner_name": "Андрій"},
     ])
     cm.backfill_due(db)
-    today = date(2026, 5, 14)   # четвер
+    today = date(2026, 5, 14)   # Thursday
 
     def tasks(**kw):
         return [r["task"] for r in cm.list_commitments(db, today=today, **kw)]
@@ -260,7 +260,7 @@ def test_list_commitments_windows(db: str):
 
 
 def test_overdue_shows_freshest_first(db: str):
-    """Свіжа прострочка вгорі: торішня — археологія, часто ще й кривий витяг."""
+    """A fresh overdue item on top: last year's is archaeology, often also a bad extraction."""
     _seed(db, [
         {"task": "Древня", "due": "2024-02-15"},
         {"task": "Вчорашня", "due": "2026-05-13"},
@@ -288,8 +288,8 @@ def test_list_commitments_hides_dups_and_deleted(db: str):
 
 
 def test_dropped_commitments_respects_quarantine(db: str):
-    """Свіжа домовленість не «загублена» — після неї просто ще нічого не було."""
-    _seed(db, [{"task": "Свіжа домовленість про сервер", "tid": 1}])   # зустріч 2026-05-14
+    """A fresh agreement is not "lost" — nothing has simply come after it yet."""
+    _seed(db, [{"task": "Свіжа домовленість про сервер", "tid": 1}])   # meeting 2026-05-14
     today = date(2026, 5, 20)
     assert cm.dropped_commitments(db, days=60, min_age_days=14, today=today) == []
     got = cm.dropped_commitments(db, days=60, min_age_days=1, today=today)
@@ -297,12 +297,12 @@ def test_dropped_commitments_respects_quarantine(db: str):
 
 
 def test_list_commitments_gives_address_without_tme_link(db: str):
-    """Адреса задачі з переписки — пара (chat_id, msg_id), а не лише посилання.
+    """The address of a chat task is the pair (chat_id, msg_id), not just a link.
 
-    У legacy-групах Telegram посилання на повідомлення НЕ ІСНУЄ (`_chat_link`
-    повертає None для chat_id без префікса -100) — це 1453 записи з 3959 живого
-    архіву, серед них робочі чати. Якщо звід має тільки `link`, на третині
-    архіву відповіді «куди написати» немає.
+    In legacy Telegram groups a message link DOES NOT EXIST (`_chat_link`
+    returns None for a chat_id without the -100 prefix) — that is some recordsin the live
+    archive, working chats among them. If the digest has only `link`, a third of the
+    archive has no answer to "where to write".
     """
     with get_db_connection(db) as conn:
         conn.execute(
@@ -323,15 +323,15 @@ def test_list_commitments_gives_address_without_tme_link(db: str):
     r = got[0]
     assert r["source"] == "tg_thread"
     assert (r["chat"], r["said_by"]) == ("Робоча група", "Микола")
-    assert r["link"] is None                       # у legacy-групі його немає…
-    assert (r["chat_id"], r["msg_id"]) == (-5162514111, 514141)   # …а адреса є
+    assert r["link"] is None                       # in a legacy group there is none...
+    assert (r["chat_id"], r["msg_id"]) == (-5162514111, 514141)   # ...but the address is there
 
     dropped = cm.dropped_commitments(db, days=60, min_age_days=1, today=date(2026, 5, 20))
     assert [(d["chat_id"], d["msg_id"]) for d in dropped] == [(-5162514111, 514141)]
 
 
 def test_list_commitments_call_has_no_chat_address(db: str):
-    """Для дзвінка поля адреси порожні — там адреси немає, і це чесно."""
+    """For a call the address fields are empty — there is no address, and that is honest."""
     _seed(db, [{"task": "Щось зробити", "due": "2026-05-14"}])
     cm.backfill_due(db)
     r = cm.list_commitments(db, window="this_week", today=date(2026, 5, 14))[0]
@@ -348,12 +348,12 @@ def test_weekly_digest_shape(db: str):
 
 
 def test_digest_carries_denominator_for_dated_windows(db: str):
-    """Вікна за датою бачать лише датовані задачі — звід має казати, скільки їх.
+    """Date windows see only dated tasks — the digest must say how many there are.
 
-    Без знаменника «цього тижня — одна» читається як повна картина, хоча на
-    живому архіві дату має частина задач: 408 із 1680. Це та сама вада, що й у
-    `stale_topics` до перевірки текстом — твердження вірне про свій шар і хибне
-    про архів.
+    Without a denominator "this week — one" reads as the full picture, although on the
+    live archive only a share of the tasks have a date: 408 of 1680. It is the same flaw as in
+    `stale_topics` before the text check — the claim is true about its own layer and false
+    about the archive.
     """
     _seed(db, [
         {"task": "З датою", "due": "2026-05-14"},
@@ -371,7 +371,7 @@ def test_digest_carries_denominator_for_dated_windows(db: str):
 
 
 def test_coverage_counts_under_the_same_owner_filter(db: str):
-    """Знаменник рахується під тими ж фільтрами, інакше він про чужі задачі."""
+    """The denominator is counted under the same filters, otherwise it speaks about other tasks."""
     _seed(db, [
         {"task": "Моя з датою", "due": "2026-05-14", "owner_name": "Андрій"},
         {"task": "Моя без дати", "due": None, "owner_name": "Андрій"},
@@ -387,14 +387,14 @@ def test_coverage_counts_under_the_same_owner_filter(db: str):
 
 
 def test_coverage_counts_subtree_not_just_own_category(db: str):
-    """`category_id=<напрямок>` рахує задачі напрямку І його проєктів через
-    `categories.filter_sql` — інакше `commitments_coverage` рахувало лише
-    власні рядки напрямку (`t.category_id = ?`), тоді як `list_commitments`/
-    `count_commitments` уже розкривали дерево: MCP `list_action_items(
-    category_id=<Фонд>)` показувало задачі проєкту Акмекорп в `items`, а
-    `coverage.total` про них мовчало (ревʼю раунду 2, п.2: на scratch-БД
-    `count_commitments=1`, `commitments_coverage.total=0` на тій самій
-    вибірці)."""
+    """`category_id=<direction>` counts tasks of the direction AND its projects through
+    `categories.filter_sql` — otherwise `commitments_coverage` counted only the
+    direction's own rows (`t.category_id = ?`), while `list_commitments`/
+    `count_commitments` already expanded the tree: MCP `list_action_items(
+    category_id=«Фонд»)` showed the Acmecorp project's tasks in `items`, while
+    `coverage.total` was silent about them (round 2 review, item 2: on a scratch DB
+    `count_commitments=1`, `commitments_coverage.total=0` on the same
+    selection)."""
     with get_db_connection(db) as conn:
         fond = conn.execute(
             "SELECT id FROM categories WHERE name = 'Фонд Робота'").fetchone()[0]
@@ -424,11 +424,11 @@ def test_coverage_counts_subtree_not_just_own_category(db: str):
 
 
 def test_coverage_denominator_matches_tag_filter(db: str):
-    """Знаменник рахує ТУ САМУ множину, що й `items`/`window_matched` (ремонт
-    п.1 раунду 3): до цього `commitments_coverage` ігнорував `tags`, тож
-    `list_action_items(tags="AI")` віддавав відфільтрований `items` поруч з
-    архівним `coverage.total`/`note` («3 із 3 задач дати не мають» при одній
-    задачі з тегом) — та сама брехня, що й у памʼятці
+    """The denominator counts THE SAME set as `items`/`window_matched` (repair of
+    item 1 of round 3): before this `commitments_coverage` ignored `tags`, so
+    `list_action_items(tags="AI")` returned a filtered `items` next to the
+    archive-wide `coverage.total`/`note` («3 of 3 tasks have no date» with one
+    task having the tag) — the same lie as in the memo
     `derived-claims-need-second-source`."""
     _seed(db, [
         {"task": "З тегом ШІ", "tid": 1, "due": None},
@@ -448,8 +448,8 @@ def test_coverage_denominator_matches_tag_filter(db: str):
 
 
 def test_coverage_denominator_matches_since_until(db: str):
-    """`since`/`until` звужують знаменник так само, як `count_commitments` з
-    тими самими межами."""
+    """`since`/`until` narrow the denominator the same way as `count_commitments` with
+    the same bounds."""
     _seed(db, [
         {"task": "Свіжа", "tid": 1, "due": None},
         {"task": "Стара перша", "tid": 2, "due": None},
@@ -463,7 +463,7 @@ def test_coverage_denominator_matches_since_until(db: str):
 
 
 def test_coverage_tags_and_category_intersect(db: str):
-    """`tags` разом із `category_id` — перетин, як і в `list_commitments`."""
+    """`tags` together with `category_id` — an intersection, as in `list_commitments`."""
     _seed(db, [
         {"task": "А з тегом", "tid": 1, "due": None},
         {"task": "Б з тегом", "tid": 2, "due": None},
@@ -485,14 +485,14 @@ def test_coverage_tags_and_category_intersect(db: str):
 
 
 # ============================================================
-# Правдивість зводу (обкатка на живому архіві 08.08.2026)
+# Truthfulness of the digest (run-in on the live archive 08.08.2026)
 # ============================================================
 
 def test_this_week_and_overdue_do_not_overlap(db: str):
-    """Задача не може бути одночасно «цього тижня» і «протермінована».
+    """A task cannot be both "this week" and "overdue" at once.
 
-    Вікно рахувалось від понеділка, тож у зводі, прочитаному не в понеділок,
-    початок тижня їхав у ОБА відра: на живих даних 6 дублів із 15 рядків.
+    The window was counted from Monday, so in a digest read on a day other than Monday the
+    start of the week went into BOTH buckets: on live data 6 duplicates out of 15 rows.
     """
     _seed(db, [
         {"task": "Вівторок (вже минув)", "due": "2026-05-12"},
@@ -500,7 +500,7 @@ def test_this_week_and_overdue_do_not_overlap(db: str):
         {"task": "Субота (ще встигаємо)", "due": "2026-05-16"},
     ])
     cm.backfill_due(db)
-    today = date(2026, 5, 14)                       # четвер
+    today = date(2026, 5, 14)                       # Thursday
     week = {r["task"] for r in cm.list_commitments(db, window="this_week", today=today)}
     over = {r["task"] for r in cm.list_commitments(db, window="overdue", today=today)}
 
@@ -510,11 +510,11 @@ def test_this_week_and_overdue_do_not_overlap(db: str):
 
 
 def test_dropped_ignores_third_party_documents(db: str):
-    """«Що МИ упустили» не бере обіцянки з чужих документів і роликів.
+    """"What WE dropped" does not take promises from other people's documents and videos.
 
-    У PDF інвесторам «обіцянки» дають портфельні компанії. Вони справді не
-    спливають у наших розмовах — бо ніколи й не були нашими: на живому зводі
-    7 із 10 «загублених» приїхали з одного такого файлу.
+    In an investor PDF the portfolio companies make the "promises". They really do not
+    surface in our conversations — because they were never ours: on the live digest
+    7 of 10 "lost" came from one such file.
     """
     _seed(db, [{"task": "Наша домовленість про сервер", "tid": 1}])
     with get_db_connection(db) as conn:
@@ -526,8 +526,8 @@ def test_dropped_ignores_third_party_documents(db: str):
             "INSERT INTO action_items (transcription_id, task, owner_name, due, status) "
             "VALUES (3, 'Complete ISO 27001 certification audit', 'Northwind Vision', "
             "'Q3 2026', 'open')")
-        # Текст самого документа — в індексі (як у бою): без нього немає за чим
-        # міряти рідкість слів.
+        # The text of the document itself is in the index (as in production): without it there is nothing to
+        # measure word rarity by.
         conn.execute("INSERT INTO chunks (transcription_id, chunk_index, text) "
                      "VALUES (3, 0, 'Roadmap: complete ISO 27001 certification audit')")
         conn.commit()
@@ -542,7 +542,7 @@ def test_dropped_ignores_third_party_documents(db: str):
 
 
 def _topic(db: str, name: str, *, tids: list[int], eid: int = 900) -> None:
-    """Тема в графі: сутність + звʼязки зі зустрічами."""
+    """A topic in the graph: an entity + links to meetings."""
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO entities (id, type, canonical_name, normalized_name) "
                      "VALUES (?, 'project', ?, ?)", (eid, name, name.lower()))
@@ -553,22 +553,22 @@ def _topic(db: str, name: str, *, tids: list[int], eid: int = 900) -> None:
 
 
 def test_stale_topics_verifies_silence_in_text(db: str):
-    """Граф не є доказом мовчання: він покриває 26% Telegram-записів.
+    """The graph is not proof of silence: it covers 26% of Telegram records.
 
-    Тема, яку щодня пишуть у чаті, для графа «замовкла» тоді, коли її востаннє
-    згадали на дзвінку. На живому архіві так брехали частина тем— «Робота
-    мовчить 36 днів» при 80 згадках у тексті.
+    A topic written about in a chat daily is "silent" for the graph from the moment it was last
+    mentioned on a call. On the live archive some topicslied this way — «Робота
+    silent for 36 days» with 80 mentions in the text.
     """
     _seed(db, [{"task": "Неважливо", "due": None}])
     with get_db_connection(db) as conn:
-        # свіжий запис, якого граф не знає (типовий Telegram без збагачення)
+        # a fresh record the graph does not know (a typical Telegram without enrichment)
         conn.execute(
             "INSERT INTO transcriptions (id, source_type, source_name, meeting_date, created_at) "
             "VALUES (3, 'telegram', '[TG] чат', '2026-05-18', '2026-05-18 10:00:00')")
         conn.execute("INSERT INTO chunks (transcription_id, chunk_index, text) "
                      "VALUES (3, 0, 'Резиденція — переносимо зустріч на понеділок')")
         conn.commit()
-    # обидві теми в графі востаннє бачені на старій зустрічі (tid=2, 2026-01-10)
+    # both topics in the graph were last seen at the old meeting (tid=2, 2026-01-10)
     _topic(db, "Резиденція", tids=[2], eid=900)
     _topic(db, "Мовчазна тема", tids=[2], eid=901)
 
@@ -576,20 +576,20 @@ def test_stale_topics_verifies_silence_in_text(db: str):
     got = {r["canonical_name"]: r for r in
            cm.stale_topics(db, days=30, min_meetings=1, today=today)}
 
-    assert "Резиденція" not in got, "тема звучала три дні тому — вона не мовчить"
+    assert "Резиденція" not in got, "the topic sounded three days ago — it is not silent"
     assert got["Мовчазна тема"]["last_seen_source"] == "graph"
 
     trusting = {r["canonical_name"] for r in
                 cm.stale_topics(db, days=30, min_meetings=1, today=today, verify_text=False)}
-    assert "Резиденція" in trusting, "стара (довірлива) поведінка лишається доступною"
+    assert "Резиденція" in trusting, "the old (trusting) behaviour stays available"
 
 
 def test_link_owners_does_not_guess_by_first_name(db: str):
-    """Фолбек по імені бере тільки однослівну сутність і тільки без тезок.
+    """The by-name fallback takes only a single-word entity and only without namesakes.
 
-    Сутності «Andrij Kovalenko» з ютуб-лекції збагачення видало аліас «Andrei» —
-    і 43 задачі власника архіву поїхали під його імʼям, бо фолбек брав перший
-    токен і будь-який аліас.
+    Enrichment gave the «Andrij Kovalenko» entity from a YouTube lecture the alias «Andrei» —
+    and 43 tasks of the archive owner went under his name, because the fallback took the first
+    token and any alias.
     """
     _seed(db, [
         {"task": "Задача власника", "owner_name": "Andrii Melnyk"},
@@ -611,18 +611,18 @@ def test_link_owners_does_not_guess_by_first_name(db: str):
         got = {r["task"]: r["owner_entity_id"] for r in
                conn.execute("SELECT task, owner_entity_id FROM action_items")}
 
-    assert got["Задача власника"] is None, "чужий аліас не має ловити повне імʼя"
+    assert got["Задача власника"] is None, "a foreign alias must not catch the full name"
     assert got["Задача Юлії"] == 11
-    assert got["Задача тезки"] == 12, "повний збіг імені лишається точним"
+    assert got["Задача тезки"] == 12, "a full name match stays exact"
 
 
 def test_owner_filter_sees_graph_aliases(db: str):
-    """Після злиття сутностей усі написання людини живуть аліасами графа.
+    """After entities are merged, all spellings of a person live as graph aliases.
 
-    Власник архіву звучить як «Андрій», «Мельник», «@johndoe», «Andrii» —
-    і всі його задачі привʼязані до однієї сутності з канонічним «Андрій». Поки
-    фільтр дивився лише на канонічне і сире імʼя, питання «що на Мельнику»
-    давало нуль при живих даних.
+    The archive owner sounds like «Андрій», «Мельник», «@johndoe», «Andrii» —
+    and all their tasks are bound to one entity with the canonical «Андрій». While the
+    filter looked only at the canonical and raw name, the question «що на Мельнику»
+    gave zero with live data.
     """
     _seed(db, [])
     with get_db_connection(db) as conn:
@@ -647,7 +647,7 @@ def test_owner_filter_sees_graph_aliases(db: str):
 
 
 def test_list_commitments_shows_both_owner_names(db: str):
-    """Поруч із канонічним імʼям їде те, як власника назвали в задачі."""
+    """Next to the canonical name goes how the owner was named in the task."""
     _seed(db, [])
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO entities (id, type, canonical_name, normalized_name) "
@@ -663,25 +663,25 @@ def test_list_commitments_shows_both_owner_names(db: str):
 
 
 # ============================================================
-# relink_owners — перевісити на точнішу людину, коли вона зʼявилась
+# relink_owners — re-point to a more precise person when one has appeared
 # ============================================================
 
 def test_relink_moves_a_task_to_the_person_whose_full_name_it_says(db: str):
-    """`Dmytro Lebid` осідав на рядку «Dmytro» через фолбек по першому токену.
+    """`Dmytro Lebid` settled on the «Dmytro» row through the first-token fallback.
 
-    Поки Лебедя не було в графі, це був найкращий доступний здогад. Щойно рядок
-    зʼявився — задача мусить переїхати, інакше свод роками показує не ту людину.
+    While Lebid was not in the graph that was the best available guess. As soon as his row
+    appeared the task must move, otherwise the digest shows the wrong person for years.
     """
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO entities (id, type, canonical_name, normalized_name) "
                      "VALUES (10, 'person', 'Dmytro', 'dmytro')")
         conn.commit()
     _seed(db, [{"task": "Порахувати модель", "owner_name": "Dmytro Lebid"}])
-    cm.link_owners(db)          # Лебедя в графі ще нема → фолбек по першому токену → #10
+    cm.link_owners(db)          # Lebid is not in the graph yet -> first-token fallback -> #10
     with get_db_connection(db) as conn:
         assert conn.execute(
             "SELECT owner_entity_id AS e FROM action_items").fetchone()["e"] == 10
-        # Рядок Лебедя зʼявляється пізніше — split'ом або руками.
+        # Lebid's row appears later — via split or by hand.
         conn.execute("INSERT INTO entities (id, type, canonical_name, normalized_name) "
                      "VALUES (11, 'person', 'Дмитро Лебідь', 'дмитро река')")
         conn.execute("INSERT INTO entity_aliases (entity_id, alias, normalized_alias) "
@@ -694,11 +694,11 @@ def test_relink_moves_a_task_to_the_person_whose_full_name_it_says(db: str):
     with get_db_connection(db) as conn:
         assert conn.execute(
             "SELECT owner_entity_id AS e FROM action_items").fetchone()["e"] == 11
-    assert cm.relink_owners(db, dry_run=False)["relinked"] == 0, "другий прохід — без рухів"
+    assert cm.relink_owners(db, dry_run=False)["relinked"] == 0, "the second pass moves nothing"
 
 
 def test_relink_does_not_repeat_the_first_token_guess(db: str):
-    """Тут ходить лише ПОВНЕ написання. Інакше перевішування ганяло б тезок по колу."""
+    """Only the FULL spelling counts here. Otherwise re-linking would drive namesakes in circles."""
     with get_db_connection(db) as conn:
         conn.executemany(
             "INSERT INTO entities (id, type, canonical_name, normalized_name) VALUES (?, ?, ?, ?)",
@@ -718,7 +718,7 @@ def test_relink_does_not_repeat_the_first_token_guess(db: str):
 
 
 def test_relink_is_a_dry_run_until_asked(db: str):
-    """Команда рухає ВЖЕ привʼязані задачі — тому за замовчуванням лише прикидка."""
+    """The command moves tasks that are ALREADY linked — so an estimate only by default."""
     with get_db_connection(db) as conn:
         conn.executemany(
             "INSERT INTO entities (id, type, canonical_name, normalized_name) VALUES (?, ?, ?, ?)",
@@ -738,7 +738,7 @@ def test_relink_is_a_dry_run_until_asked(db: str):
 
 
 def test_relink_dry_run_says_so_in_the_payload(db: str):
-    """Прикидка й запис мусять звучати по-різному, інакше оператор не застосує нічого."""
+    """The estimate and the write must sound different, otherwise the operator applies nothing."""
     with get_db_connection(db) as conn:
         conn.executemany(
             "INSERT INTO entities (id, type, canonical_name, normalized_name) VALUES (?, ?, ?, ?)",
@@ -754,7 +754,7 @@ def test_relink_dry_run_says_so_in_the_payload(db: str):
 
 
 def test_relink_cli_takes_dry_run_after_the_subcommand(db: str):
-    """`--dry-run` після підкоманди приймають усі сусіди — тут теж, і він переважає --apply."""
+    """`--dry-run` after the subcommand is accepted by all its neighbours — here too, and it beats --apply."""
     with get_db_connection(db) as conn:
         conn.executemany(
             "INSERT INTO entities (id, type, canonical_name, normalized_name) VALUES (?, ?, ?, ?)",
@@ -772,11 +772,11 @@ def test_relink_cli_takes_dry_run_after_the_subcommand(db: str):
 
 
 # ============================================================
-# Вибір термінів: рідкість замість довжини
+# Term selection: rarity instead of length
 # ============================================================
 
 def _later_chunk(db: str, text: str, *, tid: int = 5, meeting_date: str = "2026-06-20") -> None:
-    """Пізніший запис із текстом — те, чим доводиться «тема спливала»."""
+    """A later record with text — what "the topic resurfaced" is proven by."""
     with get_db_connection(db) as conn:
         conn.execute(
             "INSERT OR IGNORE INTO transcriptions (id, source_type, source_name, "
@@ -788,17 +788,17 @@ def _later_chunk(db: str, text: str, *, tid: int = 5, meeting_date: str = "2026-
 
 
 def test_rare_terms_prefer_the_name_over_the_long_verb(db: str):
-    """Найдовше слово задачі — загальне дієслово; впізнає її коротка назва."""
+    """The longest word of a task is a generic verb; a short name recognizes it."""
     _seed(db, [{"task": "Продовжувати роботу по ендавменту BUEF та стратегії"}])
     _later_chunk(db, "обговорювали стратегії розвитку і стратегії виходу знову і знову")
     with get_db_connection(db) as conn:
         got = cm._rare_terms(conn, "Продовжувати роботу по ендавменту BUEF та стратегії")
-    assert "стратегії" not in got, "часте слово не може впізнавати задачу"
+    assert "стратегії" not in got, "a frequent word cannot recognize a task"
     assert {"ендавменту", "buef"} & set(got)
 
 
 def test_rare_terms_skip_words_absent_from_the_corpus(db: str):
-    """Нуль влучань по слову, якого в архіві нема, нічого не доводить."""
+    """Zero hits on a word that is not in the archive prove nothing."""
     _later_chunk(db, "говорили про ресепцію готелю")
     with get_db_connection(db) as conn:
         got = cm._rare_terms(conn, "Полагодити ресепцію та зламаний деліріумтременс")
@@ -807,11 +807,11 @@ def test_rare_terms_skip_words_absent_from_the_corpus(db: str):
 
 
 def test_dropped_sees_a_promise_that_only_a_common_word_kept_alive(db: str):
-    """Регресія: частина задачвважались живими через загальне слово.
+    """Regression: some taskscounted as alive through a generic word.
 
-    «Продовжувати роботу по ендавменту BUEF» оголошувалась спливлою, бо в архіві
-    509 разів трапляється «стратегії» — при тому, що про BUEF більше не сказали
-    жодного разу.
+    «Продовжувати роботу по ендавменту BUEF» was declared resurfaced because «стратегії»
+    occurs 509 times in the archive — even though BUEF was not mentioned
+    a single time afterwards.
     """
     _seed(db, [{"task": "Продовжувати роботу по ендавменту BUEF та стратегії фонду"}])
     _later_chunk(db, "ми ще довго обговорювали стратегії і знову стратегії розвитку")
@@ -823,7 +823,7 @@ def test_dropped_sees_a_promise_that_only_a_common_word_kept_alive(db: str):
 
 
 def test_dropped_stays_silent_when_the_subject_really_came_back(db: str):
-    """Якщо предмет задачі справді спливав — це не упущене."""
+    """If the task's subject really did resurface — it is not dropped."""
     _seed(db, [{"task": "Продовжувати роботу по ендавменту BUEF та стратегії фонду"}])
     _later_chunk(db, "повернулись до ендавменту BUEF, домовились про наступний крок")
 
@@ -831,26 +831,26 @@ def test_dropped_stays_silent_when_the_subject_really_came_back(db: str):
 
 
 def test_one_meeting_cannot_fill_the_dropped_list(db: str):
-    """Прослуханий курс — теж `recording`, і його конспект займав 7 рядків із 44.
+    """A course the owner listened to is also a `recording`, and its notes took 7 rows of 44.
 
-    Фільтр за джерелом ловить чужі PDF, але не ловить довгу сесію: вона
-    витісняє інші зустрічі просто тим, що довга.
+    The source filter catches other people's PDFs but not a long session: it
+    pushes other meetings out simply by being long.
     """
     _seed(db, [{"task": f"Крок уроку номер {n} про мікропроєкти", "tid": 1} for n in
                ("перший", "другий", "третій", "четвертий", "пʼятий")])
 
     got = cm.dropped_commitments(db, days=60, min_age_days=1, today=date(2026, 5, 20))
 
-    assert len(got) == 3, "одна зустріч не може заповнити весь список"
+    assert len(got) == 3, "one meeting cannot fill the whole list"
     assert {r["meeting"] for r in got} == {"Тестова зустріч"}
 
 
 # ============================================================
-# Зняття обіцянок, чия тема замовкла
+# Dropping promises whose topic went quiet
 # ============================================================
 
 def test_sweep_marks_only_the_silent_promise(db: str):
-    """Знімаємо те, про що більше не говорили; те, що спливало, лишається."""
+    """We drop what is no longer talked about; what resurfaced stays."""
     _seed(db, [
         {"task": "Продовжити роботу по ендавменту BUEF", "tid": 1},
         {"task": "Полагодити лінковку в Notion", "tid": 1},
@@ -878,7 +878,7 @@ def test_sweep_dry_run_writes_nothing(db: str):
 
 
 def test_sweep_never_touches_a_future_deadline(db: str):
-    """Обіцянка на Q3 не «замовкла» — її час просто ще не настав."""
+    """A Q3 promise has not "gone quiet" — its time simply has not come yet."""
     _seed(db, [{"task": "Полагодити лінковку в Notion", "due": "Q3 2026"}])
     cm.backfill_due(db)
     res = cm.sweep_dropped(db, days=180, min_age_days=7, dry_run=False,
@@ -889,14 +889,14 @@ def test_sweep_never_touches_a_future_deadline(db: str):
 
 
 def test_sweep_respects_the_quarantine(db: str):
-    """Учорашня домовленість не «без сліду», після неї ще нічого не було."""
+    """Yesterday's agreement is not "without a trace", nothing has come after it yet."""
     _seed(db, [{"task": "Полагодити лінковку в Notion"}], meeting_date="2026-06-18")
     assert cm.sweep_dropped(db, days=180, min_age_days=30,
                             today=date(2026, 6, 20))["marked"] == 0
 
 
 def test_sweep_leaves_what_it_cannot_judge(db: str):
-    """Задача, чиїх слів немає в індексі, лишається відкритою і рахується окремо."""
+    """A task whose words are not in the index stays open and is counted separately."""
     with get_db_connection(db) as conn:
         conn.execute("INSERT INTO transcriptions (id, source_type, source_name, "
                      "meeting_date, created_at) VALUES (9, 'recording', 'Зустріч', "
@@ -923,7 +923,7 @@ def test_sweep_is_idempotent(db: str):
 
 
 def test_stale_by_age_keeps_its_own_reason(db: str):
-    """Дві причини зняття не можна плутати: відкотити треба вміти окремо."""
+    """The two drop reasons must not be confused: it must be possible to roll back separately."""
     _seed(db, [{"task": "Дуже стара задача"}], meeting_date="2026-01-10")
     cm.mark_stale(db, days=90, today=date(2026, 6, 20))
     with get_db_connection(db) as conn:
@@ -932,11 +932,11 @@ def test_stale_by_age_keeps_its_own_reason(db: str):
 
 
 def test_short_name_survives_a_long_task(db: str):
-    """Регресія: відбір «12 найдовших слів» викидав короткі власні назви.
+    """Regression: selecting the "12 longest words" threw out short proper names.
 
-    Тобто саме ті, заради яких вибір за рідкістю і робився: у задачі з довгим
-    формулюванням «buef» (4 символи) не доживав до підрахунку рідкості, і тему
-    знову доводили загальні слова.
+    That is exactly what choosing by rarity was done for: in a task with a long
+    wording «buef» (4 characters) did not survive to the rarity count, and the topic
+    was again "proven" by generic words.
     """
     task = ("Продовжувати системну підготовку та узгодження документації щодо "
             "фінансування напрямку BUEF разом із партнерськими організаціями")
@@ -947,7 +947,7 @@ def test_short_name_survives_a_long_task(db: str):
 
 
 def test_rare_terms_are_reproducible(db: str):
-    """Вибір не має залежати від порядку обходу множини між запусками."""
+    """The choice must not depend on the set iteration order between runs."""
     task = "Узгодити з Notion структуру та лінковку розділів BUEF і Archicad"
     _seed(db, [{"task": task}])
     with get_db_connection(db) as conn:
@@ -955,7 +955,7 @@ def test_rare_terms_are_reproducible(db: str):
     assert len(runs) == 1
 
 
-# --- K5 k5-task-buttons: зміна статусу з журналом і скасуванням -------------------
+# --- K5 k5-task-buttons: status change with a journal and undo -------------------
 
 def _item(db: str, task: str = "Надіслати Андрієві договір", **kw) -> int:
     _seed(db, [{"task": task, **kw}])
@@ -1056,3 +1056,12 @@ def test_migration_v51_is_idempotent(db: str):
     with get_db_connection(db) as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(action_item_events)")}
     assert {"item_id", "at", "source", "actor", "old_status", "new_status", "undo_of"} <= cols
+
+
+def test_task_action_errors_come_from_the_catalog(db: str):
+    from app.core.i18n import tr
+    aid = _item(db)
+    with pytest.raises(ValueError) as exc:
+        cm.apply_action(db, aid, "bogus", source="bot")
+    assert str(exc.value) == tr("svc_tasks.err.unknownAction", lang="uk", action="bogus")
+    assert tr("svc_tasks.err.unknownAction", lang="en", action="bogus") == "unknown action: bogus"

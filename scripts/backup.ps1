@@ -1,43 +1,43 @@
-﻿# backup.ps1 — еженедельный шифрованный бэкап Recall (медиа + вся директория)
-# на Google Drive.
+﻿# backup.ps1 - weekly encrypted Recall backup (media + the whole directory)
+# to Google Drive.
 #
-# Что делает:
-#   1) Делает консистентный снимок SQLite БД (VACUUM INTO → отдельный файл).
-#   2) restic backup всех релевантных путей (recordings, uploads, db_backups,
-#      .env, meeting_archive) в gdrive:WhisperBackup/restic.
-#   3) restic forget --keep-weekly 8 --keep-monthly 12 --prune (ротация).
-#   4) Пишет лог в logs\backup-YYYYMMDD.log.
+# What it does:
+#   1) Makes a consistent snapshot of the SQLite DB (VACUUM INTO -> a separate file).
+#   2) restic backup of all relevant paths (recordings, uploads, db_backups,
+#      .env, meeting_archive) to gdrive:WhisperBackup/restic.
+#   3) restic forget --keep-weekly 8 --keep-monthly 12 --prune (rotation).
+#   4) Writes a log to logs\backup-YYYYMMDD.log.
 #
-# ЧАСТОТА: цей скрипт — ВАЖКИЙ, тижневий бекап (media + все нижче ProjectRoot).
-# БД коштовна (вікно втрати транскриптів до 7 днів неприйнятне) — тому окремо
-# є scripts\backup_db.ps1, легкий і призначений для ЩОДЕННОГО scheduled task
-# (VACUUM INTO snapshot локально + опційно швидкий offsite restic --tag daily
-# лише по db_backups\, без важких медіа). Дивись коментарі на початку
+# FREQUENCY: this script is the HEAVY, weekly backup (media + everything under ProjectRoot).
+# The DB is valuable (a window of up to 7 days of lost transcripts is unacceptable) - so there is
+# a separate scripts\backup_db.ps1, light and meant for a DAILY scheduled task
+# (a local VACUUM INTO snapshot + an optional fast offsite restic --tag daily
+# only over db_backups\, without the heavy media). See the comments at the start of
 # backup_db.ps1.
 #
-# Зависимости: C:\bin\restic.exe, C:\bin\rclone.exe, DPAPI-зашифрованный
-# пароль в %LOCALAPPDATA%\WhisperBackup\repo.password.dpapi.
+# Dependencies: C:\bin\restic.exe, C:\bin\rclone.exe, a DPAPI-encrypted
+# password in %LOCALAPPDATA%\WhisperBackup\repo.password.dpapi.
 #
-# Запускать вручную:  powershell -ExecutionPolicy Bypass -File .\backup.ps1
-# Из scheduled task:  pwsh.exe или powershell.exe + те же аргументы.
+# Run manually:  powershell -ExecutionPolicy Bypass -File .\backup.ps1
+# From a scheduled task:  pwsh.exe or powershell.exe + the same arguments.
 #
-# ProjectRoot параметризован: передай -ProjectRoot <path>, або виставь
-# env RECALL_PROJECT_ROOT — за замовчуванням береться поточний шлях проєкту
-# E:\Projects\Recall (раніше тут був хардкод застарілого шляху
-# E:\Projects\Whisper — прибрано, непереносимо між профілями/машинами).
+# ProjectRoot is parameterized: pass -ProjectRoot <path>, or set the
+# env RECALL_PROJECT_ROOT - by default the current project path is used,
+# E:\Projects\Recall (a hardcode of an outdated path used to be here,
+# E:\Projects\Whisper - removed, not portable between profiles/machines).
 param(
     [string]$ProjectRoot = $(if ($env:RECALL_PROJECT_ROOT) { $env:RECALL_PROJECT_ROOT } else { 'E:\Projects\Recall' })
 )
 
-# НЕ ставимо 'Stop' глобально: restic у нормальному режимі ретраю
-# часто пише warning'и в stderr. З 'Stop' PowerShell приймає це за fatal error
-# і обриває скрипт на першому ж 500-у від Google, не давши restic-у відретраїти.
+# We do NOT set 'Stop' globally: restic in normal operation with retries
+# often writes warnings to stderr. With 'Stop' PowerShell takes this for a fatal error
+# and aborts the script on the very first 500 from Google, not letting restic retry.
 $ErrorActionPreference = 'Continue'
 $LogDir      = "$ProjectRoot\logs"
 $DbBackupDir = "$ProjectRoot\db_backups"
 $LiveDb      = "$ProjectRoot\whisper_history.db"
 $PasswordDpapiFile = "$env:LOCALAPPDATA\WhisperBackup\repo.password.dpapi"
-$ResticRepo  = 'rest:http://127.0.0.1:8765/'  # rclone serve restic в окремому процесі
+$ResticRepo  = 'rest:http://127.0.0.1:8765/'  # rclone serve restic in a separate process
 $RclonePort  = 8765
 $RcloneTarget = 'gdrive:WhisperBackup/restic'
 
@@ -56,20 +56,20 @@ function Resolve-ResticPath {
     foreach ($p in @('C:\bin\restic.exe', 'restic')) {
         if (Get-Command $p -ErrorAction SilentlyContinue) { return $p }
     }
-    throw "restic.exe не найден ни в C:\bin\, ни в PATH"
+    throw "restic.exe not found in C:\bin\ or in PATH"
 }
 
 function Resolve-RclonePath {
     foreach ($p in @('C:\bin\rclone.exe', 'rclone')) {
         if (Get-Command $p -ErrorAction SilentlyContinue) { return $p }
     }
-    throw "rclone.exe не найден ни в C:\bin\, ни в PATH"
+    throw "rclone.exe not found in C:\bin\ or in PATH"
 }
 
 try {
     Log "=== Whisper backup started ==="
 
-    # restic шукає rclone у PATH — додамо C:\bin без перезапису.
+    # restic looks for rclone in PATH - we add C:\bin without overwriting.
     if ($env:PATH -notlike '*C:\bin*') { $env:PATH = "C:\bin;" + $env:PATH }
     $Restic = Resolve-ResticPath
     $Rclone = Resolve-RclonePath
@@ -85,15 +85,15 @@ try {
     $env:RESTIC_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) | Out-Null
 
-    # 2a) Запускаємо rclone serve restic у фоновому процесі. REST-mode надійніший
-    #     за --stdio: restic ↔ rclone не діляться пайпами parent-shell'а, тому
-    #     pipe не закривається при моніторингу батьком (виявлено експериментально:
-    #     stdio-варіант повис 0 байт за 8 хв під run_in_background).
+    # 2a) Start rclone serve restic in a background process. REST mode is more reliable
+    #     than --stdio: restic <-> rclone do not share the parent shell's pipes, so the
+    #     pipe is not closed when monitored by the parent (found experimentally:
+    #     the stdio variant hung with 0 bytes for 8 min under run_in_background).
     Log "Starting rclone serve restic on 127.0.0.1:$RclonePort"
-    # tpslimit=10 + drive-pacer-min-sleep=10ms — особистий Google OAuth client_id
-    # має квоту 1000 req/s, але навіть так тримаємо помірно (10 req/s з burst=20),
-    # бо restic паралельно посилає ще й через паки. Раніше з shared client_id було
-    # 5, ловили 403 Quota exceeded; з особистим client_id скейл цього не потребує.
+    # tpslimit=10 + drive-pacer-min-sleep=10ms - a personal Google OAuth client_id
+    # has a quota of 1000 req/s, but even so we stay moderate (10 req/s with burst=20),
+    # because restic also sends in parallel through the packs. Earlier, with a shared client_id it was
+    # 5, and we hit 403 Quota exceeded; with a personal client_id scale does not need it.
     $rcloneArgs = @('serve','restic','--addr',"127.0.0.1:$RclonePort",
         '--cache-dir',"$env:TEMP\rclone-cache",
         '--tpslimit','10','--tpslimit-burst','20',
@@ -103,7 +103,7 @@ try {
         -PassThru -NoNewWindow -RedirectStandardOutput "$LogDir\rclone-serve-$Stamp.log" `
         -RedirectStandardError "$LogDir\rclone-serve-$Stamp.err"
 
-    # Чекаємо, поки порт відповідає (до 15с)
+    # Wait until the port responds (up to 15s)
     $alive = $false
     for ($i = 0; $i -lt 30; $i++) {
         try {
@@ -113,34 +113,34 @@ try {
             $alive = $true; break
         } catch { Start-Sleep -Milliseconds 500 }
     }
-    if (-not $alive) { throw "rclone serve не відповідає на 127.0.0.1:$RclonePort" }
+    if (-not $alive) { throw "rclone serve is not responding on 127.0.0.1:$RclonePort" }
     Log "rclone serve PID=$($rcloneProc.Id) ready"
 
-    # 2) Консистентный snapshot БД через SQLite VACUUM INTO (atomic, без блокировок).
-    #    Без этого restic мог бы поймать половину WAL → битый файл при restore.
+    # 2) Consistent DB snapshot via SQLite VACUUM INTO (atomic, no locks).
+    #    Without it restic could catch half of the WAL -> a broken file on restore.
     if (Test-Path $LiveDb) {
         $DbSnap = Join-Path $DbBackupDir "whisper_history-$Stamp.db"
         Log "VACUUM INTO $DbSnap"
         $sqliteScript = "VACUUM INTO '$($DbSnap.Replace('\','/').Replace("'","''"))';"
-        # Используем встроенный sqlite3 из .venv, если есть, иначе Python.
+        # Use the built-in sqlite3 from .venv if present, otherwise Python.
         $pyExe = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
         if (Test-Path $pyExe) {
             & $pyExe -c "import sqlite3,sys; c=sqlite3.connect(r'$LiveDb'); c.execute(sys.argv[1]); c.close()" $sqliteScript
         } else {
-            throw ".venv\Scripts\python.exe не найден; не могу сделать VACUUM"
+            throw ".venv\Scripts\python.exe not found; cannot do VACUUM"
         }
         Log "DB snapshot size: $([math]::Round((Get-Item $DbSnap).Length/1MB,1)) MB"
 
-        # Чистим старые DB-снэпшоты (>3 шт); restic сам хранит историю.
+        # Clean old DB snapshots (>3); restic keeps the history itself.
         Get-ChildItem $DbBackupDir -Filter 'whisper_history-*.db' |
             Sort-Object LastWriteTime -Descending |
             Select-Object -Skip 3 |
             ForEach-Object { Log "Cleanup old DB snap: $($_.Name)"; Remove-Item $_.FullName -Force }
     } else {
-        Log "WARN: $LiveDb не существует, пропускаю VACUUM"
+        Log "WARN: $LiveDb does not exist, skipping VACUUM"
     }
 
-    # 3) restic backup. Список путей; --exclude для шума.
+    # 3) restic backup. A list of paths; --exclude for noise.
     $BackupPaths = @(
         "$ProjectRoot\recordings",
         "$ProjectRoot\uploads",
@@ -152,14 +152,14 @@ try {
     Log "Paths to backup:"
     $BackupPaths | ForEach-Object { Log "  $_" }
 
-    # Start-Process з редіректом у файли — PowerShell-пайп ловить stderr restic-а
-    # як NativeCommandError і обриває скрипт на ретраї. Файлове перенаправлення —
-    # robusno, перевіряємо тільки ExitCode.
+    # Start-Process with redirection to files - a PowerShell pipe catches restic's stderr
+    # as NativeCommandError and aborts the script on a retry. File redirection is
+    # robust, we check only the ExitCode.
     $resticOut = "$LogDir\restic-backup-$Stamp.out"
     $resticErr = "$LogDir\restic-backup-$Stamp.err"
     $resticArgs = @('-r',$ResticRepo,'backup','--tag','weekly','--verbose=1',
         '--exclude','*.tmp','--exclude','*.partial','--exclude','Thumbs.db') + $BackupPaths
-    Log "restic backup (виведення → $(Split-Path -Leaf $resticOut))"
+    Log "restic backup (output -> $(Split-Path -Leaf $resticOut))"
     $proc = Start-Process -FilePath $Restic -ArgumentList $resticArgs `
         -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $resticOut -RedirectStandardError $resticErr
@@ -170,15 +170,15 @@ try {
     }
     if ($proc.ExitCode -ne 0) { throw "restic backup exited with code $($proc.ExitCode)" }
 
-    # 4a) Зняти stale locks (від прерваних попередніх запусків). Без цього
-    #     forget+prune падає з exit 11 "repo already locked".
-    Log "restic unlock (чистимо stale locks якщо є)"
+    # 4a) Remove stale locks (from interrupted earlier runs). Without this
+    #     forget+prune fails with exit 11 "repo already locked".
+    Log "restic unlock (cleaning stale locks if any)"
     $unlockOut = "$LogDir\restic-unlock-$Stamp.out"
     Start-Process -FilePath $Restic -ArgumentList @('-r',$ResticRepo,'unlock') `
         -NoNewWindow -Wait -RedirectStandardOutput $unlockOut -RedirectStandardError "$LogDir\restic-unlock-$Stamp.err" | Out-Null
     if (Test-Path $unlockOut) { Get-Content $unlockOut | ForEach-Object { Log $_ } }
 
-    # 4) Ротация: 8 еженедельных + 12 месячных снэпшотов + prune (физическое удаление).
+    # 4) Rotation: 8 weekly + 12 monthly snapshots + prune (physical deletion).
     Log "--- forget + prune ---"
     $forgetOut = "$LogDir\restic-forget-$Stamp.out"
     $forgetProc = Start-Process -FilePath $Restic -ArgumentList @('-r',$ResticRepo,'forget',
@@ -188,7 +188,7 @@ try {
     if (Test-Path $forgetOut) { Get-Content $forgetOut | ForEach-Object { Log $_ } }
     if ($forgetProc.ExitCode -ne 0) { throw "restic forget/prune exited with code $($forgetProc.ExitCode)" }
 
-    # 5) Краткая сводка
+    # 5) Short summary
     Log "--- snapshots ---"
     $snapOut = "$LogDir\restic-snapshots-$Stamp.out"
     Start-Process -FilePath $Restic -ArgumentList @('-r',$ResticRepo,'snapshots','--compact') `

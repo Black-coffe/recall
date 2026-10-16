@@ -1,8 +1,8 @@
-"""Тест де-шуму графа сутностей (Phase 15A): поріг meeting_count.
+"""Test of entity graph de-noising (Phase 15A): the meeting_count threshold.
 
-/api/memory/entities за замовч. ховає разові сутності (meeting_count<2 — шум від
-per-meeting LLM-екстракції). Тумблер min_meetings=1 показує всі; явний пошук (q)
-показує і рідкісні.
+/api/memory/entities hides one-off entities by default (meeting_count<2 — noise from
+per-meeting LLM extraction). The min_meetings=1 toggle shows all; an explicit search (q)
+shows the rare ones too.
 """
 import sqlite3
 
@@ -26,10 +26,10 @@ def client(tmp_path):
             (etype, name, name.lower(), mc, mc),
         )
 
-    add("person", "Андрій", 10)      # значущий
-    add("person", "Разовий", 1)      # шум
-    add("topic", "Бюджет", 3)        # значущий
-    add("topic", "Випадкова Тема", 1)  # шум
+    add("person", "Андрій", 10)      # significant
+    add("person", "Разовий", 1)      # noise
+    add("topic", "Бюджет", 3)        # significant
+    add("topic", "Випадкова Тема", 1)  # noise
     conn.commit()
     conn.close()
 
@@ -49,7 +49,7 @@ def test_default_hides_singletons(client):
     data = r.get_json()
     assert data["min_meetings"] == 2
     assert _names(r) == {"Андрій", "Бюджет"}
-    assert data["total"] == 2  # total теж рахується з порогом
+    assert data["total"] == 2  # total is counted with the threshold too
 
 
 def test_min_meetings_1_shows_all(client):
@@ -58,11 +58,11 @@ def test_min_meetings_1_shows_all(client):
 
 
 def test_search_reveals_rare(client):
-    # явний пошук по імені показує і рідкісну сутність (q → min=1)
+    # an explicit search by name shows the rare entity too (q -> min=1)
     r = client.get("/api/memory/entities?q=разов")
     assert "Разовий" in _names(r)
 
 
 def test_type_filter_with_threshold(client):
     r = client.get("/api/memory/entities?type=topic")
-    assert _names(r) == {"Бюджет"}  # «Випадкова Тема» (1 мітинг) прихована
+    assert _names(r) == {"Бюджет"}  # «Випадкова Тема» (1 meeting) is hidden

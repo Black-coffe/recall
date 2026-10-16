@@ -1,15 +1,15 @@
-"""Meeting Memory API (Phase 13) — наскрізний граф сутностей + RAG-архів.
+"""Meeting Memory API (Phase 13) - end-to-end entity graph + RAG archive.
 
-Ендпоінти:
-- POST /api/memory/backfill                     — масове збагачення історії (job + SSE)
-- GET  /api/memory/backfill/status              — статус останнього backfill
-- POST /api/memory/transcriptions/<id>/enrich   — збагатити один транскрипт
-- GET  /api/memory/entities                     — список сутностей (фільтр type/q/sort)
-- GET  /api/memory/entities/<id>                — деталі сутності: мітинги + задачі + aliases
-- GET  /api/memory/action-items                 — задачі (фільтр status/owner)
-- GET  /api/memory/stats                        — зведена статистика архіву
+Endpoints:
+- POST /api/memory/backfill                     - bulk enrichment of history (job + SSE)
+- GET  /api/memory/backfill/status              - status of the last backfill
+- POST /api/memory/transcriptions/<id>/enrich   - enrich one transcript
+- GET  /api/memory/entities                     - entity list (type/q/sort filter)
+- GET  /api/memory/entities/<id>                - entity details: meetings + tasks + aliases
+- GET  /api/memory/action-items                 - tasks (status/owner filter)
+- GET  /api/memory/stats                        - summary archive statistics
 
-SSE-канал прогресу backfill: "backfill" (через /api/events/<channel> events_bp).
+Backfill progress SSE channel: "backfill" (via /api/events/<channel> events_bp).
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from app.services import enrichment
 logger = logging.getLogger(__name__)
 memory_bp = Blueprint('memory', __name__)
 
-# Останній статус backfill (для GET status; SSE дає live-прогрес).
+# Last backfill status (for GET status; SSE gives live progress).
 _backfill_state: dict = {"running": False, "processed": 0, "total": 0,
                          "done": 0, "skipped": 0, "failed": 0}
 _backfill_lock = threading.Lock()
@@ -41,28 +41,28 @@ def _get_db():
     return get_db_connection(current_app.config['DATABASE'])
 
 
-# Нормалізація, розбір фільтра і письменники `category_id` живуть в
-# `app/services/categories.py` (спека directions-projects-tags, контракт C2) —
-# один модуль на всі 15 місць фільтра у двох процесах. Тут лишаються тонкі
-# обгортки: імена вже імпортує сторонній код (`test_categories.py`), а міняти
-# їх у цій історії нема за що.
+# Normalisation, filter parsing and the `category_id` writers live in
+# `app/services/categories.py` (spec directions-projects-tags, contract C2) -
+# one module for all 15 filter places in two processes. What stays here are thin
+# wrappers: the names are already imported by outside code (`test_categories.py`), and there
+# is no reason to rename them in this story.
 _norm_cat = cats.norm_name
-#: (conn, cid) → None. Тепер зануляє і `audio_downloads.category_id` — до цієї
-#: спеки id видаленого напрямку лишався висіти на рядках Медіатеки.
+#: (conn, cid) -> None. Now it also nulls `audio_downloads.category_id` - before this
+#: spec the id of a deleted direction stayed hanging on Media library rows.
 _null_category_refs = cats.null_category_refs
-#: (conn, src, dst) → None. Раніше повертала к-сть перенесених; тепер id
-#: перенесених віддає `cats.merge_categories` — саме вони йдуть у re-embed.
+#: (conn, src, dst) -> None. It used to return the count of moved rows; now the ids of
+#: the moved ones are returned by `cats.merge_categories` - they are what goes to re-embed.
 _reassign_category_refs = cats.reassign_category_refs
 
 
 def _parse_axes(source) -> tuple:
-    """C4: (category_id, tags, since, until) із query-параметрів/JSON-тіла.
+    """C4: (category_id, tags, since, until) from query parameters/a JSON body.
 
-    `source` — будь-що з `.get(key)` (`request.args` або розпарсений JSON).
-    Кидає `ValueError` на кривому значенні — виклики огортають у 400 (той самий
-    підхід, що `app/blueprints/research.py._parse_axes`). Раніше `category_id`
-    тут мовчки падав назад на «усі напрямки» — тепер, як і решта осей, він
-    протікає до читача помилкою (історія 07 закриває цей борг для search/ask/
+    `source` - anything with `.get(key)` (`request.args` or parsed JSON).
+    Raises `ValueError` on a bad value - callers wrap it into a 400 (the same
+    approach as `app/blueprints/research.py._parse_axes`). Earlier `category_id`
+    here silently fell back to "all directions" - now, like the other axes, it
+    leaks to the reader as an error (story 07 closes this debt for search/ask/
     entities/action-items)."""
     return (
         cats.parse_filter(source.get('category_id')),
@@ -73,20 +73,20 @@ def _parse_axes(source) -> tuple:
 
 
 def _check_project(raw) -> "str | None":
-    """Текст `project` → він сам; неоднозначна назва → `CategoryError`.
+    """Text of `project` -> itself; an ambiguous name -> `CategoryError`.
 
-    Розвʼязуємо ДО виклику `rag`: у стріма (`ask/stream`) відповідь уже пішла
-    зі статусом 200, і сказати «409, уточніть шлях» звідти нема як. Значення
-    не підмінюємо — `project` це ще й сутність графа й текстова згадка
-    («Ковальчука», бренд), і заміна тексту на шлях вузла зламала б саме ці два
-    шари. Тут лише перевірка: назва, що сидить на двох вузлах, зупиняє запит
-    переліком шляхів, а не мовчазним вибором одного з них.
+    We resolve BEFORE calling `rag`: in the stream (`ask/stream`) the answer has already gone
+    with status 200, and there is no way to say "409, specify the path" from there. We do not
+    substitute the value - `project` is also a graph entity and a text mention
+    («Ковальчука», a brand), and replacing the text with a node path would break exactly these two
+    layers. Here is only a check: a name that sits on two nodes stops the request
+    with a list of paths, not with a silent choice of one of them.
 
-    Кілька назв через кому/крапку з комою — той самий розбір, що в
-    `scope.scope_filter_ids`: перевіряємо кожну. Нерядковий вхід (число,
-    об'єкт) чи список із нерядковими елементами — `CategoryError("bad_name")`
-    (мінор 11 р0): раніше `str(5)` мовчки давав `"5"`, і крива форма
-    протікала до `scope_filter_ids`, де `list(5)` — 500.
+    Several names separated by comma/semicolon - the same parsing as in
+    `scope.scope_filter_ids`: we check each one. A non-string input (number,
+    object) or a list with non-string elements - `CategoryError("bad_name")`
+    (minor 11 r0): earlier `str(5)` silently gave `"5"`, and the malformed form
+    leaked to `scope_filter_ids`, where `list(5)` is a 500.
     """
     if not raw:
         return None
@@ -108,40 +108,40 @@ def _check_project(raw) -> "str | None":
 
 
 def _schedule_reembed(ids, reason: str) -> dict:
-    """Поставити змінені записи в точковий re-embed (напрямок і теги їдуть у
-    контекстний префікс чанка). Помилка планувальника не валить запит —
-    правка вже збережена, re-embed вторинний.
+    """Put the changed records into a targeted re-embed (direction and tags go into the
+    chunk context prefix). A scheduler error does not fail the request -
+    the edit is already saved, re-embed is secondary.
 
-    `reembed` імпортується ВСЕРЕДИНІ функції: він тягне `embeddings`, а той —
-    torch (памʼятка `mcp-stdio-no-heavy-models`)."""
+    `reembed` is imported INSIDE the function: it pulls in `embeddings`, and that pulls
+    torch (memory note `mcp-stdio-no-heavy-models`)."""
     if not ids:
         return {"mode": "none", "count": 0, "stale": 0}
     try:
         from app.services import reembed
         return reembed.schedule_records_reembed(
             ids, db_path=current_app.config["DATABASE"], reason=reason)
-    except Exception:  # noqa: BLE001 — зміна вже в БД, re-embed вторинний
-        logger.exception("[memory] %s: не вдалось запланувати re-embed для %s записів",
+    except Exception:  # noqa: BLE001 - the change is already in the DB, re-embed is secondary
+        logger.exception("[memory] %s: failed to schedule re-embed for %s records",
                          reason, len(ids))
         return {"mode": "none", "count": 0, "stale": 0}
 
 
 def _parse_explain(raw) -> bool:
-    """Історія 05 (grep-explainability): query-параметр (`?explain=1`) чи поле
-    JSON-body (`{"explain": true}`) → bool. Невідоме значення ('', '0',
-    'false', None) читаємо як False, а не як помилку — дефолт скрізь
-    компактний `why`, не його відсутність."""
+    """Story 05 (grep-explainability): query parameter (`?explain=1`) or a field
+    of the JSON body (`{"explain": true}`) -> bool. An unknown value ('', '0',
+    'false', None) is read as False, not as an error - the default everywhere is
+    the compact `why`, not its absence."""
     if isinstance(raw, bool):
         return raw
     return str(raw or "").strip().lower() in ("1", "true", "yes")
 
 
 def _parse_channel(raw) -> tuple:
-    """Канал питання для `ask_log` → (channel, error_response|None).
+    """Question channel for `ask_log` -> (channel, error_response|None).
 
-    Порожньо → `ui` (веб-чат нічого не передає). Невідоме значення — 400, а
-    НЕ тихий дефолт: канал у логу є вхідним фільтром golden-set, і мовчазне
-    «щось незнайоме = ui» зіпсувало б вибірку, яку потім розмічає людина."""
+    Empty -> `ui` (the web chat passes nothing). An unknown value is a 400, and
+    NOT a quiet default: the channel in the log is an input filter of the golden set, and a silent
+    "something unfamiliar = ui" would spoil the sample that a human then labels."""
     from app.services import rag
     if raw is None or raw == "":
         return "ui", None
@@ -153,10 +153,10 @@ def _parse_channel(raw) -> tuple:
 
 
 # ============================================================
-# Напрямки / категорії (Phase 14)
+# Directions / categories (Phase 14)
 # ============================================================
 
-#: Код помилки дерева → HTTP-статус (контракт C4).
+#: Tree error code -> HTTP status (contract C4).
 _CAT_STATUS = {"not_found": 404, "duplicate": 409, "has_projects": 409,
                "ambiguous": 409, "two_levels": 400, "self_parent": 400,
                "empty": 400, "bad_parent": 400, "bad_name": 400,
@@ -164,22 +164,22 @@ _CAT_STATUS = {"not_found": 404, "duplicate": 409, "has_projects": 409,
 
 
 def _cat_error(exc: cats.CategoryError):
-    """Відповідь на очікувану помилку дерева.
+    """Response to an expected tree error.
 
-    `error` лишається людським текстом (його показує тост SPA) і дублюється
-    машинним `code`. Виняток — `has_projects`: там контракт C4 вимагає саме
-    код і перелік проєктів, бо фронт має що показати («спершу перенесіть»).
+    `error` stays a human text (the SPA toast shows it) and is duplicated by the
+    machine `code`. The exception is `has_projects`: there contract C4 requires exactly the
+    code and the list of projects, because the front has something to show ("move them first").
 
-    `duplicate` (v47): ключі, що були, лишаються на місці, а поруч зʼявляються
-    `message` (текст сервісу — він називає напрямок, у якому назва зайнята) і
-    `conflict` `{id, path}` — адреса вузла-суперника. Без них 409 на
-    «Маркетинг» не відрізнити від 409 на «Маркетинг» у сусідньому напрямку.
-    `ambiguous` (v47, 409) влаштований так само, як `has_projects`: `error` —
-    машинний код, `message` — текст сервісу, `candidates` — повні шляхи вузлів
-    із цією назвою. Порожня відповідь чи «перший збіг» тут заборонені: клієнт
-    має отримати ПЕРЕЛІК і передати назад один шлях.
+    `duplicate` (v47): the existing keys stay in place, and next to them appear
+    `message` (the service text - it names the direction in which the name is taken) and
+    `conflict` `{id, path}` - the address of the rival node. Without them a 409 on
+    «Маркетинг» is indistinguishable from a 409 on «Маркетинг» in a neighbouring direction.
+    `ambiguous` (v47, 409) is arranged the same way as `has_projects`: `error` is the
+    machine code, `message` is the service text, `candidates` are the full paths of the nodes
+    with this name. An empty response or "the first match" is forbidden here: the client
+    must get a LIST and pass one path back.
 
-    Фронт не чіпаємо: `settings.js` читає `.message` з історії 09."""
+    We do not touch the front: `settings.js` reads `.message` from story 09."""
     body = {"success": False, "error": str(exc), "code": exc.code}
     if exc.projects:
         body["projects"] = [{"id": p["id"], "name": p["name"]} for p in exc.projects]
@@ -198,12 +198,12 @@ def _cat_error(exc: cats.CategoryError):
 
 @memory_bp.route('/api/memory/categories', methods=['GET'])
 def list_categories():
-    """Дерево напрямків: напрямок, одразу за ним — його проєкти.
+    """Direction tree: a direction, right after it - its projects.
 
-    Конверт той самий, що був; кожен елемент додав `parent_id`, `level`,
-    `items`/`items_total`. `count` лишається синонімом `items` — на ньому
-    тримаються чинні екрани (Налаштування, Дослідження), а переїзд SPA на
-    дерево — історії 09/10."""
+    The envelope is the same as it was; each item added `parent_id`, `level`,
+    `items`/`items_total`. `count` stays a synonym of `items` - current screens
+    (Settings, Research) rely on it, while moving the SPA to the
+    tree is stories 09/10."""
     with _get_db() as conn:
         tree = cats.list_tree(conn)
         uncat = conn.execute(
@@ -216,15 +216,15 @@ def list_categories():
 
 
 def _parse_int_or_none(raw) -> "tuple[int | None, bool]":
-    """`raw` → `(значення|None, ok)` — розбір через `int()`, а не через
-    перевірку «усі символи цифри» (Мінор 5, ревʼю раунду 3): така перевірка
-    каже правду про «²»/«½» (унікодні цифрові символи, які `int()` не зʼїсть)
-    — приймала їх і падала 500 нижче за стеком замість 400 тут.
+    """`raw` -> `(value|None, ok)` - parsing via `int()`, not via
+    the check "all characters are digits" (Minor 5, round 3 review): such a check
+    tells the truth about "²"/"½" (Unicode digit characters that `int()` will not eat)
+    - it accepted them and crashed with a 500 further down the stack instead of a 400 here.
 
-    `None`/порожній рядок → `(None, True)` — значення відсутнє, не помилка.
-    Невідʼємне ціле, яке приймає `int()` → `(id, True)`. `bool` НЕ вважається
-    цілим (перевірка ДО `int()`, бо `isinstance(True, int)` — так). Решта
-    (`"abc"`, `"²"`, `-1`, порожній `[]`) → `(None, False)`."""
+    `None`/empty string -> `(None, True)` - the value is absent, not an error.
+    A non-negative integer accepted by `int()` -> `(id, True)`. `bool` is NOT considered
+    an integer (checked BEFORE `int()`, because `isinstance(True, int)` is true). The rest
+    (`"abc"`, `"²"`, `-1`, an empty `[]`) -> `(None, False)`."""
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return None, True
     if isinstance(raw, bool):
@@ -237,12 +237,12 @@ def _parse_int_or_none(raw) -> "tuple[int | None, bool]":
 
 
 def _parse_signed_int_or_none(raw) -> "tuple[int | None, bool]":
-    """Як `_parse_int_or_none`, але без обмеження на невідʼємність — для
-    `sort_order` (ручне впорядкування вузлів, не id). Звуження до
-    невідʼємних (26) зачепило й це поле, хоча JS-відправника з відʼємним
-    значенням немає — воно не було на записі; тут відкочено до поведінки
-    23 (мінор р0 п.5 / р1 п.4, 28): `-5` знову приймається, `"abc"`/`1.5`/
-    `bool` — так само 400, як і в `_parse_int_or_none`."""
+    """Like `_parse_int_or_none`, but without the non-negative restriction - for
+    `sort_order` (manual ordering of nodes, not an id). The narrowing to
+    non-negatives (26) hit this field too, although there is no JS sender with a negative
+    value - it was not on record; here it is rolled back to the behaviour of
+    23 (minor r0 p.5 / r1 p.4, 28): `-5` is accepted again, `"abc"`/`1.5`/
+    `bool` are a 400 the same as in `_parse_int_or_none`."""
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return None, True
     if isinstance(raw, bool):
@@ -255,12 +255,12 @@ def _parse_signed_int_or_none(raw) -> "tuple[int | None, bool]":
 
 
 def _parse_parent_id(raw) -> "tuple[int | None, tuple | None]":
-    """`parent_id` тіла запиту → `(id|None, error_response|None)`.
+    """`parent_id` of the request body -> `(id|None, error_response|None)`.
 
-    Той самий розбір і той самий текст помилки для POST і PATCH (Мажор 7):
-    `None`/порожній рядок → без батька (вузол стає напрямком); будь-що інше,
-    що не невідʼємне ціле (у т.ч. від'ємне, `bool`, унікодні псевдоцифри) —
-    400 замість тихого падіння в «без батька» (або 500 — Мінор 5)."""
+    The same parsing and the same error text for POST and PATCH (Major 7):
+    `None`/empty string -> no parent (the node becomes a direction); anything else
+    that is not a non-negative integer (incl. negative, `bool`, Unicode pseudo-digits) -
+    a 400 instead of a quiet fall into "no parent" (or a 500 - Minor 5)."""
     val, ok = _parse_int_or_none(raw)
     if not ok:
         return None, (jsonify({"success": False, "error": tr('knowledge.memory.err.parent_id_bad')}), 400)
@@ -269,10 +269,10 @@ def _parse_parent_id(raw) -> "tuple[int | None, tuple | None]":
 
 @memory_bp.route('/api/memory/categories', methods=['POST'])
 def create_category():
-    """Створити напрямок або проєкт. Body: {name, color?, icon?, parent_id?}.
+    """Create a direction or a project. Body: {name, color?, icon?, parent_id?}.
 
-    `parent_id` — id напрямку, всередині якого створюємо проєкт. Батьком може
-    бути лише напрямок (дерево рівно двох рівнів) — інакше 400."""
+    `parent_id` - the id of the direction inside which we create a project. Only a
+    direction can be the parent (a tree of exactly two levels) - otherwise 400."""
     data = request.get_json(silent=True) or {}
     name = " ".join((data.get("name") or "").strip().split())
     if not name:
@@ -296,12 +296,12 @@ def create_category():
 
 @memory_bp.route('/api/memory/categories/<int:cid>', methods=['PATCH'])
 def update_category(cid: int):
-    """Перейменувати / перефарбувати / перепідпорядкувати вузол.
+    """Rename / recolour / reparent a node.
     Body: {name?, color?, icon?, sort_order?, parent_id?: int|null}.
 
-    `parent_id: null` робить вузол напрямком, число — проєктом усередині
-    напрямку. Назва і шлях їдуть у контекстний префікс чанків усього
-    піддерева, тож після реальної зміни записи стають у точковий re-embed."""
+    `parent_id: null` makes the node a direction, a number - a project inside a
+    direction. The name and path go into the context prefix of the chunks of the whole
+    subtree, so after a real change the records are put into a targeted re-embed."""
     data = request.get_json(silent=True) or {}
     kwargs = {}
     if "name" in data and data["name"] is not None:
@@ -336,11 +336,11 @@ def update_category(cid: int):
 
 @memory_bp.route('/api/memory/categories/<int:cid>', methods=['DELETE'])
 def delete_category(cid: int):
-    """Видалити вузол. Записи (транскрипти/аудіо/копілот/tg) стають «без
-    напрямку» — самі записи НЕ видаляються.
+    """Delete a node. Records (transcripts/audio/copilot/tg) become "without
+    direction" - the records themselves are NOT deleted.
 
-    Напрямок із проєктами не видаляється (409 `has_projects`): тихо підняти
-    проєкти в корінь означало б розсипати розкладку архіву без сліду."""
+    A direction with projects is not deleted (409 `has_projects`): quietly lifting the
+    projects to the root would scatter the archive layout without a trace."""
     try:
         with _get_db() as conn:
             moved = [r["id"] for r in conn.execute(
@@ -354,12 +354,12 @@ def delete_category(cid: int):
 
 @memory_bp.route('/api/memory/categories/<int:cid>/merge', methods=['POST'])
 def merge_category(cid: int):
-    """Перенести/обʼєднати напрямок. Body: {target_id: int|null, delete_source: bool}.
-    Усі записи напрямку cid → target_id (null = «без напрямку»). Якщо
-    delete_source=true — після перенесення напрямок cid видаляється.
+    """Move/merge a direction. Body: {target_id: int|null, delete_source: bool}.
+    All records of direction cid -> target_id (null = "without direction"). If
+    delete_source=true - the direction cid is deleted after the move.
 
-    Вузол із проєктами не переноситься і не зливається (409 `has_projects`) —
-    спершу розберіться з проєктами."""
+    A node with projects is neither moved nor merged (409 `has_projects`) -
+    deal with the projects first."""
     data = request.get_json(silent=True) or {}
     dst, ok = _parse_int_or_none(data.get("target_id"))
     if not ok:
@@ -380,7 +380,7 @@ def merge_category(cid: int):
 
 @memory_bp.route('/api/memory/transcriptions/<int:tid>/category', methods=['PATCH'])
 def set_transcription_category(tid: int):
-    """Призначити напрямок транскрипту. Body: {category_id: int|null}."""
+    """Assign a direction to a transcript. Body: {category_id: int|null}."""
     data = request.get_json(silent=True) or {}
     cid, ok = _parse_int_or_none(data.get("category_id"))
     if not ok:
@@ -398,8 +398,8 @@ def set_transcription_category(tid: int):
 
 @memory_bp.route('/api/memory/transcriptions/<int:tid>/suggest-category', methods=['GET'])
 def suggest_transcription_category(tid: int):
-    """Авто-підказка напрямку через k-NN по розмічених транскриптах (Phase 15C).
-    Повертає suggestion=None з reason, якщо підказати не можна (cold-start тощо)."""
+    """Direction auto-suggestion via k-NN over labelled transcripts (Phase 15C).
+    Returns suggestion=None with a reason if nothing can be suggested (cold start etc.)."""
     from app.services import categorize
     try:
         res = categorize.suggest_category(current_app.config['DATABASE'], tid)
@@ -411,20 +411,20 @@ def suggest_transcription_category(tid: int):
 
 @memory_bp.route('/api/memory/transcriptions/bulk-category', methods=['POST'])
 def bulk_set_category():
-    """Масово призначити напрямок. Body: {ids: [..], category_id} АБО
-    {source_type: 'youtube'|'file'|..., category_id} (усі без напрямку цього типу)."""
+    """Bulk-assign a direction. Body: {ids: [..], category_id} OR
+    {source_type: 'youtube'|'file'|..., category_id} (all without a direction of this type)."""
     data = request.get_json(silent=True) or {}
     cid, ok = _parse_int_or_none(data.get("category_id"))
     if not ok:
-        # 400 до будь-якого запису (Мінор 6): раніше нецілий/невідомий
-        # `category_id` тихо перетворювався на `None` і знімав напрямок УСІМ
-        # цілям, а не відмовляв запитом.
+        # 400 before any write (Minor 6): earlier a non-integer/unknown
+        # `category_id` quietly turned into `None` and stripped the direction from ALL
+        # targets instead of rejecting the request.
         return jsonify({"success": False, "error": tr('knowledge.memory.err.category_id_bad')}), 400
     ids = data.get("ids")
     src = data.get("source_type")
     if ids is not None:
-        # `{"ids": "123"}` — рядок теж ітерується (по символах!), тож без
-        # перевірки типу він тихо розсипався б на `[1, 2, 3]`.
+        # `{"ids": "123"}` - a string is iterable too (by characters!), so without
+        # the type check it would quietly fall apart into `[1, 2, 3]`.
         if not isinstance(ids, (list, tuple)):
             return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_bad')}), 400
         try:
@@ -440,26 +440,26 @@ def bulk_set_category():
                 (src,)).fetchall()]
         else:
             return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_or_source')}), 400
-        # `updated` тепер рахує записи, у яких напрямок СПРАВДІ змінився (а не
-        # всі, що потрапили під UPDATE): саме цей список іде в re-embed, і
-        # розбіжність між «оновлено» і «переембеджено» тільки б плутала.
+        # `updated` now counts records whose direction REALLY changed (not
+        # all that fell under the UPDATE): exactly this list goes to re-embed, and
+        # a mismatch between "updated" and "re-embedded" would only confuse.
         changed = cats.set_category(conn, targets, cid)
     return jsonify({"success": True, "updated": len(changed),
                     "reembed": _schedule_reembed(changed, "category_bulk")})
 
 
 # ============================================================
-# Теги (07, контракт C4 «Теги»)
+# Tags (07, contract C4 "Tags")
 # ============================================================
 
 _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
 
 def _parse_color(raw) -> "tuple[str | None, bool]":
-    """`raw` → `(колір|None, ok)`. `None`/відсутній → `(None, True)` — колір
-    не заданий, не помилка. Літерал `#RGB`/`#RGBA`/`#RRGGBB`/`#RRGGBBAA`
-    (регістр байдужий) → `(raw, True)`. Решта (довільний CSS-текст, який без
-    перевірки потрапляв у `style="--tag-color:…"` — Мінор 12 р1) → `(None,
+    """`raw` -> `(colour|None, ok)`. `None`/absent -> `(None, True)` - the colour
+    is not set, not an error. A literal `#RGB`/`#RGBA`/`#RRGGBB`/`#RRGGBBAA`
+    (case-insensitive) -> `(raw, True)`. The rest (arbitrary CSS text that without
+    a check landed in `style="--tag-color:..."` - Minor 12 r1) -> `(None,
     False)`."""
     if raw is None:
         return None, True
@@ -469,9 +469,9 @@ def _parse_color(raw) -> "tuple[str | None, bool]":
 
 
 def _tag_name_from_body(data, *, required: bool) -> "tuple[str | None, tuple | None]":
-    """Дістати й перевірити `name` з тіла запиту. `required=False` дозволяє
-    відсутність ключа (PATCH без зміни назви); `''`/пробіли й довжина > 40
-    (`cats.TAG_NAME_MAX`) — завжди 400, незалежно від `required`."""
+    """Extract and validate `name` from the request body. `required=False` allows
+    the key to be absent (PATCH without a name change); `''`/spaces and length > 40
+    (`cats.TAG_NAME_MAX`) are always a 400, regardless of `required`."""
     if "name" not in data or data["name"] is None:
         if required:
             return None, (jsonify({"success": False, "error": tr('knowledge.memory.err.tag_name_empty')}), 400)
@@ -488,18 +488,18 @@ def _tag_name_from_body(data, *, required: bool) -> "tuple[str | None, tuple | N
 
 @memory_bp.route('/api/memory/tags', methods=['GET'])
 def list_tags():
-    """Словник тегів: {id, name, color, items}, за `name_norm`."""
+    """Tag dictionary: {id, name, color, items}, by `name_norm`."""
     with _get_db() as conn:
         return jsonify({"success": True, "tags": cats.list_tags(conn)})
 
 
 @memory_bp.route('/api/memory/tags', methods=['POST'])
 def create_tag():
-    """Знайти/створити тег словника. Body: {name, color?}.
+    """Find/create a dictionary tag. Body: {name, color?}.
 
-    Ідемпотентно за `name_norm` (ADR §B): повторний POST тієї самої назви
-    (з іншим регістром/пробілами) повертає наявний тег 200, а не дублює його —
-    201 лише на реально новий рядок."""
+    Idempotent by `name_norm` (ADR §B): a repeated POST of the same name
+    (with another case/spaces) returns the existing tag with 200 and does not duplicate it -
+    201 only for a really new row."""
     data = request.get_json(silent=True) or {}
     name, err = _tag_name_from_body(data, required=True)
     if err:
@@ -517,7 +517,7 @@ def create_tag():
 
 @memory_bp.route('/api/memory/tags/<int:tag_id>', methods=['PATCH'])
 def update_tag_route(tag_id: int):
-    """Перейменувати / перефарбувати тег. Body: {name?, color?}."""
+    """Rename / recolour a tag. Body: {name?, color?}."""
     data = request.get_json(silent=True) or {}
     name, err = _tag_name_from_body(data, required=False)
     if err:
@@ -544,8 +544,8 @@ def update_tag_route(tag_id: int):
 
 @memory_bp.route('/api/memory/tags/<int:tag_id>', methods=['DELETE'])
 def delete_tag_route(tag_id: int):
-    """Видалити тег зі словника — каскадом знімається з `record_tags` і
-    `tg_chat_tags` (схема без FK, каскад робить `cats.delete_tag`)."""
+    """Delete a tag from the dictionary - cascading removal from `record_tags` and
+    `tg_chat_tags` (the schema has no FK, the cascade is done by `cats.delete_tag`)."""
     try:
         with _get_db() as conn:
             ids = cats.delete_tag(conn, tag_id)
@@ -556,8 +556,8 @@ def delete_tag_route(tag_id: int):
 
 @memory_bp.route('/api/memory/tags/merge', methods=['POST'])
 def merge_tags_route():
-    """Злити два теги. Body: {keep_id, merge_id}. Записи merge_id переїжджають
-    під keep_id, сам merge_id видаляється зі словника."""
+    """Merge two tags. Body: {keep_id, merge_id}. Records of merge_id move
+    under keep_id, merge_id itself is deleted from the dictionary."""
     data = request.get_json(silent=True) or {}
     keep_id, keep_ok = _parse_int_or_none(data.get("keep_id"))
     merge_id, merge_ok = _parse_int_or_none(data.get("merge_id"))
@@ -574,9 +574,9 @@ def merge_tags_route():
 
 @memory_bp.route('/api/memory/<int:tid>/tags', methods=['PUT'])
 def set_record_tags(tid: int):
-    """Додати/зняти теги запису. Body: {"add": [names], "remove": [names]} —
-    бодай один ключ обов'язковий. Теги з `add`, яких ще нема у словнику,
-    створюються з місця вживання (той самий патерн, що напрямок)."""
+    """Add/remove tags of a record. Body: {"add": [names], "remove": [names]} -
+    at least one key is required. Tags from `add` that are not yet in the dictionary
+    are created from the place of use (the same pattern as for a direction)."""
     data = request.get_json(silent=True) or {}
     if "add" not in data and "remove" not in data:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.tag_add_remove')}), 400
@@ -598,9 +598,9 @@ def set_record_tags(tid: int):
 
 @memory_bp.route('/api/memory/<int:tid>/tags/suggestions', methods=['POST'])
 def resolve_tag_suggestions(tid: int):
-    """Прийняти/відхилити підказки Claude. Body: {"accept": [names], "dismiss":
-    [names]} — бодай один непорожній список обов'язковий. Прийняте стає
-    звичайним тегом (`source='claude'`), обидва списки прибираються з
+    """Accept/dismiss Claude's suggestions. Body: {"accept": [names], "dismiss":
+    [names]} - at least one non-empty list is required. An accepted one becomes
+    a regular tag (`source='claude'`), both lists are removed from
     `suggested_tags_json`."""
     data = request.get_json(silent=True) or {}
     accept = data.get("accept") or []
@@ -623,13 +623,13 @@ def resolve_tag_suggestions(tid: int):
 
 
 # ============================================================
-# Збагачення
+# Enrichment
 # ============================================================
 
 @memory_bp.route('/api/memory/transcriptions/<int:tid>/enrich', methods=['POST'])
 def enrich_one(tid: int):
-    """Збагатити один транскрипт (синхронно). Body: {"force": bool, "model": str}."""
-    # Як і в backfill нижче: embed-фаза не потребує Claude — див. коментар там.
+    """Enrich one transcript (synchronously). Body: {"force": bool, "model": str}."""
+    # As in backfill below: the embed phase does not need Claude - see the comment there.
     if not enrichment.any_available():
         return jsonify({"success": False,
                         "error": tr('knowledge.memory.err.no_key_no_embeddings')}), 400
@@ -650,13 +650,13 @@ def enrich_one(tid: int):
 
 @memory_bp.route('/api/memory/backfill', methods=['POST'])
 def start_backfill():
-    """Запустити масове збагачення історії у фоні. Body: {force, limit, model}."""
-    # T6.5: гейт по any_available(), а не is_available(). Embed-фаза локальна і
-    # безкоштовна, а після бампу EMBED_VERSION саме вона стає основною роботою
-    # (весь архів на re-embed). Гейт по одному лише Claude-ключу означав би:
-    # ключа нема → індексер вічно показує повний архів як роботу, і запустити
-    # її з UI неможливо. Інжест уже давно ходить через any_available()
-    # (transcription.py/documents.py/copilot.py) — тут був розсинхрон.
+    """Start bulk enrichment of history in the background. Body: {force, limit, model}."""
+    # T6.5: gate on any_available(), not is_available(). The embed phase is local and
+    # free, and after an EMBED_VERSION bump it becomes the main work
+    # (the whole archive to re-embed). Gating on a Claude key alone would mean:
+    # no key -> the indexer forever shows the full archive as work, and starting
+    # it from the UI is impossible. Ingest has long gone through any_available()
+    # (transcription.py/documents.py/copilot.py) - here was a desync.
     if not enrichment.any_available():
         return jsonify({"success": False,
                         "error": tr('knowledge.memory.err.no_key_no_embeddings')}), 400
@@ -718,11 +718,11 @@ def backfill_status():
 
 @memory_bp.route('/api/memory/import', methods=['POST'])
 def import_archive():
-    """Імпорт корпусу meeting_archive. Body: {"path": "<dir>"}.
+    """Import the meeting_archive corpus. Body: {"path": "<dir>"}.
 
-    Заливає .md-мітинги як транскрипти (idempotent). Збагачення (enrich+embed)
-    запускати окремо через POST /api/memory/backfill — це контрольований
-    (платний для Claude) крок.
+    Loads .md meetings as transcripts (idempotent). Enrichment (enrich+embed)
+    is to be started separately via POST /api/memory/backfill - this is a controlled
+    (paid for Claude) step.
     """
     data = request.get_json(silent=True) or {}
     root = (data.get("path") or "").strip()
@@ -736,13 +736,13 @@ def import_archive():
 
 
 # ============================================================
-# Пошук (гібрид: вектори + FTS5)
+# Search (hybrid: vectors + FTS5)
 # ============================================================
 
 @memory_bp.route('/api/memory/search', methods=['GET'])
 def search():
-    """Гібридний семантичний пошук по архіву. Query: q, k (top-k), category_id,
-    tags (через кому), since, until (контракт C4 — невалідна вісь → 400)."""
+    """Hybrid semantic search over the archive. Query: q, k (top-k), category_id,
+    tags (comma-separated), since, until (contract C4 - an invalid axis -> 400)."""
     q = (request.args.get('q') or '').strip()
     if not q:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.query_empty')}), 400
@@ -763,13 +763,13 @@ def search():
 
 @memory_bp.route('/api/memory/ask', methods=['POST'])
 def ask():
-    """RAG «Запитай архів»: питання → відповідь з цитатами.
+    """RAG "Ask the archive": question -> answer with citations.
 
     Body: {question, k, model, category_id, tags, since, until, project, channel}.
-    `project` (Трек 2) звужує пошук до записів, де згадано цей проєкт/людину —
-    категорії недостатньо, бо «Фонд Робота» покриває більша частина корпусу. `tags`/
-    `since`/`until` — контракт C4, невалідна вісь → 400. `channel` (`ui`|`mcp`)
-    лише позначає походження питання в `ask_log`."""
+    `project` (Track 2) narrows the search to records where this project/person is mentioned -
+    a category is not enough, because «Фонд Робота» covers more than half of the corpus. `tags`/
+    `since`/`until` - contract C4, an invalid axis -> 400. `channel` (`ui`|`mcp`)
+    only marks the origin of the question in `ask_log`."""
     if not enrichment.is_available():
         return jsonify({"success": False, "error": tr('knowledge.memory.err.no_api_key')}), 400
     data = request.get_json(silent=True) or {}
@@ -784,7 +784,7 @@ def ask():
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
     from app.services import rag
-    # Дефолт k живе в rag._DEFAULT_TOP_K (одна точка правди, env RAG_TOP_K).
+    # The default k lives in rag._DEFAULT_TOP_K (single source of truth, env RAG_TOP_K).
     try:
         k = min(max(int(data.get("k", rag._DEFAULT_TOP_K)), 1), 20)
     except (ValueError, TypeError):
@@ -807,7 +807,7 @@ def ask():
     return jsonify({"success": True, **res})
 
 
-# Тексти статусів/помилок, які `answer_question_stream` стрімить українською.
+# Status/error texts that `answer_question_stream` streams in Ukrainian.
 _ASK_SSE_KEYS = (
     'knowledge.memory.err.question_empty',
     'knowledge.memory.err.rag_failed',
@@ -817,11 +817,11 @@ _ASK_SSE_KEYS = (
 
 @memory_bp.route('/api/memory/ask/stream', methods=['POST'])
 def ask_stream():
-    """RAG зі стрімом відповіді (SSE). Body: {question, k, model, category_id,
+    """RAG with answer streaming (SSE). Body: {question, k, model, category_id,
     tags, since, until, project}.
 
-    Події: sources (одразу) → delta* (токени) → done | error.
-    Усі значення з request читаємо ДО генератора (поза request-контекстом).
+    Events: sources (at once) -> delta* (tokens) -> done | error.
+    All values from request are read BEFORE the generator (outside the request context).
     """
     if not enrichment.is_available():
         return jsonify({"success": False, "error": tr('knowledge.memory.err.no_api_key')}), 400
@@ -842,8 +842,8 @@ def ask_stream():
     except (ValueError, TypeError):
         k = rag._DEFAULT_TOP_K
     model = data.get("model")
-    # Трек 2: зріз за проєктом/людиною. Читаємо ТУТ, а не в генераторі — той
-    # виконується поза request-контекстом (та сама причина, що й для решти полів).
+    # Track 2: slice by project/person. Read HERE, not in the generator - it
+    # runs outside the request context (the same reason as for the other fields).
     try:
         project = _check_project(data.get("project"))
     except cats.CategoryError as exc:
@@ -871,10 +871,10 @@ def ask_stream():
 
 @memory_bp.route('/api/memory/ask/<int:ask_id>/rate', methods=['POST'])
 def rate_ask(ask_id: int):
-    """Оцінка відповіді власником: body {rating: 1|-1, note?} → `ask_log`.
+    """Owner's rating of an answer: body {rating: 1|-1, note?} -> `ask_log`.
 
-    Це сировина golden-set (A17): раз на тиждень власник розмічає десяток
-    питань із логу, 👎 йдуть у набір першими."""
+    This is the raw material of the golden set (A17): once a week the owner labels a dozen
+    questions from the log, thumbs-down go into the set first."""
     data = request.get_json(silent=True) or {}
     try:
         rating = int(data.get("rating"))
@@ -890,13 +890,13 @@ def rate_ask(ask_id: int):
 
 
 # ============================================================
-# Сутності
+# Entities
 # ============================================================
 
 @memory_bp.route('/api/memory/entities', methods=['GET'])
 def list_entities():
-    """Список сутностей. Query: type, q (пошук по імені/alias), sort, limit,
-    offset, category_id, tags, since, until (контракт C4 — невалідна вісь → 400)."""
+    """Entity list. Query: type, q (search by name/alias), sort, limit,
+    offset, category_id, tags, since, until (contract C4 - an invalid axis -> 400)."""
     etype = request.args.get('type')
     q = (request.args.get('q') or '').strip()
     sort = request.args.get('sort', 'mentions')  # mentions | meetings | name | recent
@@ -906,9 +906,9 @@ def list_entities():
     except ValueError:
         limit, offset = 100, 0
 
-    # Поріг значущості: per-meeting LLM-екстракція плодить разові сутності
-    # (≈65-83% згадані лише в 1 мітингу — шум). За замовчуванням ховаємо їх
-    # (min_meetings=2). Явний пошук по імені (q) показує і рідкісні (=1).
+    # Significance threshold: per-meeting LLM extraction breeds one-off entities
+    # (~65-83% mentioned in only 1 meeting - noise). By default we hide them
+    # (min_meetings=2). An explicit search by name (q) shows rare ones too (=1).
     default_min = 1 if q else 2
     try:
         min_meetings = max(int(request.args.get('min_meetings', default_min)), 1)
@@ -934,8 +934,8 @@ def list_entities():
         )
         like = f"%{enrichment._normalize(q)}%"
         params.extend([like, like])
-    # C4: напрямок (з розкриттям на проєкти) / теги (OR) / період — власний SQL
-    # через ті самі `categories.filter_sql`/`tags_sql`/`date_sql`, що й скрізь.
+    # C4: direction (expanded to projects) / tags (OR) / period - own SQL
+    # via the same `categories.filter_sql`/`tags_sql`/`date_sql` as everywhere.
     cat_frag, cat_params = cats.filter_sql('t.category_id', category_id)
     tags_frag, tags_params = cats.tags_sql('t.id', tag_names)
     date_frag, date_params = cats.date_sql(
@@ -976,7 +976,7 @@ def list_entities():
 
 @memory_bp.route('/api/memory/entities/<int:eid>', methods=['GET'])
 def entity_detail(eid: int):
-    """Деталі сутності: мітинги (таймлайн), задачі-власник, aliases."""
+    """Entity details: meetings (timeline), tasks as owner, aliases."""
     with _get_db() as conn:
         ent = conn.execute("SELECT * FROM entities WHERE id = ?", (eid,)).fetchone()
         if not ent:
@@ -1017,26 +1017,26 @@ def entity_detail(eid: int):
 # Action items
 # ============================================================
 
-# Дашборд-вікна дедлайну. Взаємно виключні й вичерпні — кожна задача потрапляє
-# РІВНО в одне відро, інакше бакети на /tasks брехали б сумою.
+# Dashboard deadline windows. Mutually exclusive and exhaustive - each task falls
+# into EXACTLY one bucket, otherwise the buckets on /tasks would lie with their sum.
 #
-# NB: свідомо відрізняються від вікон MCP-зводів (commitments._WINDOWS):
-#  1. Там `this_week` = понеділок…неділя і тому ПЕРЕТИНАЄТЬСЯ з `overdue`. Для
-#     понеділкового зводу це нормально (два окремі списки), для дашборда — ні.
-#  2. Календарний тиждень вироджується під кінець: у суботу «цей тиждень» — це
-#     два дні, і відро стабільно порожнє. Тому тут `soon` — це СЛИЗЬКЕ вікно
-#     «наступні 7 днів від сьогодні», яке однаково корисне будь-якого дня.
+# NB: deliberately different from the MCP digest windows (commitments._WINDOWS):
+#  1. There `this_week` = Monday...Sunday and therefore INTERSECTS with `overdue`. For
+#     the Monday digest this is fine (two separate lists), for the dashboard - no.
+#  2. A calendar week degenerates toward its end: on Saturday "this week" is
+#     two days, and the bucket is stably empty. So here `soon` is a SLIDING window
+#     "the next 7 days from today", equally useful on any day.
 _TASK_WINDOWS = ('overdue', 'soon', 'later', 'no_date', 'all')
 _SOON_DAYS = 7
 
 
 def _soon_end_iso(today=None) -> str:
-    """ISO-дата кінця вікна «найближчі 7 днів»."""
+    """ISO date of the end of the "next 7 days" window."""
     return ((today or _date.today()) + _timedelta(days=_SOON_DAYS)).isoformat()
 
 
 def _task_window_sql(window: str, today=None):
-    """(sql_clauses, params) для дашборд-вікна. Порожньо для 'all'."""
+    """(sql_clauses, params) for a dashboard window. Empty for 'all'."""
     t = (today or _date.today()).isoformat()
     if window == 'no_date':
         return ["ai.due_date IS NULL"], []
@@ -1051,14 +1051,14 @@ def _task_window_sql(window: str, today=None):
 
 @memory_bp.route('/api/memory/action-items', methods=['GET'])
 def list_action_items():
-    """Задачі. Query: status (open|done|cancelled|stale|all), owner_entity_id,
-    owner (canonical або сира назва), category_id, tags (через кому), since,
+    """Tasks. Query: status (open|done|cancelled|stale|all), owner_entity_id,
+    owner (canonical or raw name), category_id, tags (comma-separated), since,
     until, period (24h|7d|month|year|all), window (overdue|soon|later|no_date|all),
-    limit (контракт C4 — невалідна вісь category_id/tags/since/until → 400).
+    limit (contract C4 - an invalid axis category_id/tags/since/until -> 400).
 
-    Додатково повертає ``windows`` (лічильники по відрах у межах решти фільтрів)
-    і ``owners`` (фасет власників) — щоб дашборд показував правдиві суми навіть
-    коли сам список обрізаний лімітом."""
+    Additionally returns ``windows`` (counters per bucket within the remaining filters)
+    and ``owners`` (the owner facet) - so the dashboard shows true sums even
+    when the list itself is cut off by the limit."""
     status = request.args.get('status', 'open')
     owner = request.args.get('owner_entity_id')
     owner_name = (request.args.get('owner') or '').strip()
@@ -1076,35 +1076,35 @@ def list_action_items():
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
-    # Три НЕЗАЛЕЖНІ групи умов, кожна тримає свої clauses разом зі своїми
-    # params. Це не педантизм: нижче потрібні три різні комбінації тих самих
-    # фільтрів (список / лічильники відер / фасет власників), і зшивати їх з
-    # одного плоского списку без прив'язки параметрів до умов неможливо.
+    # Three INDEPENDENT groups of conditions, each keeping its clauses together with its
+    # params. This is not pedantry: below we need three different combinations of the same
+    # filters (list / bucket counters / owner facet), and stitching them from
+    # one flat list without binding params to conditions is impossible.
     common, common_p = [], []
     if status and status != 'all':
         common.append("ai.status = ?")
         common_p.append(status)
-    # T4.6: задачі мітингу, який видалено (soft-delete), не мають спливати на
-    # дашборді — незалежно від category-фільтра нижче.
+    # T4.6: tasks of a deleted (soft-delete) meeting must not surface
+    # on the dashboard - regardless of the category filter below.
     common.append(
         "ai.transcription_id IN (SELECT id FROM transcriptions WHERE deleted_at IS NULL)")
-    # Трек 1: повтори однієї домовленості з різних зустрічей позначені dup_of →
-    # за замовчуванням показуємо лише канонічну (include_dups=1 щоб побачити всі).
+    # Track 1: repeats of one agreement from different meetings are marked dup_of ->
+    # by default we show only the canonical one (include_dups=1 to see all).
     if request.args.get('include_dups') not in ('1', 'true', 'yes'):
         common.append("ai.dup_of IS NULL")
 
-    # Фільтр періоду — за датою запису-джерела (meeting_date, інакше created_at),
-    # бо користувач мислить «задачі за останні N» у термінах коли був дзвінок,
-    # а не коли відпрацював enrichment. Whitelisted модифікатори SQLite.
+    # The period filter - by the date of the source record (meeting_date, otherwise created_at),
+    # because the user thinks "tasks of the last N" in terms of when the call was,
+    # not when enrichment ran. Whitelisted SQLite modifiers.
     period = (request.args.get('period') or 'all').strip().lower()
     _period_mod = {'24h': '-1 day', '7d': '-7 days', 'month': '-1 month', 'year': '-1 year'}
     if period in _period_mod:
         common.append("date(COALESCE(t.meeting_date, t.created_at)) >= date('now', ?)")
         common_p.append(_period_mod[period])
 
-    # C4: напрямок (з розкриттям на проєкти) / теги (OR) / since-until — ті самі
-    # осі, що в search/ask/entities, через `categories.filter_sql`/`tags_sql`/
-    # `date_sql` на вже приєднаному в `_JOINS` `t` (без окремого підзапиту).
+    # C4: direction (expanded to projects) / tags (OR) / since-until - the same
+    # axes as in search/ask/entities, via `categories.filter_sql`/`tags_sql`/
+    # `date_sql` on `t` already joined in `_JOINS` (without a separate subquery).
     cat_frag, cat_params = cats.filter_sql('t.category_id', category_id)
     tags_frag, tags_params = cats.tags_sql('t.id', tag_names)
     date_frag, date_params = cats.date_sql(
@@ -1117,27 +1117,27 @@ def list_action_items():
         own.append("ai.owner_entity_id = ?")
         own_p.append(owner)
     if owner_name:
-        # Точний збіг, а не підрядок: значення приходить з чипа фасета (він і
-        # зібраний тим самим COALESCE), і підрядок зробив би чип «Андрій»
-        # фільтром, що тягне ще й «Андрій Ткаченко».
+        # Exact match, not a substring: the value comes from a facet chip (which was
+        # built by the same COALESCE), and a substring would make the chip «Андрій» a
+        # filter that also pulls in «Андрій Ткаченко».
         #
-        # Дві гілки, бо одне й те саме імʼя живе у двох місцях:
-        #   1) канонічне імʼя сутності (або сире, коли звʼязку немає) — це чип;
-        #   2) аліаси графа — після злиття сутностей (`entity_dedup merge`) усі
-        #      інші написання людини переїжджають САМЕ туди. У власника архіву
-        #      це 40 варіантів, і без цієї гілки посилання виду
-        #      `/tasks?owner=Мельник` давало порожньо при живих даних.
+        # Two branches, because the same name lives in two places:
+        #   1) the entity's canonical name (or raw, when there is no link) - this is the chip;
+        #   2) graph aliases - after an entity merge (`entity_dedup merge`) all
+        #      other spellings of a person move EXACTLY there. For the archive owner
+        #      this is 40 variants, and without this branch a link like
+        #      `/tasks?owner=Мельник` gave empty with live data.
         #
-        # Третьої гілки — по сирому `ai.owner_name` — тут свідомо НЕМАЄ, хоча в
-        # MCP-фільтрі вона є. На дашборді число на чипі має дорівнювати довжині
-        # списку, а сире імʼя цю рівність ламає: задача 2566 звучить як «Юлія»,
-        # але звʼязана з сутністю «Юля», тобто живе під ІНШИМ чипом — і список
-        # ставав на рядок довшим за чип, який його відкрив. Для вільного тексту
-        # є MCP (`list_action_items`), там підрядок і доречний.
-        # Порівняння аліасів — по `normalized_alias`, і ключ рахуємо ТІЄЮ Ж
-        # функцією, що його й записала (`enrichment._normalize`): робити це в
-        # SQL через LOWER() не можна — він не згортає кирилицю, тож
-        # регістронезалежність вийшла б фікцією.
+        # There is deliberately NO third branch - by the raw `ai.owner_name` - although the
+        # MCP filter has it. On the dashboard the number on a chip must equal the length of the
+        # list, and a raw name breaks that equality: task 2566 sounds like «Юлія»,
+        # but is linked to the entity «Юля», i.e. lives under ANOTHER chip - and the list
+        # became a row longer than the chip that opened it. For free text
+        # there is MCP (`list_action_items`), where a substring is appropriate.
+        # Alias comparison is by `normalized_alias`, and the key is computed by THE SAME
+        # function that wrote it (`enrichment._normalize`): doing this in
+        # SQL via LOWER() is impossible - it does not fold Cyrillic, so
+        # case-insensitivity would be a fiction.
         own.append("(COALESCE(e.canonical_name, ai.owner_name) = ? "
                    "OR EXISTS(SELECT 1 FROM entity_aliases ea "
                    "WHERE ea.entity_id = e.id AND ea.normalized_alias = ?))")
@@ -1146,8 +1146,8 @@ def list_action_items():
     win, win_p = _task_window_sql(window)
 
     def _sql(*groups):
-        # common завжди непорожній (deleted_at IS NULL), тож `WHERE` завжди є
-        # ДО того, як сюди дописується `axes_sql` (фрагменти з власним " AND ").
+        # common is always non-empty (deleted_at IS NULL), so `WHERE` is always there
+        # BEFORE `axes_sql` is appended here (fragments with their own " AND ").
         cl, pr = [], []
         for c, p in groups:
             cl += c
@@ -1156,23 +1156,23 @@ def list_action_items():
         return base + axes_sql, pr + axes_params
 
     where_sql, params = _sql((common, common_p), (own, own_p), (win, win_p))
-    # Лічильники відер — у межах решти фільтрів, але БЕЗ вікна: інакше активне
-    # відро завжди показувало б себе як 100%, а решту як нулі.
+    # Bucket counters - within the remaining filters, but WITHOUT the window: otherwise the active
+    # bucket would always show itself as 100% and the rest as zeros.
     count_sql, count_p = _sql((common, common_p), (own, own_p))
-    # Фасет власників — фільтр РІВНЯ СТОРІНКИ, тож рахуємо його без вікна і без
-    # самого себе: чипи мають показувати «скільки всього задач у цієї людини»,
-    # а не «скільки її задач потрапило у відро, яке зараз відкрите».
+    # The owner facet is a PAGE-LEVEL filter, so we count it without the window and without
+    # itself: chips must show "how many tasks this person has in total",
+    # not "how many of their tasks fell into the bucket that is open now".
     facet_sql, facet_p = _sql((common, common_p))
 
     _JOINS = ("FROM action_items ai "
               "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
               "LEFT JOIN entities e ON e.id = ai.owner_entity_id ")
 
-    # Протерміноване — СВІЖИМ УГОРУ (задача, прострочена вчора, ще жива; торішня
-    # — археологія). Решта вікон — найближчий дедлайн першим, недатоване в хвіст.
-    # Тай-брейк — дата розмови, потім id: після Волни 5.1 id більше не збігається
-    # з хронологією (задачі з переписки записані останніми, а говорять про
-    # травень), і на самому id вони витісняли дзвінки з ведра «без дати».
+    # Overdue - FRESH ON TOP (a task overdue yesterday is still alive; last year's
+    # is archaeology). The remaining windows - nearest deadline first, undated at the tail.
+    # Tie-break - the conversation date, then id: after Wave 5.1 id no longer matches
+    # the chronology (tasks from correspondence were written last, yet speak about
+    # May), and on id alone they pushed calls out of the "no date" bucket.
     order_sql = ("ORDER BY ai.due_date DESC, meeting_date DESC, ai.id DESC"
                  if window == 'overdue'
                  else "ORDER BY ai.due_date IS NULL, ai.due_date, meeting_date DESC, ai.id DESC")
@@ -1185,10 +1185,10 @@ def list_action_items():
             f"SELECT ai.id, ai.task, ai.owner_name, ai.owner_entity_id, ai.due, "
             f"ai.due_date, ai.due_precision, ai.stale_at, ai.dup_of, "
             f"ai.status, ai.transcription_id, ai.source, t.source_name, t.category_id, "
-            # Волна 5.1: у списку зʼявились задачі з переписки, а source_name у
-            # TG — це превʼю самого повідомлення («[TG] Так, звичайно, плануємо…»),
-            # тобто підпис, який повторює текст задачі. Картці потрібна адреса:
-            # чат і автор репліки.
+            # Wave 5.1: tasks from correspondence appeared in the list, and source_name in
+            # TG is the preview of the message itself («[TG] Так, звичайно, плануємо…»),
+            # i.e. a caption that repeats the task text. The card needs an address:
+            # the chat and the author of the reply.
             f"t.source_type, t.tg_chat_title, t.tg_sender, "
             f"COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date, "
             f"e.canonical_name AS owner_canonical "
@@ -1232,12 +1232,12 @@ def list_action_items():
 
 @memory_bp.route('/api/memory/action-items/<int:aid>', methods=['PATCH'])
 def update_action_item(aid: int):
-    """Оновити статус задачі. Body: {"status": "open|done|cancelled"}."""
+    """Update a task status. Body: {"status": "open|done|cancelled"}."""
     data = request.get_json(silent=True) or {}
     status = data.get('status')
     if status not in ('open', 'done', 'cancelled'):
         return jsonify({"success": False, "error": tr('knowledge.memory.err.status_bad')}), 400
-    # K5: той самий писальний шлях, що й кнопки брифінгу — з подією в журналі.
+    # K5: the same write path as the brief buttons - with an event in the journal.
     from app.services import commitments
     try:
         commitments.apply_action(current_app.config['DATABASE'], aid, status,
@@ -1248,7 +1248,7 @@ def update_action_item(aid: int):
 
 
 # ============================================================
-# Статистика
+# Statistics
 # ============================================================
 
 @memory_bp.route('/api/memory/stats', methods=['GET'])
@@ -1260,7 +1260,7 @@ def stats():
                 "SELECT type, COUNT(*) AS n FROM entities GROUP BY type"
             ).fetchall()
         }
-        # Значущі = згадані у ≥2 мітингах (хребет графа; решта — разовий шум).
+        # Significant = mentioned in >=2 meetings (the graph backbone; the rest is one-off noise).
         by_type_sig = {
             r["type"]: r["n"] for r in conn.execute(
                 "SELECT type, COUNT(*) AS n FROM entities WHERE meeting_count >= 2 GROUP BY type"
@@ -1271,10 +1271,10 @@ def stats():
                 "SELECT status, COUNT(*) AS n FROM action_items GROUP BY status"
             ).fetchall()
         }
-        # T6.5: «embedded» рахуємо тим самим предикатом, що й список роботи
-        # індексера (enrichment.list_unenriched_ids) — модель І версія. Інакше
-        # після бампу EMBED_VERSION на одному екрані стояли б два числа, які
-        # суперечать одне одному: «векторизовано 4502/4503» і «до обробки 4503».
+        # T6.5: we count "embedded" with the same predicate as the indexer's work
+        # list (enrichment.list_unenriched_ids) - model AND version. Otherwise
+        # after an EMBED_VERSION bump one screen would show two numbers that
+        # contradict each other: «векторизовано 4502/4503» and «до обробки 4503».
         tx = conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN enriched_at IS NOT NULL THEN 1 ELSE 0 END) AS enriched, "

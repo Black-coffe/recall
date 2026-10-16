@@ -1,26 +1,26 @@
 #!/usr/bin/env python
-"""Двостороння звірка медіа-файлів проти БД (dry-run за замовчуванням).
+"""Two-way reconciliation of media files against the DB (dry-run by default).
 
-Пряма звірка (диск → БД):
-    Файли в медіа-теках, на які НЕ посилається жоден рядок
-    ``audio_downloads`` чи ``transcriptions`` (за абсолютним шляхом АБО
-    імʼям файлу) → осиротілі (кандидати на видалення).
+Direct pass (disk -> DB):
+    Files in the media dirs that NO row of ``audio_downloads`` or
+    ``transcriptions`` references (by absolute path OR
+    file name) -> orphaned (deletion candidates).
 
-Зворотна звірка (БД → диск):
-    Рядки БД, чий ``file_path`` вказує на відсутній на диску файл.
-    - ``audio_downloads``: мертві каталожні рядки Аудіотеки — можна прибрати
-      (файлу нема, запис не грається/не транскрибується).
-    - ``transcriptions``: НЕ видаляємо НІКОЛИ — текст, сутності та RAG-чанки
-      цінні; відсутнє оригінальне аудіо старих завантажень — це норма.
-      Лише попередження.
+Reverse pass (DB -> disk):
+    DB rows whose ``file_path`` points to a file missing on disk.
+    - ``audio_downloads``: dead catalog rows of the Audio library - can be removed
+      (no file, the entry cannot be played/transcribed).
+    - ``transcriptions``: NEVER deleted - the text, entities and RAG chunks
+      are valuable; missing original audio of old downloads is normal.
+      Warning only.
 
-За замовчуванням скрипт ЛИШЕ ЗВІТУЄ (dry-run). Прапор ``--apply`` виконує
-чистку: видаляє осиротілі файли + мертві ``audio_downloads``-рядки. Транскрипти
-не чіпає за жодних умов.
+By default the script ONLY REPORTS (dry-run). The ``--apply`` flag performs
+the cleanup: deletes orphaned files + dead ``audio_downloads`` rows. Transcripts
+are never touched under any circumstances.
 
-Приклади:
+Examples:
     .venv/Scripts/python.exe scripts/reconcile_media.py            # dry-run
-    .venv/Scripts/python.exe scripts/reconcile_media.py --apply    # чистка
+    .venv/Scripts/python.exe scripts/reconcile_media.py --apply    # cleanup
     .venv/Scripts/python.exe scripts/reconcile_media.py --dirs youtube_downloads uploads
 """
 from __future__ import annotations
@@ -33,21 +33,21 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Теки з НАДІЙНИМ трекінгом file_path — лише їх скануємо за замовчуванням:
-#   youtube_downloads → audio_downloads.file_path (повний);
-#   uploads           → transcriptions.file_path (source_type='file', повний).
+# Dirs with RELIABLE file_path tracking - only these are scanned by default:
+#   youtube_downloads -> audio_downloads.file_path (complete);
+#   uploads           -> transcriptions.file_path (source_type='file', complete).
 #
-# СВІДОМО ВИКЛЮЧЕНО з дефолту (file_path трекається ненадійно → пряма звірка
-# дала б хибні «сироти», --apply видалив би потрібне):
-#   documents/      — Phase 16: текст у архіві, але file_path НЕ зберігається
-#                     (0 рядків) → усі PDF/DOCX виглядали б як сироти;
-#   telegram_media/ — лише частина медіа має file_path (текстові TG-повідомлення
-#                     без файлів) → багато хибних спрацювань;
-#   recordings/     — власний життєвий цикл (не-фіналізовані сесії, finalize сам
-#                     чистить проміжні WAV).
-# Їх можна передати явно через --dirs, але ЛИШЕ для звіту й з ручною перевіркою.
+# DELIBERATELY EXCLUDED from the default (file_path is tracked unreliably -> the direct pass
+# would give false "orphans", --apply would delete needed files):
+#   documents/      - Phase 16: text is in the archive, but file_path is NOT stored
+#                     (0 rows) -> all PDF/DOCX would look like orphans;
+#   telegram_media/ - only part of the media has file_path (text-only TG messages
+#                     have no files) -> many false positives;
+#   recordings/     - own lifecycle (non-finalized sessions, finalize cleans
+#                     the intermediate WAVs itself).
+# They can be passed explicitly via --dirs, but ONLY for a report and with manual review.
 DEFAULT_DIRS = ['youtube_downloads', 'uploads']
-# Теки, для яких --apply НЕБЕЗПЕЧНИЙ (немає надійного трекінгу file_path).
+# Dirs for which --apply is UNSAFE (no reliable file_path tracking).
 UNSAFE_FOR_APPLY = {'documents', 'telegram_media', 'recordings'}
 
 
@@ -56,7 +56,7 @@ def _norm(p: str) -> str:
 
 
 def gather_referenced(db_path: str) -> tuple[set[str], set[str]]:
-    """Усі file_path з audio_downloads + transcriptions → (abs-шляхи, basenames)."""
+    """All file_path values from audio_downloads + transcriptions -> (abs paths, basenames)."""
     abs_set: set[str] = set()
     base_set: set[str] = set()
     con = sqlite3.connect(db_path)
@@ -74,7 +74,7 @@ def gather_referenced(db_path: str) -> tuple[set[str], set[str]]:
 
 
 def scan_dirs(dirs: list[Path]) -> list[tuple[str, int]]:
-    """Усі файли в заданих теках → [(абсолютний шлях, розмір)]."""
+    """All files in the given dirs -> [(absolute path, size)]."""
     found: list[tuple[str, int]] = []
     for d in dirs:
         if not d.is_dir():
@@ -90,7 +90,7 @@ def scan_dirs(dirs: list[Path]) -> list[tuple[str, int]]:
 
 
 def find_orphans(disk: list[tuple[str, int]], abs_set: set[str], base_set: set[str]):
-    """Файли на диску, на які БД не посилається (ні шляхом, ні іменем)."""
+    """Files on disk that the DB does not reference (neither by path nor by name)."""
     orphans = []
     for p, sz in disk:
         ap = _norm(p)
@@ -101,7 +101,7 @@ def find_orphans(disk: list[tuple[str, int]], abs_set: set[str], base_set: set[s
 
 
 def find_broken(db_path: str, table: str):
-    """Рядки table з file_path, що вказує на відсутній файл."""
+    """Rows of table with a file_path that points to a missing file."""
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     try:
@@ -123,63 +123,63 @@ def _gb(n: int) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description='Двостороння звірка медіа проти БД.')
+    ap = argparse.ArgumentParser(description='Two-way reconciliation of media against the DB.')
     ap.add_argument('--db', default=str(PROJECT_ROOT / 'whisper_history.db'),
-                    help='Шлях до SQLite (default: whisper_history.db у корені).')
+                    help='Path to SQLite (default: whisper_history.db in the root).')
     ap.add_argument('--dirs', nargs='+', default=DEFAULT_DIRS,
-                    help=f'Медіа-теки для прямої звірки (default: {" ".join(DEFAULT_DIRS)}).')
+                    help=f'Media dirs for the direct pass (default: {" ".join(DEFAULT_DIRS)}).')
     ap.add_argument('--apply', action='store_true',
-                    help='ВИКОНАТИ чистку (видалити осиротілі файли + мертві '
-                         'audio_downloads-рядки). Без прапора — лише звіт (dry-run).')
+                    help='PERFORM the cleanup (delete orphaned files + dead '
+                         'audio_downloads rows). Without the flag - report only (dry-run).')
     ap.add_argument('--limit-examples', type=int, default=15,
-                    help='Скільки прикладів показувати у звіті (default: 15).')
+                    help='How many examples to show in the report (default: 15).')
     args = ap.parse_args(argv)
 
     if not os.path.isfile(args.db):
-        print(f'❌ БД не знайдено: {args.db}', file=sys.stderr)
+        print(f'ERROR: DB not found: {args.db}', file=sys.stderr)
         return 2
 
     dirs = [(PROJECT_ROOT / d) if not os.path.isabs(d) else Path(d) for d in args.dirs]
-    mode = 'APPLY (чистка)' if args.apply else 'DRY-RUN (лише звіт)'
-    print(f'=== Звірка медіа проти БД — {mode} ===')
-    print(f'БД: {args.db}')
-    print(f'Теки: {", ".join(str(d) for d in dirs)}\n')
+    mode = 'APPLY (cleanup)' if args.apply else 'DRY-RUN (report only)'
+    print(f'=== Media vs DB reconciliation - {mode} ===')
+    print(f'DB: {args.db}')
+    print(f'Dirs: {", ".join(str(d) for d in dirs)}\n')
 
     abs_set, base_set = gather_referenced(args.db)
 
-    # --- Пряма: осиротілі файли ----------------------------------------------
+    # --- Direct: orphaned files ----------------------------------------------
     disk = scan_dirs(dirs)
     orphans = find_orphans(disk, abs_set, base_set)
     disk_total = sum(s for _, s in disk)
     orphan_total = sum(s for _, s in orphans)
-    print('─ ПРЯМА (диск → БД): осиротілі файли')
-    print(f'  на диску: {len(disk)} файлів, {_gb(disk_total)}')
-    print(f'  осиротілі: {len(orphans)} файлів, {_gb(orphan_total)}')
+    print('- DIRECT (disk -> DB): orphaned files')
+    print(f'  on disk: {len(disk)} files, {_gb(disk_total)}')
+    print(f'  orphaned: {len(orphans)} files, {_gb(orphan_total)}')
     for p, sz in sorted(orphans, key=lambda x: -x[1])[:args.limit_examples]:
         print(f'    {_mb(sz):>10}  {os.path.basename(p)}')
     if len(orphans) > args.limit_examples:
-        print(f'    … ще {len(orphans) - args.limit_examples}')
+        print(f'    ... {len(orphans) - args.limit_examples} more')
 
-    # --- Зворотна: биті посилання --------------------------------------------
+    # --- Reverse: broken references ------------------------------------------
     broken_audio = find_broken(args.db, 'audio_downloads')
     broken_tr = find_broken(args.db, 'transcriptions')
-    print('\n─ ЗВОРОТНА (БД → диск): биті посилання')
-    print(f'  audio_downloads (Аудіотека): {len(broken_audio)} мертвих рядків (можна прибрати)')
+    print('\n- REVERSE (DB -> disk): broken references')
+    print(f'  audio_downloads (Audio library): {len(broken_audio)} dead rows (can be removed)')
     for r in broken_audio[:args.limit_examples]:
         print(f'    id={r["id"]} [{r["source_type"]}] {os.path.basename(r["file_path"])}')
-    print(f'  transcriptions (Історія): {len(broken_tr)} битих — ЗБЕРІГАЄМО '
-          f'(текст+RAG цінні, аудіо відсутнє = норма)')
+    print(f'  transcriptions (History): {len(broken_tr)} broken - KEEPING '
+          f'(text+RAG are valuable, missing audio is normal)')
 
-    # --- Дія (тільки з --apply) ----------------------------------------------
+    # --- Action (only with --apply) ------------------------------------------
     if not args.apply:
         would = orphan_total
-        print(f'\n[dry-run] Видалилось би: {len(orphans)} файлів ({_gb(would)}) '
-              f'+ {len(broken_audio)} рядків Аудіотеки.')
-        print('Запусти з --apply, щоб виконати. Транскрипти не чіпаються ніколи.')
+        print(f'\n[dry-run] Would delete: {len(orphans)} files ({_gb(would)}) '
+              f'+ {len(broken_audio)} Audio library rows.')
+        print('Run with --apply to perform it. Transcripts are never touched.')
         return 0
 
-    # Захист: не видаляємо файли з тек, де трекінг file_path ненадійний
-    # (documents/telegram_media/recordings) — навіть якщо їх передали через --dirs.
+    # Guard: do not delete files from dirs where file_path tracking is unreliable
+    # (documents/telegram_media/recordings) - even if they were passed via --dirs.
     def _is_unsafe(path: str) -> bool:
         ap = _norm(path)
         return any(_norm(str(PROJECT_ROOT / u)) in ap for u in UNSAFE_FOR_APPLY)
@@ -191,17 +191,17 @@ def main(argv=None) -> int:
         if _is_unsafe(p):
             skipped_unsafe += 1
             continue
-        if os.path.isfile(p):  # повторна перевірка перед видаленням
+        if os.path.isfile(p):  # re-check before deleting
             try:
                 os.remove(p)
                 freed += sz
                 removed_files += 1
             except OSError as e:
-                print(f'    ⚠ не видалено {p}: {e}')
+                print(f'    WARNING: not deleted {p}: {e}')
     if skipped_unsafe:
-        print(f'    ⚠ пропущено {skipped_unsafe} файлів у ненадійних теках '
-              f'({", ".join(sorted(UNSAFE_FOR_APPLY))}) — file_path трекається '
-              f'неповно, видалення небезпечне.')
+        print(f'    WARNING: skipped {skipped_unsafe} files in unreliable dirs '
+              f'({", ".join(sorted(UNSAFE_FOR_APPLY))}) - file_path is tracked '
+              f'incompletely, deletion is unsafe.')
 
     removed_rows = 0
     if broken_audio:
@@ -209,7 +209,7 @@ def main(argv=None) -> int:
         try:
             cur = con.cursor()
             for r in broken_audio:
-                # safety: видаляємо рядок лише якщо файл СПРАВДІ відсутній
+                # safety: delete a row only if the file is REALLY missing
                 if not os.path.isfile(r['file_path']):
                     cur.execute('DELETE FROM audio_downloads WHERE id = ?', (r['id'],))
                     removed_rows += 1
@@ -217,9 +217,9 @@ def main(argv=None) -> int:
         finally:
             con.close()
 
-    print(f'\n✅ Видалено {removed_files} осиротілих файлів ({_gb(freed)}) '
-          f'+ {removed_rows} мертвих рядків Аудіотеки.')
-    print(f'   Транскрипти ({len(broken_tr)} битих) збережено.')
+    print(f'\nDone: deleted {removed_files} orphaned files ({_gb(freed)}) '
+          f'+ {removed_rows} dead Audio library rows.')
+    print(f'   Transcripts ({len(broken_tr)} broken) kept.')
     return 0
 
 

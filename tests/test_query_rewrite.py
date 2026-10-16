@@ -1,7 +1,7 @@
-"""Юніт-тести переписування запиту (production-rag-wave-b-07).
+"""Unit tests for search query rewriting (production-rag-wave-b-07).
 
-Офлайн: жодного реального виклику Anthropic API — `text_polishing._get_client`
-підмінюється фейком, що повертає скриптований JSON-текст.
+Offline: no real Anthropic API call -- `text_polishing._get_client`
+is replaced by a fake that returns scripted JSON text.
 """
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ def _mock_client(monkeypatch, response_text=None, error=None):
 
 
 # ============================================================
-# Порожній/односкладовий запит -> [] без виклику API
+# Empty/single-word query -> [] without an API call
 # ============================================================
 
 def test_empty_question_returns_empty_without_calling_api(monkeypatch):
     def _boom():
-        raise AssertionError("_get_client НЕ мусить викликатись для порожнього запиту")
+        raise AssertionError("_get_client must NOT be called for an empty query")
     monkeypatch.setattr(text_polishing, "_get_client", _boom)
     assert query_rewrite.rewrite_query("") == []
     assert query_rewrite.rewrite_query("   ") == []
@@ -61,13 +61,13 @@ def test_empty_question_returns_empty_without_calling_api(monkeypatch):
 
 def test_single_word_question_returns_empty_without_calling_api(monkeypatch):
     def _boom():
-        raise AssertionError("_get_client НЕ мусить викликатись для односкладового запиту")
+        raise AssertionError("_get_client must NOT be called for a single-word query")
     monkeypatch.setattr(text_polishing, "_get_client", _boom)
     assert query_rewrite.rewrite_query("бюджет") == []
 
 
 # ============================================================
-# Валідний JSON -> варіанти
+# Valid JSON -> variants
 # ============================================================
 
 def test_valid_json_returns_variants(monkeypatch):
@@ -118,7 +118,7 @@ def test_non_string_and_blank_entries_are_skipped(monkeypatch):
 
 
 # ============================================================
-# Збій API / невалідний JSON -> [] + logger.warning
+# API failure / invalid JSON -> [] + logger.warning
 # ============================================================
 
 def test_api_error_returns_empty_and_logs_warning(monkeypatch, caplog):
@@ -126,7 +126,7 @@ def test_api_error_returns_empty_and_logs_warning(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         out = query_rewrite.rewrite_query("який бюджет проєкту")
     assert out == []
-    assert any("переписування запиту не вдалось" in r.message for r in caplog.records)
+    assert any("query rewrite failed" in r.message for r in caplog.records)
 
 
 def test_invalid_json_returns_empty_and_logs_warning(monkeypatch, caplog):
@@ -134,7 +134,7 @@ def test_invalid_json_returns_empty_and_logs_warning(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         out = query_rewrite.rewrite_query("який бюджет проєкту")
     assert out == []
-    assert any("переписування запиту не вдалось" in r.message for r in caplog.records)
+    assert any("query rewrite failed" in r.message for r in caplog.records)
 
 
 def test_json_object_instead_of_array_returns_empty_and_logs_warning(monkeypatch, caplog):
@@ -142,11 +142,11 @@ def test_json_object_instead_of_array_returns_empty_and_logs_warning(monkeypatch
     with caplog.at_level("WARNING"):
         out = query_rewrite.rewrite_query("який бюджет проєкту")
     assert out == []
-    assert any("не JSON-масив" in r.message for r in caplog.records)
+    assert any("non-JSON array" in r.message for r in caplog.records)
 
 
 # ============================================================
-# Модель/температура запиту
+# Model/temperature of the request
 # ============================================================
 
 def test_default_model_used_when_not_specified(monkeypatch):
@@ -163,10 +163,10 @@ def test_explicit_model_overrides_default(monkeypatch):
 
 
 # ============================================================
-# production-rag-wave-b-08, Minor 16: без власної копії `_strip_json_fence`
+# production-rag-wave-b-08, Minor 16: no own copy of `_strip_json_fence`
 # ============================================================
 
 def test_no_local_strip_json_fence_copy():
     assert not hasattr(query_rewrite, "_strip_json_fence"), (
-        "query_rewrite не має мати власну копію _strip_json_fence — "
-        "бере text_polishing._strip_json_fence тим самим лінивим імпортом")
+        "query_rewrite must not have its own copy of _strip_json_fence -- "
+        "it takes text_polishing._strip_json_fence via the same lazy import")

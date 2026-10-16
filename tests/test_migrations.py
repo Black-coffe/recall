@@ -1,7 +1,7 @@
-"""Tests для DB migrations (Phase 9.6 та існуючі версії).
+"""Tests for DB migrations (Phase 9.6 and the existing versions).
 
-Тести працюють з тимчасовими SQLite БД у tmp_path — реальна
-whisper_history.db не зачіпається.
+The tests work with temporary SQLite DBs in tmp_path - the real
+whisper_history.db is not touched.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from app.db.migrations import init_database
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> dict[str, dict]:
-    """Повертає {col_name: {type, notnull, dflt_value}} для колонок table."""
+    """Returns {col_name: {type, notnull, dflt_value}} for the columns of table."""
     cols = {}
     for row in conn.execute(f"PRAGMA table_info({table})"):
         cols[row[1]] = {
@@ -57,7 +57,7 @@ def test_v5_adds_recording_columns(tmp_path: Path):
         assert 'recording_session_id' in cols
         assert 'recording_segments' in cols
         assert 'recording_duration_sec' in cols
-        # Recording-specific колонки nullable (бо для YouTube=NULL)
+        # Recording-specific columns are nullable (because NULL for YouTube)
         assert cols['recording_session_id']['notnull'] is False
     finally:
         conn.close()
@@ -81,16 +81,16 @@ def test_v5_creates_indexes(tmp_path: Path):
 
 
 def test_v5_migration_is_idempotent(tmp_path: Path):
-    """Повторні init_database() не повинні падати чи дублювати колонки."""
+    """Repeated init_database() calls must not fail or duplicate columns."""
     db = str(tmp_path / 'test.db')
     init_database(db)
-    init_database(db)  # повторно
-    init_database(db)  # ще раз
+    init_database(db)  # again
+    init_database(db)  # once more
 
     conn = sqlite3.connect(db)
     try:
         cols = _columns(conn, 'audio_downloads')
-        # Кожна колонка має зустрітися рівно раз — pragma не вертає duplicates
+        # Each column must appear exactly once - pragma does not return duplicates
         assert list(cols).count('source_type') == 1
         assert _schema_version(conn) >= 5
     finally:
@@ -98,11 +98,11 @@ def test_v5_migration_is_idempotent(tmp_path: Path):
 
 
 def test_v5_existing_youtube_rows_get_source_type_youtube(tmp_path: Path):
-    """Якщо БД вже існує з v4 і має YouTube-завантаження, після v5
-    усі вони повинні мати source_type='youtube'."""
+    """If the DB already exists at v4 and has YouTube downloads, after v5
+    all of them must have source_type='youtube'."""
     db = str(tmp_path / 'pre_v5.db')
 
-    # Створюємо БД у стані v4 (без source_type у audio_downloads)
+    # Create the DB in the v4 state (without source_type in audio_downloads)
     conn = sqlite3.connect(db)
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('''CREATE TABLE schema_versions
@@ -129,7 +129,7 @@ def test_v5_existing_youtube_rows_get_source_type_youtube(tmp_path: Path):
         upload_date TEXT,
         tags TEXT
     )''')
-    # Додаємо існуючі YouTube-завантаження ДО міграції v5
+    # Add existing YouTube downloads BEFORE the v5 migration
     conn.execute(
         '''INSERT INTO audio_downloads
            (youtube_url, youtube_id, title, file_path)
@@ -143,7 +143,7 @@ def test_v5_existing_youtube_rows_get_source_type_youtube(tmp_path: Path):
     conn.commit()
     conn.close()
 
-    # Запускаємо міграцію
+    # Run the migration
     init_database(db)
 
     conn = sqlite3.connect(db)
@@ -157,8 +157,8 @@ def test_v5_existing_youtube_rows_get_source_type_youtube(tmp_path: Path):
 
 
 def test_v5_can_insert_recording_row(tmp_path: Path):
-    """Можна вставити recording-row з source_type='recording' і recording_*
-    колонками. Перевіряємо що SELECT WHERE source_type='recording' працює."""
+    """A recording row with source_type='recording' and recording_*
+    columns can be inserted. We check that SELECT WHERE source_type='recording' works."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -206,9 +206,9 @@ def test_v5_can_insert_recording_row(tmp_path: Path):
 
 
 def test_v5_unique_youtube_id_does_not_block_multiple_recordings(tmp_path: Path):
-    """Рекординги мусять мати унікальний youtube_id surrogate
-    (наприклад, 'recording_<sid>') — два recording'а отримають різні
-    sid'и, отже UNIQUE не блокуватиме."""
+    """Recordings must have a unique youtube_id surrogate
+    (for example, 'recording_<sid>') - two recordings get different
+    sids, hence UNIQUE will not block."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -250,7 +250,7 @@ def test_v6_creates_speakers_table_with_self_seed(tmp_path: Path):
                          'embedding', 'created_at', 'updated_at'):
             assert required in cols, f'speakers.{required} missing'
 
-        # Сід "Ви" створено з is_self=1
+        # The seed "Ви" was created with is_self=1
         rows = conn.execute(
             "SELECT name, is_self FROM speakers WHERE is_self = 1"
         ).fetchall()
@@ -270,7 +270,7 @@ def test_v6_creates_transcription_speaker_map_table(tmp_path: Path):
         cols = _columns(conn, 'transcription_speaker_map')
         for required in ('transcription_id', 'raw_label', 'speaker_id'):
             assert required in cols
-        # PK на (transcription_id, raw_label)
+        # PK on (transcription_id, raw_label)
         pk_rows = conn.execute(
             "PRAGMA table_info(transcription_speaker_map)"
         ).fetchall()
@@ -281,8 +281,8 @@ def test_v6_creates_transcription_speaker_map_table(tmp_path: Path):
 
 
 def test_v6_speakers_name_unique_case_insensitive_ascii(tmp_path: Path):
-    """SQLite COLLATE NOCASE працює тільки для ASCII.
-    Cyrillic case-insensitivity робиться нормалізацією на app-level."""
+    """SQLite COLLATE NOCASE works only for ASCII.
+    Cyrillic case-insensitivity is done by normalization at the app level."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -298,7 +298,7 @@ def test_v6_speakers_name_unique_case_insensitive_ascii(tmp_path: Path):
 
 
 def test_v6_speakers_name_exact_match_unique(tmp_path: Path):
-    """Однакові Cyrillic-імена все одно блокуються (exact-case)."""
+    """Identical Cyrillic names are still blocked (exact-case)."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -319,7 +319,7 @@ def test_v6_can_map_raw_label_to_speaker(tmp_path: Path):
 
     conn = sqlite3.connect(db)
     try:
-        # Створюємо transcription
+        # Create a transcription
         conn.execute('''
             INSERT INTO transcriptions
               (source_type, source_name, transcript_text)
@@ -327,7 +327,7 @@ def test_v6_can_map_raw_label_to_speaker(tmp_path: Path):
         ''')
         tid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
 
-        # Створюємо speaker і мапимо SPEAKER_00 → нього
+        # Create a speaker and map SPEAKER_00 -> it
         conn.execute("INSERT INTO speakers (name, usage_count) VALUES ('Юля', 0)")
         sid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
 
@@ -337,7 +337,7 @@ def test_v6_can_map_raw_label_to_speaker(tmp_path: Path):
             VALUES (?, ?, ?)
         ''', (tid, 'SPEAKER_00', sid))
 
-        # Unnamed label з NULL speaker_id (ще не іменований)
+        # Unnamed label with a NULL speaker_id (not named yet)
         conn.execute('''
             INSERT INTO transcription_speaker_map
               (transcription_id, raw_label, speaker_id)
@@ -345,7 +345,7 @@ def test_v6_can_map_raw_label_to_speaker(tmp_path: Path):
         ''', (tid, 'SPEAKER_01'))
         conn.commit()
 
-        # JOIN читання: SPEAKER_00 → Юля, SPEAKER_01 → NULL
+        # JOIN read: SPEAKER_00 -> «Юля», SPEAKER_01 -> NULL
         rows = conn.execute('''
             SELECT m.raw_label, s.name
             FROM transcription_speaker_map m
@@ -359,7 +359,7 @@ def test_v6_can_map_raw_label_to_speaker(tmp_path: Path):
 
 
 def test_v6_pk_prevents_duplicate_raw_label(tmp_path: Path):
-    """Не можна двічі мапити той самий raw_label у одному transcript-і."""
+    """The same raw_label cannot be mapped twice in one transcript."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -394,7 +394,7 @@ def test_v6_migration_is_idempotent(tmp_path: Path):
 
     conn = sqlite3.connect(db)
     try:
-        # Сід "Ви" не повинен дублюватися
+        # The seed "Ви" must not be duplicated
         cnt = conn.execute(
             "SELECT COUNT(*) FROM speakers WHERE name = 'Ви'"
         ).fetchone()[0]
@@ -434,7 +434,7 @@ def test_v16_adds_document_columns(tmp_path: Path):
         for required in ('doc_type', 'original_filename', 'page_count',
                          'byte_size', 'content_hash', 'parsed_at', 'parser_version'):
             assert required in cols, f'transcriptions.{required} missing'
-        # усі document-колонки nullable (для аудіо-транскриптів = NULL)
+        # all document columns are nullable (NULL for audio transcripts)
         assert cols['doc_type']['notnull'] is False
         assert _schema_version(conn) >= 16
     finally:
@@ -484,7 +484,7 @@ def test_v16_can_insert_document_row(tmp_path: Path):
         assert row[2] == 12
         assert 'текст документа' in row[3]
 
-        # FTS5-тригер з v3 повинен проіндексувати документ
+        # the FTS5 trigger from v3 must index the document
         fts = conn.execute(
             "SELECT COUNT(*) FROM transcriptions_fts WHERE transcriptions_fts MATCH 'документа'"
         ).fetchone()[0]
@@ -578,7 +578,7 @@ def test_v26_creates_jobs_table(tmp_path: Path):
         cols = _columns(conn, 'jobs')
         for col in ('id', 'kind', 'state', 'created_at', 'started_at',
                     'finished_at', 'error', 'meta_json', 'updated_at'):
-            assert col in cols, f"jobs.{col} відсутня"
+            assert col in cols, f"jobs.{col} is missing"
         assert cols['kind']['notnull'] is True
         assert cols['state']['notnull'] is True
         assert _schema_version(conn) >= 26
@@ -629,8 +629,8 @@ def test_v26_can_insert_and_upsert_job_row(tmp_path: Path):
 
 
 def test_v26_migration_is_idempotent(tmp_path: Path):
-    """Повторний init_database() (напр. другий рестарт застосунку) не падає
-    'table already exists' і не дублює версію в schema_versions."""
+    """A repeated init_database() (e.g. a second app restart) does not fail with
+    'table already exists' and does not duplicate the version in schema_versions."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     init_database(db)
@@ -650,17 +650,17 @@ def test_v26_migration_is_idempotent(tmp_path: Path):
 
 
 def test_v26_rerun_after_version_row_missing_is_safe(tmp_path: Path):
-    """Крайній випадок атомарності: якщо schema_versions "відкотили" (рядок
-    26 видалено вручну/зовнішнім інструментом), а таблиця jobs фізично вже
-    існує — повторний init_database() не падає 'table already exists' і
-    відновлює версійний рядок (CREATE TABLE IF NOT EXISTS + INSERT OR IGNORE
-    ідемпотентні незалежно один від одного).
+    """Edge case of atomicity: if schema_versions was "rolled back" (row
+    26 deleted manually/by an external tool), while the jobs table physically
+    already exists - a repeated init_database() does not fail with 'table already exists' and
+    restores the version row (CREATE TABLE IF NOT EXISTS + INSERT OR IGNORE
+    are idempotent independently of each other).
 
-    T4.6 додав v27 ПІСЛЯ v26 — щоб MAX(version) справді впав нижче 26 (а не
-    лишився 27 через рядок наступної міграції), видаляємо весь хвіст версій
-    ≥26, не лише 26. Так тест і надалі перевіряє саме "втрату
-    version-бухгалтерії при фізично вже застосованій схемі", а не залежить
-    від того, яка міграція є найновішою на момент запуску."""
+    T4.6 added v27 AFTER v26 - so that MAX(version) really drops below 26 (and does not
+    stay 27 because of the next migration's row), we delete the whole tail of versions
+    >=26, not just 26. This way the test keeps checking exactly "the loss of
+    version bookkeeping with a physically already applied schema", and does not depend
+    on which migration is the newest at the moment of the run."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     assert _schema_version(_conn := sqlite3.connect(db)) >= 26
@@ -668,8 +668,8 @@ def test_v26_rerun_after_version_row_missing_is_safe(tmp_path: Path):
     _conn.commit()
     _conn.close()
 
-    # current_version тепер < 26 знову (MAX(version) впав), тож блок v26
-    # (і наступні) виконаються повторно поверх уже існуючих таблиць.
+    # current_version is < 26 again (MAX(version) dropped), so the v26 block
+    # (and the following ones) run again on top of the already existing tables.
     init_database(db)
 
     conn = sqlite3.connect(db)
@@ -695,7 +695,7 @@ def test_v27_adds_deleted_at_columns(tmp_path: Path):
         a_cols = _columns(conn, 'audio_downloads')
         assert 'deleted_at' in t_cols
         assert 'deleted_at' in a_cols
-        # nullable (default = живий запис)
+        # nullable (default = live record)
         assert t_cols['deleted_at']['notnull'] is False
         assert a_cols['deleted_at']['notnull'] is False
         assert _schema_version(conn) >= 27
@@ -730,7 +730,7 @@ def test_v27_creates_speaker_merges_table(tmp_path: Path):
         cols = _columns(conn, 'speaker_merges')
         for col in ('id', 'keep_id', 'merged_speaker_ids', 'before_json',
                     'merged_at', 'restored_at'):
-            assert col in cols, f"speaker_merges.{col} відсутня"
+            assert col in cols, f"speaker_merges.{col} is missing"
         assert cols['keep_id']['notnull'] is True
         assert cols['before_json']['notnull'] is True
         assert cols['restored_at']['notnull'] is False
@@ -746,8 +746,8 @@ def test_v27_creates_speaker_merges_table(tmp_path: Path):
 
 
 def test_v27_deleted_at_defaults_to_null_for_existing_rows(tmp_path: Path):
-    """Живі рядки (deleted_at IS NULL) лишаються видимими — migration не
-    зачіпає жодного існуючого запису."""
+    """Live rows (deleted_at IS NULL) stay visible - the migration does not
+    touch any existing record."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     conn = sqlite3.connect(db)
@@ -783,7 +783,7 @@ def test_v27_migration_is_idempotent(tmp_path: Path):
 # ---------------------------------------------------------------- v45
 
 def test_v45_adds_parent_id_tag_tables_and_suggestions(tmp_path: Path):
-    """Спека directions-projects-tags, історія 01: дерево напрямків + словник тегів."""
+    """Spec directions-projects-tags, story 01: direction tree + tag vocabulary."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -818,7 +818,7 @@ def test_v45_tag_tables_enforce_their_keys(tmp_path: Path):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO record_tags (transcription_id, tag_id) VALUES (1, ?)",
                          (tag_id,))
-        # source за замовчуванням — ручний тег
+        # source defaults to a manual tag
         assert conn.execute("SELECT source FROM record_tags").fetchone()[0] == 'manual'
         conn.execute("INSERT INTO tg_chat_tags (chat_id, tag_id) VALUES (777, ?)", (tag_id,))
         with pytest.raises(sqlite3.IntegrityError):
@@ -829,7 +829,7 @@ def test_v45_tag_tables_enforce_their_keys(tmp_path: Path):
 
 
 def test_v45_applies_on_top_of_a_v44_database(tmp_path: Path):
-    """БД рівня v44 доганяє схему, не втрачаючи даних і не чіпаючи name_norm."""
+    """A v44-level DB catches up with the schema without losing data or touching name_norm."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -871,7 +871,7 @@ def test_v45_migration_is_idempotent(tmp_path: Path):
 # ---------------------------------------------------------------- v46
 
 def _rollback_to_v45(db: str) -> None:
-    """Повернути БД у стан «до v46»: таблиці немає, версія 45."""
+    """Return the DB to the "before v46" state: no table, version 45."""
     conn = sqlite3.connect(db)
     conn.execute("DROP TABLE IF EXISTS embedding_epochs")
     conn.execute("DELETE FROM schema_versions WHERE version >= 46")
@@ -880,8 +880,8 @@ def _rollback_to_v45(db: str) -> None:
 
 
 def test_v46_stamps_existing_pairs_as_prefix_format_1(tmp_path: Path):
-    """Усе, що існувало ДО v46, побудовано старим форматом префікса — бекфіл
-    саме це й записує, а повторна міграція рядка не множить."""
+    """Everything that existed BEFORE v46 was built with the old prefix format - the backfill
+    writes exactly that, and a repeated migration does not multiply the row."""
     db = str(tmp_path / 'test.db')
     init_database(db)
 
@@ -891,7 +891,7 @@ def test_v46_stamps_existing_pairs_as_prefix_format_1(tmp_path: Path):
             "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
             "embedding_model, embedding_version) VALUES ('file', ?, ?, ?, 4)",
             (name, 'Обговорили терміни здачі.', 'intfloat/multilingual-e5-large'))
-    # запис без ембедингу і запис до v28 (версія NULL) у таблицю не потрапляють
+    # a record without an embedding and a pre-v28 record (version NULL) do not get into the table
     conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text) "
                  "VALUES ('file', 'Ще не ембеджено', 'Текст.')")
     conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
@@ -911,7 +911,7 @@ def test_v46_stamps_existing_pairs_as_prefix_format_1(tmp_path: Path):
     finally:
         conn.close()
 
-    init_database(db)          # повторна міграція — той самий рядок
+    init_database(db)          # repeated migration - the same row
     conn = sqlite3.connect(db)
     try:
         assert conn.execute("SELECT COUNT(*) FROM embedding_epochs").fetchone()[0] == 1
@@ -953,8 +953,8 @@ def test_v46_pair_is_unique(tmp_path: Path):
 # ---------------------------------------------------------------- v47
 
 def _rollback_to_v46(db: str) -> None:
-    """Повернути `categories` у стан «до v47»: inline UNIQUE на `name` (v15),
-    глобальний UNIQUE-індекс на `name_norm` (v20), без індексу братів."""
+    """Return `categories` to the "before v47" state: inline UNIQUE on `name` (v15),
+    a global UNIQUE index on `name_norm` (v20), without the siblings index."""
     conn = sqlite3.connect(db)
     conn.execute("PRAGMA foreign_keys=OFF")
     cols = [r[1] for r in conn.execute("PRAGMA table_info(categories)")]
@@ -983,7 +983,7 @@ def _rollback_to_v46(db: str) -> None:
 
 
 def _seed_refs(db: str) -> dict:
-    """Рядки всіх чотирьох таблиць, що посилаються на напрямок, + проєкт."""
+    """Rows of all four tables that reference a direction, + a project."""
     conn = sqlite3.connect(db)
     fund = conn.execute("SELECT id FROM categories WHERE name = 'Фонд Робота'"
                         ).fetchone()[0]
@@ -1005,8 +1005,8 @@ def _seed_refs(db: str) -> dict:
 
 
 def test_v47_rebuild_keeps_ids_and_all_category_refs(tmp_path: Path):
-    """Перебудова `categories` не міняє id і не зачіпає жодного посилання —
-    попри `ON DELETE SET NULL` на `tg_monitored_chats.category_id` (v18)."""
+    """Rebuilding `categories` changes no id and breaks no reference -
+    despite `ON DELETE SET NULL` on `tg_monitored_chats.category_id` (v18)."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     ids = _seed_refs(db)
@@ -1025,7 +1025,7 @@ def test_v47_rebuild_keeps_ids_and_all_category_refs(tmp_path: Path):
             kept = conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE category_id = ?",
                 (ids["proj"],)).fetchone()[0]
-            assert kept == 1, f"{table}: посилання на напрямок обнулилось"
+            assert kept == 1, f"{table}: the direction reference was nulled"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert _schema_version(conn) >= 47
     finally:
@@ -1033,7 +1033,7 @@ def test_v47_rebuild_keeps_ids_and_all_category_refs(tmp_path: Path):
 
 
 def test_v47_drops_global_name_unique_and_adds_sibling_index(tmp_path: Path):
-    """DDL без UNIQUE на `name`, `slug` унікальний, є `idx_categories_parent_name`."""
+    """DDL without UNIQUE on `name`, `slug` is unique, `idx_categories_parent_name` exists."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     _rollback_to_v46(db)
@@ -1059,16 +1059,16 @@ def test_v47_drops_global_name_unique_and_adds_sibling_index(tmp_path: Path):
         fund = conn.execute("SELECT id FROM categories WHERE name = 'Фонд Робота'"
                             ).fetchone()[0]
         free = conn.execute("SELECT id FROM categories WHERE name = 'Фріланс'").fetchone()[0]
-        # однойменні проєкти різних напрямків співіснують…
+        # same-named projects of different directions coexist...
         conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
                      "VALUES ('Маркетинг', 'маркетинг', 'm1', ?)", (fund,))
         conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
                      "VALUES ('Маркетинг', 'маркетинг', 'm2', ?)", (free,))
-        # …а два однойменні брати — ні
+        # ...but two same-named siblings do not
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO categories (name, name_norm, slug, parent_id) "
                          "VALUES ('Маркетинг', 'маркетинг', 'm3', ?)", (fund,))
-        # напрямки між собою теж (COALESCE(parent_id, 0) = 0)
+        # directions among themselves too (COALESCE(parent_id, 0) = 0)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO categories (name, name_norm, slug) "
                          "VALUES ('Фріланс', 'фріланс', 'm4')")
@@ -1096,10 +1096,10 @@ def test_v47_migration_is_idempotent(tmp_path: Path):
 
 
 def test_v47_drop_table_with_fk_on_would_null_chat_category(tmp_path: Path):
-    """Доказ пастки, заради якої міграція гасить `foreign_keys`: з увімкненими
-    FK `DROP TABLE categories` спрацьовує як DELETE і мовчки зануляє
-    `tg_monitored_chats.category_id` (`ON DELETE SET NULL`, v18). Відкат
-    транзакції лишає БД цілою — і той самий рядок далі на місці."""
+    """Proof of the trap for which the migration turns off `foreign_keys`: with FKs
+    enabled `DROP TABLE categories` acts as a DELETE and silently nulls
+    `tg_monitored_chats.category_id` (`ON DELETE SET NULL`, v18). Rolling back the
+    transaction leaves the DB intact - and the same row is still in place."""
     db = str(tmp_path / 'test.db')
     init_database(db)
     ids = _seed_refs(db)
@@ -1124,17 +1124,17 @@ def test_v47_drop_table_with_fk_on_would_null_chat_category(tmp_path: Path):
 
 
 def test_v47_fk_guard_is_defensive_on_the_init_database_path(tmp_path: Path):
-    """Запис вимірювання (хвиля 7, історія 22): гард `PRAGMA foreign_keys=OFF`
-    у v47 на чинному шляху нічого не несе.
+    """Measurement record (wave 7, story 22): the `PRAGMA foreign_keys=OFF` guard
+    in v47 carries nothing on the current path.
 
-    `init_database` відкриває СИРИЙ `sqlite3.connect` (`migrations.py:139`), а
-    там `foreign_keys` за замовчуванням вимкнені; `PRAGMA foreign_keys = ON`
-    ставить `app/db/connection.py` — інше зʼєднання, не те, на якому йде
-    перебудова. Тому гард лишається захисним (на випадок виклику
-    `init_database` на FK-ON зʼєднанні), а пастку, заради якої він написаний,
-    доводить `test_v47_drop_table_with_fk_on_would_null_chat_category` на
-    зібраному руками FK-ON зʼєднанні. `init_database` заради тесту не
-    рефакторимо — ціна більша за доказ."""
+    `init_database` opens a RAW `sqlite3.connect` (`migrations.py:139`), and
+    there `foreign_keys` is off by default; `PRAGMA foreign_keys = ON`
+    is set by `app/db/connection.py` - a different connection, not the one the
+    rebuild runs on. So the guard stays defensive (for the case of calling
+    `init_database` on an FK-ON connection), while the trap it was written for
+    is proven by `test_v47_drop_table_with_fk_on_would_null_chat_category` on
+    a hand-built FK-ON connection. We do not refactor `init_database` for the test -
+    the cost is bigger than the proof."""
     from app.db.connection import get_db_connection
 
     db = str(tmp_path / 'test.db')
@@ -1143,19 +1143,19 @@ def test_v47_fk_guard_is_defensive_on_the_init_database_path(tmp_path: Path):
     raw = sqlite3.connect(db)
     try:
         assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0, \
-            "шлях міграції: FK і так вимкнені — гард захисний"
+            "migration path: FKs are off anyway - the guard is defensive"
     finally:
         raw.close()
 
     with get_db_connection(db) as conn:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1, \
-            "зʼєднання застосунку FK вмикає — але міграція йде не ним"
+            "the app connection turns FKs on - but the migration does not run on it"
 
 
 def test_v48_video_timeline_columns_are_additive_and_idempotent(tmp_path: Path):
     db = str(tmp_path / 'test.db')
     init_database(db)
-    init_database(db)                      # повторний прогін — без помилок
+    init_database(db)                      # repeated run - no errors
     conn = sqlite3.connect(db)
     try:
         vk = _columns(conn, 'video_keyframes')
@@ -1171,7 +1171,7 @@ def test_v48_video_timeline_columns_are_additive_and_idempotent(tmp_path: Path):
 def test_v50_pipe_runs_is_additive_and_idempotent(tmp_path: Path):
     db = str(tmp_path / 'test.db')
     init_database(db)
-    init_database(db)                      # повторний прогін — без помилок
+    init_database(db)                      # repeated run - no errors
     conn = sqlite3.connect(db)
     try:
         cols = _columns(conn, 'pipe_runs')

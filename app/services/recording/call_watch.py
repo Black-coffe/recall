@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+from app.core.i18n import tr
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_APPS = ('zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,'
@@ -246,9 +248,10 @@ class CallWatcher:
         call.prompt_id = p.id
         label = app_label(call.exe)
         effects.append(lambda p=p, label=label: self._notifier.show(
-            p.id, f'Recall · дзвінок у {label}',
-            f'Записати? Мікрофон і звук лише з {label}.',
-            [('Записати', self._url(p.id, 'record')), ('Інші джерела', self._url(p.id, 'sources'))],
+            p.id, tr('svc_recording.call.prompt.title', label=label),
+            tr('svc_recording.call.prompt.body', label=label),
+            [(tr('svc_recording.call.prompt.record'), self._url(p.id, 'record')),
+             (tr('svc_recording.call.prompt.sources'), self._url(p.id, 'sources'))],
             launch_url=self._url(p.id, 'sources'), reminder=True))
         self._log('prompt', exe=call.exe, prompt=p.id)
 
@@ -268,10 +271,11 @@ class CallWatcher:
             self._watches[sid] = _Watch(sid, call.exe, p.id)
             label = app_label(call.exe)
             effects.append(lambda p=p, label=label: self._notifier.show(
-                p.id, 'Recall · дзвінок завершився',
-                f'Зупинити запис? Дзвінок у {label} закінчився. '
-                f'Якщо {self.autostop_sec / 60:g} хв буде тиша — зупиню сам.',
-                [('Зупинити', self._url(p.id, 'stop')), ('Продовжити', self._url(p.id, 'keep'))],
+                p.id, tr('svc_recording.call.ended.title'),
+                tr('svc_recording.call.ended.body', label=label,
+                   minutes=f'{self.autostop_sec / 60:g}'),
+                [(tr('svc_recording.call.ended.stop'), self._url(p.id, 'stop')),
+                 (tr('svc_recording.call.ended.keep'), self._url(p.id, 'keep'))],
                 reminder=True))
             self._log('stop_prompt', exe=call.exe, prompt=p.id)
 
@@ -304,8 +308,9 @@ class CallWatcher:
             self._log('autostop_failed', exe=w.exe, error=type(exc).__name__)
             return
         self._log('autostop', exe=w.exe, silence_min=round(self.autostop_sec / 60, 1))
-        self._notifier.show(f'{w.prompt_id}-done', 'Recall · запис зупинено',
-                            f'{self.autostop_sec / 60:g} хв тиші після дзвінка. Запис збережено повністю.',
+        self._notifier.show(f'{w.prompt_id}-done', tr('svc_recording.call.autostopped.title'),
+                            tr('svc_recording.call.autostopped.body',
+                               minutes=f'{self.autostop_sec / 60:g}'),
                             [], launch_url=f'{self.base_url}/record')
 
     def _expire(self, now, effects) -> None:

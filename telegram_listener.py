@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Phase 17B — слухач реального Telegram-акаунта (MTProto/Telethon).
+"""Phase 17B — listener for a real Telegram account (MTProto/Telethon).
 
-ОКРЕМИЙ процес (не частина Flask). Тонкий: ловить нові повідомлення у
-моніторених чатах, СКАЧУЄ медіа на диск і POST'ить у Flask
-(/api/telegram/ingest) — уся важка робота (parse/OCR/whisper/embeddings/Claude)
-там, де моделі вже в пам'яті GPU. Слухач НЕ вантажить моделей.
+A SEPARATE process (not part of Flask). Thin: catches new messages in the
+monitored chats, DOWNLOADS media to disk and POSTs to Flask
+(/api/telegram/ingest) — all the heavy work (parse/OCR/whisper/embeddings/Claude)
+lives there, where the models are already in GPU memory. The listener loads NO models.
 
-Запуск (після telegram_login.py):
-    .venv\\Scripts\\python.exe telegram_listener.py            # слухати
-    .venv\\Scripts\\python.exe telegram_listener.py list       # показати чати (id+назва)
+Run (after telegram_login.py):
+    .venv\\Scripts\\python.exe telegram_listener.py            # listen
+    .venv\\Scripts\\python.exe telegram_listener.py list       # show chats (id+title)
     .venv\\Scripts\\python.exe telegram_listener.py enable  <chat_id>
     .venv\\Scripts\\python.exe telegram_listener.py disable <chat_id>
-    .venv\\Scripts\\python.exe telegram_listener.py status     # що слухається
+    .venv\\Scripts\\python.exe telegram_listener.py status     # what is being listened to
 
-Які чати слухати — таблиця tg_monitored_chats (enabled=1). У Phase 17C цим
-керуватиме UI Recall; зараз — CLI enable/disable. Набір моніторених чатів
-оновлюється на льоту (refresh кожні 30с), тож вмикати/вимикати можна без
-перезапуску слухача.
+Which chats to listen to is the tg_monitored_chats table (enabled=1). In Phase 17C the Recall UI
+will manage it; for now it is the CLI enable/disable. The set of monitored chats
+is refreshed on the fly (refresh every 30s), so you can enable/disable without
+restarting the listener.
 """
 from __future__ import annotations
 
@@ -36,22 +36,22 @@ from datetime import datetime, timedelta, timezone
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Windows-консоль: UTF-8 для кирилиці/емодзі імен чатів.
+# Windows console: UTF-8 for Cyrillic/emoji in chat names.
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-# T8.3 (Волна 4): окремий процес (не app.py) — свій файловий лог, ІНША назва
-# файлу (telegram_listener.log), ніж app.py (whisper_ui.log). Причина, чому
-# спільний whisper_ui.log був вимкнений навмисно — app/core/logger.py:46-53
-# (коміти 84accf8/baf0cda): другий RotatingFileHandler на ОДНОМУ файлі з двох
-# процесів → rollover одного впирається у файл, зайнятий іншим (WinError 32 на
-# Windows). Окремий файл на процес прибирає конфлікт повністю (rollover свого
-# файлу цей процес ніхто інший не тримає відкритим). logging.raiseExceptions =
-# False лишаємо як другий рубіж — той самий anti-WinError32 патерн, що і в
-# app.py/mcp_server.py, на випадок паралельного запуску двох listener'ів.
+# T8.3 (Wave 4): a separate process (not app.py) — its own log file, a DIFFERENT file
+# name (telegram_listener.log) from app.py (whisper_ui.log). The reason the
+# shared whisper_ui.log was disabled on purpose — app/core/logger.py:46-53
+# (commits 84accf8/baf0cda): a second RotatingFileHandler on ONE file from two
+# processes → one's rollover runs into a file held by the other (WinError 32 on
+# Windows). A separate file per process removes the conflict entirely (nobody else holds
+# this process's own file open during rollover). logging.raiseExceptions =
+# False stays as a second line of defence — the same anti-WinError32 pattern as in
+# app.py/mcp_server.py, in case two listeners are started in parallel.
 logging.raiseExceptions = False
 _TG_LOG_FORMAT = "%(asctime)s %(levelname)s [tg-listener] %(message)s"
 _tg_log_formatter = logging.Formatter(fmt=_TG_LOG_FORMAT, datefmt="%H:%M:%S")
@@ -60,19 +60,19 @@ _tg_stream_handler = logging.StreamHandler()
 _tg_stream_handler.setFormatter(_tg_log_formatter)
 _tg_handlers = [_tg_stream_handler]
 
-# Під pytest цей модуль лише імпортується (tests/test_telegram.py, на рівні
-# модуля — тобто ще на стадії collection) — він не є бойовим слухачем, і
-# файловий хендлер тут писав би в telegram_listener.log власника поряд із
-# реальними записами (звідси й був баг: рядок від тесту видали за завершення
-# бойового catchup). Реєстр налаштувань уже знає PYTEST_CURRENT_TEST як
-# зовнішню змінну (app/core/settings.py IGNORED_ENV_NAMES), але саме ця
-# змінна pytest виставляє лише на фазу виконання тесту (setup/call/teardown),
-# а не на collection — на момент цього імпорту вона ще None. "pytest" у
-# sys.modules pytest кладе одразу при старті, до збору тестів, тож саме він
-# і є надійним індикатором тут. Консольний хендлер лишається і під pytest,
-# але pytest уже повісив на root свої хендлери, тож цей basicConfig() —
-# no-op і StreamHandler не чіпляється зовсім (виміряно); `capsys` рядків
-# слухача тому не бачить, `caplog` бачить — через propagation на root.
+# Under pytest this module is only imported (tests/test_telegram.py, at
+# module level — i.e. already at the collection stage) — it is not the live listener, and
+# a file handler here would write into the owner's telegram_listener.log next to
+# real records (that was the bug: a line from a test was taken for the end of a
+# live catchup). The settings registry already knows PYTEST_CURRENT_TEST as
+# an external variable (app/core/settings.py IGNORED_ENV_NAMES), but pytest sets
+# exactly this variable only for the test execution phase (setup/call/teardown),
+# not for collection — at the moment of this import it is still None. pytest puts "pytest" in
+# sys.modules immediately at startup, before collecting tests, so that is
+# the reliable indicator here. The console handler stays under pytest too,
+# but pytest has already hung its own handlers on the root, so this basicConfig() is a
+# no-op and the StreamHandler is not attached at all (measured); `capsys` therefore does not
+# see listener lines, `caplog` does — via propagation to the root.
 if "pytest" not in sys.modules:
     try:
         _tg_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_listener.log")
@@ -82,18 +82,18 @@ if "pytest" not in sys.modules:
         _tg_file_handler.setFormatter(_tg_log_formatter)
         _tg_handlers.append(_tg_file_handler)
     except OSError:
-        # Не валимо слухача, якщо файл лога недоступний — консольний лог лишається.
+        # Do not crash the listener if the log file is unavailable — the console log remains.
         pass
 
 logging.basicConfig(level=logging.INFO, handlers=_tg_handlers)
 logger = logging.getLogger("tg_listener")
 
 REFRESH_SECONDS = 30
-STICKER_SKIP = True  # стікери/гіфи без сенсу для RAG — пропускаємо
+STICKER_SKIP = True  # stickers/gifs are meaningless for RAG — skip them
 
 
 # ============================================================
-# Конфіг / БД
+# Config / DB
 # ============================================================
 
 def _load_cfg():
@@ -107,35 +107,35 @@ def _load_cfg():
     api_id = int(os.environ.get("TELEGRAM_API_ID", "0") or "0")
     api_hash = os.environ.get("TELEGRAM_API_HASH", "")
     if not api_id or not api_hash:
-        logger.error("Немає TELEGRAM_API_ID / TELEGRAM_API_HASH у .env")
+        logger.error("TELEGRAM_API_ID / TELEGRAM_API_HASH missing in .env")
         sys.exit(1)
     api_base = f"http://127.0.0.1:{getattr(cfg, 'PORT', 5050)}"
     return {
         "api_id": api_id,
         "api_hash": api_hash,
-        # BASE_DIR-абсолютний шлях, cwd-незалежний; явний env і так врахований
-        # у config.py:269 — окремий os.environ.get тут дублював/обходив його.
+        # BASE_DIR-absolute path, cwd-independent; an explicit env is already honoured
+        # in config.py:269 — a separate os.environ.get here duplicated/bypassed it.
         "session": str(cfg.TELEGRAM_SESSION),
         "media_dir": str(getattr(cfg, "TELEGRAM_MEDIA_DIR", "telegram_media")),
         "db_path": os.path.abspath(str(getattr(cfg, "DATABASE", "whisper_history.db"))),
         "ingest_url": f"{api_base}/api/telegram/ingest",
-        # T2.6: app.py лишається єдиним писарем у SQLite — cmd_toggle (CLI
-        # enable/disable) POST'ить сюди замість прямого INSERT/UPDATE.
+        # T2.6: app.py stays the only writer to SQLite — cmd_toggle (CLI
+        # enable/disable) POSTs here instead of a direct INSERT/UPDATE.
         "chats_toggle_url": f"{api_base}/api/telegram/chats/toggle",
-        # Волна 4: архів більше не пишеться один раз назавжди.
+        # Wave 4: the archive is no longer written once and for all.
         "edited_url": f"{api_base}/api/telegram/edited",
         "deleted_url": f"{api_base}/api/telegram/deleted",
         "control_host": getattr(cfg, "TELEGRAM_CONTROL_HOST", "127.0.0.1"),
         "control_port": int(getattr(cfg, "TELEGRAM_CONTROL_PORT", 5051)),
-        # Вікно діалогів. 200 упиралось у стелю (dialogs_seen == limit), і тоді
-        # «чату немає серед діалогів» неможливо відрізнити від «не вліз у вікно» —
-        # саме на цьому /coverage не міг винести вердикт по двох чатах.
+        # Dialog window. 200 hit the ceiling (dialogs_seen == limit), and then
+        # «the chat is not among the dialogs» cannot be told from «did not fit the window» —
+        # exactly why /coverage could not deliver a verdict on two chats.
         "dialog_limit": int(os.environ.get("TELEGRAM_DIALOG_LIMIT", "500")),
-        # Throttle backfill проти flood-wait (сек між повідомленнями).
+        # Throttle backfill against flood-wait (seconds between messages).
         "backfill_delay": float(os.environ.get("TELEGRAM_BACKFILL_DELAY", "0.5")),
-        # Недоставлене в Flask (app.py перезапускався) — сюди, а не в нікуди.
+        # Undelivered to Flask (app.py was restarting) goes here, not into nothing.
         "deadletter": os.path.join(_BASE_DIR, "telegram_deadletter.jsonl"),
-        # Догонка після простою: стан «коли востаннє догоняли» + вимикач + дебаунс.
+        # Catch-up after downtime: the state «when we last caught up» + a switch + a debounce.
         "catchup_state": os.path.join(_BASE_DIR, "telegram_catchup.json"),
         "catchup_enabled": os.environ.get("TELEGRAM_CATCHUP", "1").strip().lower()
                            not in ("0", "false", "no"),
@@ -146,8 +146,8 @@ def _load_cfg():
 def _db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    # T2.3: явний busy_timeout — listener пише в ту саму WAL-БД, що й app.py;
-    # без нього конкурентна транзакція дає миттєвий `database is locked`.
+    # T2.3: explicit busy_timeout — the listener writes to the same WAL DB as app.py;
+    # without it a concurrent transaction gives an immediate `database is locked`.
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
@@ -160,27 +160,27 @@ def _enabled_chat_ids(db_path: str) -> set[int]:
             ).fetchall()
         return {int(r["chat_id"]) for r in rows}
     except Exception as e:
-        logger.warning("Не зміг прочитати tg_monitored_chats: %s", e)
+        logger.warning("Could not read tg_monitored_chats: %s", e)
         return set()
 
 
 # ============================================================
-# Маршрутизація повідомлення → payload для Flask
+# Routing a message → payload for Flask
 # ============================================================
 
-# tg-media-policy-03: відео, надіслане «файлом» (document), Telegram часто
-# лишає без mime_type або зі стертим/невідповідним — DocumentAttributeVideo
-# ловить стиснене відео й кружки, але не цей випадок. Розширення з
-# DocumentAttributeFilename — останній сигнал перед тим, як документ мовчки
-# піде у повне завантаження.
+# tg-media-policy-03: a video sent as a «file» (document), Telegram often
+# leaves without a mime_type or with an erased/mismatched one — DocumentAttributeVideo
+# catches compressed video and round notes, but not this case. The extension from
+# DocumentAttributeFilename is the last signal before the document silently
+# goes into a full download.
 _VIDEO_EXTENSIONS = (
     ".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".3gp", ".mpeg", ".mpg",
 )
 
 
 def _doc_filename(doc) -> str:
-    """Ім'я файлу документа. Telethon кладе його в attributes
-    (DocumentAttributeFilename), не в плаский атрибут документа."""
+    """Document file name. Telethon puts it in attributes
+    (DocumentAttributeFilename), not in a flat document attribute."""
     for attr in getattr(doc, "attributes", None) or []:
         name = getattr(attr, "file_name", None)
         if name:
@@ -189,7 +189,7 @@ def _doc_filename(doc) -> str:
 
 
 def _detect_kind(msg) -> str | None:
-    """Тип повідомлення для ingest. None = пропустити (стікер/службове)."""
+    """Message type for ingest. None = skip (sticker/service)."""
     if getattr(msg, "voice", None):
         return "voice"
     if getattr(msg, "video_note", None) or getattr(msg, "video", None) or getattr(msg, "gif", None):
@@ -230,15 +230,15 @@ def _sender_name(sender) -> str | None:
 
 def _chat_link(chat, chat_id: int | None, msg_id: int) -> str | None:
     if chat_id is None:
-        # Telethon віддає None, коли в peer_id немає жодного з полів
-        # (рідкісний, але наявний випадок) — раніше це давало посилання чи
-        # None через порівняння з int, тепер поводимось так само явно.
+        # Telethon returns None when peer_id has none of the fields
+        # (a rare but real case) — earlier this gave a link or
+        # None through comparison with int, now we behave the same way explicitly.
         return None
     if chat_id > 0:
-        # Особистий чат (позитивний chat_id = User): навіть якщо в юзернейма
-        # співрозмовника є username, https://t.me/<username>/<msg_id> — це
-        # посилання на пост у публічній групі/каналі, а не на повідомлення в
-        # особистому листуванні. Формату посилання на таке повідомлення нема
+        # Personal chat (positive chat_id = User): even if the counterpart
+        # has a username, https://t.me/<username>/<msg_id> is a
+        # link to a post in a public group/channel, not to a message in
+        # a private conversation. No link format exists for such a message
         # (core.telegram.org/api/links).
         return None
     uname = getattr(chat, "username", None)
@@ -269,49 +269,49 @@ def _post_ingest(url: str, payload: dict) -> None:
 
 
 def _deadletter_append(path: str, payload: dict) -> None:
-    """Повідомлення, яке не вдалось віддати Flask, лягає у dead-letter, а не зникає."""
+    """A message that could not be handed to Flask goes to the dead-letter, not vanishing."""
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except OSError as e:
-        # Останній рубіж: навіть файл не пишеться — гучно в лог, бо це вже втрата.
-        logger.error("[deadletter] НЕ ЗБЕРЕГЛОСЬ (chat=%s msg=%s): %s",
+        # Last line of defence: even the file is not written — loud in the log, as this is already a loss.
+        logger.error("[deadletter] NOT SAVED (chat=%s msg=%s): %s",
                      payload.get("chat_id"), payload.get("message_id"), e)
 
 
 def _post_ingest_reliable(url: str, payload: dict, deadletter: str) -> bool:
-    """POST в ingest із ретраями; провал → dead-letter, ніколи не мовчазна втрата.
+    """POST to ingest with retries; failure → dead-letter, never a silent loss.
 
-    Причина: раніше `_post_ingest` кидав виняток, handler його логував
-    (telegram_listener.py: except у handler) — і повідомлення зникало назавжди.
-    app.py недоступний рівно в ті моменти, коли він перезапускається, тобто
-    регулярно. Це — окреме джерело втрат, незалежне від простою слухача, і саме
-    його не бачив аудит: у розривах id воно виглядає так само, як вимкнена машина.
+    Reason: earlier `_post_ingest` raised an exception, the handler logged it
+    (telegram_listener.py: except in the handler) — and the message vanished forever.
+    app.py is unavailable exactly when it restarts, i.e.
+    regularly. This is a separate source of losses, independent of listener downtime, and it is
+    the one the audit did not see: in id gaps it looks the same as a switched-off machine.
     """
     delays = (1, 3, 9)
     for attempt, pause in enumerate(delays, 1):
         try:
             _post_ingest(url, payload)
             if attempt > 1:
-                logger.info("[ingest] доставлено з %d-ї спроби (chat=%s msg=%s)",
+                logger.info("[ingest] delivered on attempt %d (chat=%s msg=%s)",
                             attempt, payload.get("chat_id"), payload.get("message_id"))
             return True
         except Exception as e:
             if attempt == len(delays):
-                logger.warning("[ingest] не доставлено після %d спроб (%s) → dead-letter "
+                logger.warning("[ingest] not delivered after %d attempts (%s) → dead-letter "
                                "(chat=%s msg=%s)", attempt, e,
                                payload.get("chat_id"), payload.get("message_id"))
                 _deadletter_append(deadletter, payload)
                 return False
-            logger.info("[ingest] спроба %d/%d не вдалась (%s) — повтор через %ds",
+            logger.info("[ingest] attempt %d/%d failed (%s) — retry in %ds",
                         attempt, len(delays), e, pause)
             time.sleep(pause)
     return False
 
 
 def _replay_deadletter(cfg: dict) -> None:
-    """Спробувати віддати те, що колись не доїхало. Викликається на старті, коли
-    app.py вже точно піднятий. Те, що не пішло знову, лишається у файлі."""
+    """Try to deliver what once did not arrive. Called at startup, when
+    app.py is definitely up. What fails again stays in the file."""
     path = cfg["deadletter"]
     if not os.path.isfile(path):
         return
@@ -319,18 +319,18 @@ def _replay_deadletter(cfg: dict) -> None:
         with open(path, encoding="utf-8") as f:
             pending = [json.loads(line) for line in f if line.strip()]
     except (OSError, ValueError) as e:
-        logger.error("[deadletter] не зміг прочитати %s: %s", path, e)
+        logger.error("[deadletter] could not read %s: %s", path, e)
         return
     if not pending:
         return
 
-    logger.info("[deadletter] повторна доставка: %d повідомлень", len(pending))
+    logger.info("[deadletter] redelivery: %d messages", len(pending))
     still_failing = []
     for payload in pending:
         try:
             _post_ingest(cfg["ingest_url"], payload)
         except Exception as e:
-            logger.info("[deadletter] знову не пішло (chat=%s msg=%s): %s",
+            logger.info("[deadletter] failed again (chat=%s msg=%s): %s",
                         payload.get("chat_id"), payload.get("message_id"), e)
             still_failing.append(payload)
     try:
@@ -341,14 +341,14 @@ def _replay_deadletter(cfg: dict) -> None:
         else:
             os.remove(path)
     except OSError as e:
-        logger.warning("[deadletter] не зміг оновити %s: %s", path, e)
-    logger.info("[deadletter] доставлено %d, лишилось %d",
+        logger.warning("[deadletter] could not update %s: %s", path, e)
+    logger.info("[deadletter] delivered %d, %d left",
                 len(pending) - len(still_failing), len(still_failing))
 
 
 def _post_json(url: str, payload: dict, timeout: int = 15) -> dict:
-    """POST з shared-secret, повертає розпарсений JSON. Кидає виняток при
-    мережевій помилці/не-2xx — виклик відповідає за retry/деградацію."""
+    """POST with the shared secret, returns the parsed JSON. Raises on
+    a network error/non-2xx — the caller is responsible for retry/degradation."""
     from telegram_common import CONTROL_TOKEN_HEADER, control_token
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -360,11 +360,11 @@ def _post_json(url: str, payload: dict, timeout: int = 15) -> dict:
 
 
 async def _ingest_message(chat, msg, cfg) -> str | None:
-    """Побудувати payload з повідомлення → скачати медіа → POST у Flask ingest.
-    СПІЛЬНЕ для real-time (handler) і backfill (iter_messages). chat — вже
-    резолвлена сутність (щоб не резолвити на кожне повідомлення). Дедуп робить
-    сам ingest (chat_id,message_id), тож перетин real-time/backfill безпечний.
-    Returns kind якщо відправлено, None якщо пропущено (стікер/порожнє/без медіа)."""
+    """Build the payload from a message → download media → POST to Flask ingest.
+    SHARED by real-time (handler) and backfill (iter_messages). chat is an already
+    resolved entity (so as not to resolve on every message). Dedup is done by
+    ingest itself (chat_id,message_id), so real-time/backfill overlap is safe.
+    Returns kind if sent, None if skipped (sticker/empty/no media)."""
     kind = _detect_kind(msg)
     if kind is None:
         return None
@@ -382,10 +382,10 @@ async def _ingest_message(chat, msg, cfg) -> str | None:
         "message_id": msg.id,
         "date": msg.date.isoformat() if msg.date else None,
         "link": _chat_link(chat, chat_id, msg.id),
-        # Волна 4: сигнали, які Telegram дає безкоштовно, а ми викидали.
-        # reply_to — ТОЧНА нитка (краще за будь-яке вгадування по часу);
-        # sender_id — стабільний ключ автора (імʼя людина міняє);
-        # grouped_id — альбом; edit_date — єдиний спосіб побачити правку.
+        # Wave 4: signals that Telegram gives for free and we threw away.
+        # reply_to is the EXACT thread (better than any guessing by time);
+        # sender_id is a stable author key (a person changes their name);
+        # grouped_id is an album; edit_date is the only way to see an edit.
         "sender_id": getattr(sender, "id", None),
         "reply_to": getattr(msg, "reply_to_msg_id", None),
         "grouped_id": getattr(msg, "grouped_id", None),
@@ -395,16 +395,16 @@ async def _ingest_message(chat, msg, cfg) -> str | None:
     if kind == "text":
         payload["text"] = text_body
     elif kind == "video":
-        # Рішення власника (tg-media-policy-01): відео НІКОЛИ не скачується —
-        # ні на диск слухача, ні далі. file_path у payload не ставимо взагалі;
-        # ingest сам лишає рядок-заглушку з посиланням (app/blueprints/telegram.py).
+        # Owner's decision (tg-media-policy-01): video is NEVER downloaded —
+        # neither to the listener's disk nor further. We set no file_path in the payload at all;
+        # ingest itself leaves a stub row with a link (app/blueprints/telegram.py).
         payload["caption"] = text_body
     else:
         payload["caption"] = text_body
-        # Скачуємо медіа на диск; Flask читає по локальному шляху (та сама машина).
+        # Download media to disk; Flask reads by local path (same machine).
         path = await msg.download_media(file=cfg["media_dir"])
         if not path:
-            logger.warning("Не вдалось скачати медіа (chat=%s msg=%s)", chat_id, msg.id)
+            logger.warning("Could not download media (chat=%s msg=%s)", chat_id, msg.id)
             return None
         payload["file_path"] = os.path.abspath(path)
 
@@ -414,27 +414,32 @@ async def _ingest_message(chat, msg, cfg) -> str | None:
 
 
 # ============================================================
-# Control-API (Phase 17C): Flask питає слухача (лише він тримає сесію).
-#   GET  /status   → живий? хто залогінений? які чати моніторяться
-#   GET  /dialogs  → список діалогів акаунта (для вибору галочками в UI)
-#   POST /backfill → догрузка історії чату (реалізація — Phase 17D)
-# Захист: той самий shared-secret header, що й ingest.
+# Control-API (Phase 17C): Flask asks the listener (only it holds the session).
+#   GET  /status   → alive? who is logged in? which chats are monitored
+#   GET  /dialogs  → list of the account's dialogs (for picking with checkboxes in the UI)
+#   POST /backfill → load a chat's history (implementation — Phase 17D)
+# Protection: the same shared-secret header as ingest.
 # ============================================================
+
+def _ctl_err(key: str) -> str:
+    """Control-API error text for the UI, in the server language (lazy import: no Flask at listener import)."""
+    from app.core.i18n import tr
+    return tr(key)
 
 async def _ctl_status(client, get_monitored):
     me = await client.get_me()
-    # username — не косметика: питання «@нік, зробиш?» адресоване власнику
-    # структурно, і це єдиний спосіб це довести (Волна 5.3). Ім'я в тексті
-    # пишуть як завгодно, нік — рівно один.
+    # username is not cosmetic: a question «@handle, will you do it?» is addressed to the owner
+    # structurally, and this is the only way to prove it (Wave 5.3). A name in the text
+    # is written any way at all, a handle is exactly one.
     return {"me": {"id": me.id, "name": _sender_name(me),
                    "username": getattr(me, "username", None)},
             "monitored": sorted(get_monitored())}
 
 
 def _migrated_to(ent) -> int | None:
-    """Чат мігрував у супергрупу? Тоді chat_id змінюється на -100…, а старий стає
-    недоступним — слухач мовчки глухне, бо в tg_monitored_chats лишається мертвий id.
-    Кандидати на це: чат обірвався різко і не оживає (Волна 1 роадмапу)."""
+    """Did the chat migrate to a supergroup? Then chat_id changes to -100…, and the old one becomes
+    unavailable — the listener silently goes deaf, because a dead id stays in tg_monitored_chats.
+    Candidates: the chat broke off abruptly and does not revive (Wave 1 of the roadmap)."""
     target = getattr(ent, "migrated_to", None)
     if target is None:
         return None
@@ -442,17 +447,17 @@ def _migrated_to(ent) -> int | None:
         from telethon import utils
         return utils.get_peer_id(target)
     except Exception as e:
-        logger.debug("не зміг розгорнути migrated_to для %s: %s", getattr(ent, "id", "?"), e)
+        logger.debug("could not unfold migrated_to for %s: %s", getattr(ent, "id", "?"), e)
         return None
 
 
 def _identity_fields(ent) -> dict:
-    """Хто це — щоб у списку чатів людину можна було впізнати й знайти
-    (імʼя, прізвище, телефон). Усе з сутності, яку iter_dialogs уже віддав:
-    жодного запиту на чат. У груп і каналів цих атрибутів нема → None.
-    phone у Telethon — цифри без «+», None, якщо приховано приватністю.
-    deleted: видалений акаунт приходить без імені, і без прапорця рядок у UI
-    був би безіменним «Чатом»."""
+    """Who this is — so that a person can be recognised and found in the chat list
+    (name, surname, phone). Everything from the entity iter_dialogs already returned:
+    no request per chat. Groups and channels have no such attributes → None.
+    phone in Telethon is digits without «+», None if hidden by privacy.
+    deleted: a deleted account arrives without a name, and without the flag the row in the UI
+    would be a nameless «Chat»."""
     return {
         "first_name": getattr(ent, "first_name", None),
         "last_name": getattr(ent, "last_name", None),
@@ -463,11 +468,11 @@ def _identity_fields(ent) -> dict:
 
 
 async def _ctl_dialogs(client, cfg, get_monitored):
-    """Діалоги акаунта + ЖИВИЙ курсор кожного (Волна 1 «Бачити»).
+    """The account's dialogs + each one's LIVE cursor (Wave 1 «See»).
 
-    last_message_* беруться з того самого проходу iter_dialogs (Dialog.message —
-    останнє повідомлення діалогу), тож звірка «архів проти Telegram» не коштує
-    жодного зайвого запиту і не потребує другої Telethon-сесії."""
+    last_message_* come from the same iter_dialogs pass (Dialog.message is
+    the dialog's last message), so the «archive vs Telegram» check costs
+    not a single extra request and needs no second Telethon session."""
     enabled = get_monitored()
     out = []
     async for d in client.iter_dialogs(limit=cfg["dialog_limit"]):
@@ -485,30 +490,30 @@ async def _ctl_dialogs(client, cfg, get_monitored):
             "archived": bool(getattr(d, "archived", False)),
             "migrated_to": _migrated_to(ent),
         })
-    # limit віддаємо разом зі списком: без нього «чату немає серед діалогів»
-    # неможливо відрізнити від «чат не вліз у вікно останніх N діалогів».
+    # We return limit together with the list: without it «the chat is not among the dialogs»
+    # cannot be told from «the chat did not fit the window of the last N dialogs».
     return {"dialogs": out, "limit": cfg["dialog_limit"]}
 
 
 async def _backfill_task(client, chat_id: int, limit: int, cfg):
-    """Догрузка історії чату через iter_messages. Fire-and-forget (планується на
-    loop, HTTP-відповідь не чекає завершення — може тривати хвилини). Throttle
-    між повідомленнями + обробка FloodWaitError проти бана. Дедуп — в ingest."""
+    """Backfill a chat's history through iter_messages. Fire-and-forget (scheduled on
+    the loop, the HTTP response does not wait for completion — it can take minutes). Throttle
+    between messages + FloodWaitError handling against a ban. Dedup is in ingest."""
     from telethon.errors import FloodWaitError
     try:
         chat = await client.get_entity(chat_id)
     except Exception as e:
-        logger.error("[backfill] не зміг резолвити чат %s: %s", chat_id, e)
+        logger.error("[backfill] could not resolve chat %s: %s", chat_id, e)
         return
     title = _chat_title(chat, chat_id)
     delay = cfg.get("backfill_delay", 0.5)
-    logger.info("[backfill] старт «%s» (limit=%s, delay=%.2fs)", title, limit, delay)
+    logger.info("[backfill] start «%s» (limit=%s, delay=%.2fs)", title, limit, delay)
     sent = 0
-    # Ітеруємо вручну: FloodWaitError прилітає з ГРАНИЦІ генератора (__anext__,
-    # коли Telethon тягне наступну порцію історії), а не з тіла циклу. У версії
-    # з `async for ... : try:` він летів повз except, а задача — fire-and-forget,
-    # тож виняток нікуди не прокидався: backfill помирав мовчки, чат лишався
-    # залитим наполовину, і в логу просто не зʼявлялось «завершено».
+    # We iterate manually: FloodWaitError arrives from the generator BOUNDARY (__anext__,
+    # when Telethon pulls the next portion of history), not from the loop body. In the version
+    # with `async for ... : try:` it flew past the except, and the task is fire-and-forget,
+    # so the exception propagated nowhere: backfill died silently, the chat stayed
+    # half-filled, and the log simply lacked «completed».
     it = client.iter_messages(chat, limit=limit).__aiter__()
     while True:
         try:
@@ -516,46 +521,46 @@ async def _backfill_task(client, chat_id: int, limit: int, cfg):
         except StopAsyncIteration:
             break
         except FloodWaitError as e:
-            logger.warning("[backfill] flood-wait %ss на вибірці історії — чекаю", e.seconds)
+            logger.warning("[backfill] flood-wait %ss on history fetch — waiting", e.seconds)
             await asyncio.sleep(e.seconds + 1)
             continue
         except Exception as e:
-            logger.error("[backfill] вибірка історії «%s» обірвалась: %s", title, e)
+            logger.error("[backfill] history fetch of «%s» broke off: %s", title, e)
             break
 
         try:
             if await _ingest_message(chat, msg, cfg):
                 sent += 1
         except FloodWaitError as e:
-            # Раніше тут було sleep + continue, тобто сон І ВТРАТА повідомлення.
-            logger.warning("[backfill] flood-wait %ss на msg %s — чекаю і ПОВТОРЮЮ",
+            # Earlier there was sleep + continue here, i.e. sleeping AND LOSING the message.
+            logger.warning("[backfill] flood-wait %ss on msg %s — waiting and RETRYING",
                            e.seconds, getattr(msg, "id", "?"))
             await asyncio.sleep(e.seconds + 1)
             try:
                 if await _ingest_message(chat, msg, cfg):
                     sent += 1
             except Exception as e2:
-                logger.error("[backfill] msg %s не вдалось і після паузи: %s",
+                logger.error("[backfill] msg %s failed even after the pause: %s",
                              getattr(msg, "id", "?"), e2)
         except Exception as e:
-            logger.error("[backfill] msg %s помилка: %s", getattr(msg, "id", "?"), e)
+            logger.error("[backfill] msg %s error: %s", getattr(msg, "id", "?"), e)
         await asyncio.sleep(delay)
-    logger.info("[backfill] завершено «%s»: відправлено %d повідомлень", title, sent)
+    logger.info("[backfill] completed «%s»: sent %d messages", title, sent)
 
 
 async def _ctl_repair(client, chat_id: int, ids: list[int], cfg) -> dict:
-    """Точковий ремонт дірок: тягнемо КОНКРЕТНІ id і інжестимо знайдене (Волна 3).
+    """Targeted gap repair: fetch SPECIFIC ids and ingest what is found (Wave 3).
 
-    Чому не backfill за limit: get_messages(ids=…) віддає None на місці кожного
-    видаленого/недоступного повідомлення, тож «втрачено слухачем» нарешті
-    відрізняється від «видалено автором». Послідовний прохід цього не вміє —
-    для нього дірка в id завжди виглядає однаково.
+    Why not backfill by limit: get_messages(ids=…) returns None in place of every
+    deleted/unavailable message, so «lost by the listener» finally
+    differs from «deleted by the author». A sequential pass cannot do this —
+    to it a gap in ids always looks the same.
 
-    Telethon сам ріже список по 100 (_MAX_CHUNK_SIZE), але ми ріжемо своїми
-    пачками теж: тоді FloodWait повторює лише свою пачку, а не весь ремонт.
+    Telethon itself cuts the list by 100 (_MAX_CHUNK_SIZE), but we cut with our own
+    batches too: then FloodWait repeats only its own batch, not the whole repair.
 
-    FloodWait НЕ пропускає повідомлення (регрес _backfill_task, telegram_listener
-    :301 — там sleep + continue, тобто сон і втрата), а повторює його.
+    FloodWait does NOT skip a message (regression of _backfill_task, telegram_listener
+    :301 — sleep + continue there, i.e. sleeping and loss), but repeats it.
     """
     from telethon.errors import FloodWaitError
     stats = {"requested": len(ids), "found": 0, "deleted": 0,
@@ -563,11 +568,11 @@ async def _ctl_repair(client, chat_id: int, ids: list[int], cfg) -> dict:
     try:
         chat = await client.get_entity(chat_id)
     except Exception as e:
-        logger.error("[repair] не зміг резолвити чат %s: %s", chat_id, e)
+        logger.error("[repair] could not resolve chat %s: %s", chat_id, e)
         return {**stats, "error": "chat_unresolved"}
 
     delay = cfg.get("backfill_delay", 0.5)
-    logger.info("[repair] «%s»: %d id на перевірку", _chat_title(chat, chat_id), len(ids))
+    logger.info("[repair] «%s»: %d ids to check", _chat_title(chat, chat_id), len(ids))
 
     for start in range(0, len(ids), 100):
         batch = ids[start:start + 100]
@@ -577,11 +582,11 @@ async def _ctl_repair(client, chat_id: int, ids: list[int], cfg) -> dict:
                 msgs = await client.get_messages(chat, ids=batch)
                 break
             except FloodWaitError as e:
-                logger.warning("[repair] flood-wait %ss на пачці %d — чекаю",
+                logger.warning("[repair] flood-wait %ss on batch %d — waiting",
                                e.seconds, start // 100)
                 await asyncio.sleep(e.seconds + 1)
             except Exception as e:
-                logger.error("[repair] пачка %d впала: %s", start // 100, e)
+                logger.error("[repair] batch %d failed: %s", start // 100, e)
                 break
         if msgs is None:
             stats["failed"] += len(batch)
@@ -589,46 +594,46 @@ async def _ctl_repair(client, chat_id: int, ids: list[int], cfg) -> dict:
 
         for msg in msgs:
             if msg is None:
-                stats["deleted"] += 1      # видалено автором — це не наша втрата
+                stats["deleted"] += 1      # deleted by the author — not our loss
                 continue
             stats["found"] += 1
             try:
                 kind = await _ingest_message(chat, msg, cfg)
                 stats["ingested" if kind else "skipped"] += 1
             except FloodWaitError as e:
-                logger.warning("[repair] flood-wait %ss на msg %s — чекаю і ПОВТОРЮЮ",
+                logger.warning("[repair] flood-wait %ss on msg %s — waiting and RETRYING",
                                e.seconds, msg.id)
                 await asyncio.sleep(e.seconds + 1)
                 try:
                     kind = await _ingest_message(chat, msg, cfg)
                     stats["ingested" if kind else "skipped"] += 1
                 except Exception as e2:
-                    logger.error("[repair] msg %s не вдалось і після паузи: %s", msg.id, e2)
+                    logger.error("[repair] msg %s failed even after the pause: %s", msg.id, e2)
                     stats["failed"] += 1
             except Exception as e:
-                logger.error("[repair] msg %s помилка: %s", msg.id, e)
+                logger.error("[repair] msg %s error: %s", msg.id, e)
                 stats["failed"] += 1
             await asyncio.sleep(delay)
 
-    logger.info("[repair] «%s» завершено: %s", _chat_title(chat, chat_id), stats)
+    logger.info("[repair] «%s» completed: %s", _chat_title(chat, chat_id), stats)
     return stats
 
 
 def _watermarks(db_path: str, chat_ids: set[int]) -> dict[int, dict]:
-    """Скільки архів уже знає по кожному чату — ВИВОДИМО з даних, а не зберігаємо.
+    """How much the archive already knows per chat — DERIVED from data, not stored.
 
-    Колонка tg_monitored_chats.last_message_id лишається мертвою свідомо: окремий
-    курсор довелось би комусь писати (а писар у БД лише app.py), він розʼїхався б
-    з реальністю при кожній частковій невдачі, і його все одно не можна скинути
-    на виході — app.py гасить слухача через terminate(), тобто без atexit і flush.
-    MAX(tg_date) завжди правдивий за побудовою.
+    The column tg_monitored_chats.last_message_id stays dead on purpose: a separate
+    cursor would have to be written by someone (and the only DB writer is app.py), it would drift
+    from reality on every partial failure, and it still cannot be reset
+    on exit — app.py kills the listener via terminate(), i.e. without atexit and flush.
+    MAX(tg_date) is true by construction.
 
-    Дата, а не min_id: id послідовні лише в супергрупах (-100…), а це 4 чати з 19.
+    A date, not min_id: ids are sequential only in supergroups (-100…), and that is 4 chats of 19.
 
-    Разом з датою віддаємо id того самого повідомлення: offset_date у Telethon
-    ВКЛЮЧНИЙ, тож без нього догонка щоразу перетягує вже відоме останнє
-    повідомлення — дедуп його відкидає, але медіафайл встигає скачатись ще раз
-    (на живих даних той самий PDF лежав у telegram_media у семи копіях).
+    Together with the date we return the id of that same message: offset_date in Telethon
+    is INCLUSIVE, so without it the catch-up re-pulls the already known last
+    message every time — dedup rejects it, but the media file manages to be downloaded again
+    (in live data the same PDF lay in telegram_media in seven copies).
     """
     if not chat_ids:
         return {}
@@ -644,7 +649,7 @@ def _watermarks(db_path: str, chat_ids: set[int]) -> dict[int, dict]:
         marks = {int(r["cid"]): {"date": r["last"], "msg_id": r["mid"]}
                  for r in rows if r["last"]}
     except Exception as e:
-        logger.warning("[catchup] не зміг прочитати watermark: %s", e)
+        logger.warning("[catchup] could not read the watermark: %s", e)
     return marks
 
 
@@ -661,28 +666,28 @@ def _catchup_state_save(path: str, state: dict) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except OSError as e:
-        logger.debug("[catchup] не зміг зберегти стан: %s", e)
+        logger.debug("[catchup] could not save the state: %s", e)
 
 
 async def _catchup(client, cfg, monitored: set[int]) -> dict:
-    """Догрузити те, що прийшло, поки слухач не працював (Волна 2).
+    """Catch up on what arrived while the listener was not running (Wave 2).
 
-    Слухач — дочірній процес app.py, тож «слухач 24/7» неможливий без app.py 24/7:
-    вимкнена на ніч машина = мовчазна дірка. На живих даних це 30 втрачених
-    буднів за 8 місяців, зі зміщенням у вечір і вихідні.
+    The listener is a child process of app.py, so a «24/7 listener» is impossible without app.py 24/7:
+    a machine switched off for the night = a silent gap. In live data that is 30 lost
+    working days over 8 months, skewed to evenings and weekends.
 
-    Сутності беремо з ОДНОГО проходу iter_dialogs, а не get_entity на кожен чат:
-    резолв пірів — найбільш flood-небезпечна частина, 1-2 виклики замість 18.
+    We take entities from ONE iter_dialogs pass, not get_entity per chat:
+    resolving peers is the most flood-prone part, 1-2 calls instead of 18.
 
-    Дебаунс: app.py стартує десятки разів на день під час розробки
-    (_maybe_launch_telegram_listener на кожен запуск), і без нього догонка
-    гнала б 18 запитів щоразу.
+    Debounce: app.py starts dozens of times a day during development
+    (_maybe_launch_telegram_listener on every start), and without it the catch-up
+    would run 18 requests every time.
     """
     from telethon.errors import FloodWaitError
 
     stats = {"chats": 0, "skipped_debounce": 0, "ingested": 0, "failed": 0, "failed_chats": []}
     if not cfg["catchup_enabled"]:
-        logger.info("[catchup] вимкнено (TELEGRAM_CATCHUP=0)")
+        logger.info("[catchup] disabled (TELEGRAM_CATCHUP=0)")
         return stats
     if not monitored:
         return stats
@@ -692,14 +697,14 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
     now = datetime.now(timezone.utc)
     debounce = timedelta(minutes=cfg["catchup_debounce_min"])
 
-    # Один прохід діалогів → і сутності, і фільтр «чат взагалі доступний».
+    # One dialog pass → both entities and the «is the chat available at all» filter.
     entities: dict[int, object] = {}
     try:
         async for d in client.iter_dialogs(limit=cfg["dialog_limit"]):
             if d.id in monitored:
                 entities[d.id] = d.entity
     except Exception as e:
-        logger.warning("[catchup] не зміг перелічити діалоги: %s", e)
+        logger.warning("[catchup] could not list dialogs: %s", e)
         return stats
 
     delay = cfg.get("backfill_delay", 0.5)
@@ -717,8 +722,8 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
 
                 mark = marks.get(chat_id)
                 if not mark:
-                    # Чат без жодного запису — це первинна догрузка історії, свідоме
-                    # рішення власника (обсяг невідомий), а не автоматичний ремонт.
+                    # A chat with no record at all is the initial history load, a deliberate
+                    # decision of the owner (volume unknown), not an automatic repair.
                     state[str(chat_id)] = now.isoformat()
                     continue
                 try:
@@ -735,16 +740,16 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
                     except StopAsyncIteration:
                         break
                     except FloodWaitError as e:
-                        logger.warning("[catchup] flood-wait %ss — чекаю", e.seconds)
+                        logger.warning("[catchup] flood-wait %ss — waiting", e.seconds)
                         await asyncio.sleep(e.seconds + 1)
                         continue
                     except Exception as e:
-                        logger.warning("[catchup] вибірка для %s обірвалась: %s", chat_id, e)
+                        logger.warning("[catchup] fetch for %s broke off: %s", chat_id, e)
                         break
 
-                    # offset_date включний → перше повідомлення і є наш watermark.
-                    # Пропускаємо ДО завантаження медіа, інакше кожен старт створює
-                    # ще одну копію того самого файлу в telegram_media.
+                    # offset_date is inclusive → the first message is our watermark.
+                    # We skip BEFORE downloading media, otherwise every start creates
+                    # one more copy of the same file in telegram_media.
                     if known_id is not None and getattr(msg, "id", None) == known_id:
                         continue
 
@@ -752,7 +757,7 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
                         if await _ingest_message(entity, msg, cfg):
                             got += 1
                     except Exception as e:
-                        logger.error("[catchup] msg %s помилка: %s", getattr(msg, "id", "?"), e)
+                        logger.error("[catchup] msg %s error: %s", getattr(msg, "id", "?"), e)
                         stats["failed"] += 1
                     await asyncio.sleep(delay)
 
@@ -760,28 +765,28 @@ async def _catchup(client, cfg, monitored: set[int]) -> dict:
                 stats["chats"] += 1
                 stats["ingested"] += got
                 if got:
-                    logger.info("[catchup] «%s»: догружено %d з %s",
+                    logger.info("[catchup] «%s»: caught up %d of %s",
                                 _chat_title(entity, chat_id), got, mark["date"][:16])
             except Exception as e:
-                # Межа одного чату: збій тут коштує рівно цього чату — решта
-                # чатів і збереження стану мають відбутись попри цю помилку.
+                # One chat's boundary: a failure here costs exactly this chat — the rest of the
+                # chats and the state saving must happen despite this error.
                 stats["failed_chats"].append(chat_id)
                 try:
                     title = _chat_title(entity, chat_id)
                 except Exception:
                     title = str(chat_id)
-                logger.error("[catchup] «%s» (id=%s) обвалив чат: %s",
+                logger.error("[catchup] «%s» (id=%s) brought the chat down: %s",
                              title, chat_id, e, exc_info=True)
     finally:
         _catchup_state_save(cfg["catchup_state"], state)
 
-    logger.info("[catchup] завершено: %s", stats)
+    logger.info("[catchup] completed: %s", stats)
     return stats
 
 
 def _start_control_api(client, loop, cfg, get_monitored):
-    """ThreadingHTTPServer у daemon-потоці; хендлери шедулять корутини на
-    Telethon-loop через run_coroutine_threadsafe (бо клієнт живе в loop)."""
+    """ThreadingHTTPServer in a daemon thread; handlers schedule coroutines on
+    the Telethon loop via run_coroutine_threadsafe (because the client lives in the loop)."""
     from telegram_common import CONTROL_TOKEN_HEADER, control_token
     token = control_token()
 
@@ -801,7 +806,7 @@ def _start_control_api(client, loop, cfg, get_monitored):
             self.wfile.write(body)
 
         def log_message(self, *a):
-            pass  # не засмічуємо консоль слухача HTTP-логами
+            pass  # do not clutter the listener console with HTTP logs
 
         def do_GET(self):
             if not self._auth():
@@ -826,15 +831,15 @@ def _start_control_api(client, loop, cfg, get_monitored):
                     body = {}
                 ids = body.get("ids") or []
                 if body.get("chat_id") is None or not ids:
-                    return self._send(400, {"error": "потрібні chat_id та непорожній ids"})
-                # Синхронно (на відміну від backfill): пачка обмежена викликачем,
-                # і саме стата ремонту — те, заради чого його запускають.
+                    return self._send(400, {"error": _ctl_err("svc_telegram.listener.err.repairArgs")})
+                # Synchronous (unlike backfill): the batch is bounded by the caller,
+                # and the repair stats are exactly what it is run for.
                 try:
                     res = _run_coro(_ctl_repair(client, int(body["chat_id"]),
                                                 [int(i) for i in ids], cfg), 900)
                     return self._send(200, res)
                 except Exception as e:
-                    logger.error("[repair] впав: %s", e, exc_info=True)
+                    logger.error("[repair] failed: %s", e, exc_info=True)
                     return self._send(500, {"error": "repair failed"})
 
             if self.path.split("?")[0] == "/backfill":
@@ -844,10 +849,10 @@ def _start_control_api(client, loop, cfg, get_monitored):
                 except Exception:
                     body = {}
                 if body.get("chat_id") is None:
-                    return self._send(400, {"error": "chat_id обов'язковий"})
+                    return self._send(400, {"error": _ctl_err("svc_telegram.listener.err.chatIdRequired")})
                 chat_id = int(body["chat_id"])
                 limit = int(body.get("limit", 200))
-                # Fire-and-forget: backfill довгий, не тримаємо HTTP-зʼєднання.
+                # Fire-and-forget: backfill is long, we do not hold the HTTP connection.
                 asyncio.run_coroutine_threadsafe(
                     _backfill_task(client, chat_id, limit, cfg), loop)
                 return self._send(200, {"started": True, "chat_id": chat_id, "limit": limit})
@@ -869,7 +874,7 @@ async def run_listener(cfg: dict):
 
     os.makedirs(cfg["media_dir"], exist_ok=True)
     monitored = _enabled_chat_ids(cfg["db_path"])
-    logger.info("Старт. Моніторю %d чат(ів): %s", len(monitored), sorted(monitored) or "—")
+    logger.info("Start. Monitoring %d chat(s): %s", len(monitored), sorted(monitored) or "—")
     logger.info("Ingest → %s", cfg["ingest_url"])
 
     client = TelegramClient(cfg["session"], cfg["api_id"], cfg["api_hash"])
@@ -882,36 +887,36 @@ async def run_listener(cfg: dict):
             if new != monitored:
                 added, removed = new - monitored, monitored - new
                 monitored = new
-                logger.info("Оновлено набір чатів (+%s / -%s) → %d активних",
+                logger.info("Chat set updated (+%s / -%s) → %d active",
                             sorted(added) or "—", sorted(removed) or "—", len(monitored))
 
     @client.on(events.MessageEdited())
     async def on_edited(event):
-        """Правка в чаті → оновити текст у архіві (Волна 4)."""
+        """An edit in a chat → update the text in the archive (Wave 4)."""
         try:
             if event.chat_id not in monitored:
                 return
             msg = event.message
             text = (msg.message or "").strip()
             if not text:
-                return                       # правка медіа без підпису — нічого оновлювати
+                return                       # media edit without a caption — nothing to update
             edit_date = getattr(msg, "edit_date", None)
             await asyncio.to_thread(_post_json, cfg["edited_url"], {
                 "chat_id": event.chat_id, "message_id": msg.id, "text": text,
                 "edit_date": edit_date.isoformat() if edit_date else None,
             })
-            logger.info("→ правка в «%s» (msg=%s)", _chat_title(await event.get_chat(),
+            logger.info("→ edit in «%s» (msg=%s)", _chat_title(await event.get_chat(),
                                                                 event.chat_id), msg.id)
         except Exception as e:
-            logger.error("Помилка обробки правки: %s", e, exc_info=True)
+            logger.error("Edit handling error: %s", e, exc_info=True)
 
     @client.on(events.MessageDeleted())
     async def on_deleted(event):
-        """Видалення в чаті → мʼяко прибрати з архіву (Волна 4).
+        """A deletion in a chat → softly remove from the archive (Wave 4).
 
-        В особистих чатах Telegram не завжди повідомляє, ДЕ саме видалено
-        (event.chat_id None) — тоді нічого не робимо: гадати по одному лише
-        message_id небезпечно, id у різних чатах перетинаються."""
+        In personal chats Telegram does not always say WHERE the deletion happened
+        (event.chat_id None) — then we do nothing: guessing by message_id alone
+        is dangerous, ids in different chats overlap."""
         try:
             if event.chat_id is None or event.chat_id not in monitored:
                 return
@@ -921,7 +926,7 @@ async def run_listener(cfg: dict):
             await asyncio.to_thread(_post_json, cfg["deleted_url"],
                                     {"chat_id": event.chat_id, "message_ids": ids})
         except Exception as e:
-            logger.error("Помилка обробки видалення: %s", e, exc_info=True)
+            logger.error("Deletion handling error: %s", e, exc_info=True)
 
     @client.on(events.NewMessage())
     async def handler(event):
@@ -931,33 +936,33 @@ async def run_listener(cfg: dict):
             chat = await event.get_chat()
             kind = await _ingest_message(chat, event.message, cfg)
             if kind:
-                logger.info("→ %s з «%s» (msg=%s)", kind,
+                logger.info("→ %s from «%s» (msg=%s)", kind,
                             _chat_title(chat, event.chat_id), event.message.id)
         except Exception as e:
-            logger.error("Помилка обробки повідомлення: %s", e, exc_info=True)
+            logger.error("Message handling error: %s", e, exc_info=True)
 
     async with client:
         asyncio.create_task(refresh_loop())
-        # Control-API для Flask: lambda бачить актуальний `monitored` (refresh_loop
-        # переприсвоює його у цьому ж scope).
+        # Control-API for Flask: the lambda sees the current `monitored` (refresh_loop
+        # reassigns it in this same scope).
         try:
             _start_control_api(client, asyncio.get_running_loop(), cfg, lambda: monitored)
         except OSError as e:
-            logger.warning("Control-API не піднявся (порт зайнятий?): %s", e)
+            logger.warning("Control-API did not come up (port busy?): %s", e)
         me = await client.get_me()
-        logger.info("Залогінено як %s (id=%s). Слухаю… Ctrl+C для зупинки.",
+        logger.info("Logged in as %s (id=%s). Listening… Ctrl+C to stop.",
                     _sender_name(me), me.id)
 
-        # Спочатку віддаємо те, що вже ловили, але не доставили (app.py був
-        # недоступний), потім догоняємо те, що пропустили, поки не працювали.
-        # Обидва — у фоні: слухач має почати приймати НОВІ повідомлення одразу,
-        # не чекаючи кінця догонки.
+        # First we deliver what we already caught but did not deliver (app.py was
+        # unavailable), then we catch up on what we missed while not running.
+        # Both in the background: the listener must start accepting NEW messages immediately,
+        # without waiting for the end of the catch-up.
         async def _startup_recovery():
             await asyncio.to_thread(_replay_deadletter, cfg)
             try:
                 await _catchup(client, cfg, set(monitored))
             except Exception as e:
-                logger.error("[catchup] впав: %s", e, exc_info=True)
+                logger.error("[catchup] failed: %s", e, exc_info=True)
 
         asyncio.create_task(_startup_recovery())
         await client.run_until_disconnected()
@@ -972,7 +977,7 @@ async def cmd_list(cfg: dict, limit: int):
     client = TelegramClient(cfg["session"], cfg["api_id"], cfg["api_hash"])
     async with client:
         enabled = _enabled_chat_ids(cfg["db_path"])
-        print(f"{'EN':<3} {'chat_id':>15}  {'тип':<9} назва")
+        print(f"{'EN':<3} {'chat_id':>15}  {'type':<9} title")
         print("-" * 70)
         async for d in client.iter_dialogs(limit=limit):
             ent = d.entity
@@ -981,7 +986,7 @@ async def cmd_list(cfg: dict, limit: int):
                      "user" if d.is_user else "chat")
             mark = "[x]" if d.id in enabled else "[ ]"
             print(f"{mark} {d.id:>15}  {ctype:<9} {d.name}")
-    print("\nУвімкнути: telegram_listener.py enable <chat_id>")
+    print("\nEnable: telegram_listener.py enable <chat_id>")
 
 
 def _chat_type_of(ent, dialog=None) -> str:
@@ -995,15 +1000,15 @@ def _chat_type_of(ent, dialog=None) -> str:
 
 
 async def cmd_toggle(cfg: dict, chat_id: int, enable: bool):
-    """Увімкнути/вимкнути моніторинг чату. Резолвить назву/тип через Telethon
-    (для UX), сам запис у tg_monitored_chats — ЧЕРЕЗ Flask (T2.6:
-    POST /api/telegram/chats/toggle), а не прямим SQL з цього процесу. app.py
-    лишається єдиним писарем у SQLite — інваріант, що його дотримується решта
-    слухача (усі TG-повідомлення теж ідуть через /api/telegram/ingest).
+    """Enable/disable monitoring of a chat. Resolves the title/type via Telethon
+    (for UX), the write to tg_monitored_chats itself goes THROUGH Flask (T2.6:
+    POST /api/telegram/chats/toggle), not by direct SQL from this process. app.py
+    stays the only SQLite writer — an invariant kept by the rest of the
+    listener (all TG messages also go through /api/telegram/ingest).
 
-    Деградація коли app.py недоступний: 3 спроби з паузою 2с (може ще
-    піднімається), потім зрозуміла помилка в stderr + exit(1) — команда НЕ
-    падає мовчки і НЕ намагається писати в БД напряму як фолбек."""
+    Degradation when app.py is unavailable: 3 attempts with a 2s pause (it may still be
+    coming up), then a clear error to stderr + exit(1) — the command does NOT
+    fail silently and does NOT try to write to the DB directly as a fallback."""
     from telethon import TelegramClient
     title = username = ctype = None
     try:
@@ -1014,7 +1019,7 @@ async def cmd_toggle(cfg: dict, chat_id: int, enable: bool):
             username = getattr(ent, "username", None)
             ctype = _chat_type_of(ent)
     except Exception as e:
-        logger.warning("Не зміг резолвити чат %s (продовжую без назви): %s", chat_id, e)
+        logger.warning("Could not resolve chat %s (continuing without a title): %s", chat_id, e)
 
     payload = {"chat_id": chat_id, "enabled": bool(enable), "title": title,
                "username": username, "chat_type": ctype}
@@ -1024,22 +1029,22 @@ async def cmd_toggle(cfg: dict, chat_id: int, enable: bool):
         try:
             res = await asyncio.to_thread(_post_json, cfg["chats_toggle_url"], payload)
             if not res.get("success"):
-                raise RuntimeError(res.get("error") or "невідома помилка від app.py")
-            print(f"{'Увімкнено' if enable else 'Вимкнено'}: {title or chat_id} ({chat_id})")
+                raise RuntimeError(res.get("error") or "unknown error from app.py")
+            print(f"{'Enabled' if enable else 'Disabled'}: {title or chat_id} ({chat_id})")
             return
         except Exception as e:
             last_err = e
             if attempt < 3:
                 logger.warning(
-                    "Спроба %d/3 запису чату %s у app.py не вдалась (%s) — повтор через 2с",
+                    "Attempt %d/3 to write chat %s to app.py failed (%s) — retry in 2s",
                     attempt, chat_id, e,
                 )
                 await asyncio.sleep(2)
 
-    logger.error("Не вдалось зберегти чат %s: app.py недоступний (%s)", chat_id, last_err)
+    logger.error("Could not save chat %s: app.py unavailable (%s)", chat_id, last_err)
     print(
-        f"ПОМИЛКА: не вдалось зберегти чат {chat_id} — app.py недоступний ({last_err}).\n"
-        f"Переконайтесь що застосунок запущено (.venv/Scripts/python.exe app.py) і повторіть команду.",
+        f"ERROR: could not save chat {chat_id} — app.py unavailable ({last_err}).\n"
+        f"Make sure the application is running (.venv/Scripts/python.exe app.py) and retry the command.",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1052,9 +1057,9 @@ def cmd_status(cfg: dict):
             "FROM tg_monitored_chats ORDER BY enabled DESC, title"
         ).fetchall()
     if not rows:
-        print("Немає налаштованих чатів. Спочатку: telegram_listener.py list")
+        print("No chats configured. First: telegram_listener.py list")
         return
-    print(f"{'EN':<3} {'chat_id':>15}  {'тип':<9} {'cat':>4}  назва")
+    print(f"{'EN':<3} {'chat_id':>15}  {'type':<9} {'cat':>4}  title")
     print("-" * 70)
     for r in rows:
         mark = "[x]" if r["enabled"] else "[ ]"
@@ -1063,22 +1068,22 @@ def cmd_status(cfg: dict):
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Telegram listener для Recall (Phase 17B)")
+    p = argparse.ArgumentParser(description="Telegram listener for Recall (Phase 17B)")
     sub = p.add_subparsers(dest="cmd")
-    pl = sub.add_parser("list", help="показати чати акаунта (id + назва)")
+    pl = sub.add_parser("list", help="show the account's chats (id + title)")
     pl.add_argument("--limit", type=int, default=100)
-    pe = sub.add_parser("enable", help="увімкнути чат для слухання")
+    pe = sub.add_parser("enable", help="enable a chat for listening")
     pe.add_argument("chat_id", type=int)
-    pd = sub.add_parser("disable", help="вимкнути чат")
+    pd = sub.add_parser("disable", help="disable a chat")
     pd.add_argument("chat_id", type=int)
-    sub.add_parser("status", help="що зараз слухається")
+    sub.add_parser("status", help="what is being listened to now")
     args = p.parse_args()
 
     cfg = _load_cfg()
     try:
         from telethon import TelegramClient  # noqa: F401
     except ImportError:
-        logger.error("Telethon не встановлено: .venv\\Scripts\\python.exe -m pip install telethon")
+        logger.error("Telethon is not installed: .venv\\Scripts\\python.exe -m pip install telethon")
         return 1
 
     if args.cmd == "list":
@@ -1093,7 +1098,7 @@ def main() -> int:
         try:
             asyncio.run(run_listener(cfg))
         except KeyboardInterrupt:
-            logger.info("Зупинено користувачем.")
+            logger.info("Stopped by the user.")
     return 0
 
 

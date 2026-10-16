@@ -1,10 +1,10 @@
-"""Читання і валідація golden-set для evals/gate.py (eval-gate, історія 01).
+"""Reading and validating the golden-set for evals/gate.py (eval-gate, story 01).
 
-Формат — контракт C1 плану (docs/specs/eval-gate/plan.md): JSONL, один
-запис на рядок (сучасний формат), або legacy `{"items": [...]}` / голий
-список (стара схема `evals/run_eval.py`, читається без конвертації файлу —
-лише в памʼяті). Це ЛИШЕ читання і нормалізація — побудова набору (мінінг
-логу, розмітка) — окрема історія (`evals/build_golden.py`, історія 02).
+The format is plan contract C1 (docs/specs/eval-gate/plan.md): JSONL, one
+record per line (modern format), or legacy `{"items": [...]}` / a bare
+list (the old `evals/run_eval.py` schema, read without converting the file -
+only in memory). This is ONLY reading and normalization; building the set (log
+mining, labelling) is a separate story (`evals/build_golden.py`, story 02).
 """
 from __future__ import annotations
 
@@ -16,16 +16,16 @@ from typing import Optional
 
 
 class GoldenSetError(ValueError):
-    """Невалідний golden-set — `evals.gate` ловить і повертає exit 2. Єдиний
-    тип помилки для `read_jsonl` (D13/D3) — файл не знайдено, нечитний, рядок
-    не є валідним JSON-обʼєктом. Кожен CLI ловить цей ОДИН тип замість трьох."""
+    """Invalid golden-set: `evals.gate` catches it and returns exit 2. The single
+    error type for `read_jsonl` (D13/D3): file not found, unreadable, a line
+    is not a valid JSON object. Every CLI catches this ONE type instead of three."""
 
 
 _VALID_SLICES = ("calls", "tg", "docs")
 _VALID_STATUS = ("labeled", "unlabeled", "negative")
 
-# Та сама мапа, що C8 (мінінг логу) буде використовувати для нових
-# записів — тут лише для інференсу `slice` у legacy-записах.
+# The same map that C8 (log mining) will use for new
+# records; here only for inferring `slice` in legacy records.
 _SOURCE_TYPE_TO_SLICE = {"telegram": "tg", "document": "docs"}
 
 
@@ -36,39 +36,39 @@ def _slice_from_source_type(source_type: Optional[str]) -> str:
 
 
 def _where(line_no: Optional[int]) -> str:
-    return f" (рядок {line_no})" if line_no else ""
+    return f" (line {line_no})" if line_no else ""
 
 
 def _normalize(item: dict, *, source: str, default_status: str,
                line_no: Optional[int] = None) -> dict:
     item_id = item.get("id")
     if not item_id:
-        raise GoldenSetError(f"golden-set: запис без 'id'{_where(line_no)}")
+        raise GoldenSetError(f"golden-set: record without 'id'{_where(line_no)}")
     if not item.get("question"):
-        raise GoldenSetError(f"golden-set {item_id!r}: без 'question'{_where(line_no)}")
+        raise GoldenSetError(f"golden-set {item_id!r}: no 'question'{_where(line_no)}")
 
     slice_ = item.get("slice") or "calls"
     if slice_ not in _VALID_SLICES:
         raise GoldenSetError(
-            f"golden-set {item_id!r}: невалідний slice {slice_!r}{_where(line_no)}")
+            f"golden-set {item_id!r}: invalid slice {slice_!r}{_where(line_no)}")
 
     status = item.get("status") or default_status
     if status not in _VALID_STATUS:
         raise GoldenSetError(
-            f"golden-set {item_id!r}: невалідний status {status!r}{_where(line_no)}")
+            f"golden-set {item_id!r}: invalid status {status!r}{_where(line_no)}")
 
-    # directions-projects-tags-08 (C8): `tags` — необовʼязкова вісь фільтра
-    # поруч з `category_id`, strip + дроп порожніх (той самий підхід, що
-    # `categories.parse_tags`, але без звернення до БД — тут лише сира
-    # нормалізація рядків golden-запису). `expected_leak` — лише документує
-    # намір пункту (мірило завжди FAIL на `filter_leak > 0` незалежно від
-    # значення), тому єдине валідне значення — `0`; інше — помилка
-    # нормалізації, а не тихий дефолт.
+    # directions-projects-tags-08 (C8): `tags` is an optional filter axis
+    # next to `category_id`, strip + drop empties (same approach as
+    # `categories.parse_tags`, but without touching the DB: only raw
+    # normalization of the golden record's strings). `expected_leak` only documents
+    # the item's intent (the metric always FAILs on `filter_leak > 0` regardless of
+    # the value), so the only valid value is `0`; anything else is a
+    # normalization error, not a silent default.
     expected_leak = item.get("expected_leak")
     if expected_leak is not None and expected_leak != 0:
         raise GoldenSetError(
-            f"golden-set {item_id!r}: невалідний expected_leak {expected_leak!r} "
-            f"(єдине валідне значення — 0){_where(line_no)}")
+            f"golden-set {item_id!r}: invalid expected_leak {expected_leak!r} "
+            f"(the only valid value is 0){_where(line_no)}")
 
     return {
         "id": item_id,
@@ -96,32 +96,32 @@ def _lookup_source_type(conn: Optional[sqlite3.Connection],
             (transcription_ids[0],),
         ).fetchone()
     except sqlite3.Error as exc:
-        # Не ковтаємо мовчки (CLAUDE.md: no bare except without a log; finding
-        # 18) — побитий знімок/відсутня таблиця стають видимими, а не тихим
-        # дефолтом slice="calls".
-        print(f"[golden_io] не вдалось визначити source_type для "
+        # Do not swallow silently (CLAUDE.md: no bare except without a log; finding
+        # 18): a broken snapshot / missing table becomes visible instead of a silent
+        # default slice="calls".
+        print(f"[golden_io] could not determine source_type for "
               f"{transcription_ids[0]}: {exc}", file=sys.stderr)
         return None
     return row[0] if row is not None else None
 
 
 def read_jsonl(path: str) -> list[dict]:
-    """Спільний зчитувач JSONL для ВСІХ eval-CLI (D13, знахідка 21) — один
-    JSON-обʼєкт на непорожній рядок, БЕЗ golden-set-специфічної нормалізації
-    (`id`/`slice`/`status`/... лишаються шаром `read_golden`/`_normalize` для
-    golden-set і власною схемою кожного CLI для інших наборів, напр.
-    tasks-golden). Контракт фіксований: `read_jsonl(path) -> list[dict]`.
+    """Shared JSONL reader for ALL eval CLIs (D13, finding 21): one
+    JSON object per non-empty line, WITHOUT golden-set-specific normalization
+    (`id`/`slice`/`status`/... stay the layer of `read_golden`/`_normalize` for
+    the golden-set and each CLI's own schema for other sets, e.g.
+    tasks-golden). The contract is fixed: `read_jsonl(path) -> list[dict]`.
 
-    Кидає ЄДИНИЙ тип помилки — `GoldenSetError` (D3): файл не знайдено,
-    нечитний, або рядок не є валідним JSON-обʼєктом (з номером рядка) —
-    кожен CLI ловить один `except GoldenSetError` і мапить у exit 2."""
+    Raises a SINGLE error type, `GoldenSetError` (D3): file not found,
+    unreadable, or a line is not a valid JSON object (with the line number);
+    every CLI catches one `except GoldenSetError` and maps it to exit 2."""
     p = Path(path)
     if not p.exists():
-        raise GoldenSetError(f"golden-set {path}: файл не знайдено")
+        raise GoldenSetError(f"golden-set {path}: file not found")
     try:
         raw_text = p.read_text(encoding="utf-8")
     except OSError as exc:
-        raise GoldenSetError(f"golden-set {path}: не вдалось прочитати: {exc}") from exc
+        raise GoldenSetError(f"golden-set {path}: could not read: {exc}") from exc
 
     items = []
     for line_no, raw in enumerate(raw_text.splitlines(), start=1):
@@ -132,20 +132,20 @@ def read_jsonl(path: str) -> list[dict]:
             obj = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise GoldenSetError(
-                f"golden-set {path}: невалідний JSON у рядку {line_no}: {exc}"
+                f"golden-set {path}: invalid JSON at line {line_no}: {exc}"
             ) from exc
         if not isinstance(obj, dict):
             raise GoldenSetError(
-                f"golden-set {path}: рядок {line_no} має бути обʼєктом")
+                f"golden-set {path}: line {line_no} must be an object")
         items.append(obj)
     return items
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    """Golden-set-специфічний шар над `read_jsonl` — нормалізує кожен сирий
-    обʼєкт (`id`/`slice`/`status`/...). Позиція у списку (1-based) — не
-    буквальний номер рядка файлу (порожні рядки випадають до нормалізації),
-    але помилки самого JSON (`read_jsonl`) уже несуть точний номер рядка."""
+    """Golden-set-specific layer over `read_jsonl`: normalizes each raw
+    object (`id`/`slice`/`status`/...). The position in the list (1-based) is not
+    the literal file line number (empty lines drop out before normalization),
+    but JSON errors themselves (`read_jsonl`) already carry the exact line number."""
     raw_items = read_jsonl(str(path))
     return [_normalize(obj, source="manual", default_status="labeled", line_no=i)
             for i, obj in enumerate(raw_items, start=1)]
@@ -157,7 +157,7 @@ def _read_legacy(path: Path, conn: Optional[sqlite3.Connection]) -> list[dict]:
     raw_items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(raw_items, list):
         raise GoldenSetError(
-            f"golden-set {path}: очікується список або {{'items': [...]}}")
+            f"golden-set {path}: expected a list or {{'items': [...]}}")
 
     out = []
     for item in raw_items:
@@ -172,13 +172,13 @@ def _read_legacy(path: Path, conn: Optional[sqlite3.Connection]) -> list[dict]:
 
 
 def read_golden(path: str, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
-    """Прочитати golden-set — JSONL (C1, `.jsonl`) або legacy JSON (усе інше).
+    """Read a golden-set: JSONL (C1, `.jsonl`) or legacy JSON (anything else).
 
-    `conn` — опційне read-only зʼєднання зі знімком; використовується лише
-    для інференсу `slice` у legacy-записах без явного поля (за `source_type`
-    першого очікуваного транскрипту) — без нього такі записи падають у
-    `"calls"`. JSONL-записи без `slice` теж падають у `"calls"` (C1 не
-    інферить його з даних для нового формату — має проставляти будівник).
+    `conn` is an optional read-only connection to a snapshot; used only
+    to infer `slice` in legacy records without an explicit field (from the `source_type`
+    of the first expected transcript); without it such records fall to
+    `"calls"`. JSONL records without `slice` also fall to `"calls"` (C1 does not
+    infer it from data for the new format: the builder must set it).
     """
     p = Path(path)
     if p.suffix == ".jsonl":

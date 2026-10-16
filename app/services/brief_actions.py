@@ -1,22 +1,22 @@
-"""Кнопки брифінгу (K5 k5-task-buttons): «зроблено / неактуально / перенести» під задачами.
+"""Brief buttons (K5 k5-task-buttons): "done / not relevant / postpone" under tasks.
 
-Під повідомленням брифінгу — ряд кнопок на кожну пронумеровану задачу
-(``pipes_cards.render(buttons=...)`` → ``keyboard``). Натиск приходить сюди
-long-polling-ом ``getUpdates``: webhook потребує публічної адреси, а Recall живе
-на домашньому ПК за Tailscale без Funnel. Тому натиск, зроблений, поки ПК спить,
-чекає на боці Telegram до 24 год і застосовується після пробудження; старший
-губиться (рядок про це — внизу брифінгу).
+Under the brief message there is a row of buttons for each numbered task
+(``pipes_cards.render(buttons=...)`` → ``keyboard``). A press arrives here by
+``getUpdates`` long-polling: a webhook needs a public address, while Recall lives
+on a home PC behind Tailscale without Funnel. So a press made while the PC sleeps
+waits on the Telegram side for up to 24 h and is applied after wake-up; an older one
+is lost (a line about this is at the bottom of the brief).
 
-Зміна йде лише через ``commitments.apply_action``/``undo_action`` (журнал
-``action_item_events``), MCP лишається read-only. Натиск приймається лише з чату
+A change goes only through ``commitments.apply_action``/``undo_action`` (the journal
+``action_item_events``), MCP stays read-only. A press is accepted only from the chat
 ``TELEGRAM_BOT_CHAT_ID``.
 
-``callback_data`` несе все потрібне (≤64 байти, без стану на нашому боці):
-    ``a:<n>:<id>:<дія>`` — дія над задачею (done|cancelled|postpone:1|7|30)
-    ``p:<n>:<id>``       — показати вибір терміну
-    ``b:<n>:<id>``       — назад до трьох кнопок
-    ``u:<n>:<event>``    — скасувати подію
-    ``x``                — нічого (підпис після дії)
+``callback_data`` carries everything needed (≤64 bytes, no state on our side):
+    ``a:<n>:<id>:<action>`` — action on a task (done|cancelled|postpone:1|7|30)
+    ``p:<n>:<id>``       — show the deadline choice
+    ``b:<n>:<id>``       — back to the three buttons
+    ``u:<n>:<event>``    — undo an event
+    ``x``                — nothing (the caption after an action)
 """
 from __future__ import annotations
 
@@ -31,15 +31,15 @@ from app.services import commitments, tg_bot
 
 logger = logging.getLogger(__name__)
 
-#: 3 кнопки на задачу, ліміт Telegram — 100 на повідомлення.
+#: 3 buttons per task, the Telegram limit is 100 per message.
 MAX_ITEMS = 33
-POLL_TIMEOUT = 15            # < tg_bot.TIMEOUT: long-poll не має впертись у таймаут HTTP
+POLL_TIMEOUT = 15            # < tg_bot.TIMEOUT: long-poll must not run into the HTTP timeout
 _DONE_KEYS = {"done": "done", "cancelled": "cancelled", "postpone:1": "postpone1",
               "postpone:7": "postpone7", "postpone:30": "postpone30"}
 
 
 def _t(key: str, lang: Optional[str] = None, **vars) -> str:
-    """Текст кнопки/відповіді мовою налаштування на момент складання/натиску."""
+    """Button/reply text in the language of the setting at assembly/press time."""
     return tr("telegram.btn." + key, lang=lang or server_lang(), **vars)
 
 
@@ -48,7 +48,7 @@ def footer(lang: Optional[str] = None) -> str:
 
 
 def __getattr__(name: str):
-    if name == "FOOTER":          # сумісність: константа стала мовозалежною
+    if name == "FOOTER":          # compatibility: the constant became language-dependent
         return footer()
     raise AttributeError(name)
 
@@ -84,21 +84,21 @@ def done_row(n: int, action: str, event_id: int, due_date: Optional[str] = None,
 
 
 def keyboard(item_ids: list[int]) -> Optional[dict]:
-    """Нумерація з 1 у порядку показу; None — кнопок нема."""
+    """Numbering from 1 in display order; None — there are no buttons."""
     rows = [task_row(n, i) for n, i in enumerate(item_ids[:MAX_ITEMS], 1)]
     return {"inline_keyboard": rows} if rows else None
 
 
-# ------------------------------------------------------------------ натиск
+# ------------------------------------------------------------------ press
 
 def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
-    """Один ``callback_query`` → зміна в БД + нова клавіатура. → текст відповіді (для тестів)."""
-    lang = server_lang()          # мова — на момент натиску
+    """One ``callback_query`` → a DB change + a new keyboard. → reply text (for tests)."""
+    lang = server_lang()          # language — at the moment of the press
     msg = cq.get("message") or {}
     chat = str((msg.get("chat") or {}).get("id", ""))
     data = str(cq.get("data") or "")
     if not chat or chat != tg_bot._chat_id():
-        logger.warning("Кнопки брифінгу: натиск з чужого чату — відмова")
+        logger.warning("Brief buttons: press from a foreign chat — rejected")
         denied = _t("noAccess", lang)
         _answer(cq, denied, transport)
         return denied
@@ -119,44 +119,44 @@ def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
             res = commitments.apply_action(db_path, iid, action, source="bot", actor=actor)
             new_row = done_row(n, action, res["event_id"], res.get("due_date"), lang)
             reply = _done_label(action, lang) or _t("ok", lang)
-            logger.info("Кнопки брифінгу: задача %s → %s (подія %s)", iid, action, res["event_id"])
+            logger.info("Brief buttons: task %s → %s (event %s)", iid, action, res["event_id"])
         elif kind == "u" and len(parts) == 3:
             n, eid = int(parts[1]), int(parts[2])
             res = commitments.undo_action(db_path, eid, source="bot", actor=actor)
             new_row = task_row(n, res["item_id"])
             reply = _t("undone", lang)
-            logger.info("Кнопки брифінгу: подію %s скасовано", eid)
+            logger.info("Brief buttons: event %s undone", eid)
         else:
             reply = _t("unknown", lang)
     except (LookupError, ValueError) as e:
         reply = str(e)[:180]
-        logger.info("Кнопки брифінгу: %s — %s", data, reply)
+        logger.info("Brief buttons: %s — %s", data, reply)
     if new_row is not None:
         _replace_row(msg, n, new_row, transport)
     _answer(cq, reply, transport)
     return reply
 
 
-#: (chat, message_id) → клавіатура, яку МИ поставили останньою. Натиски, що чекали,
-#: поки ПК спав, приходять пачкою, і кожен несе ще ПОЧАТКОВУ клавіатуру — будувати
-#: від неї означало б повернути ряд попереднього натиску до трьох кнопок (і загубити
-#: його ↩). Тому основа — наша остання правка, а клавіатура з натиску — лише якщо
-#: цього повідомлення ми ще не міняли (наприклад, після рестарту).
+#: (chat, message_id) → the keyboard WE set last. Presses that waited
+#: while the PC slept arrive in a batch, and each carries the INITIAL keyboard too — building
+#: from it would return the previous press's row to three buttons (and lose
+#: its ↩). So the base is our last edit, and the keyboard from the press is used only if
+#: we have not changed this message yet (for example, after a restart).
 _KEYBOARDS: "OrderedDict[tuple, list]" = OrderedDict()
 _KEYBOARDS_MAX = 200
 _kb_lock = threading.Lock()
 
 
 def _row_number(row: list[dict]) -> Optional[str]:
-    """Номер задачі ряду: кожен ряд (task/postpone/done) починається з «N …»."""
+    """Task number of a row: every row (task/postpone/done) starts with "N …"."""
     text = str((row[0] if row else {}).get("text", ""))
     return text.split(" ", 1)[0] or None
 
 
 def _replace_row(msg: dict, n: int, new_row: list[dict], transport) -> None:
-    """Замінити ряд задачі N. Ряд шукається за НОМЕРОМ, а не за натиснутою кнопкою:
-    після першої правки тієї ж задачі (два пізні натиски поспіль) кнопки вже нема,
-    а зміна в БД уже є — ряд мусить її показати разом зі своїм ↩ (ревʼю раунду 2)."""
+    """Replace the row of task N. The row is found by NUMBER, not by the pressed button:
+    after the first edit of the same task (two late presses in a row) the button is gone,
+    while the DB change is already there — the row must show it together with its ↩ (round 2 review)."""
     key = (str((msg.get("chat") or {}).get("id")), msg.get("message_id"))
     with _kb_lock:
         rows = _KEYBOARDS.get(key)
@@ -172,7 +172,7 @@ def _replace_row(msg: dict, n: int, new_row: list[dict], transport) -> None:
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)},
             transport=transport)
     except tg_bot.BotError as e:
-        logger.warning("Кнопки брифінгу: клавіатуру не оновлено (%s)", e)
+        logger.warning("Brief buttons: keyboard not updated (%s)", e)
         return
     with _kb_lock:
         _KEYBOARDS[key] = rows
@@ -182,20 +182,20 @@ def _replace_row(msg: dict, n: int, new_row: list[dict], transport) -> None:
 
 
 def _answer(cq: dict, text: str, transport) -> None:
-    """Пізній натиск (ПК спав) — Telegram уже не приймає відповідь; зміна від цього не скасовується."""
+    """A late press (PC slept) — Telegram no longer accepts the answer; the change is not undone by this."""
     try:
         params = {"callback_query_id": cq.get("id")}
         if text:
             params["text"] = text
         tg_bot._call("answerCallbackQuery", params, transport=transport)
     except tg_bot.BotError as e:
-        logger.info("Кнопки брифінгу: відповідь на натиск не прийнято (%s)", e)
+        logger.info("Brief buttons: reply to the press not accepted (%s)", e)
 
 
-# ------------------------------------------------------------------ потік
+# ------------------------------------------------------------------ thread
 
 class ButtonPoller:
-    """Daemon-потік: long-polling ``getUpdates`` лише для ``callback_query``."""
+    """Daemon thread: ``getUpdates`` long-polling for ``callback_query`` only."""
 
     def __init__(self, *, db_path: str, transport=None, backoff: float = 10.0):
         self.db_path = db_path
@@ -219,22 +219,22 @@ class ButtonPoller:
             n += 1
             try:
                 handle(cq, db_path=self.db_path, transport=self.transport)
-            except Exception as e:  # noqa: BLE001 — один зламаний натиск не валить потік
-                logger.warning("Кнопки брифінгу: натиск не оброблено (%s)", e, exc_info=True)
+            except Exception as e:  # noqa: BLE001 — one broken press does not kill the thread
+                logger.warning("Brief buttons: press not processed (%s)", e, exc_info=True)
         return n
 
     def _loop(self):
         while not self._stop.is_set():
             try:
                 self.poll_once()
-            except Exception as e:  # noqa: BLE001 — мережа/409: чекаємо й пробуємо знову
-                logger.warning("Кнопки брифінгу: getUpdates не вдався (%s)", e)
+            except Exception as e:  # noqa: BLE001 — network/409: wait and try again
+                logger.warning("Brief buttons: getUpdates failed (%s)", e)
                 self._stop.wait(self.backoff)
 
     def start(self):
         self._thread = threading.Thread(target=self._loop, name="brief-buttons", daemon=True)
         self._thread.start()
-        logger.info("Кнопки брифінгу: слухаю натиски")
+        logger.info("Brief buttons: listening for presses")
 
     def stop(self):
         self._stop.set()

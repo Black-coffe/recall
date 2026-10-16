@@ -1,14 +1,14 @@
-"""Юніт-тести чанкінгу (app/services/embeddings.py) — T7.5.
+"""Unit tests of chunking (app/services/embeddings.py) - T7.5.
 
-Офлайн, без torch/sentence-transformers/GPU — тестуємо ЛИШЕ детерміновані
-хелпери нарізки тексту (_window_text/_split_sentences/_chunk_from_segments/
-_chunk_from_blocks/build_chunks). Покриває межі нарізки: короткі/довгі
-речення, кирилицю, overlap, межу _MAX_CHARS.
+Offline, without torch/sentence-transformers/GPU: we test ONLY the deterministic
+text-cutting helpers (_window_text/_split_sentences/_chunk_from_segments/
+_chunk_from_blocks/build_chunks). Covers the cutting boundaries: short/long
+sentences, Cyrillic, overlap, the _MAX_CHARS boundary.
 
-production-rag-wave-b-04: embed_texts/embed_query теж покриті — але через
-підмінений `_encode` (фейк, що памʼятає вхідні рядки), реальна модель НЕ
-завантажується. Це перевіряє лише вибір префікса за `_style_for()`, не саме
-кодування."""
+production-rag-wave-b-04: embed_texts/embed_query are covered too, but through
+a replaced `_encode` (a fake that remembers the input strings); the real model is NOT
+loaded. This checks only the choice of prefix by `_style_for()`, not the
+encoding itself."""
 from __future__ import annotations
 
 import importlib
@@ -44,7 +44,7 @@ def test_split_sentences_empty_string():
 
 
 # ============================================================
-# _window_text — межі нарізки
+# _window_text - cutting boundaries
 # ============================================================
 
 def test_window_text_empty_returns_empty_list():
@@ -66,34 +66,34 @@ def test_window_text_exactly_at_max_chars_boundary_single_piece():
 
 
 def test_window_text_one_char_over_boundary_splits():
-    # Рівно один символ понад ліміт І без пунктуації для розбиття на речення —
-    # _split_sentences віддає весь текст як ОДНЕ "речення", яке відразу
-    # перевищує _MAX_CHARS при першому ж append → flush з overlap-хвостом.
+    # Exactly one character over the limit AND no punctuation to split into sentences -
+    # _split_sentences returns the whole text as ONE "sentence", which at once
+    # exceeds _MAX_CHARS on the very first append -> flush with an overlap tail.
     text = "а" * (embeddings._MAX_CHARS + 1)
     pieces = embeddings._window_text(text)
     assert len(pieces) == 2
     assert pieces[0] == text
-    # ні речень, ні пробілів → різати нема по чому, хвіст лишається сирим зрізом
+    # no sentences, no spaces -> nothing to cut by, the tail stays a raw slice
     assert pieces[1] == text[-embeddings._TEXT_OVERLAP:]
     assert len(pieces[1]) == embeddings._TEXT_OVERLAP
 
 
 def test_window_text_long_multisentence_text_splits_with_overlap():
     sentence = "Це речення про проєкт та бюджет команди. "
-    text = sentence * 60  # довший за _MAX_CHARS, багато речень-делімітерів
+    text = sentence * 60  # longer than _MAX_CHARS, many sentence delimiters
     pieces = embeddings._window_text(text)
     assert len(pieces) >= 2
     for p in pieces:
-        assert p  # непорожні
-    # overlap: хвіст попереднього шматка є префіксом наступного — але зрізаний
-    # по межі речення/слова, а не посеред слова (T6.5)
+        assert p  # non-empty
+    # overlap: the tail of the previous piece is a prefix of the next one, but cut
+    # at a sentence/word boundary, not mid-word (T6.5)
     tail = embeddings._overlap_tail(pieces[0], embeddings._TEXT_OVERLAP)
     assert pieces[1].startswith(tail)
-    assert pieces[1][0].isupper(), "перекриття має починатись з нового речення"
+    assert pieces[1][0].isupper(), "the overlap must start with a new sentence"
 
 
 # ============================================================
-# _overlap_tail — межа перекриття (T6.5)
+# _overlap_tail - overlap boundary (T6.5)
 # ============================================================
 
 def test_overlap_tail_snaps_to_sentence_start():
@@ -104,8 +104,8 @@ def test_overlap_tail_snaps_to_sentence_start():
 
 
 def test_overlap_tail_falls_back_to_word_boundary():
-    """Немає кінця речення в хвості → ріжемо принаймні по межі слова, а не
-    посеред нього (саме тут сирий зріз [-N:] і псував чанків архіву)."""
+    """No sentence end in the tail -> cut at least at a word boundary, not
+    mid-word (this is where the raw slice [-N:] spoiled chunks of the archive)."""
     text = "слово-одне слово-два слово-три слово-чотири слово-пʼять"
     tail = embeddings._overlap_tail(text, 20)
     assert not tail.startswith("во-") and not tail.startswith("о-")
@@ -128,9 +128,9 @@ def test_window_text_cyrillic_sentence_boundaries_respected():
 
 
 def test_window_text_no_sentence_delimiters_still_terminates():
-    """Без крапок/знаків — весь текст один 'sentence', overlap-хвіст все одно
-    коротший за оригінал (не зациклюється)."""
-    text = "слово " * 500  # ~3000 символів, без .!?, але з пробілами (split_sentences не ріже)
+    """No periods/marks: the whole text is one 'sentence', the overlap tail is still
+    shorter than the original (does not loop)."""
+    text = "слово " * 500  # ~3000 characters, no .!?, but with spaces (split_sentences does not cut)
     pieces = embeddings._window_text(text)
     assert len(pieces) >= 1
     assert all(isinstance(p, str) and p for p in pieces)
@@ -164,15 +164,15 @@ def test_chunk_from_text_empty_returns_empty_list():
     ("SPEAKER_0", {}, "Спікер 1"),
     ("SPEAKER_3", {}, "Спікер 4"),
     ("SPEAKER_0", {"SPEAKER_0": "Андрій"}, "Андрій"),
-    ("SPEAKER_0", {"SPEAKER_0": ""}, "Спікер 1"),  # порожнє ім'я в мапі — fallback
-    ("Гість", {}, "Гість"),  # довільна мітка проходить як є
+    ("SPEAKER_0", {"SPEAKER_0": ""}, "Спікер 1"),  # empty name in the map - fallback
+    ("Гість", {}, "Гість"),  # an arbitrary label passes as is
 ])
 def test_resolve_speaker(raw, speaker_map, expected):
     assert embeddings._resolve_speaker(raw, speaker_map) == expected
 
 
 # ============================================================
-# _chunk_from_segments — межі нарізки по сегментах
+# _chunk_from_segments - cutting boundaries by segments
 # ============================================================
 
 def _seg(text, start, end, speaker=None):
@@ -200,10 +200,10 @@ def test_chunk_from_segments_merges_short_segments_into_one_chunk():
 
 
 def test_chunk_from_segments_huge_segment_not_duplicated_into_next_chunk():
-    """T6.5: сегмент, який сам більший за ліміт, НЕ тягнеться в наступний чанк
-    як перекриття — інакше він дублювався б у кожному наступному вікні (до
-    T6.5 такий сегмент давав три чанки, два з яких були ним же)."""
-    big = "слово " * 200  # ~1200 символів > _MAX_CHARS(1000)
+    """T6.5: a segment that is itself bigger than the limit does NOT get dragged into the next chunk
+    as overlap; otherwise it would be duplicated in every following window (before
+    T6.5 such a segment gave three chunks, two of which were itself)."""
+    big = "слово " * 200  # ~1200 characters > _MAX_CHARS(1000)
     segs = [_seg("коротке", 0, 1), _seg(big, 1, 2), _seg("хвіст", 2, 3)]
     chunks = embeddings._chunk_from_segments(segs, {})
     assert len(chunks) == 2
@@ -213,25 +213,25 @@ def test_chunk_from_segments_huge_segment_not_duplicated_into_next_chunk():
 
 
 def test_chunk_from_segments_overlap_carries_tail_on_limit_cut():
-    """Розрив за лімітом = думку обрізано штучно → наступний чанк починається
-    з хвоста попереднього (~_SEG_OVERLAP_CHARS), щоб контекст не загубився."""
+    """A break at the limit = the thought was cut artificially -> the next chunk starts
+    with the tail of the previous one (~_SEG_OVERLAP_CHARS) so the context is not lost."""
     seg_text = "Це доволі довге речення про бюджет проєкту на наступний квартал."
     n = embeddings._MAX_CHARS // len(seg_text) + 2
     segs = [_seg(seg_text, i * 2.0, i * 2.0 + 1.9) for i in range(n)]
     chunks = embeddings._chunk_from_segments(segs, {})
     assert len(chunks) >= 2
-    # хвіст першого чанку дослівно починає другий
+    # the tail of the first chunk verbatim starts the second
     assert chunks[1]["text"].startswith(seg_text)
     assert chunks[0]["text"].endswith(seg_text)
-    # перекриття обмежене: не більше кількох сегментів, а не пів-чанку
+    # the overlap is bounded: no more than a few segments, not half a chunk
     assert len(chunks[1]["text"]) < embeddings._MAX_CHARS
 
 
 def test_chunk_from_segments_overlap_never_exceeds_budget():
-    """Перекриття обмежене бюджетом, а не «хоч один сегмент». Довгий сегмент,
-    що спричинив розрив за лімітом, у наступний чанк НЕ переїжджає — інакше
-    900-символьний монолог дублювався б в індексі і перебивав голосування
-    за спікера наступного чанку."""
+    """The overlap is bounded by the budget, not by "at least one segment". A long segment
+    that caused the break at the limit does NOT move into the next chunk; otherwise a
+    900-character monologue would be duplicated in the index and skew the vote
+    for the speaker of the next chunk."""
     long_seg = "Розгорнута репліка про стратегію фонду та наступні кроки. " * 18  # >_MAX_CHARS
     segs = [_seg("Коротко про порядок денний.", 0, 2, speaker="SPEAKER_0"),
             _seg(long_seg, 2, 40, speaker="SPEAKER_0"),
@@ -244,33 +244,33 @@ def test_chunk_from_segments_overlap_never_exceeds_budget():
 
 
 def test_chunk_from_segments_no_tail_only_chunk_at_end():
-    """Якщо ліміт спрацював на ОСТАННЬОМУ сегменті, хвіст не випускається
-    окремим чанком: він цілком міститься в попередньому."""
+    """If the limit fired on the LAST segment, the tail is not emitted
+    as a separate chunk: it is wholly contained in the previous one."""
     seg_text = "Речення про бюджет команди на наступний квартал і ризики."
     n = embeddings._MAX_CHARS // len(seg_text) + 1
     segs = [_seg(seg_text, i * 2.0, i * 2.0 + 1.9) for i in range(n)]
     chunks = embeddings._chunk_from_segments(segs, {})
-    assert len(chunks) == 1, "хвіст після останнього розриву — не окремий чанк"
+    assert len(chunks) == 1, "the tail after the last break is not a separate chunk"
 
 
 def test_chunk_from_segments_min_chars_counts_own_text_only():
-    """Поріг _MIN_CHARS рахується по СВОЄМУ тексту: перенесений хвіст не має
-    достроково «дозволяти» природну межу."""
+    """The _MIN_CHARS threshold is counted on the chunk's OWN text: the carried tail must not
+    "allow" a natural boundary prematurely."""
     filler = "Слова про порядок денний зустрічі команди. "
     n = embeddings._MAX_CHARS // len(filler) + 1
     segs = [_seg(filler, i * 1.0, i * 1.0 + 0.9, speaker="SPEAKER_0") for i in range(n)]
-    # одразу після розриву за лімітом — короткий свій сегмент і зміна спікера
+    # right after a break at the limit: a short own segment and a speaker change
     segs.append(_seg("Коротка відповідь.", n * 1.0, n * 1.0 + 1, speaker="SPEAKER_1"))
     segs.append(_seg("І ще одна репліка.", n * 1.0 + 2, n * 1.0 + 3, speaker="SPEAKER_1"))
     chunks = embeddings._chunk_from_segments(segs, {})
     tail_chunk = chunks[-1]["text"]
     assert "Коротка відповідь." in tail_chunk and "І ще одна репліка." in tail_chunk, \
-        "своїх символів менше _MIN_CHARS → різати на зміні спікера ще рано"
+        "own characters are fewer than _MIN_CHARS -> too early to cut on a speaker change"
 
 
 def test_chunk_from_segments_splits_on_speaker_change_after_min_chars():
-    """T6.5: зміна спікера — природна межа. До неї чанк мав бути не коротшим
-    за _MIN_CHARS, інакше діалог покришився б на репліки."""
+    """T6.5: a speaker change is a natural boundary. Before it the chunk must be no shorter
+    than _MIN_CHARS, otherwise the dialogue would shatter into utterances."""
     a = "Ми домовились підняти бюджет на маркетинг у другому кварталі. " * 6  # > _MIN_CHARS
     b = "Погоджуюсь, тоді я готую розрахунок до пʼятниці."
     segs = [_seg(a, 0, 30, speaker="SPEAKER_0"), _seg(b, 30, 35, speaker="SPEAKER_1")]
@@ -279,12 +279,12 @@ def test_chunk_from_segments_splits_on_speaker_change_after_min_chars():
     assert chunks[0]["speaker"] == "Спікер 1"
     assert chunks[1]["speaker"] == "Спікер 2"
     assert chunks[1]["text"] == b
-    # межа природна → перекриття НЕ додається
+    # the boundary is natural -> NO overlap is added
     assert a.strip() not in chunks[1]["text"]
 
 
 def test_chunk_from_segments_short_exchange_stays_one_chunk():
-    """Швидкий обмін репліками (обидві короткі) не ріжеться: _MIN_CHARS не набрано."""
+    """A quick exchange of utterances (both short) is not cut: _MIN_CHARS is not reached."""
     segs = [_seg("А ти дзвонив клієнту?", 0, 2, speaker="SPEAKER_0"),
             _seg("Так, вчора ввечері.", 2, 4, speaker="SPEAKER_1")]
     chunks = embeddings._chunk_from_segments(segs, {})
@@ -293,7 +293,7 @@ def test_chunk_from_segments_short_exchange_stays_one_chunk():
 
 
 def test_chunk_from_segments_splits_on_long_pause():
-    """Пауза >= _PAUSE_BOUNDARY_SEC читається як кінець думки (без діаризації)."""
+    """A pause >= _PAUSE_BOUNDARY_SEC is read as the end of a thought (without diarization)."""
     a = "Обговорили постачальника і зупинились на другому варіанті. " * 7  # > _MIN_CHARS
     segs = [_seg(a, 0, 20), _seg("Тепер про наступний квартал.", 25, 27)]
     chunks = embeddings._chunk_from_segments(segs, {})
@@ -310,7 +310,7 @@ def test_chunk_from_segments_short_pause_is_not_a_boundary():
 
 
 def test_chunk_from_segments_speaker_unknown_is_not_a_turn_change():
-    """SPEAKER_UNKNOWN — діра діаризації, а не учасник: вхід/вихід у неї не ріже."""
+    """SPEAKER_UNKNOWN is a diarization hole, not a participant: entering/leaving it does not cut."""
     a = "Говоримо про терміни здачі і про те, хто відповідальний. " * 7
     segs = [_seg(a, 0, 20, speaker="SPEAKER_0"),
             _seg("Незрозумілий шматок.", 20, 21, speaker="SPEAKER_UNKNOWN"),
@@ -320,8 +320,8 @@ def test_chunk_from_segments_speaker_unknown_is_not_a_turn_change():
 
 
 def test_chunk_from_segments_timecodes_follow_retained_segments():
-    """start_time/end_time беруться з СЕГМЕНТІВ, що реально лежать у чанку
-    (включно з перенесеним хвостом), а не з лічильника вікна."""
+    """start_time/end_time are taken from the SEGMENTS actually lying in the chunk
+    (including the carried tail), not from the window counter."""
     a = "Довга репліка про план на квартал і ризики по ньому. " * 8
     segs = [_seg(a, 5, 40, speaker="SPEAKER_0"),
             _seg("Коротка відповідь.", 45, 47, speaker="SPEAKER_1")]
@@ -337,7 +337,7 @@ def test_chunk_from_segments_dominant_speaker_by_char_count():
     ]
     chunks = embeddings._chunk_from_segments(segs, {})
     assert len(chunks) == 1
-    assert chunks[0]["speaker"] == "Спікер 1"  # SPEAKER_0 → "Спікер 1" (домінує по символах)
+    assert chunks[0]["speaker"] == "Спікер 1"  # SPEAKER_0 -> "Спікер 1" (dominates by characters)
 
 
 def test_chunk_from_segments_resolves_speaker_via_speaker_map():
@@ -355,7 +355,7 @@ def test_chunk_from_segments_chunk_index_sequential_across_multiple_flushes():
 
 
 # ============================================================
-# _chunk_from_blocks — документи з провенансом (page/section)
+# _chunk_from_blocks - documents with provenance (page/section)
 # ============================================================
 
 def test_chunk_from_blocks_preserves_page_and_section_per_chunk():
@@ -377,21 +377,21 @@ def test_chunk_from_blocks_skips_empty_blocks_and_non_dicts():
 
 
 def test_chunk_from_blocks_windows_do_not_cross_block_boundary():
-    """Великий блок ріжеться sentence-aware на під-чанки з ТІЄЮ Ж page/section —
-    але межа блоку ніколи не перетинається одним чанком."""
+    """A large block is cut sentence-aware into sub-chunks with THE SAME page/section,
+    but a block boundary is never crossed by one chunk."""
     big_text = ("Речення блоку один. " * 60)
     blocks = [
         {"text": big_text, "page": 1, "section": "A"},
         {"text": "Короткий блок два.", "page": 2, "section": "B"},
     ]
     chunks = embeddings._chunk_from_blocks(blocks)
-    assert len(chunks) >= 3  # блок 1 розбито на 2+ шматки + блок 2
+    assert len(chunks) >= 3  # block 1 split into 2+ pieces + block 2
     assert all(c["page"] == 1 for c in chunks[:-1])
     assert chunks[-1]["page"] == 2 and chunks[-1]["text"] == "Короткий блок два."
 
 
 # ============================================================
-# build_chunks — вибір стратегії
+# build_chunks - strategy choice
 # ============================================================
 
 def test_build_chunks_prefers_structure_json_over_segments_and_text():
@@ -434,7 +434,7 @@ def test_build_chunks_empty_segments_list_falls_back_to_text():
 
 
 # ============================================================
-# blob_to_vec — round-trip (не потребує моделі)
+# blob_to_vec - round-trip (needs no model)
 # ============================================================
 
 def test_blob_to_vec_roundtrip():
@@ -446,7 +446,7 @@ def test_blob_to_vec_roundtrip():
 
 
 # ============================================================
-# T6.8: EMBED_VERSION — структурна idempotency (без форс re-embed)
+# T6.8: EMBED_VERSION - structural idempotency (without forcing re-embed)
 # ============================================================
 
 @pytest.fixture
@@ -502,15 +502,15 @@ def test_embed_skips_when_model_and_version_match(db, monkeypatch):
 
     res2 = embeddings.chunk_and_embed_transcription(db, tid)
     assert res2["status"] == "skipped"
-    assert calls["n"] == 1  # вдруге НЕ перекодовували
+    assert calls["n"] == 1  # NOT re-encoded the second time
 
 
 def test_embed_null_version_legacy_rows_are_reembedded(db, monkeypatch):
-    """T6.5: рядки, embedded ДО міграції v28 (embedding_version=NULL), — це
-    завідомо СТАРА нарізка, тож вони підлягають re-embed. Раніше NULL вважався
-    сумісним (щоб міграція не перерахувала архів заднім числом); з переходом на
-    природні межі це стало б тихою дірою — частина архіву назавжди з іншим
-    чанкінгом."""
+    """T6.5: rows embedded BEFORE migration v28 (embedding_version=NULL) are
+    certainly the OLD cutting, so they are subject to re-embed. Before, NULL was considered
+    compatible (so that the migration would not recompute the archive retroactively); with the move to
+    natural boundaries that would become a silent hole: part of the archive forever with a different
+    chunking."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     calls = {"n": 0}
 
@@ -530,7 +530,7 @@ def test_embed_null_version_legacy_rows_are_reembedded(db, monkeypatch):
 
     res = embeddings.chunk_and_embed_transcription(db, tid)
     assert res["status"] == "embedded"
-    assert calls["n"] == 2  # NULL-версія = стара нарізка → перекодовано
+    assert calls["n"] == 2  # NULL version = old cutting -> re-encoded
 
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT embedding_version FROM transcriptions WHERE id = ?",
@@ -540,9 +540,9 @@ def test_embed_null_version_legacy_rows_are_reembedded(db, monkeypatch):
 
 
 def test_embed_version_bump_forces_reembed(db, monkeypatch):
-    """Явний бамп EMBED_VERSION (майбутня зміна логіки чанкінгу) МАЄ
-    детектуватись і форснути re-embed — перевіряємо, що структурне
-    підключення справді працює (не лише декларація константи)."""
+    """An explicit EMBED_VERSION bump (a future change of the chunking logic) MUST
+    be detected and force a re-embed; we check that the structural
+    wiring really works (not just a declaration of the constant)."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     calls = {"n": 0}
 
@@ -558,28 +558,28 @@ def test_embed_version_bump_forces_reembed(db, monkeypatch):
     monkeypatch.setattr(embeddings, "EMBED_VERSION", embeddings.EMBED_VERSION + 1)
     res = embeddings.chunk_and_embed_transcription(db, tid)
     assert res["status"] == "embedded"
-    assert calls["n"] == 2  # версія змінилась → перекодували
+    assert calls["n"] == 2  # the version changed -> re-encoded
 
 
 def test_embed_version_roundtrip_via_env_pair(db, monkeypatch):
-    """production-rag-wave-b-04: рішення «застаріло / актуально» приймається
-    по парі (EMBED_MODEL, EMBED_VERSION), яка тепер приходить з env — тож
-    відкат `EMBED_VERSION` назад повертає той самий стан, що й до бампу.
-    Кожна зміна пари робить наявний запис застарілим (status=embedded), а під
-    незмінною парою він одразу знову актуальний (status=skipped)."""
+    """production-rag-wave-b-04: the "stale / current" decision is made
+    by the pair (EMBED_MODEL, EMBED_VERSION), which now comes from env, so
+    rolling `EMBED_VERSION` back returns the same state as before the bump.
+    Every change of the pair makes an existing record stale (status=embedded), and under
+    an unchanged pair it is immediately current again (status=skipped)."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     base = embeddings.EMBED_VERSION
     tid = _add_tx(db)
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
 
-    # Бамп версії (нова пара в .env) → запис застарів, після перекодування актуальний.
+    # Version bump (a new pair in .env) -> the record is stale, after re-encoding it is current.
     monkeypatch.setattr(embeddings, "EMBED_VERSION", base + 1)
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "skipped"
 
-    # Відкат тим самим рядком .env → запис знову застарілий для старої пари,
-    # а після перекодування під нею — знову актуальний, як до бампу.
+    # Rollback with the same .env line -> the record is stale again for the old pair,
+    # and after re-encoding under it it is current again, as before the bump.
     monkeypatch.setattr(embeddings, "EMBED_VERSION", base)
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "skipped"
@@ -592,16 +592,16 @@ def test_embed_version_roundtrip_via_env_pair(db, monkeypatch):
 
 
 def test_embed_model_and_version_come_from_env(monkeypatch):
-    """Обіцянка історії: пара Qwen3 вмикається ДВОМА рядками `.env`, відкат —
-    тими ж двома. Перевіряємо саме читання env на імпорті модуля (reload),
-    а не літерали: модель, версія і стиль префіксів мусять поїхати разом.
+    """Story promise: the Qwen3 pair is switched on by TWO `.env` lines, the rollback by
+    the same two. We check exactly the env reading at module import (reload),
+    not literals: the model, version and prefix style must travel together.
 
-    Гейт-9 (знахідка 15): НЕ пінити "оригінал" тим, що зараз лежить у
-    `embeddings.EMBED_MODEL/EMBED_VERSION` на старті тесту — це залежить від
-    того, чи вже десь у сесії викликався `load_dotenv()` (власницький `.env`
-    несе свою версію). Пінимо буквальні дефолти коду
-    (`app/services/embeddings.py`) і на кожному кроці явно керуємо env через
-    monkeypatch — незалежно від порядку збирання файлів pytest."""
+    Gate 9 (finding 15): do NOT pin the "original" to what currently lies in
+    `embeddings.EMBED_MODEL/EMBED_VERSION` at test start; that depends on
+    whether `load_dotenv()` was already called somewhere in the session (the owner's `.env`
+    carries its own version). We pin the literal code defaults
+    (`app/services/embeddings.py`) and at each step explicitly control env through
+    monkeypatch, independent of the pytest file collection order."""
     DEFAULT_MODEL = "intfloat/multilingual-e5-large"
     DEFAULT_VERSION = 2
 
@@ -613,8 +613,8 @@ def test_embed_model_and_version_come_from_env(monkeypatch):
         assert embeddings.EMBED_VERSION == 5
         assert embeddings._STYLE == "qwen3"
     finally:
-        # Відкат — теж явними значеннями (не тим, що випадково в os.environ
-        # цієї сесії), інакше тест знову стає залежним від порядку файлів.
+        # The rollback is also with explicit values (not with whatever happens to be in os.environ
+        # of this session), otherwise the test again depends on file order.
         monkeypatch.setenv("EMBED_MODEL", DEFAULT_MODEL)
         monkeypatch.setenv("EMBED_VERSION", str(DEFAULT_VERSION))
         importlib.reload(embeddings)
@@ -625,7 +625,7 @@ def test_embed_model_and_version_come_from_env(monkeypatch):
 
 
 # ============================================================
-# Волна 4: Telegram — автор у чанку + заглушки не стають векторами
+# Wave 4: Telegram - author in the chunk + stubs do not become vectors
 # ============================================================
 
 def _add_tg_tx(db_path: str, text: str, sender: str | None = "Адам", chat_id: int = -100500):
@@ -642,9 +642,9 @@ def _add_tg_tx(db_path: str, text: str, sender: str | None = "Адам", chat_id
 
 
 def test_tg_sender_lands_in_chunk_speaker(db, monkeypatch):
-    """У TG немає segments, тож build_chunks лишав speaker=None — на живих даних
-    порожній у ВСІХ 5857 чанках. Через це RAG не міг сказати, ХТО це написав,
-    хоча імʼя лежало в сусідній колонці."""
+    """TG has no segments, so build_chunks left speaker=None - empty in ALL 5857
+    chunks on live data. Because of this RAG could not say WHO wrote it,
+    although the name lay in the neighbouring column."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     tid = _add_tg_tx(db, "домовились про оплату в пʼятницю")
@@ -658,8 +658,8 @@ def test_tg_sender_lands_in_chunk_speaker(db, monkeypatch):
 
 
 def test_contentless_tg_placeholder_is_not_embedded(db, monkeypatch):
-    """«[фото без тексту]» — службова позначка, а не текст: 152 однакові точки
-    конкурували за місце у видачі і не означали нічого."""
+    """"[фото без тексту]" is a service marker, not text: 152 identical points
+    competed for a place in the results and meant nothing."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     tid = _add_tg_tx(db, "[фото без тексту]")
@@ -669,7 +669,7 @@ def test_contentless_tg_placeholder_is_not_embedded(db, monkeypatch):
     conn = sqlite3.connect(db)
     chunks = conn.execute("SELECT COUNT(*) FROM chunks WHERE transcription_id = ?",
                           (tid,)).fetchone()[0]
-    # embedded_at МАЄ бути проставлений: інакше індексер вічно вважатиме це роботою.
+    # embedded_at MUST be set: otherwise the indexer would consider this work forever.
     marked = conn.execute("SELECT embedded_at IS NOT NULL FROM transcriptions WHERE id = ?",
                           (tid,)).fetchone()[0]
     conn.close()
@@ -684,7 +684,7 @@ def test_contentless_matcher_keeps_real_text():
 
 
 # ============================================================
-# production-rag-wave-b-04: _style_for() — стиль префіксів за родиною моделі
+# production-rag-wave-b-04: _style_for() - prefix style by model family
 # ============================================================
 
 @pytest.mark.parametrize("name,expected", [
@@ -700,8 +700,8 @@ def test_style_for_families(name, expected):
 
 
 def _capture_encode(monkeypatch):
-    """Підмінює _encode фейком, що памʼятає, які рядки прийшли на вхід
-    (без завантаження реальної моделі)."""
+    """Replaces _encode with a fake that remembers which strings came in
+    (without loading the real model)."""
     seen: list[list[str]] = []
 
     def _fake(texts, batch_size=32):
@@ -755,7 +755,7 @@ def test_embed_query_plain_style_no_prefix(monkeypatch):
 
 
 # ============================================================
-# production-rag-wave-b-04: EMBED_DIM — дефолт до завантаження, факт після
+# production-rag-wave-b-04: EMBED_DIM - default before loading, the fact after
 # ============================================================
 
 def test_embed_dim_default_before_load():
@@ -781,9 +781,9 @@ def test_apply_model_dim_updates_embed_dim():
 
 
 def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
-    """Переіндексація має ПРИБИРАТИ старі сміттєві вектори, а не лише перестати
-    робити нові: інакше фільтр заглушок нічого не змінює для наявного архіву
-    (спіймано на живих даних — 188 «[фото без тексту]» пережили прохід)."""
+    """Re-indexing must REMOVE the old junk vectors, not merely stop
+    making new ones; otherwise the stub filter changes nothing for the existing archive
+    (caught on live data: 188 "[фото без тексту]" survived the pass)."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     tid = _add_tg_tx(db, "справжній текст повідомлення")
@@ -792,7 +792,7 @@ def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM chunks WHERE transcription_id = ?",
                         (tid,)).fetchone()[0] > 0
-    # текст став заглушкою (напр. правка або повторний інжест медіа без розпізнавання)
+    # the text became a stub (e.g. an edit or a repeated media ingest without recognition)
     conn.execute("UPDATE transcriptions SET transcript_text = '[фото без тексту]' WHERE id = ?",
                  (tid,))
     conn.commit()
@@ -811,7 +811,7 @@ def test_contentless_tg_removes_previously_indexed_junk(db, monkeypatch):
 
 
 # ============================================================
-# production-rag-wave-b-05: контекстний префікс чанка
+# production-rag-wave-b-05: chunk context prefix
 # ============================================================
 
 def test_context_prefix_call_has_title_date_speaker_and_category():
@@ -827,8 +827,8 @@ def test_context_prefix_telegram_has_chat_author_and_thread_label():
             "date": "2026-09-16", "category": "Фонд Робота",
             "thread_label": "бюджет вересня", "summary_line": None}
     prefix = embeddings.build_context_prefix(meta, {"speaker": "Оксана"})
-    # directions-projects-tags-03: напрямок тепер стоїть і в переписці — перед
-    # міткою нитки (епоха 2 його тут не друкувала взагалі).
+    # directions-projects-tags-03: the direction now stands in chats too, before
+    # the thread label (epoch 2 did not print it here at all).
     assert prefix == ("[переписка] Фонд · загальний · 2026-09-16 · Оксана · "
                       "Фонд Робота · нитка: бюджет вересня")
 
@@ -881,8 +881,8 @@ def test_context_prefix_is_deterministic():
 
 
 def test_embed_writes_context_prefix_and_keeps_text_clean(db, monkeypatch):
-    """Префікс іде в ембедер і в окрему колонку; `chunks.text` — побайтово
-    той самий текст, що був у транскрипті (цитати не мають нести заголовок)."""
+    """The prefix goes into the embedder and into a separate column; `chunks.text` is byte for byte
+    the same text that was in the transcript (quotes must not carry a header)."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     seen: list[list[str]] = []
 
@@ -900,10 +900,10 @@ def test_embed_writes_context_prefix_and_keeps_text_clean(db, monkeypatch):
     row = conn.execute("SELECT text, context_prefix FROM chunks WHERE transcription_id = ?",
                        (tid,)).fetchone()
     conn.close()
-    assert row[0] == body                       # текст чистий, побайтово
+    assert row[0] == body                       # the text is clean, byte for byte
     assert row[1].startswith("[переписка] Fund")
     assert "Адам" in row[1]
-    # фейковий ембедер БАЧИВ префікс — саме він іде у вектор
+    # the fake embedder SAW the prefix: it is what goes into the vector
     assert seen and seen[0][0] == row[1] + "\n" + body
 
 
@@ -931,8 +931,8 @@ def test_embed_prefix_carries_unit_summary_of_call(db, monkeypatch):
 
 
 def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
-    """Назва чату звучить у префіксі й НЕ звучить у тексті репліки — пошук має
-    її знаходити (префікс у BM25), а видача — нести чистий текст."""
+    """The chat title sounds in the prefix and does NOT sound in the utterance text: search must
+    find it (prefix in BM25), and the output must carry clean text."""
     from app.services import retrieval
 
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
@@ -945,7 +945,7 @@ def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
     conn.close()
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
 
-    # vector-гілка вимкнена: у тесті немає ні моделі, ні реальних векторів
+    # the vector branch is off: the test has neither a model nor real vectors
     monkeypatch.setattr(embeddings, "is_available", lambda: False)
     res = retrieval.search(db, "Барселона", top_k=5)
     assert [c["transcription_id"] for c in res["chunks"]] == [tid]
@@ -955,7 +955,7 @@ def test_prefix_only_term_is_searchable_via_fts(db, monkeypatch):
 
 
 # ============================================================
-# editable-title-description-03: власна назва й опис у префіксі
+# editable-title-description-03: own title and description in the prefix
 # ============================================================
 
 def test_context_prefix_uses_own_title_instead_of_source_name():
@@ -1004,7 +1004,7 @@ def test_load_prefix_meta_prefers_title_and_carries_description(db):
 
 
 def test_load_prefix_meta_falls_back_to_chat_title_for_telegram(db):
-    """Без власної назви префікс лишається побайтово таким, як до історії 03."""
+    """Without an own title the prefix stays byte for byte as before story 03."""
     tid = _add_tg_tx(db, "рахунок виставили")
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
@@ -1014,8 +1014,8 @@ def test_load_prefix_meta_falls_back_to_chat_title_for_telegram(db):
 
 
 def test_description_only_term_is_searchable_and_result_carries_display_name(db, monkeypatch):
-    """Термін звучить ЛИШЕ в описі запису — пошук має знаходити чанк через
-    префікс, віддавати чистий текст і називати запис власною назвою."""
+    """The term sounds ONLY in the record description: search must find the chunk through
+    the prefix, return clean text and name the record by its own title."""
     from app.services import retrieval
 
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
@@ -1040,11 +1040,11 @@ def test_description_only_term_is_searchable_and_result_carries_display_name(db,
 
 
 # ============================================================
-# directions-projects-tags-03: шлях напрямку і теги в префіксі, епоха 3
+# directions-projects-tags-03: direction path and tags in the prefix, epoch 3
 # ============================================================
 
 def _seed_tree(db_path, direction="Фонд Робота", project="Акмекорп"):
-    """Напрямок + проєкт усередині нього. Повертає (direction_id, project_id)."""
+    """A direction + a project inside it. Returns (direction_id, project_id)."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     d = _ensure_node(conn, direction)
@@ -1055,7 +1055,7 @@ def _seed_tree(db_path, direction="Фонд Робота", project="Акмеко
 
 
 def _ensure_node(conn, name, parent_id=None):
-    """id вузла дерева за назвою — init_database уже засіває частину назв."""
+    """id of a tree node by name - init_database already seeds some names."""
     row = conn.execute("SELECT id FROM categories WHERE name_norm = ?",
                        (categories.norm_name(name),)).fetchone()
     if row:
@@ -1081,7 +1081,7 @@ def _tag(db_path, tid, *names):
 
 
 def test_context_prefix_path_goes_before_type_tail_for_telegram():
-    """Шлях напрямку тепер є і в переписці — ПЕРЕД міткою нитки."""
+    """The direction path is now in chats too - BEFORE the thread label."""
     meta = {"source_type": "telegram", "title": "Фонд · загальний",
             "date": "2026-09-16", "category": "Акмекорп",
             "category_path": "Фонд Робота → Акмекорп",
@@ -1148,12 +1148,12 @@ def test_context_prefix_tags_line_cut_by_whole_tag_under_sixty():
     line = embeddings.build_context_prefix(meta, {}).split("\n")[1]
     assert len(line) <= embeddings._PREFIX_TAGS_LINE_MAX
     assert line == "теги: довгий тег про інвестиції, ще один довгий тег сюди"
-    # обрізок назви — не тег: або тег цілий, або його немає
+    # a truncated name is not a tag: either the tag is whole or it is absent
     assert "третій" not in line
 
 
 def test_context_prefix_without_direction_and_tags_is_byte_identical_to_epoch2():
-    """Запис без напрямку й тегів дає рівно той самий рядок, що до історії."""
+    """A record without a direction and tags gives exactly the same line as before the story."""
     for meta, chunk, expected in (
         ({"source_type": "file", "title": "Планерка", "date": "2026-09-15",
           "category": None, "category_path": None, "tags": [],
@@ -1183,7 +1183,7 @@ def test_load_prefix_meta_builds_path_and_sorts_tags_by_norm(db):
     conn.close()
     assert meta["category"] == "Акмекорп"
     assert meta["category_path"] == "Фонд Робота → Акмекорп"
-    assert meta["tags"] == ["AI", "інвестори"]   # порядок за name_norm, не за вставкою
+    assert meta["tags"] == ["AI", "інвестори"]   # order by name_norm, not by insertion
 
 
 def test_load_prefix_meta_direction_node_has_plain_path(db):
@@ -1199,8 +1199,8 @@ def test_load_prefix_meta_direction_node_has_plain_path(db):
 
 
 def test_tag_lands_in_prefix_and_is_searchable_but_not_in_text(db, monkeypatch):
-    """Тег звучить лише в префіксі: пошук за ним знаходить чанк (BM25 по
-    context_prefix), а `chunks.text` лишається побайтово чистим."""
+    """The tag sounds only in the prefix: search by it finds the chunk (BM25 over
+    context_prefix), and `chunks.text` stays byte for byte clean."""
     from app.services import retrieval
 
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
@@ -1224,12 +1224,12 @@ def test_tag_lands_in_prefix_and_is_searchable_but_not_in_text(db, monkeypatch):
 
 
 def test_embed_version_code_default_stays_two(monkeypatch):
-    """ADR-016: зміна формату префікса НЕ рухає дефолт коду — без змінної
-    середовища модуль і далі дає епоху 2 (та саму, що на `main`).
+    """ADR-016: a change of the prefix format does NOT move the code default; without an
+    environment variable the module still gives epoch 2 (the same one as on `main`).
 
-    Змінну знімаємо явно, бо власницький `.env` несе свою версію і могла вже
-    доїхати в `os.environ` через чийсь `load_dotenv()`; читання файлу тест не
-    робить взагалі, тож він зелений і з `.env` у корені, і без нього."""
+    We unset the variable explicitly, because the owner's `.env` carries its own version and it could have already
+    reached `os.environ` through someone's `load_dotenv()`; the test does not read the file at
+    all, so it is green both with `.env` in the root and without it."""
     monkeypatch.delenv("EMBED_VERSION", raising=False)
     monkeypatch.delenv("EMBED_MODEL", raising=False)
     try:
@@ -1243,8 +1243,8 @@ def test_embed_version_code_default_stays_two(monkeypatch):
 
 
 def test_embed_version_epoch_comes_from_env(monkeypatch):
-    """Нову епоху вмикає рядок `.env`, а не правка коду: бойова тримає пару
-    (e5-large, 4), тож формат префікса цієї спеки їде під номером 5."""
+    """A new epoch is switched on by a `.env` line, not by a code edit: the live DB holds the pair
+    (e5-large, 4), so the prefix format of this spec travels under number 5."""
     monkeypatch.setenv("EMBED_VERSION", "5")
     monkeypatch.delenv("EMBED_MODEL", raising=False)
     try:
@@ -1257,11 +1257,11 @@ def test_embed_version_epoch_comes_from_env(monkeypatch):
 
 
 # ============================================================
-# directions-projects-tags-17: гард формату префікса (epoch ↔ PREFIX_FORMAT)
+# directions-projects-tags-17: prefix format guard (epoch <-> PREFIX_FORMAT)
 # ============================================================
 
 def _stamp_epoch(path, model, version, prefix_format):
-    """Рядок, який лишає по собі бекфіл v46 (або попередній прохід)."""
+    """The row the v46 backfill (or a previous pass) leaves behind."""
     conn = sqlite3.connect(path)
     conn.execute("INSERT OR REPLACE INTO embedding_epochs (model, version, prefix_format) "
                  "VALUES (?, ?, ?)", (model, version, prefix_format))
@@ -1307,9 +1307,9 @@ def test_epoch_status_reads_format_of_current_pair(db, monkeypatch):
 
 
 def test_epoch_status_without_table_falls_back_to_existing_pairs(db, monkeypatch):
-    """БД нижче v46 (крок 1 рунбука — перевірка ДО рестарту): памʼяті про
-    формат ще немає, тож пара, яка вже є в `transcriptions`, рахується старим
-    форматом — саме так її стемплює бекфіл міграції."""
+    """DB below v46 (step 1 of the runbook: a check BEFORE restart): there is no memory of the
+    format yet, so a pair already present in `transcriptions` counts as the old
+    format; this is exactly how the migration backfill stamps it."""
     monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
     conn = sqlite3.connect(db)
     conn.execute("INSERT INTO transcriptions (source_type, source_name, transcript_text, "
@@ -1325,8 +1325,8 @@ def test_epoch_status_without_table_falls_back_to_existing_pairs(db, monkeypatch
 
 
 def test_embed_refuses_to_write_new_format_into_older_epoch(db, monkeypatch, caplog):
-    """Рестарт із забутим `.env`: епоха 4 побудована форматом 1, код пише
-    формат 2 — жодного чанка і РІВНО один ERROR на процес."""
+    """A restart with a forgotten `.env`: epoch 4 was built with format 1, the code writes
+    format 2 - no chunk at all and EXACTLY one ERROR per process."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     monkeypatch.setattr(embeddings, "EMBED_VERSION", 4)
@@ -1342,11 +1342,11 @@ def test_embed_refuses_to_write_new_format_into_older_epoch(db, monkeypatch, cap
     assert res["status"] == "epoch_mismatch" and res2["status"] == "epoch_mismatch"
     assert _chunk_count(db, first) == 0 and _chunk_count(db, second) == 0
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1                      # не спамимо на кожен запис
+    assert len(errors) == 1                      # do not spam on every record
     message = errors[0].getMessage()
     assert "EMBED_VERSION" in message
     assert f"{embeddings.EMBED_MODEL} / v4" in message
-    # запис лишився «незембедженим» — його підбере `run` після підняття епохи
+    # the record stayed "un-embedded"; `run` will pick it up after the epoch is raised
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT embedded_at, embedding_version FROM transcriptions "
                        "WHERE id = ?", (first,)).fetchone()
@@ -1355,8 +1355,8 @@ def test_embed_refuses_to_write_new_format_into_older_epoch(db, monkeypatch, cap
 
 
 def test_embed_writes_and_registers_epoch_after_version_bump(db, monkeypatch):
-    """Піднятий `EMBED_VERSION` — епоха вільна: чанки пишуться, а БД запамʼятовує,
-    яким форматом її побудовано."""
+    """A raised `EMBED_VERSION` means the epoch is free: chunks are written, and the DB remembers
+    which format built it."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     monkeypatch.setattr(embeddings, "_epoch_mismatch_logged", False)
@@ -1372,8 +1372,8 @@ def test_embed_writes_and_registers_epoch_after_version_bump(db, monkeypatch):
 
 
 def test_fresh_install_registers_its_own_epoch(db, monkeypatch):
-    """Порожня БД і дефолтна епоха 2: гард нікому не заважає, а формат епохи
-    фіксується з першого ж запису (PREFIX_FORMAT — не другий EMBED_VERSION)."""
+    """An empty DB and the default epoch 2: the guard bothers nobody, and the epoch format
+    is fixed from the very first record (PREFIX_FORMAT is not a second EMBED_VERSION)."""
     monkeypatch.setattr(embeddings, "is_available", lambda: True)
     monkeypatch.setattr(embeddings, "embed_texts", _fake_embed_texts)
     monkeypatch.setattr(embeddings, "EMBED_VERSION", 2)
@@ -1383,7 +1383,7 @@ def test_fresh_install_registers_its_own_epoch(db, monkeypatch):
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
     assert _epochs(db) == [(embeddings.EMBED_MODEL, 2, embeddings.PREFIX_FORMAT)]
 
-    # друга епоха реєструється окремим рядком, стару не чіпає
+    # the second epoch is registered by a separate row, the old one is not touched
     monkeypatch.setattr(embeddings, "EMBED_VERSION", 3)
     assert embeddings.chunk_and_embed_transcription(db, tid)["status"] == "embedded"
     assert _epochs(db) == [(embeddings.EMBED_MODEL, 2, embeddings.PREFIX_FORMAT),

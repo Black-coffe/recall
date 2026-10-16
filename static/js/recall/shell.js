@@ -199,13 +199,13 @@
     }
 
     // ============================================================
-    // K2: підказки дзвінка («Записати?» / «Зупинити?») плашкою у вкладці.
-    // Детектор живе на сервері (call_watch.py) і шле сповіщення Windows; тут лише
-    // показуємо те саме, що віддає GET /api/recording/autoprompt, з тими ж
-    // кнопками. Кнопка = перехід на одноразовий URL дії: сервер робить дію і
-    // повертає на /record. Опитування — лише коли вкладка видима.
+    // K2: call prompts ("Record?" / "Stop?") as a banner in the tab.
+    // The detector lives on the server (call_watch.py) and sends Windows notifications; here we only
+    // show the same thing GET /api/recording/autoprompt returns, with the same
+    // buttons. A button = a jump to a one-time action URL: the server performs the action and
+    // returns to /record. Polling happens only while the tab is visible.
     const CALL_POLL_MS = 5000;
-    const callShown = new Map();   // prompt id → element (null = закрито тут, не показувати знову)
+    const callShown = new Map();   // prompt id → element (null = closed here, do not show again)
 
     function startCallPrompts() {
         document.addEventListener('visibilitychange', () => { if (!document.hidden) pollCallPrompts(); });
@@ -228,7 +228,7 @@
     }
 
     function goAction(url) {
-        const u = new URL(url, window.location.origin);   // той самий origin, хоч би як відкрито Recall
+        const u = new URL(url, window.location.origin);   // same origin, however Recall was opened
         window.location.href = u.pathname + u.search;
     }
 
@@ -264,8 +264,8 @@
             add(R.t('core.call.stop'), () => goAction(p.actions.stop));
             add(R.t('core.call.keep'), () => goAction(p.actions.keep));
         }
-        // × на «Записати?» = «Не потрібно»; на «Зупинити?» лише ховає плашку тут
-        // (автостоп після тиші лишається — ним керує сервер).
+        // × on "Record?" = "Not needed"; on "Stop?" it only hides the banner here
+        // (auto-stop after silence stays — the server controls it).
         t.querySelector('.rc-toast__x').addEventListener('click', isRec ? dismiss : () => { t.remove(); callShown.set(p.id, null); });
         wrap.appendChild(t);
         return t;

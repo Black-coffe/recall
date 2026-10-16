@@ -1,7 +1,7 @@
 /* Recall — "Додати у архів · Telegram" (Phase 17). Management panel, not an
    ingest-and-navigate flow: shows listener status, the account's dialogs (live
    listener) or saved monitored chats (offline), and lets you toggle monitoring,
-   assign a напрямок (category) and backfill history per chat.
+   assign a category (напрямок) and backfill history per chat.
 
    Reads: GET /api/telegram/status, /dialogs (live only), /chats (DB, always).
    Writes: POST /chats (enable + category upsert), /backfill, /api/memory/categories. */
@@ -18,12 +18,12 @@
     ];
 
     // [{ id, title, type, username, first_name, last_name, phone, bot, deleted,
-    //    monitored, category_id }] — first_name…deleted віддає лише живий слухач
-    // нової версії; старий слухач і офлайн-список (з БД) їх не мають.
+    //    monitored, category_id }] — first_name…deleted is provided only by the live listener
+    // of the new version; the old listener and the offline list (from the DB) do not have them.
     let dialogs = [];
     let filter = 'all';
-    let query = null;      // parseQuery(...) або null, коли пошук порожній
-    let live = false;      // список прийшов від живого слухача (а не з БД)
+    let query = null;      // parseQuery(...) or null when the search is empty
+    let live = false;      // the list came from the live listener (not from the DB)
     let cats = null;
 
     async function render(ctx) {
@@ -125,19 +125,19 @@
         }
     }
 
-    // ---- Пошук: імʼя / @нік / телефон ---------------------------------------
-    // Імена в Telegram записані як заманеться: та сама людина буває «Olena
-    // Koval» і «Олена Коваль». Тому, крім прямого збігу підрядка, імʼя
-    // порівнюється ще й «скелетом»: латиниця після транслітерації, де j/y→i,
-    // g→h, kh→h і подвоєні літери злиті (Олена = Olena = Elena).
+    // ---- Search: name / @nick / phone ---------------------------------------
+    // Names in Telegram are written however people like: the same person can be «Olena
+    // Koval» and «Олена Коваль». So besides a direct substring match, the name
+    // is also compared by a "skeleton": Latin after transliteration, where j/y→i,
+    // g→h, kh→h and doubled letters are merged (Олена = Olena = Elena).
     const CYR = {
         а: 'a', б: 'b', в: 'v', г: 'h', ґ: 'g', д: 'd', е: 'e', є: 'ie', ё: 'e', ж: 'zh', з: 'z',
         и: 'y', і: 'i', ї: 'i', й: 'i', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r',
         с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '',
         ы: 'y', ь: '', э: 'e', ю: 'iu', я: 'ia',
     };
-    // toLowerCase у JS згортає кирилицю коректно (на відміну від SQLite LOWER);
-    // апострофи (', ’, ʼ) прибираємо, щоб «Мар'яна» = «Марʼяна».
+    // toLowerCase in JS folds Cyrillic correctly (unlike SQLite LOWER);
+    // we strip apostrophes (', ’, ʼ) so that «Мар'яна» = «Марʼяна».
     function fold(s) {
         return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/['’ʼ`]/g, '')
             .replace(/\s+/g, ' ').trim();
@@ -150,9 +150,9 @@
     }
     const digits = (s) => String(s == null ? '' : s).replace(/\D/g, '');
 
-    // Телефон від Telethon — цифри без «+» (380671234567). Запит порівнюємо
-    // цифрами: «+380 67 123-45-67», «(067) 123 45 67», «0671234567» — один номер.
-    // Локальний запис із транковою 0/8 збігається з хвостом міжнародного.
+    // A phone from Telethon — digits without "+" (380671234567). We compare the query by
+    // digits: «+380 67 123-45-67», «(067) 123 45 67», «0671234567» — one number.
+    // A local number with a trunk 0/8 matches the tail of the international one.
     function phoneHit(phone, qd) {
         if (phone.includes(qd)) return true;
         return qd.length >= 9 && /^[08]/.test(qd) && phone.endsWith(qd.slice(1));
@@ -174,7 +174,7 @@
         return {
             raw: q, atNick,
             tokens: text.split(' ').filter(Boolean),
-            // скелет із 1–2 літер («й», «y») збігається майже з усім — лише шум
+            // a skeleton of 1–2 letters («й», «y») matches almost everything — just noise
             skel: skel.join('').length >= 3 ? skel : [],
             phone: /^[+\d\s\-().]+$/.test(q) && digits(q).length >= 3 ? digits(q) : '',
             id: /^-?\d+$/.test(compact) ? compact : '',
@@ -191,9 +191,9 @@
         };
     }
 
-    // → null (не підходить) або { rank, by }. rank упорядковує видачу (менше —
-    // вище), by — яке поле збіглося: його підсвічуємо в рядку, бо збіг за
-    // @ніком чи телефоном з назви не видно.
+    // → null (does not fit) or { rank, by }. rank orders the results (lower —
+    // higher), by — which field matched: we highlight it in the row, because a match by
+    // @nick or phone is not visible from the title.
     function matchDialog(d, q) {
         const ix = d._ix || (d._ix = searchIndex(d));
         if (q.id && String(d.id) === q.id) return { rank: 0, by: 'id' };
@@ -212,8 +212,8 @@
         return null;
     }
 
-    // Пошук звужує список ДО фільтрів: лічильники на чипах показують, скільки
-    // знайдено в кожному фільтрі, тож «у Відстежуваних 0» видно одразу.
+    // The search narrows the list BEFORE the filters: the counters on the chips show how many
+    // were found in each filter, so «у Відстежуваних 0» is visible at once.
     function searched() {
         if (!query) return dialogs.map(d => ({ d, hit: null }));
         const out = [];
@@ -279,7 +279,7 @@
     }
     function typeLabel(d) {
         if (d.bot) return R.t('telegram.type.bot');
-        // видалений акаунт приходить без імені, і _chat_type_of бачить у ньому «chat»
+        // a deleted account comes without a name, and _chat_type_of sees "chat" in it
         if (d.deleted) return R.t('telegram.type.user');
         return TYPE_BADGE[d.type] ? R.t(TYPE_BADGE[d.type]) : (d.type || '');
     }
@@ -293,7 +293,7 @@
             badge ? `<span class="rc-tgrow__badge">${U.esc(badge)}</span>` : '',
             d.username ? `<span class="rc-tgrow__nick${cls('nick')}">@${U.esc(d.username)}</span>` : '',
             d.phone ? `<span class="rc-tgrow__phone${cls('phone')}">${U.esc(fmtPhone(d.phone))}</span>` : '',
-            // без назви й ніка єдине, що відрізняє рядок, — id
+            // without a title and nick the only thing that distinguishes the row is the id
             (!d.title && !d.username) || by === 'id' ? `<span class="rc-tgrow__id${cls('id')}">id ${U.esc(String(d.id))}</span>` : '',
         ].join('');
         return `<div class="rc-tgrow-wrap" data-wrap="${d.id}">
@@ -314,10 +314,10 @@
         </div>`;
     }
 
-    // Обсяг backfill'у обирає користувач (замість фіксованого limit=200 мовчки).
-    // Fire-and-forget на бекенді (Phase 17D) не має progress-API — тож чесно
-    // показуємо: скільки запросили, що це фоновий процес, і посилання на
-    // Архів (відфільтрований по цьому чату), де видно нові записи по мірі появи.
+    // The backfill volume is chosen by the user (instead of a silently fixed limit=200).
+    // Fire-and-forget on the backend (Phase 17D) has no progress API — so we honestly
+    // show: how many were requested, that this is a background process, and a link to
+    // the Archive (filtered by this chat), where new records are visible as they appear.
     function backfillPanelHTML(d) {
         return `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 0;font-size:var(--rc-t-xs);color:var(--rc-ink-2)">
             <label style="display:flex;align-items:center;gap:6px">${R.t('telegram.bf.volume')}

@@ -1,7 +1,7 @@
-"""Eval-інфраструктура для retrieval/RAG (REMEDIATION_PLAN Волна 3, T6.1).
+"""Eval infrastructure for retrieval/RAG (REMEDIATION_PLAN Wave 3, T6.1).
 
-Дивись evals/README.md — формат golden-set, коли ганяти, як тримати власні
-дані локально. ``evals.metrics`` — детермінована математика (recall@k,
-citation-rate), тестована офлайн без API/GPU. ``evals.run_eval`` — CLI, що
-дійсно ходить у БД і (опційно) Claude API.
+See evals/README.md for the golden-set format, when to run it and how to keep your own
+data local. ``evals.metrics`` is deterministic math (recall@k,
+citation-rate), tested offline without API/GPU. ``evals.run_eval`` is a CLI that
+really hits the DB and (optionally) the Claude API.
 """

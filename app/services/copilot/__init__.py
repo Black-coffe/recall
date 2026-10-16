@@ -1,9 +1,9 @@
-"""Co-pilot — живий ко-пілот дзвінка (Phase 19).
+"""Co-pilot — the live call co-pilot (Phase 19).
 
-Локальна модель-диспетчер слухає діалог у реальному часі (теми / RAG /
-протиріччя), Claude підключається як верифікатор лише на ескалаціях
-(local-first cascade). Повний план — docs/COPILOT_ROADMAP.md.
+A local dispatcher model listens to the dialogue in real time (topics / RAG /
+contradictions); Claude joins as a verifier only on escalations
+(local-first cascade). Full plan — docs/COPILOT_ROADMAP.md.
 
-Крок 1: каркас сесії (config-резолвер матриці режим×важливість + CopilotService
-для персисту в copilot_sessions). Аналізу ще нема — лише фіксація налаштувань.
+Step 1: session skeleton (config resolver for the mode x importance matrix + CopilotService
+for persistence into copilot_sessions). No analysis yet — settings are only recorded.
 """

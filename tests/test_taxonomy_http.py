@@ -1,9 +1,9 @@
-"""Фільтри напрямок/теги/період на `/api/history`, `/api/audio/downloads`,
-`/api/research/*` (спека `directions-projects-tags`, історія 02).
+"""Direction/tags/period filters on `/api/history`, `/api/audio/downloads`,
+`/api/research/*` (spec `directions-projects-tags`, story 02).
 
-Той самий підхід, що й `test_taxonomy.py`: tmp-БД (`init_database`) + Flask
-`test_client` навколо блупринтів напряму — бойовий `whisper_history.db` не
-чіпається. Фікстури кириличні (`plan-dictated-sql-ignored-own-memory`).
+The same approach as `test_taxonomy.py`: a tmp DB (`init_database`) + Flask
+`test_client` around the blueprints directly - the live `whisper_history.db` is
+not touched. Fixtures are Cyrillic (`plan-dictated-sql-ignored-own-memory`).
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def client(db):
 
 @pytest.fixture
 def memory_client(db):
-    """`memory_bp` окремо: `merge_category`/`sort_order`/`ask` (історія 23)."""
+    """`memory_bp` on its own: `merge_category`/`sort_order`/`ask` (story 23)."""
     app = Flask(__name__)
     app.register_blueprint(memory_bp)
     app.config["TESTING"] = True
@@ -58,8 +58,8 @@ def memory_client(db):
 
 
 def _tree(conn):
-    """«Фонд Робота» (наявний серед засівів v15) → «Акмекорп» + сусідній
-    напрямок «Інше»."""
+    """«Фонд Робота» (existing among the v15 seeds) -> «Акмекорп» + a neighbouring
+    direction «Інше»."""
     row = conn.execute("SELECT id FROM categories WHERE COALESCE(name_norm, name) = ?",
                        ("фонд робота",)).fetchone()
     fund = cats.get_category(conn, row[0]) if row else cats.create_category(conn, "Фонд Робота")
@@ -128,8 +128,8 @@ def test_history_tags_and_period_filters(client, conn):
     t_ai = _add_tx(conn, category_id=bar["id"], name="AI", meeting_date="2026-09-03")
     t_inv = _add_tx(conn, category_id=fund["id"], name="Інвестори", meeting_date="2026-09-10")
     t_bare = _add_tx(conn, category_id=bar["id"], name="Без тегів", meeting_date="2026-09-05")
-    # Обидві межі включно: рівно since / рівно until (останній — з часом у
-    # межах дня, щоб довести `date(...)` а не рядкове порівняння).
+    # Both bounds inclusive: exactly since / exactly until (the latter with a time within
+    # the day, to prove `date(...)` and not a string comparison).
     t_left = _add_tx(conn, category_id=bar["id"], name="Рівно з", meeting_date="2026-09-01")
     t_right = _add_tx(conn, category_id=bar["id"], name="Рівно по",
                       meeting_date="2026-09-07 23:40:00")
@@ -158,7 +158,7 @@ def test_history_tags_and_period_filters(client, conn):
 
 
 # ============================================================
-# /api/history + /api/history/<id> — tags/suggested_tags на кожному елементі
+# /api/history + /api/history/<id> - tags/suggested_tags on every item
 # ============================================================
 
 def test_history_items_and_detail_carry_tags_and_suggested_tags(client, conn):
@@ -184,7 +184,7 @@ def test_history_items_and_detail_carry_tags_and_suggested_tags(client, conn):
 
 
 # ============================================================
-# /api/audio/downloads — ті самі три осі через останній транскрипт
+# /api/audio/downloads - the same three axes through the latest transcript
 # ============================================================
 
 def test_audio_downloads_axes_via_last_transcript(client, conn):
@@ -200,8 +200,8 @@ def test_audio_downloads_axes_via_last_transcript(client, conn):
 
     data = client.get(f"/api/audio/downloads?category_id={fund['id']}").get_json()
     titles = {d["title"] for d in data["downloads"]}
-    # A1 — напрямок через останній транскрипт (Акмекорп, проєкт фонду);
-    # A2 — власна category_id (fallback без транскрипту).
+    # A1 - the direction through the latest transcript («Акмекорп», a fund project);
+    # A2 - its own category_id (fallback without a transcript).
     assert titles == {"A1", "A2 без транскрипту"}
 
     row_a1 = next(d for d in data["downloads"] if d["title"] == "A1")
@@ -212,12 +212,12 @@ def test_audio_downloads_axes_via_last_transcript(client, conn):
     assert row_a2["tags"] == []
     assert row_a2["youtube_tags"] == []
 
-    # Тег живе лише на транскрипті — без нього рядок випадає з тег-фільтра.
+    # The tag lives only on the transcript - without it the row drops out of the tag filter.
     titles = {d["title"] for d in client.get("/api/audio/downloads?tags=AI")
                                         .get_json()["downloads"]}
     assert titles == {"A1"}
 
-    # Період так само — тільки через транскрипт.
+    # The period likewise - only through the transcript.
     titles = {d["title"] for d in
               client.get("/api/audio/downloads?since=2026-09-01&until=2026-09-07")
                     .get_json()["downloads"]}
@@ -229,7 +229,7 @@ def test_audio_downloads_axes_via_last_transcript(client, conn):
 
 
 # ============================================================
-# /api/research/* — напрямок розкривається на проєкти + tags/since/until
+# /api/research/* - the direction expands to projects + tags/since/until
 # ============================================================
 
 def test_research_preview_sees_mentions_in_direction_projects(client, conn):
@@ -291,7 +291,7 @@ def test_research_endpoints_pass_tags_since_until_to_service(client, monkeypatch
     r = client.post("/api/research/summary", json={
         "q": "Horeca", "tags": "AI", "since": "2026-09-01", "until": "2026-09-07"})
     assert r.status_code == 200
-    r.get_data()  # спожити генератор
+    r.get_data()  # consume the generator
     assert captured["summarize"]["tags"] == ["AI"]
     assert captured["summarize"]["since"] == "2026-09-01"
     assert captured["summarize"]["until"] == "2026-09-07"
@@ -304,7 +304,7 @@ def test_research_preview_rejects_bad_date(client):
 
 
 def test_research_service_has_no_private_category_parser():
-    """research.py більше не тримає власну копію парсера — лише `categories.parse_filter`."""
+    """research.py no longer keeps its own copy of the parser - only `categories.parse_filter`."""
     src = inspect.getsource(research_svc)
     assert "_parse_category" not in src
     assert "from app.services.categories import" in src
@@ -312,7 +312,7 @@ def test_research_service_has_no_private_category_parser():
 
 
 # ============================================================
-# v47: помилка кривої дати — українська на всіх спискових поверхнях (історія 20)
+# v47: bad-date error - Ukrainian on all list surfaces (story 20)
 # ============================================================
 
 @pytest.mark.parametrize("url", [
@@ -321,9 +321,9 @@ def test_research_service_has_no_private_category_parser():
     "/api/research/preview?q=кошторис&since=not-a-date",
 ])
 def test_bad_date_error_is_ukrainian_everywhere(client, url):
-    """Один розбір (`categories.parse_date`) — один текст: «Невалідна дата …
-    очікується YYYY-MM-DD». Сире `Invalid isoformat string` не доходить до
-    клієнта в жодній із трьох поверхонь."""
+    """One parse (`categories.parse_date`) - one text: «Невалідна дата ...
+    очікується YYYY-MM-DD». The raw `Invalid isoformat string` does not reach the
+    client on any of the three surfaces."""
     r = client.get(url)
     assert r.status_code == 400
     error = r.get_json()["error"]
@@ -332,8 +332,8 @@ def test_bad_date_error_is_ukrainian_everywhere(client, url):
 
 
 # ============================================================
-# Мажор 2 р4/р5: `merge_category` `target_id`, `sort_order` — той самий
-# розбір (`_parse_int_or_none`), що вже стоїть на `category_id`/`parent_id`.
+# Major 2 r4/r5: `merge_category` `target_id`, `sort_order` - the same
+# parsing (`_parse_int_or_none`) that already stands on `category_id`/`parent_id`.
 # ============================================================
 
 def test_merge_category_rejects_garbled_target_id(memory_client, conn):
@@ -390,9 +390,9 @@ def test_update_category_sort_order_valid_still_works(memory_client, conn):
 
 
 def test_update_category_sort_order_negative_accepted(memory_client, conn):
-    """28 (мінор р0 п.5 / р1 п.4): `-5` знову приймається — звуження до
-    невідʼємних (26) відкочено, JS-відправника з відʼємним значенням немає,
-    звуження не було на записі."""
+    """28 (minor r0 p.5 / r1 p.4): `-5` is accepted again - the narrowing to
+    non-negatives (26) is rolled back, there is no JS sender with a negative value,
+    the narrowing was not on record."""
     fund, bar, other = _tree(conn)
     r = memory_client.patch(f"/api/memory/categories/{other['id']}", json={"sort_order": -5})
     assert r.status_code == 200
@@ -412,7 +412,7 @@ def test_update_category_sort_order_non_integer_is_400(memory_client, conn):
 
 
 # ============================================================
-# Мінор 11 р0: `project` у `/api/memory/ask` — нерядковий вхід → 400 ДО rag.
+# Minor 11 r0: `project` in `/api/memory/ask` - a non-string input -> 400 BEFORE rag.
 # ============================================================
 
 def test_ask_rejects_non_string_project_before_calling_rag(memory_client, monkeypatch):

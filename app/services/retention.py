@@ -1,15 +1,15 @@
-"""Purge прострочених soft-deleted записів (T4.6, REMEDIATION_PLAN Волна 2).
+"""Purge of expired soft-deleted records (T4.6, REMEDIATION_PLAN Wave 2).
 
-Одиничний DELETE (transcriptions/audio_downloads) ставить `deleted_at`
-(epoch-секунди) замість фізичного видалення — undo-вікно для фронта
-(restore-ендпоінти). merge_speakers (Phase 12.8) зберігає before-снапшот у
-``speaker_merges`` для un-merge. Обидва механізми мають грейс-період —
-безстроково висячі soft-deleted записи ніхто не просив; ``purge_soft_deleted``
-фізично прибирає прострочене (файл з диска + рядок БД / снапшот).
+A single DELETE (transcriptions/audio_downloads) sets `deleted_at`
+(epoch seconds) instead of physical removal — an undo window for the frontend
+(restore endpoints). merge_speakers (Phase 12.8) keeps a before-snapshot in
+``speaker_merges`` for un-merge. Both mechanisms have a grace period —
+nobody asked for soft-deleted records to hang around indefinitely; ``purge_soft_deleted``
+physically removes the expired ones (file from disk + DB row / snapshot).
 
-Викликається на старті app.py (той самий патерн, що й
-``recording_service.recover_orphaned()`` і ``job_queue.recover_crashed()``)
-— НЕ періодичний фон-таск: досить одного проходу при рестарті сервера.
+Called at app.py startup (the same pattern as
+``recording_service.recover_orphaned()`` and ``job_queue.recover_crashed()``)
+— NOT a periodic background task: a single pass on server restart is enough.
 """
 from __future__ import annotations
 
@@ -44,12 +44,12 @@ def _safe_remove(path: Optional[str]) -> bool:
             os.remove(path)
             return True
     except OSError as e:
-        logger.warning("[retention] не вдалося видалити файл %s: %s", path, e)
+        logger.warning("[retention] failed to delete file %s: %s", path, e)
     return False
 
 
 def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict:
-    """Фізично прибрати soft-deleted записи/снапшоти, старші за grace-період.
+    """Physically remove soft-deleted records/snapshots older than the grace period.
 
     Returns {"grace_days", "transcriptions_purged", "audio_purged",
     "merges_purged"}.
@@ -72,10 +72,10 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
                 (cutoff,),
             ).fetchall()
             for row in rows:
-                # Той самий контракт, що й у попередньому фізичному DELETE
-                # (transcription.py): file_path youtube/file-джерел видаляємо
-                # з диска, 'recording' — файл належить Audio Library (там
-                # своя soft-delete/purge доріжка), не чіпаємо.
+                # The same contract as the previous physical DELETE
+                # (transcription.py): the file of youtube/file sources is deleted
+                # from disk; 'recording' — the file belongs to the Audio Library (it has
+                # its own soft-delete/purge track), do not touch.
                 if row["source_type"] in ("youtube", "file") and row["file_path"]:
                     _safe_remove(row["file_path"])
                 conn.execute(
@@ -96,7 +96,7 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
                 conn.execute("DELETE FROM audio_downloads WHERE id = ?", (row["id"],))
                 stats["audio_purged"] += 1
 
-            # --- speaker_merges snapshots (undo-вікно спливло) ---
+            # --- speaker_merges snapshots (undo window has expired) ---
             cur = conn.execute(
                 "DELETE FROM speaker_merges WHERE merged_at < ?", (cutoff,),
             )
@@ -104,7 +104,7 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
 
             conn.commit()
     except Exception as e:
-        logger.error("[retention] purge_soft_deleted помилка: %s", e, exc_info=True)
+        logger.error("[retention] purge_soft_deleted error: %s", e, exc_info=True)
         return stats
 
     if stats["transcriptions_purged"] or stats["audio_purged"] or stats["merges_purged"]:

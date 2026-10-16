@@ -1,4 +1,4 @@
-"""Тесты для sanitize_fts_query (Phase 4.2 FTS5 пошук)."""
+"""Tests for sanitize_fts_query (Phase 4.2 FTS5 search)."""
 from app.utils.fts import sanitize_fts_query as sanitize
 
 
@@ -21,13 +21,13 @@ def test_multiple_words_AND():
 
 
 def test_special_chars_stripped():
-    """FTS5 спецсимволи (* " :) не потрапляють у результат як operators."""
+    """FTS5 special characters (* " :) do not end up in the result as operators."""
     out = sanitize('hello*world')
     assert out == '"hello" "world"'
 
 
 def test_quotes_neutralized():
-    """Лапки в інпуті не повинні зламати FTS5 phrase syntax."""
+    """Quotes in the input must not break the FTS5 phrase syntax."""
     out = sanitize('say "hi" please')
     assert '"say"' in out
     assert '"hi"' in out

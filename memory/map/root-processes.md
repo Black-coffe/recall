@@ -1,6 +1,6 @@
 # root-processes — telegram_*, mcp_server.py
 
-last-verified: 2026-10-15
+last-verified: 2026-10-16
 Adjacent slice: `root.md` (app.py, config, state, whisper).
 
 ## telegram_listener.py
@@ -31,11 +31,14 @@ Flask goes through HTTP only.
 **41 read-only tools** (17 direct-DB + 24 proxy; checked against the tuples). The number in `about()` comes from the FastMCP registry
 (`_registered_tool_names()` :2228).
 **Hybrid:** 17 tools read SQLite directly without app.py (`_ABOUT_DIRECT_DB` :2210; among them `grep_archive`, `list_pipe_runs`);
-24 are httpx proxies to app.py (`_ABOUT_PROXY` :2217) via `_api()` :142, `RECALL_API_URL` (default `http://127.0.0.1:5050`).
+24 are httpx proxies to app.py (`_ABOUT_PROXY` :2217) via `_api()` :155, `RECALL_API_URL` (default `http://127.0.0.1:5050`).
 **Transports:** stdio (default :2308; `claude mcp add ... -- ... --transport stdio` drops trailing arguments, hence the default) or
 `--transport http` (127.0.0.1:5060, Bearer `RECALL_MCP_KEY`; without a key — startup refused :2313).
 **Resources:** `recall://about`, `recall://transcript/{id}`, `recall://entity/{id}`.
-**Env:** `RECALL_API_URL`, `RECALL_MCP_READONLY` (:138; blocks writes in `_api`, effectively no effect), `RECALL_MCP_KEY`,
+**Language (english-code, 4.17.0):** the whole MCP surface is English (tool descriptions, responses, logs). `_set_process_lang()` :103
+sets `RECALL_UI_LANG=en` at import (skipped under pytest, :109), so `tr()` server texts come out `en`; every `_api` call sends
+`_LANG_HEADERS = {"X-Recall-Lang": "en"}` :142. Archive content (transcripts, summaries) stays in its source language.
+**Env:** `RECALL_API_URL`, `RECALL_MCP_READONLY` (:150; blocks writes in `_api`, effectively no effect), `RECALL_MCP_KEY`,
 `RECALL_MCP_DEBUG_LOG=1` (call log in `logs/mcp_calls.log`), `RECALL_MCP_VISUAL` (`images` default|`text`|`off`),
 `RECALL_PRIVATE_CATEGORIES`, `RECALL_PRIVATE_WORDS_FILE`. `.env` is loaded from the script's directory.
 **Tool groups:**

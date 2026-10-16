@@ -20,10 +20,10 @@
     --rc-surface-2:     #faf8f2;   /* hover / nested surface */
     --rc-ink:           #1b1a16;   /* primary text — warm near-black */
     --rc-ink-2:         #57534a;   /* secondary text */
-    /* Було #8c8678 — 3.21:1 на канві, тобто НИЖЧЕ 4.5:1 для дрібного тексту.
-       А саме ним набрана вся мета-інформація списків (дати, лічильники, id),
-       якої на екрані найбільше. #706b5d тримає той самий теплий сірий характер
-       і дає 4.71:1 на канві / 5.27:1 на surface. */
+    /* Was #8c8678 — 3.21:1 on the canvas, i.e. BELOW 4.5:1 for small text.
+       And that is what all the list meta information is set in (dates, counters, ids),
+       which is the most numerous thing on the screen. #706b5d keeps the same warm gray character
+       and gives 4.71:1 on the canvas / 5.27:1 on the surface. */
     --rc-ink-3:         #706b5d;   /* tertiary / placeholder / mono labels */
     --rc-hairline:      #e2ddd1;   /* borders, rules */
     --rc-hairline-2:    #d3cdbf;   /* stronger rule */
@@ -35,10 +35,10 @@
     --rc-accent-ring:   rgba(184, 115, 27, 0.22);
 
     /* — Status (muted, editorial) — */
-    --rc-ok:            #3a7247;   /* було #3f7d4e — 4.38:1, тепер 5.06:1 */
+    --rc-ok:            #3a7247;   /* was #3f7d4e — 4.38:1, now 5.06:1 */
     --rc-ok-tint:       #e7f0e6;
-    --rc-warn:          #b07a16;   /* лише для плашок/крапок — 3.30:1 на канві */
-    --rc-warn-deep:     #8a5c0d;   /* для ТЕКСТУ: 5.15:1 на канві, 5.76:1 на surface */
+    --rc-warn:          #b07a16;   /* only for pills/dots — 3.30:1 on the canvas */
+    --rc-warn-deep:     #8a5c0d;   /* for TEXT: 5.15:1 on the canvas, 5.76:1 on the surface */
     --rc-warn-tint:     #f7efdb;
     --rc-err:           #a23a2e;
     --rc-err-tint:      #f4e4e0;
@@ -537,14 +537,14 @@ html, body { margin: 0; padding: 0; }
 }
 .rc-toolbar__grow { flex: 1; min-width: 220px; }
 .rc-filterbar { display: flex; gap: var(--rc-2); flex-wrap: wrap; margin-bottom: var(--rc-5); align-items: center; }
-/* Розділяє чипи РІЗНИХ осей фільтра (джерело ≠ «чи вже оброблено»), щоб їх не
-   читали як один взаємовиключний ряд. */
+/* Separates chips of DIFFERENT filter axes (source ≠ «чи вже оброблено»), so they are not
+   read as one mutually exclusive row. */
 .rc-filterbar__sep { width: 1px; align-self: stretch; margin: 2px var(--rc-2); background: var(--rc-hairline-2); }
 
 .rc-list { border-top: 1px solid var(--rc-hairline); }
-/* Flex, не grid: кількість дітей у рядку змінна (чекбокс зʼявляється лише в
-   режимі вибору), а фіксована сітка `auto 1fr auto` при чотирьох дітях
-   переносила праву колонку на другий рядок. Це 1D-розкладка — тут flex. */
+/* Flex, not grid: the number of children in the row varies (the checkbox appears only in
+   selection mode), and a fixed `auto 1fr auto` grid with four children
+   wrapped the right column onto a second row. This is a 1D layout — flex here. */
 .rc-rec {
     display: flex;
     gap: var(--rc-4);
@@ -555,9 +555,9 @@ html, body { margin: 0; padding: 0; }
     transition: background var(--rc-fast);
 }
 .rc-rec:hover { background: var(--rc-surface); }
-/* Ліва рейка фіксованої ширини — тримає вирівнювання списку, коли частина
-   рядків має мініатюру (YouTube), а частина ні. Замість важкого боксу 48×48
-   з рамкою — сама мініатюра або тихий гліф джерела. */
+/* Left rail of fixed width — keeps the list aligned when some
+   rows have a thumbnail (YouTube) and some do not. Instead of a heavy 48×48 box
+   with a frame — the thumbnail itself or a quiet source glyph. */
 .rc-rec__rail {
     flex: none; width: 56px; min-height: 38px;
     display: flex; align-items: center; justify-content: center;
@@ -583,8 +583,8 @@ html, body { margin: 0; padding: 0; }
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
 }
-/* Телеграм-повідомлення: «заголовок» — це не назва, а провенанс (чат + автор).
-   Тому не серіф-дисплей, а тихий підпис — читати треба текст під ним. */
+/* Telegram message: the «заголовок» is not a title but provenance (chat + author).
+   So not a serif display but a quiet caption — the text under it is what must be read. */
 .rc-rec__title--label {
     font-family: var(--rc-sans);
     font-size: var(--rc-t-sm);
@@ -605,8 +605,8 @@ html, body { margin: 0; padding: 0; }
     color: var(--rc-ink-3);
 }
 .rc-rec__meta .sep { opacity: 0.4; }
-/* Числа, за якими приймають рішення (тривалість, скільки задач) — трохи
-   темніші за решту мети, щоб їх було видно при скануванні. */
+/* Numbers decisions are made by (duration, how many tasks) — slightly
+   darker than the rest of the meta, so they are visible when scanning. */
 .rc-rec__sig { color: var(--rc-ink-2); font-weight: 500; }
 .rc-rec__warn { color: var(--rc-warn-deep); }
 .rc-rec__preview {
@@ -619,8 +619,8 @@ html, body { margin: 0; padding: 0; }
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
 }
-/* Коли тіло — головний вміст рядка (текст TG-повідомлення), воно й отримує
-   вагу основного тексту, а мета йде під ним. */
+/* When the body is the main content of the row (the text of a TG message), it also gets
+   the weight of the main text, and the meta goes under it. */
 .rc-rec__preview--lead {
     margin-top: 0; margin-bottom: 5px;
     color: var(--rc-ink);
@@ -632,9 +632,9 @@ html, body { margin: 0; padding: 0; }
 .rc-rec__aside { display: flex; flex-direction: column; align-items: flex-end; gap: var(--rc-1); flex: none; }
 .rc-rec__acts { display: flex; align-items: center; gap: var(--rc-1); }
 .rc-rec__id { color: var(--rc-ink-3); opacity: 0.75; }
-/* Видалення — найруйнівніша дія рядка, і донедавна єдина видима. Тримаємо її
-   притишеною, поки курсор не на рядку; на тач-пристроях (немає :hover)
-   лишається видимою завжди, інакше до неї не дістатись. */
+/* Deletion is the most destructive action of a row, and until recently the only visible one. We keep it
+   muted until the cursor is on the row; on touch devices (no :hover)
+   it stays always visible, otherwise it cannot be reached. */
 @media (hover: hover) {
     .rc-rec__del { opacity: 0; transition: opacity var(--rc-fast); }
     .rc-rec:hover .rc-rec__del,
@@ -642,9 +642,9 @@ html, body { margin: 0; padding: 0; }
     .rc-task:hover .rc-rec__del,
     .rc-rec__del:focus-visible { opacity: 1; }
 }
-/* [hidden] має вигравати в атомарних утиліт із власним display. Без цього
-   правила порожня sticky-панель bulk-дій висіла внизу Бібліотеки ЗАВЖДИ:
-   `.rc-bulkbar { display:flex }` перебивало браузерне `[hidden]{display:none}`. */
+/* [hidden] must win over atomic utilities with their own display. Without this
+   rule the empty sticky bulk-action panel hung at the bottom of the Library ALWAYS:
+   `.rc-bulkbar { display:flex }` overrode the browser's `[hidden]{display:none}`. */
 .rc-app [hidden] { display: none !important; }
 
 /* pagination */
@@ -774,7 +774,7 @@ html, body { margin: 0; padding: 0; }
 .rc-bm__note { flex: 1; min-width: 0; color: var(--rc-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-bm__empty { color: var(--rc-ink-3); font-style: italic; }
 
-/* editable напрямок cell (select + ✨ suggest) */
+/* editable category cell (select + ✨ suggest) */
 #rcCatEdit { display: flex; align-items: center; gap: var(--rc-1); }
 #rcCatEdit .rc-select { max-width: 200px; }
 
@@ -803,12 +803,12 @@ html, body { margin: 0; padding: 0; }
     border-bottom: 1px solid var(--rc-hairline);
 }
 .rc-task:hover { background: var(--rc-surface); }
-/* ?task=<id> з брифінгу: задача підсвічена кілька секунд і згасає */
+/* ?task=<id> from the briefing: the task is highlighted for a few seconds and fades out */
 .rc-task.is-target { animation: rc-task-target 4s var(--rc-ease); }
 @keyframes rc-task-target { 0%,60% { background: var(--rc-accent-tint); } 100% { background: transparent; } }
-/* Статус-пілюля лишається для /entities та /transcript, де задача показана
-   поодинці й статус справді інформативний. На дашборді /tasks її замінили
-   прапорці-винятки (.rc-task__flag) — «open» на 1500 рядках був чистим шумом. */
+/* The status pill stays for /entities and /transcript, where the task is shown
+   on its own and the status is truly informative. On the /tasks dashboard it was replaced by
+   the exception flags (.rc-task__flag) — «open» on 1500 rows was pure noise. */
 .rc-task__status { font-family: var(--rc-mono); font-size: var(--rc-t-xs); padding: 1px 7px; border-radius: var(--rc-r-1); flex: none; margin-top: 2px; }
 .rc-task__status[data-s="open"] { background: var(--rc-accent-tint); color: var(--rc-accent-deep); }
 .rc-task__status[data-s="done"] { background: var(--rc-ok-tint); color: var(--rc-ok); }
@@ -820,8 +820,8 @@ html, body { margin: 0; padding: 0; }
 .rc-task__src { color: var(--rc-ink-3); font-family: var(--rc-mono); font-size: var(--rc-t-xs); }
 .rc-task__src:hover { color: var(--rc-accent-deep); text-decoration: underline; }
 
-/* Рейка дедлайну — фіксована ширина, щоб дати вишикувались у колонку і список
-   можна було сканувати згори вниз, не читаючи текст задач. */
+/* Deadline rail — fixed width, so the dates line up in a column and the list
+   can be scanned top to bottom without reading the task texts. */
 .rc-task__due {
     flex: none; width: 116px; padding-top: 1px;
     display: flex; flex-direction: column; gap: 1px;
@@ -845,7 +845,7 @@ html, body { margin: 0; padding: 0; }
 .rc-task__flag[data-s="done"] { background: var(--rc-ok-tint); color: var(--rc-ok); border-color: transparent; }
 .rc-task__flag[data-s="cancelled"] { background: var(--rc-err-tint); color: var(--rc-err); border-color: transparent; }
 
-/* Відра терміновості на /tasks */
+/* Urgency buckets on /tasks */
 .rc-bucket { margin-bottom: var(--rc-6); }
 .rc-bucket__head {
     display: flex; align-items: baseline; gap: var(--rc-3);
@@ -868,7 +868,7 @@ html, body { margin: 0; padding: 0; }
 .rc-bucket__list { border-top: none; }
 .rc-bucket__more { padding: var(--rc-3) var(--rc-2) 0; }
 
-/* Фасет власника — та сама вісь, що й «Період», тому та сама форма рядка */
+/* Owner facet — the same axis as «Період», hence the same row shape */
 .rc-ownerrow { display: flex; align-items: center; gap: var(--rc-2); flex-wrap: wrap; margin-bottom: var(--rc-5); }
 .rc-ownerrow:empty { display: none; }
 .rc-ownerrow__lbl {
@@ -1005,7 +1005,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     background: var(--rc-surface);
 }
 .rc-ask__bar textarea:focus { outline: none; border-color: var(--rc-accent); box-shadow: 0 0 0 3px var(--rc-accent-ring); }
-/* 👍/👎 під відповіддю — розмітка golden-set, а не «лайк» */
+/* 👍/👎 under the answer — golden-set labeling, not a "like" */
 .rc-ask__rate { display: flex; align-items: center; gap: var(--rc-2); margin-top: var(--rc-2); flex-wrap: wrap; }
 .rc-ask__rate-lede { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
 .rc-ask__rate-note {
@@ -1160,7 +1160,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-aud__run { margin-top: var(--rc-2); }
 .rc-aud__run[hidden] { display: none; }
 .rc-aud__tr { display: flex; align-items: center; gap: var(--rc-2); flex-wrap: wrap; }
-/* Статус «транскрибується у фоні» — нерухомий pill замість кнопки */
+/* Status "transcribing in the background" — a static pill instead of a button */
 .rc-btn.is-transcribing {
     cursor: default; pointer-events: none;
     color: var(--rc-accent); border-color: var(--rc-accent-soft, var(--rc-line));
@@ -1316,7 +1316,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-recwarn i { color: var(--rc-warn); margin-right: 4px; }
 .rc-recwarn--ask { display: flex; flex-wrap: wrap; align-items: center; gap: var(--rc-2); font-size: var(--rc-t-sm); color: var(--rc-ink); }
 
-/* ---- Co-pilot widget (Phase 19, Крок 4) ---- */
+/* ---- Co-pilot widget (Phase 19, Step 4) ---- */
 .rc-rec-active--cp { max-width: 1180px; display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: var(--rc-6); align-items: start; }
 .rc-rec-active--cp .rc-rec-main { min-width: 0; }
 .rc-cp {
@@ -1400,7 +1400,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-cp__feed { max-height: 420px; }
 }
 
-/* ---- Co-pilot session timeline on transcript page (Крок 7) ---- */
+/* ---- Co-pilot session timeline on transcript page (Step 7) ---- */
 .rc-cptl { border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); background: var(--rc-surface); margin-bottom: var(--rc-5); overflow: hidden; }
 .rc-cptl__head { display: flex; align-items: center; gap: var(--rc-3); padding: var(--rc-3) var(--rc-4); border-bottom: 1px solid var(--rc-hairline); background: var(--rc-surface-2); }
 .rc-cptl__title { font-weight: 600; display: inline-flex; align-items: center; gap: var(--rc-2); }
@@ -1472,18 +1472,18 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-newcat { display: flex; gap: var(--rc-2); margin-bottom: var(--rc-4); }
 .rc-newcat .rc-input { flex: 1; max-width: 360px; }
 
-/* «＋ Новий напрямок…» опція у будь-якому селекті напрямку */
+/* «＋ Новий напрямок…» option in any category select */
 .rc-opt-new { color: var(--rc-accent-deep, var(--rc-accent)); font-weight: 600; }
 
-/* напрямки: рядок керування у Налаштуваннях (флет-список — теги) */
+/* categories: management row in Settings (flat list — tags) */
 .rc-catrow { display: flex; align-items: center; gap: var(--rc-3); padding: var(--rc-2) 0; border-bottom: 1px solid var(--rc-hairline); }
 .rc-catrow__color { width: 30px; height: 30px; padding: 0; border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); background: none; cursor: pointer; flex: none; }
 .rc-catrow__name { flex: 1; max-width: 360px; }
 .rc-catrow__count { color: var(--rc-ink-3); font-size: var(--rc-t-xs); white-space: nowrap; flex: none; }
 .rc-catrow__actions { display: flex; gap: var(--rc-1); flex: none; }
 
-/* напрямки: дерево двох рівнів (09) — той самий рядок, що .rc-catrow, лише
-   з відступом для проєктів і селектом reparent замінюючи довільний блок */
+/* categories: two-level tree (09) — the same row as .rc-catrow, only
+   with an indent for projects and the reparent select replacing a free-form block */
 .rc-tree { border-top: 1px solid var(--rc-hairline); }
 .rc-tree__node { display: flex; align-items: center; gap: var(--rc-3); padding: var(--rc-2) 0; border-bottom: 1px solid var(--rc-hairline); }
 .rc-tree__node--project { padding-left: 34px; position: relative; }
@@ -1492,7 +1492,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     color: var(--rc-ink-3);
 }
 
-/* теги — чіп (запис/Налаштування) і мультиселект словника (09) */
+/* tags — chip (record/Settings) and the dictionary multiselect (09) */
 .rc-tag {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 2px 8px; border-radius: 999px;
@@ -1507,29 +1507,29 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-tag__x:hover { color: var(--rc-err); }
 .rc-tagsel { min-height: 76px; padding: var(--rc-2); }
 
-/* пікер тегів чіпами (21): прихований select лишається джерелом істини
-   (selectedOptions/change для шести sync()-екранів і рядка Telegram),
-   видимий шар — перемикачі поверх .rc-chip. Без фіксованої висоти й
-   min-height — у рядку Telegram (.rc-tgrow) не рве рядок, лише переносить
-   чіпи (flex-wrap). */
+/* tag picker with chips (21): the hidden select stays the source of truth
+   (selectedOptions/change for six sync() screens and the Telegram row),
+   the visible layer — toggles on top of .rc-chip. Without a fixed height and
+   min-height — in the Telegram row (.rc-tgrow) it does not break the row, only wraps
+   the chips (flex-wrap). */
 .rc-tagpick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .rc-tagpick .rc-tagsel { display: none; }
 .rc-tagpick__chips { display: flex; flex-wrap: wrap; gap: 6px; }
-/* Натиснутий стан — .rc-chip.is-active (413), той самий клас, що інші чіпи-
-   фільтри; окреме правило на атрибуті aria-pressed прибрано (24, дублювало). */
+/* Pressed state — .rc-chip.is-active (413), the same class as other filter
+   chips; a separate rule on the aria-pressed attribute was removed (24, duplicated). */
 .rc-tagpick__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--tag-color, var(--rc-ink-3)); }
 .rc-tagpick__empty { font-size: var(--rc-t-xs); color: var(--rc-ink-3); margin: 0; }
 .rc-tagpick__empty a { color: var(--rc-accent-deep); }
-/* Збій UI.loadTags (24) — не «тегів немає», окремий стан з «повторити». */
+/* UI.loadTags failure (24) — not "no tags", a separate state with "retry". */
 .rc-tagpick__error { display: flex; align-items: center; gap: 8px; font-size: var(--rc-t-xs); color: var(--rc-err); }
 
-/* згорнута підказка «Що це?» біля нового фільтра/контролу (09) */
+/* collapsed hint «Що це?» next to a new filter/control (09) */
 .rc-hint { font-size: var(--rc-t-xs); color: var(--rc-ink-3); margin: 0 0 var(--rc-3); }
 .rc-hint > summary { cursor: pointer; color: var(--rc-ink-2); }
 .rc-hint > summary:hover { color: var(--rc-accent-deep); }
 .rc-hint[open] > summary { color: var(--rc-accent-deep); margin-bottom: 4px; }
 
-/* загальна модалка (створення напрямку, перенесення) */
+/* common modal (category creation, move) */
 .rc-modal-ov { position: fixed; inset: 0; z-index: 1000; background: rgba(20, 22, 28, .42); display: flex; align-items: center; justify-content: center; padding: var(--rc-4); }
 .rc-modal { background: var(--rc-surface); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); box-shadow: 0 18px 50px rgba(20, 22, 28, .28); width: 100%; max-width: 420px; padding: var(--rc-5, 20px); max-height: 100%; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; }
 .rc-modal__h { font-weight: 700; font-size: var(--rc-t-md, 1.05rem); margin-bottom: var(--rc-4); display: flex; align-items: center; gap: var(--rc-2); }
@@ -1562,16 +1562,16 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-onb__status[data-s="done"] { color: var(--rc-ok); }
 .rc-onb__actions { flex: none; padding-top: 2px; }
 .rc-onb__x { margin-left: auto; width: 30px; height: 30px; }
-/* окно вище за екран (телефон): заголовок із × лишається видимим під час прокрутки */
+/* window taller than the screen (phone): the header with × stays visible while scrolling */
 .rc-onb .rc-modal__h { position: sticky; top: calc(-1 * var(--rc-5, 20px)); background: var(--rc-surface); padding: var(--rc-5, 20px) 0 var(--rc-2); margin-top: calc(-1 * var(--rc-5, 20px)); z-index: 1; }
 @keyframes rc-onb-flash { 0%, 100% { background: transparent; } 25% { background: var(--rc-accent-tint); } }
 .rc-onb-flash { animation: rc-onb-flash 1.6s ease; border-radius: var(--rc-r-2); }
 
 .rc-tglist { border-top: 1px solid var(--rc-hairline); }
-/* Рядок чату: ліворуч «хто це» (назва + тип/@нік/телефон), праворуч контроли.
-   Блок «хто це» забирає вільне місце й не стискається нижче flex-basis —
-   на вузькому екрані контроли переносяться під нього, а не виштовхують
-   назву в нуль (так було з чіпами тегів у рядку). */
+/* Chat row: on the left "who is this" (title + type/@nick/phone), on the right the controls.
+   The "who is this" block takes the free space and does not shrink below flex-basis —
+   on a narrow screen the controls wrap under it, instead of pushing
+   the title to zero (that is what happened with tag chips in the row). */
 .rc-tgrow {
     display: flex; align-items: center; flex-wrap: wrap; gap: var(--rc-2) var(--rc-4); justify-content: space-between;
     padding: var(--rc-3) 0; border-bottom: 1px solid var(--rc-hairline);
@@ -1591,7 +1591,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-tgrow__meta > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-tgrow__phone, .rc-tgrow__id { font-variant-numeric: tabular-nums; }
 .rc-tgrow__id { color: var(--rc-ink-3); }
-/* поле, за яким знайшовся рядок (@нік, телефон, id), — з назви цього не видно */
+/* field the row was found by (@nick, phone, id) — it is not visible from the title */
 .rc-tgrow__meta .is-hit { color: var(--rc-accent-deep); font-weight: 600; }
 .rc-tgrow__badge {
     flex: none; font-family: var(--rc-mono); font-size: var(--rc-t-xs); color: var(--rc-ink-3);
@@ -1650,9 +1650,9 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-yt__thumb { width: 100%; }
     .rc-yt__settings { grid-template-columns: 1fr; }
 
-    /* Списки на вузькому екрані: рейка й правий стовпчик з'їдали половину
-       ширини, через що заголовок обрізався до префікса — а у переважна більшість архіву
-       корисне саме в тексті. Рейка вужча, дії лягають у рядок під вміст. */
+    /* Lists on a narrow screen: the rail and the right column ate half
+       of the width, because of which the title was cut to a prefix — and in the vast majority of the archive
+       the useful part is in the text. The rail is narrower, actions go into a row under the content. */
     .rc-rec, .rc-aud { gap: var(--rc-3); flex-wrap: wrap; }
     .rc-rec__rail { width: 28px; align-self: flex-start; padding-top: 2px; }
     .rc-rec__thumb { width: 28px; height: 28px; }
@@ -1661,8 +1661,8 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-rec__id { margin-left: auto; }
     .rc-aud__actions { width: 100%; justify-content: flex-end; }
 
-    /* Дедлайн над задачею, а не колонкою зліва — 116px рейки на 390px екрані
-       лишали тексту задачі смужку. */
+    /* Deadline above the task, not a column on the left — a 116px rail on a 390px screen
+       left the task text a sliver. */
     .rc-task { flex-wrap: wrap; gap: var(--rc-2) var(--rc-3); }
     .rc-task__due { width: auto; flex-direction: row; align-items: baseline; gap: var(--rc-2); order: -1; }
     .rc-task__body { flex: 1 1 100%; }
@@ -1706,7 +1706,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 @media (max-width: 720px) { .rc-spkedit__row { grid-template-columns: 1fr; gap: var(--rc-1); } }
 
 /* ============================================================
-   Спікери — розширене керування (статистика / обʼєднання / таймлайн)
+   Speakers — extended management (statistics / merging / timeline)
    ============================================================ */
 .rc-spk {
     border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-2);
@@ -1741,7 +1741,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-mergebar > i.fa-circle-info { color: var(--rc-accent-deep); }
 
 /* ============================================================
-   Дослідження бренду / великий експорт (Phase 18)
+   Brand research / big export (Phase 18)
    ============================================================ */
 .rc-research__form {
     background: var(--rc-surface); border: 1px solid var(--rc-hairline);
@@ -1900,7 +1900,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     padding: 2px var(--rc-2); border-radius: var(--rc-r-1);
 }
 
-/* Експорт на картці сутності — реюз rc-research__* карток дій. */
+/* Export on the entity card — reuse of the rc-research__* action cards. */
 .rc-entexp__lede { color: var(--rc-ink-2); font-size: var(--rc-t-sm); margin: 0 0 var(--rc-3); line-height: 1.5; }
 .rc-entexp__lede b { color: var(--rc-ink); }
 .rc-entexp .rc-research__actions { margin-bottom: var(--rc-3); }
@@ -2046,17 +2046,17 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 
 
 /* ----------------------------------------------------------------------------
-   Шар коментарів — бейдж на картці + інлайн-панель
+   Comments layer — badge on the card + inline panel
    ----------------------------------------------------------------------------
-   POV: коментар власника — це маргіналія на полях каталожної картки. Тому
-   панель не модальна і не «важка»: вона розгортається під рядком на тому ж
-   папері, з лівою лінійкою замість рамки — так само, як приписка олівцем не
-   стає окремим документом.
+   POV: the owner's comment is marginalia in the margins of a catalog card. So
+   the panel is not modal and not "heavy": it expands under the row on the same
+   paper, with a left rule instead of a frame — the same way a pencil note does not
+   become a separate document.
 
-   Акцент витрачається строго: бейдж без коментарів приглушений (це запрошення,
-   не сигнал), з коментарями — чорнильний, а з ВИПРАВЛЕННЯМ — марігольд. У
-   системі рівно один акцентний колір, і виправлення — саме той випадок, заради
-   якого його варто витратити: у записі щось спростовано.
+   Accent is spent strictly: a badge without comments is muted (an invitation,
+   not a signal), with comments — ink, and with a CORRECTION — marigold. The
+   system has exactly one accent color, and a correction is precisely the case it is
+   worth spending on: something in the record is disputed.
    ---------------------------------------------------------------------------- */
 
 .rc-cmbtn {
@@ -2075,8 +2075,8 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-cmbtn.is-fix:hover { color: var(--rc-accent-deep); }
 .rc-cmbtn__n { font-weight: 600; line-height: 1; }
 
-/* Панель — окремий вузол-сусід рядка, а не вкладення в картку: так вона не
-   воює з grid самої картки і однаково лягає в Бібліотеці й Медіатеці. */
+/* Panel — a separate sibling node of the row, not nested in the card: this way it does not
+   fight the grid of the card itself and sits the same in the Library and the Media library. */
 .rc-cmpanel {
     margin: calc(var(--rc-2) * -1) 0 var(--rc-3);
     padding: var(--rc-3) var(--rc-4);
@@ -2103,8 +2103,8 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     text-transform: uppercase; letter-spacing: 0.05em;
     color: var(--rc-ink-2);
 }
-/* Виправлення — єдиний тип, що ЗМІНЮЄ прочитане в записі, тож єдиний, який
-   отримує колір. Решта типів розрізняються словом, а не фарбою. */
+/* Correction is the only type that CHANGES what is read in a record, so the only one that
+   gets color. The other types are distinguished by a word, not by paint. */
 .rc-cm--correction .rc-cm__kind { color: var(--rc-accent-deep); font-weight: 700; }
 .rc-cm__pin { color: var(--rc-accent); font-size: var(--rc-t-xs); }
 .rc-cm__at, .rc-cm__when {
@@ -2124,7 +2124,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     white-space: normal; overflow-wrap: anywhere;
 }
 
-/* Композер */
+/* Composer */
 .rc-cmform { padding-top: var(--rc-3); }
 .rc-cmform__ta {
     width: 100%; box-sizing: border-box;
@@ -2154,9 +2154,9 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-cmpanel { padding: var(--rc-3); }
 }
 
-/* Похідні коментаря: задачі, витягнуті Claude. Візуально це НЕ частина
-   коментаря — це те, що з нього виросло, тож окремий блок під тілом із
-   власною лінійкою і приглушеним набором. */
+/* Derivatives of a comment: tasks extracted by Claude. Visually this is NOT part of
+   the comment — it is what grew out of it, so a separate block under the body with
+   its own rule and a muted set. */
 .rc-cm__derived { margin-top: 8px; }
 .rc-cm__none {
     font-family: var(--rc-mono); font-size: var(--rc-t-xs); color: var(--rc-ink-3);
@@ -2178,11 +2178,11 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-cm__due { font-size: var(--rc-t-xs); color: var(--rc-warn-deep); }
 
 /* ----------------------------------------------------------------------------
-   Живий коментар оператора (під час запису)
+   Operator's live comment (during recording)
    ----------------------------------------------------------------------------
-   Поле одне і завжди на видноті: під час дзвінка руки зайняті розмовою, і
-   будь-який зайвий клік означає, що думку не зафіксують. Слід останніх
-   коментарів — під полем, моноширинним таймкодом уліво, як бортжурнал.
+   The field is single and always in view: during a call the hands are busy with the conversation, and
+   any extra click means the thought will not be captured. The trail of the latest
+   comments is under the field, with a monospace timecode on the left, like a logbook.
    ---------------------------------------------------------------------------- */
 .rc-livecm { margin-top: var(--rc-4); }
 .rc-livecm__row { display: flex; align-items: center; gap: var(--rc-2); }
@@ -2220,11 +2220,11 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 }
 
 /* ----------------------------------------------------------------------------
-   Сторінка «Коментарі» — записник поверх архіву
+   Page «Коментарі» — a notebook over the archive
    ----------------------------------------------------------------------------
-   Композиція перевернута проти Бібліотеки: там ліворуч провенанс, а тіло —
-   хвіст картки; тут головне і є ТЕКСТ, бо це те, що власник написав сам.
-   Провенанс («до чого це») відсунутий праворуч і приглушений.
+   Composition is inverted compared to the Library: there provenance is on the left, and the body is
+   the card's tail; here the main thing is the TEXT, because that is what the owner wrote themselves.
+   Provenance («до чого це») is pushed to the right and muted.
    ---------------------------------------------------------------------------- */
 .rc-cmrow {
     display: flex; align-items: flex-start; gap: var(--rc-4);
@@ -2249,7 +2249,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     font-family: var(--rc-mono); text-transform: uppercase; letter-spacing: 0.05em;
     color: var(--rc-ink-2);
 }
-/* Єдиний тип, що ЗМІНЮЄ прочитане в записі, — єдиний з кольором. */
+/* The only type that CHANGES what is read in a record — the only one with color. */
 .rc-cmrow__kind--correction { color: var(--rc-accent-deep); font-weight: 700; }
 .rc-cmrow__pin { color: var(--rc-accent); }
 .rc-cmrow__live {
@@ -2264,8 +2264,8 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     font-size: var(--rc-t-xs); color: var(--rc-ink-2);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
-/* Ціль без сторінки (сесія запису, яку ще не транскрибували) — видима, але
-   явно не клікабельна: мертве посилання гірше за його відсутність. */
+/* Target without a page (a recording session not yet transcribed) — visible but
+   explicitly not clickable: a dead link is worse than its absence. */
 .rc-cmrow__to.is-dead { color: var(--rc-ink-3); font-style: italic; }
 
 @media (max-width: 640px) {
@@ -2273,7 +2273,7 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
     .rc-cmrow__target { max-width: 100%; text-align: left; align-items: flex-start; }
 }
 
-/* recording-meta-suggest: варіанти назви й опису від локальної моделі */
+/* recording-meta-suggest: title and description variants from the local model */
 .rc-meta__suggest { margin-left: auto; }
 .rc-modal--wide .rc-input, .rc-modal--wide .rc-textarea { box-sizing: border-box; }
 .rc-meta__status { font-size: var(--rc-t-xs); color: var(--rc-ink-2); min-height: 1.1em; margin: calc(-1 * var(--rc-2)) 0 var(--rc-3); }

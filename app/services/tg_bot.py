@@ -1,16 +1,16 @@
-"""Бот доставки труб (K4): окремий Telegram-бот, лише в чат власника.
+"""Delivery bot for pipes (K4): a separate Telegram bot, only to the owner's chat.
 
-Не плутати зі слухачем ``telegram_listener.py``: той — MTProto-АКАУНТ власника
-(Telethon), цей — Bot API з токеном від @BotFather. Бот шле ЛИШЕ в
-``TELEGRAM_BOT_CHAT_ID``; адресата викликач не передає взагалі.
+Not to be confused with the listener ``telegram_listener.py``: that one is the owner's MTProto ACCOUNT
+(Telethon), this one is the Bot API with a token from @BotFather. The bot sends ONLY to
+``TELEGRAM_BOT_CHAT_ID``; the caller does not pass a recipient at all.
 
-HTTP — стандартний ``urllib``, без нової бібліотеки. Текст іде з
-``parse_mode=HTML`` (картки K5). Повідомлення довше 4096 символів ріжеться по
-порожніх рядках — межах блоків, — тож жодна частина не рве тег. Токен — частина URL Bot API, тому жодна
-помилка звідси не несе ні URL, ні токена (``BotError`` уже очищений).
+HTTP is the standard ``urllib``, no new library. The text goes with
+``parse_mode=HTML`` (K5 cards). A message longer than 4096 characters is cut at
+empty lines — block boundaries — so no part breaks a tag. The token is part of the Bot API URL, so no
+error from here carries either the URL or the token (``BotError`` is already sanitized).
 
 CLI:
-    python -m app.services.tg_bot whoami     # chat id після /start боту
+    python -m app.services.tg_bot whoami     # chat id after /start to the bot
 """
 from __future__ import annotations
 
@@ -31,17 +31,17 @@ TIMEOUT = 20.0
 
 
 class BotError(RuntimeError):
-    """Збій бота; повідомлення без токена."""
+    """Bot failure; the message has no token."""
 
 
-#: (url, data | None) → тіло відповіді. Підмінюється в тестах.
+#: (url, data | None) → response body. Replaced in tests.
 Transport = Callable[[str, Optional[bytes]], bytes]
 
 
 def _urllib_transport(url: str, data: Optional[bytes]) -> bytes:
     req = urllib.request.Request(url, data=data, headers={
         "Content-Type": "application/x-www-form-urlencoded"} if data else {})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # noqa: S310 — фіксований https
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # noqa: S310 — fixed https
         return resp.read()
 
 
@@ -61,7 +61,7 @@ def _call(method: str, params: Optional[dict] = None, *,
           transport: Optional[Transport] = None) -> dict:
     token = _token()
     if not token:
-        raise BotError("нема TELEGRAM_BOT_TOKEN")
+        raise BotError("no TELEGRAM_BOT_TOKEN")
     url = API.format(token=token, method=method)
     data = urllib.parse.urlencode(params).encode() if params else None
     try:
@@ -69,16 +69,16 @@ def _call(method: str, params: Optional[dict] = None, *,
         out = json.loads(body.decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise BotError(f"Bot API {method}: HTTP {e.code}") from None
-    except Exception as e:  # noqa: BLE001 — будь-що інше теж без URL і токена
+    except Exception as e:  # noqa: BLE001 — anything else is also without URL and token
         raise BotError(f"Bot API {method}: {type(e).__name__}: "
                        f"{str(e).replace(token, '***')}"[:300]) from None
     if not out.get("ok"):
-        raise BotError(f"Bot API {method}: {out.get('description', 'відмова')}"[:300])
+        raise BotError(f"Bot API {method}: {out.get('description', 'rejected')}"[:300])
     return out
 
 
 def _split_lines(text: str, limit: int) -> list[str]:
-    """Ріже по рядках; рядок довший за ліміт — по символах."""
+    """Cuts by lines; a line longer than the limit — by characters."""
     parts: list[str] = []
     cur = ""
     for line in text.split("\n"):
@@ -100,7 +100,7 @@ def _split_lines(text: str, limit: int) -> list[str]:
 
 
 def split_text(text: str, limit: int = MAX_LEN) -> list[str]:
-    """Ріже по абзацах (порожній рядок — межа блоку); абзац довший за ліміт — по рядках."""
+    """Cuts by paragraphs (an empty line is a block boundary); a paragraph longer than the limit — by lines."""
     parts: list[str] = []
     cur = ""
     for para in text.split("\n\n"):
@@ -124,14 +124,14 @@ def split_text(text: str, limit: int = MAX_LEN) -> list[str]:
 def send(text: str, *, parse_mode: Optional[str] = "HTML",
          reply_markup: Optional[dict] = None,
          transport: Optional[Transport] = None) -> int:
-    """Надіслати текст у чат власника. → кількість повідомлень. Збій → BotError.
+    """Send text to the owner's chat. → number of messages. Failure → BotError.
 
-    ``parse_mode`` за замовчуванням HTML: усе, що шлють труби, уже екрановане
-    (``pipes_cards``, сповіщення про збій). ``None`` — простий текст.
-    ``reply_markup`` (кнопки брифінгу K5) чіпляється до ОСТАННЬОЇ частини."""
+    ``parse_mode`` is HTML by default: everything the pipes send is already escaped
+    (``pipes_cards``, the failure notification). ``None`` — plain text.
+    ``reply_markup`` (K5 brief buttons) is attached to the LAST part."""
     chat = _chat_id()
     if not chat or not _token():
-        raise BotError("бот не налаштований: потрібні TELEGRAM_BOT_TOKEN і TELEGRAM_BOT_CHAT_ID")
+        raise BotError("bot not configured: TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_CHAT_ID are required")
     parts = split_text(text)
     for i, part in enumerate(parts):
         params = {"chat_id": chat, "text": part, "disable_web_page_preview": "true"}
@@ -144,9 +144,9 @@ def send(text: str, *, parse_mode: Optional[str] = "HTML",
 
 
 def whoami(*, transport: Optional[Transport] = None) -> list[dict]:
-    """Чати, що писали боту (з getUpdates): звідси береться TELEGRAM_BOT_CHAT_ID."""
-    # Слухач кнопок (brief_actions) просить лише callback_query, а Telegram запамʼятовує
-    # цей фільтр — тож тут явно повертаємо повідомлення, інакше /start не видно.
+    """Chats that wrote to the bot (from getUpdates): TELEGRAM_BOT_CHAT_ID is taken from here."""
+    # The button listener (brief_actions) asks only for callback_query, and Telegram remembers
+    # that filter — so here we explicitly return messages, otherwise /start is not visible.
     out = _call("getUpdates", {"allowed_updates": json.dumps(
         ["message", "my_chat_member", "callback_query"])}, transport=transport)
     seen: dict = {}
@@ -163,19 +163,19 @@ def whoami(*, transport: Optional[Transport] = None) -> list[dict]:
 
 def _cli(argv: list[str]) -> int:
     if argv[:1] != ["whoami"]:
-        print("використання: python -m app.services.tg_bot whoami")
+        print("usage: python -m app.services.tg_bot whoami")
         return 2
     if not _token():
-        print("Нема TELEGRAM_BOT_TOKEN у .env. Створи бота в @BotFather, впиши токен, "
-              "напиши боту /start і повтори.")
+        print("No TELEGRAM_BOT_TOKEN in .env. Create a bot in @BotFather, put the token in, "
+              "send the bot /start and repeat.")
         return 1
     try:
         chats = whoami()
     except BotError as e:
-        print(f"Не вдалося спитати Telegram: {e}")
+        print(f"Failed to ask Telegram: {e}")
         return 1
     if not chats:
-        print("Бот ще нікого не бачив. Напиши йому /start у Telegram і повтори.")
+        print("The bot has not seen anyone yet. Send it /start in Telegram and repeat.")
         return 1
     for c in chats:
         print(f"TELEGRAM_BOT_CHAT_ID={c['chat_id']}   # {c['type']}: {c['name']}")

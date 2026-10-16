@@ -1,8 +1,8 @@
-"""SystemMonitor — фоновый поток, который раз в N секунд снимает CPU/GPU/RAM.
+"""SystemMonitor — a background thread that samples CPU/GPU/RAM every N seconds.
 
-Раньше /api/system_stats делал psutil.cpu_percent(interval=0.1) синхронно — это
-блокировало воркер на 100мс на каждый запрос. Теперь endpoint просто читает
-снапшот, накопленный фоновым потоком, без блокировки.
+Previously /api/system_stats called psutil.cpu_percent(interval=0.1) synchronously — that
+blocked the worker for 100 ms on every request. Now the endpoint just reads the
+snapshot accumulated by the background thread, without blocking.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import psutil
 
 
 try:
-    import torch  # для GPU stats
+    import torch  # for GPU stats
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
@@ -31,7 +31,7 @@ class SystemMonitor:
         self._snapshot: Dict = self._empty_snapshot()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Прайм cpu_percent — первый вызов всегда возвращает 0.0
+        # Prime cpu_percent — the first call always returns 0.0
         psutil.cpu_percent(interval=None)
 
     def _empty_snapshot(self) -> Dict:
@@ -72,7 +72,7 @@ class SystemMonitor:
 
     def _collect(self) -> Dict:
         snap: Dict = {
-            "cpu_percent": psutil.cpu_percent(interval=None),  # неблокирующий
+            "cpu_percent": psutil.cpu_percent(interval=None),  # non-blocking
             "memory_percent": psutil.virtual_memory().percent,
             "memory_available_gb": psutil.virtual_memory().available / (1024 ** 3),
             "memory_total_gb": psutil.virtual_memory().total / (1024 ** 3),
@@ -97,5 +97,5 @@ class SystemMonitor:
         return snap
 
 
-# Глобальный монитор (один на процесс). start() вызывается в app.py.
+# Global monitor (one per process). start() is called in app.py.
 monitor = SystemMonitor(interval=1.0)

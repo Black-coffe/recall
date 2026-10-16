@@ -126,9 +126,9 @@
     A.del = (u, o) => send(u, 'DELETE', undefined, o);
     A.postForm = postForm;
 
-    // Build a query string DROPPING null/undefined/'' — інакше URLSearchParams
-    // серіалізує undefined у літерал "undefined" (напр. search=undefined → FTS
-    // шукає слово "undefined" і нічого не знаходить → порожня Бібліотека).
+    // Build a query string DROPPING null/undefined/'' — otherwise URLSearchParams
+    // serializes undefined into the literal "undefined" (e.g. search=undefined → FTS
+    // searches for the word "undefined" and finds nothing → empty Library).
     function qs(params) {
         const sp = new URLSearchParams();
         for (const k in (params || {})) {
@@ -145,7 +145,7 @@
     A.audioUrl = (id) => '/api/transcription/' + id + '/audio';
     A.exportUrl = (fmt) => '/api/export/' + fmt;
     A.updateRecord = (id, body) => A.patch('/api/history/' + id, body);
-    // Варіанти назви й опису від локальної моделі (до ~1 хв, без таймауту; 409 RECORDING_ACTIVE під час запису).
+    // Title and description variants from the local model (up to ~1 min, no timeout; 409 RECORDING_ACTIVE during recording).
     A.suggestMeta = (id) => A.post('/api/history/' + id + '/suggest-meta');
 
     // — Ingest: YouTube → download → transcribe (lands in History/transcriptions) —
@@ -154,8 +154,8 @@
     A.youtubeDownload = (body) => A.post('/api/youtube/download', body);
     A.youtubeProgress = (id) => getJSON('/api/youtube/progress/' + encodeURIComponent(id));
     A.transcribe = (formData) => postForm('/api/transcribe', formData);
-    // Активні бекенд-транскрипції, стартовані з Аудіотеки (library-шлях).
-    // Ключ — audio_download_id. Бібліотека опитує для бейджа «транскрибується…».
+    // Active backend transcriptions started from the Audio library (library path).
+    // The key is audio_download_id. The Library polls it for the "transcribing…" badge.
     A.transcribeActive = () => getJSON('/api/transcribe/active');
     // Multipart upload via XHR so we get real upload progress (bodies can be
     // large — up to 20GB for video). onUploadProgress(pct) fires during the send;
@@ -223,11 +223,11 @@
     A.bookmarkDelete = (id) => A.del('/api/bookmarks/' + id);
     A.bookmarkUpdate = (id, note) => A.patch('/api/bookmarks/' + id, { note });
 
-    // — Коментарі власника (шар коментарів) —
-    // counts іде POST'ом навмисно: Бібліотека вміє вибрати до записів за
-    // фільтром, і такий список id у query-string не влазить.
-    // qs() САМ додає '?' — літерал тут дав би '??', і Werkzeug прочитав би
-    // перший ключ як '?target_type', тобто кожен запит падав би у 400.
+    // — Owner comments (comments layer) —
+    // counts goes as a POST on purpose: the Library can select up to records by a
+    // filter, and such an id list does not fit into a query string.
+    // qs() adds '?' ITSELF — a literal here would give '??', and Werkzeug would read the
+    // first key as '?target_type', so every request would fail with 400.
     A.comments = (target_type, target_id) => getJSON('/api/comments' + qs({ target_type, target_id }));
     A.commentsRecent = (params) => getJSON('/api/comments/recent' + qs(params || {}));
     A.commentCounts = (target_type, ids) => A.post('/api/comments/counts', { target_type, ids });
@@ -236,21 +236,21 @@
     A.commentDelete = (id) => A.del('/api/comments/' + id);
     A.commentRestore = (id) => A.post('/api/comments/' + id + '/restore');
     A.commentMeta = () => getJSON('/api/comments/meta');
-    // Без клієнтського тайм-ауту (дефолт POST і так 0): розбір платний, і
-    // обірвати запит, за який уже заплачено, гірше, ніж почекати довше.
+    // No client-side timeout (the POST default is 0 anyway): parsing is paid for, and
+    // aborting a request that is already paid for is worse than waiting longer.
     A.commentAnalyze = (id, body) => A.post('/api/comments/' + id + '/analyze', body || {});
     A.commentDerived = (id) => getJSON('/api/comments/' + id + '/derived');
 
-    // — Single-record напрямок: set + k-NN auto-suggest (✨) —
+    // — Single-record category: set + k-NN auto-suggest (✨) —
     A.setCategory = (tid, category_id) => A.patch('/api/memory/transcriptions/' + tid + '/category', { category_id });
     A.suggestCategory = (tid) => getJSON('/api/memory/transcriptions/' + tid + '/suggest-category');
 
     // — Memory / RAG / graph —
     A.stats = () => getJSON('/api/memory/stats');
     A.categories = () => getJSON('/api/memory/categories');
-    // — Напрямки: керування (створення/редагування/видалення/обʼєднання) —
-    // `updateCategory` — контракт C9 (09); body: {name?, color?, icon?,
-    // parent_id?: int|null} — parent_id керує reparent (null = стає напрямком).
+    // — Categories: management (create/edit/delete/merge) —
+    // `updateCategory` — contract C9 (09); body: {name?, color?, icon?,
+    // parent_id?: int|null} — parent_id controls reparent (null = becomes a top-level category).
     A.categoryCreate = (body) => A.post('/api/memory/categories', body);
     A.updateCategory = (cid, body) => A.patch('/api/memory/categories/' + cid, body);
     A.categoryDelete = (cid) => A.del('/api/memory/categories/' + cid);
@@ -261,8 +261,8 @@
     A.actionItems = (params) => getJSON('/api/memory/action-items' + qs(params));
     A.setActionStatus = (id, status) => A.patch('/api/memory/action-items/' + id, { status });
 
-    // — Словник тегів (07: контракт C4, ще без живого ендпоїнта на момент 09 —
-    // budується проти контракту, перевірка Queen на стадії 05) —
+    // — Tag dictionary (07: contract C4, no live endpoint yet at the time of 09 —
+    // built against the contract, Queen's check at stage 05) —
     A.getTags = () => getJSON('/api/memory/tags');
     A.createTag = (body) => A.post('/api/memory/tags', body);
     A.updateTag = (id, body) => A.patch('/api/memory/tags/' + id, body);
@@ -270,9 +270,9 @@
     A.mergeTags = (keep_id, merge_id) => A.post('/api/memory/tags/merge', { keep_id, merge_id });
     // {add: [names], remove: [names]} → {success, tags, suggested_tags, reembed}
     A.setRecordTags = (id, body) => A.put('/api/memory/' + id + '/tags', body);
-    // {accept: [names], dismiss: [names]} → та сама відповідь, що setRecordTags
+    // {accept: [names], dismiss: [names]} → the same response as setRecordTags
     A.resolveTagSuggestions = (id, body) => A.post('/api/memory/' + id + '/tags/suggestions', body);
-    // Повна заміна набору тегів TG-чату (не add/remove — мультиселект у панелі).
+    // Full replacement of a TG chat's tag set (not add/remove — multiselect in the panel).
     A.setChatTags = (chatId, names) => A.put('/api/telegram/chats/' + chatId + '/tags', { tags: names });
 
     // ============================================================
@@ -427,10 +427,10 @@
     //   (saves paid Claude tokens), matching the researchSummary pattern. —
     A.askStream = (payload, onEvent, signal, opts) => postSseStream('/api/memory/ask/stream', payload, onEvent, signal, opts);
 
-    // — Оцінка відповіді 👍/👎 (+ замітка) → рядок ask_log; сировина golden-set —
+    // — Rating of an answer 👍/👎 (+ note) → an ask_log row; golden-set raw material —
     A.rateAsk = (askId, rating, note) => A.post('/api/memory/ask/' + askId + '/rate', { rating, note });
 
-    // — Research / big export (зібрати всі згадки бренду з усіх джерел) —
+    // — Research / big export (collect all brand mentions from all sources) —
     A.researchPreview = (params) => getJSON('/api/research/preview' + qs(params));
     A.researchOriginals = (body) => A.post('/api/research/originals', body);
     A.researchSummary = (payload, onEvent, signal, opts) => postSseStream('/api/research/summary', payload, onEvent, signal, opts);

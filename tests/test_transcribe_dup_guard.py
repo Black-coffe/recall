@@ -1,9 +1,9 @@
-"""Тест для anti-dup guard'а library-шляху /api/transcribe (Фикс 1, 03.07.2026).
+"""Test for the anti-dup guard of the library path of /api/transcribe (Fix 1, 03.07.2026).
 
-Повторний POST з тим самим audio_download_id, поки активна транскрипція вже
-йде (маркер у state.active_library_transcriptions), раніше запускав ДРУГУ
-повну whisper-задачу на тому самому файлі (GPU-час ×2). Guard мусить
-повернути 409 ДО будь-якого виклику whisper_manager.
+A repeated POST with the same audio_download_id while an active transcription is already
+running (the marker in state.active_library_transcriptions) used to start a SECOND
+full whisper job on the same file (GPU time ×2). The guard must
+return 409 BEFORE any call to whisper_manager.
 """
 from __future__ import annotations
 
@@ -46,14 +46,14 @@ def _insert_audio_download(db_path: str, **overrides) -> int:
 
 
 class _WhisperManagerMustNotBeCalled:
-    """Guard мусить спрацювати ДО будь-якого звернення до whisper — якщо
-    transcribe_with_progress() усе ж викликаний, тест провалиться явно
-    замість тихого дубля."""
+    """The guard must fire BEFORE any access to whisper - if
+    transcribe_with_progress() is called after all, the test fails loudly
+    instead of a silent duplicate."""
 
     def transcribe_with_progress(self, *args, **kwargs):
         raise AssertionError(
-            "whisper_manager.transcribe_with_progress() викликаний — "
-            "409-guard мав зупинити запит РАНІШЕ"
+            "whisper_manager.transcribe_with_progress() was called - "
+            "the 409 guard should have stopped the request EARLIER"
         )
 
 
@@ -98,14 +98,14 @@ class TestLibraryAntiDupGuard:
         assert body['error_code'] == 'ALREADY_RUNNING'
         assert body['active'] == existing_marker
 
-        # Маркер лишається — це запис ПЕРШОЇ (все ще активної) задачі,
-        # guard не мав його чіпати.
+        # The marker stays - it is the record of the FIRST (still active) job,
+        # the guard must not have touched it.
         assert state.active_library_transcriptions[aid] == existing_marker
 
     def test_marker_not_overwritten_or_second_job_started(self, client_with_library_audio):
-        """Другий сабміт не повинен ані перезаписати маркер новим
-        started_at/stage, ані (транзитивно, через _WhisperManagerMustNotBeCalled)
-        запустити другу whisper-задачу."""
+        """The second submit must neither overwrite the marker with a new
+        started_at/stage nor (transitively, via _WhisperManagerMustNotBeCalled)
+        start a second whisper job."""
         client, aid = client_with_library_audio
         original_marker = {
             'audio_download_id': aid,
@@ -124,10 +124,10 @@ class TestLibraryAntiDupGuard:
         assert state.active_library_transcriptions[aid] == original_marker
 
     def test_no_active_marker_falls_through_to_normal_flow(self, client_with_library_audio):
-        """Без існуючого маркера guard не втручається — запит іде далі
-        (і впаде вже на whisper_manager, бо ми навмисно підклали mock, що
-        падає з AssertionError — підтверджує, що дійшли до нормального
-        флоу, а не 409)."""
+        """Without an existing marker the guard does not interfere - the request goes on
+        (and fails at whisper_manager, because we deliberately planted a mock that
+        fails with an AssertionError - confirms that we reached the normal
+        flow, and not the 409)."""
         client, aid = client_with_library_audio
         assert aid not in state.active_library_transcriptions
 
@@ -136,10 +136,10 @@ class TestLibraryAntiDupGuard:
             'audio_download_id': str(aid),
         })
 
-        # Дійшли до whisper_manager (виняток впіймано, endpoint віддає 500,
-        # НЕ 409) — доводить, що без активного маркера гард не блокує.
+        # We reached whisper_manager (the exception is caught, the endpoint returns 500,
+        # NOT 409) - proves that without an active marker the guard does not block.
         assert r.status_code == 500
         assert r.get_json()['success'] is False
         assert r.get_json().get('error_code') != 'ALREADY_RUNNING'
-        # Маркер після невдалого запиту прибирається у finally.
+        # The marker is removed in finally after a failed request.
         assert aid not in state.active_library_transcriptions

@@ -1,32 +1,32 @@
-"""Спільна утиліта захисту від path traversal (T1.5, Волна 1).
+"""Shared path traversal protection utility (T1.5, Wave 1).
 
-Раніше `os.path.abspath(...).startswith(...)` / `os.path.realpath(...)`-перевірка
-писалась вручну і по-різному в кожному blueprint'і (documents.py, transcription.py,
-telegram.py) — де паттерн забули скопіювати, захисту не було. Тепер одна точка
-правди: `safe_path_within` (одна база) і `safe_path_within_any` (декілька
-дозволених коренів, напр. uploads + youtube_downloads + recordings).
+Previously the `os.path.abspath(...).startswith(...)` / `os.path.realpath(...)` check
+was written by hand and differently in every blueprint (documents.py, transcription.py,
+telegram.py) — wherever the pattern was forgotten to be copied, there was no protection. Now there is a single
+source of truth: `safe_path_within` (one base) and `safe_path_within_any` (several
+allowed roots, e.g. uploads + youtube_downloads + recordings).
 
-Контракт:
-- Резолвить і `base`, і `candidate` через `os.path.realpath` — розкриває
-  симлінки, нормалізує `..`/`.`, коректно працює з Windows-літерами дисків
-  та UNC-шляхами (`\\\\server\\share\\...`).
-- Порівняння регістронезалежне на Windows (`os.path.normcase`) — NTFS
-  case-insensitive за замовчуванням; на POSIX лишається case-sensitive
-  (`normcase` там — no-op).
-- Межу перевіряє по роздільнику шляху (`base + os.sep`), а не голим
-  `startswith`, щоб `C:\\foo` не пропускав `C:\\foobar\\secret.txt`.
-- НЕ перевіряє існування `candidate` — придатна і для шляхів, які ще будуть
-  створені (наприклад, ціль завантаження файлу), і для вже існуючих.
-- Повертає резолвлений абсолютний шлях `candidate`, якщо він дорівнює `base`
-  або лежить строго всередині нього; інакше `None` (traversal/symlink-escape/
-  шлях поза межами).
+Contract:
+- Resolves both `base` and `candidate` via `os.path.realpath` — expands
+  symlinks, normalizes `..`/`.`, works correctly with Windows drive letters
+  and UNC paths (`\\\\server\\share\\...`).
+- The comparison is case-insensitive on Windows (`os.path.normcase`) — NTFS is
+  case-insensitive by default; on POSIX it stays case-sensitive
+  (`normcase` is a no-op there).
+- The boundary is checked by the path separator (`base + os.sep`), not by a bare
+  `startswith`, so that `C:\\foo` does not let through `C:\\foobar\\secret.txt`.
+- Does NOT check that `candidate` exists — suitable both for paths that will still be
+  created (for example, a file upload target) and for already existing ones.
+- Returns the resolved absolute path of `candidate` if it equals `base`
+  or lies strictly inside it; otherwise `None` (traversal/symlink-escape/
+  path outside the bounds).
 
-НЕ використовується у `mcp_server.py`: той — окремий stdio-процес, і навмисно
-тримає власну легку копію цього ж патерну, щоб не тягнути важкий імпорт
-пакету `app` (Flask/DB-ініціалізація) у процес, де це критично для часу
-старту (див. memory/mcp-stdio-no-heavy-models.md — «нічого важкого в
-mcp_server.py»). Якщо колись знадобиться синхронізувати логіку — синхронізуй
-вручну, не імпортуй звідси.
+NOT used in `mcp_server.py`: that is a separate stdio process, and it deliberately
+keeps its own light copy of the same pattern, to avoid pulling the heavy import
+of the `app` package (Flask/DB initialization) into a process where startup time is
+critical (see memory/mcp-stdio-no-heavy-models.md — "nothing heavy in
+mcp_server.py"). If you ever need to sync the logic — sync it
+by hand, do not import from here.
 """
 from __future__ import annotations
 
@@ -34,9 +34,9 @@ import os
 
 
 def safe_path_within(base: str | os.PathLike, candidate: str | os.PathLike) -> str | None:
-    """Повертає резолвлений `candidate`, якщо він у межах `base`, інакше None.
+    """Returns the resolved `candidate` if it is within `base`, otherwise None.
 
-    Приклад:
+    Example:
         docs_dir = "documents"
         target = safe_path_within(docs_dir, os.path.join(docs_dir, filename))
         if target is None:
@@ -57,10 +57,10 @@ def safe_path_within_any(
     bases: "list[str | os.PathLike] | tuple[str | os.PathLike, ...]",
     candidate: str | os.PathLike,
 ) -> str | None:
-    """Те саме, що `safe_path_within`, але з кількома дозволеними коренями
-    (напр. uploads + youtube_downloads + recordings). Повертає резолвлений
-    шлях при першому збігу, інакше None. Порожні/falsy елементи `bases`
-    пропускаються.
+    """Same as `safe_path_within`, but with several allowed roots
+    (e.g. uploads + youtube_downloads + recordings). Returns the resolved
+    path on the first match, otherwise None. Empty/falsy items of `bases`
+    are skipped.
     """
     for base in bases:
         if not base:

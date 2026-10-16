@@ -1,25 +1,25 @@
 """Speaker diarization via pyannote.audio (Phase 10.2).
 
 Architecture:
-- Singleton сервіс з lazy-load пайплайну (модель ~1.5GB, ~10s завантаження).
-- ``diarize_audio()`` — універсальний прохід для будь-якого аудіо (file, YouTube).
-- ``diarize_recording()`` — оптимізований для recording-режиму: mic + system
-  пишуться окремо, тому mic.wav діарізуємо як "self" (1 голос гарантовано —
-  це користувач за мікрофоном), system.wav — повна діарізація віддалених
-  учасників. Цим уникаємо помилок коли pyannote плутає себе з кимось іншим
-  у мікшованому потоці.
+- Singleton service with a lazy-loaded pipeline (model ~1.5GB, ~10s to load).
+- ``diarize_audio()`` - a universal pass for any audio (file, YouTube).
+- ``diarize_recording()`` - optimized for recording mode: mic + system
+  are recorded separately, so mic.wav is diarized as "self" (1 voice guaranteed -
+  that is the user at the microphone), system.wav gets full diarization of the remote
+  participants. This avoids errors when pyannote confuses the user with someone else
+  in a mixed stream.
 
-Мерджимо діарізаційні інтервали з whisper-сегментами через
-``assign_speakers_to_whisper_segments()`` — для кожного whisper-сегмента
-визначаємо домінантного спікера за overlap'ом.
+We merge the diarization intervals with the whisper segments via
+``assign_speakers_to_whisper_segments()`` - for each whisper segment
+we determine the dominant speaker by overlap.
 
-Робочі pin'и (див. requirements.txt):
+Working pins (see requirements.txt):
 - pyannote.audio==3.3.2
 - speechbrain==1.0.2
 - huggingface_hub<1.0
 
-Error handling: ``is_available()`` повертає False якщо HF_TOKEN не заданий
-або import не вдався — caller просто пропустить діарізацію без падіння.
+Error handling: ``is_available()`` returns False if HF_TOKEN is not set
+or the import failed - the caller simply skips diarization without crashing.
 """
 from __future__ import annotations
 
@@ -43,39 +43,39 @@ logger = logging.getLogger(__name__)
 
 
 SELF_LABEL = 'self'
-"""Зарезервований label для mic-стріму — мапиться на speakers.is_self=1 ('Ви')."""
+"""Reserved label for the mic stream - mapped to speakers.is_self=1 ('Ви')."""
 
 UNKNOWN_LABEL = 'SPEAKER_UNKNOWN'
-"""Whisper-сегмент без перетину з жодним діарізаційним інтервалом."""
+"""A whisper segment with no overlap with any diarization interval."""
 
 
-# pyannote завантажує аудіо через torchaudio + soundfile (libsndfile),
-# який НЕ підтримує AAC/M4A/MP4/WMA/OPUS контейнери. WAV/FLAC/OGG/AIFF/MP3
-# (libsndfile 1.1+) працюють напряму. Все інше прозоро конвертуємо у WAV
-# 16kHz mono через ffmpeg — pyannote всередині все одно ресемплить до 16kHz.
-# УВАГА: '.mp3' тут НЕМАЄ навмисно, хоч soundfile його і ВМІЄ читати.
-# pyannote у фазі спікер-ембедингів вирізає сотні коротких фрагментів через
-# soundfile.seek, а seek у MP3 без індексу декодує файл з початку на КОЖЕН
-# фрагмент → O(n²) по довжині запису. Профільовано py-spy 03.07.2026:
-# 32-56-хв записи — 4-8 хв діаризації, 89-хв — 31.5 хв соло (див. §12
-# REMEDIATION_PLAN). Разова ffmpeg-конверсія у WAV (секунди) прибирає це:
-# WAV seek — O(1). Тому MP3 маршрутизуємо через конвертер нижче.
+# pyannote loads audio via torchaudio + soundfile (libsndfile),
+# which does NOT support the AAC/M4A/MP4/WMA/OPUS containers. WAV/FLAC/OGG/AIFF/MP3
+# (libsndfile 1.1+) work directly. Everything else is transparently converted to WAV
+# 16kHz mono via ffmpeg - pyannote resamples to 16kHz internally anyway.
+# NOTE: '.mp3' is deliberately NOT here, although soundfile CAN read it.
+# In the speaker-embedding phase pyannote cuts out hundreds of short fragments via
+# soundfile.seek, and a seek in an MP3 without an index decodes the file from the start for EVERY
+# fragment → O(n²) in the recording length. Profiled with py-spy on 03.07.2026:
+# 32-56-minute recordings - 4-8 min of diarization, 89-minute - 31.5 min solo (see §12 of
+# REMEDIATION_PLAN). A one-off ffmpeg conversion to WAV (seconds) removes this:
+# a WAV seek is O(1). So MP3 is routed through the converter below.
 _SOUNDFILE_NATIVE_EXTS = frozenset({
     '.wav', '.wave', '.flac', '.ogg', '.oga', '.aiff', '.aif',
 })
 
 
 def _ensure_pyannote_compatible(audio_path: Path) -> tuple[Path, Optional[Path]]:
-    """Якщо формат не читається soundfile-бекендом АБО читається повільно
-    (MP3: O(n²) seek у фазі ембедингів — див. _SOUNDFILE_NATIVE_EXTS) —
-    конвертуємо у WAV 16kHz mono.
+    """If the format is not readable by the soundfile backend OR is read slowly
+    (MP3: O(n²) seek in the embeddings phase - see _SOUNDFILE_NATIVE_EXTS) -
+    convert to WAV 16kHz mono.
 
     Returns:
-        (path_to_use, temp_to_cleanup). Якщо конверсія не потрібна,
-        temp_to_cleanup=None і path_to_use=audio_path як є.
+        (path_to_use, temp_to_cleanup). If no conversion is needed,
+        temp_to_cleanup=None and path_to_use=audio_path as is.
 
     Raises:
-        RuntimeError: ffmpeg недоступний або не зміг конвертувати.
+        RuntimeError: ffmpeg is unavailable or could not convert.
     """
     ext = audio_path.suffix.lower()
     if ext in _SOUNDFILE_NATIVE_EXTS:
@@ -92,15 +92,15 @@ def _ensure_pyannote_compatible(audio_path: Path) -> tuple[Path, Optional[Path]]
         subprocess.run(cmd, check=True, capture_output=True, creationflags=NO_WINDOW)
     except FileNotFoundError as e:
         raise RuntimeError(
-            f'ffmpeg не знайдено у PATH — не можу конвертувати {ext} для діарізації'
+            f'ffmpeg not found in PATH - cannot convert {ext} for diarization'
         ) from e
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or b'').decode('utf-8', errors='replace')[:500]
         raise RuntimeError(
-            f'ffmpeg failed для {audio_path.name}: {stderr}'
+            f'ffmpeg failed for {audio_path.name}: {stderr}'
         ) from e
     logger.info(
-        'Diarization: %s сконвертовано у WAV 16kHz mono (%.1f MB)',
+        'Diarization: %s converted to WAV 16kHz mono (%.1f MB)',
         ext, tmp.stat().st_size / 1024 / 1024,
     )
     return tmp, tmp
@@ -108,7 +108,7 @@ def _ensure_pyannote_compatible(audio_path: Path) -> tuple[Path, Optional[Path]]
 
 @dataclass
 class DiarSegment:
-    """Один інтервал з єдиним спікером."""
+    """A single interval with a single speaker."""
     start: float
     end: float
     speaker: str  # 'self' | 'SPEAKER_00' | 'SPEAKER_01' | ...
@@ -120,12 +120,12 @@ class DiarSegment:
 
 @dataclass
 class DiarizationResult:
-    """Результат діарізаційного проходу.
+    """Result of a diarization pass.
 
-    Phase 10.6: ``embeddings`` map {raw_label: list[float]} опціонально
-    повертається коли pipeline викликаний з return_embeddings=True. Тип —
-    звичайний list[float] для сериалізації; numpy не використовуємо у
-    inter-module API щоб тести з мокнутим pipeline не вимагали numpy.
+    Phase 10.6: the ``embeddings`` map {raw_label: list[float]} is optionally
+    returned when the pipeline is called with return_embeddings=True. The type is
+    a plain list[float] for serialization; we do not use numpy in the
+    inter-module API so that tests with a mocked pipeline do not require numpy.
     """
     segments: list[DiarSegment]
     speakers: set[str] = field(default_factory=set)
@@ -142,20 +142,20 @@ class DiarizationResult:
 
 # ---------------------------------------------------------------- embedding helpers
 
-EMBEDDING_DTYPE_TAG = b'F32V'  # 4-byte magic щоб помітити формат у BLOB
+EMBEDDING_DTYPE_TAG = b'F32V'  # 4-byte magic to mark the format in the BLOB
 DEFAULT_MATCH_THRESHOLD = 0.75
-"""Cosine similarity threshold для auto-match. Емпірично:
-    - той самий спікер: 0.80-0.95
-    - різні спікери: 0.40-0.65
-    - 0.75 — обережний default (мало false-positive на коротких записах)."""
+"""Cosine similarity threshold for auto-match. Empirically:
+    - same speaker: 0.80-0.95
+    - different speakers: 0.40-0.65
+    - 0.75 - a cautious default (few false positives on short recordings)."""
 
 
 def embedding_to_blob(emb: Sequence[float]) -> bytes:
-    """Серіалізує embedding (list/tuple/np.array) у float32 BLOB з magic-tag.
+    """Serializes an embedding (list/tuple/np.array) into a float32 BLOB with a magic tag.
 
     Format: 4-byte magic 'F32V' + N x float32 (little-endian).
-    Magic дозволяє у майбутньому додати нові формати (F64V, INT8V, …)
-    без міграції БД.
+    The magic allows adding new formats (F64V, INT8V, …) in the future
+    without a DB migration.
     """
     if emb is None:
         return b''
@@ -166,11 +166,11 @@ def embedding_to_blob(emb: Sequence[float]) -> bytes:
 
 
 def blob_to_embedding(blob: Optional[bytes]) -> Optional[list[float]]:
-    """Зворотна операція. None якщо blob порожній/невалідний."""
+    """The inverse operation. None if the blob is empty/invalid."""
     if not blob or len(blob) < 4:
         return None
     if blob[:4] != EMBEDDING_DTYPE_TAG:
-        return None  # незнайомий формат — обережно ігноруємо
+        return None  # unknown format - ignore carefully
     payload = blob[4:]
     if len(payload) % 4 != 0:
         return None
@@ -179,7 +179,7 @@ def blob_to_embedding(blob: Optional[bytes]) -> Optional[list[float]]:
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
-    """Cosine similarity у [-1, 1]. Без numpy — pure Python (~0.1ms на 256d)."""
+    """Cosine similarity in [-1, 1]. Without numpy - pure Python (~0.1ms for 256d)."""
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = 0.0
@@ -200,16 +200,16 @@ def average_embeddings(
     weight_a: float = 1.0,
     weight_b: float = 1.0,
 ) -> list[float]:
-    """Зважене усереднення двох embeddings + L2-нормалізація.
+    """Weighted average of two embeddings + L2 normalization.
 
-    Використовується для running average у speakers.embedding: при кожному
-    PATCH'у з новим іменуванням ваги: a=usage_count (старий avg),
-    b=1 (новий sample).
+    Used for the running average in speakers.embedding: on every
+    PATCH with a new naming the weights are: a=usage_count (the old avg),
+    b=1 (the new sample).
     """
     if a is None or len(a) == 0:
         return _l2_normalize(list(b))
     if len(a) != len(b):
-        raise ValueError(f'Розмірності embeddings не співпадають: {len(a)} vs {len(b)}')
+        raise ValueError(f'Embedding dimensions do not match: {len(a)} vs {len(b)}')
     total_w = weight_a + weight_b
     averaged = [(a[i] * weight_a + b[i] * weight_b) / total_w for i in range(len(a))]
     return _l2_normalize(averaged)
@@ -225,16 +225,16 @@ def _l2_normalize(v: list[float]) -> list[float]:
 # ---------------------------------------------------------------- service
 
 class DiarizationService:
-    """Lazy-singleton обгортка над pyannote.audio Pipeline.
+    """Lazy-singleton wrapper over the pyannote.audio Pipeline.
 
-    Використання::
+    Usage::
 
         svc = DiarizationService.get_instance()
         if svc.is_available():
             result = svc.diarize_audio(Path('audio.wav'))
 
-    Pipeline вантажиться при першому виклику ``diarize_*`` (не у __init__),
-    щоб app startup не блокувався 10 секундами на завантаження моделі.
+    The pipeline is loaded on the first ``diarize_*`` call (not in __init__),
+    so that app startup is not blocked for 10 seconds by the model load.
     """
 
     _instance: Optional['DiarizationService'] = None
@@ -261,18 +261,18 @@ class DiarizationService:
         self._pipeline_lock = threading.Lock()
         self._import_error: Optional[str] = None
 
-        # Pre-flight check (не вантажить модель)
+        # Pre-flight check (does not load the model)
         try:
             import pyannote.audio  # noqa: F401
         except ImportError as e:
             self._import_error = f'pyannote.audio not installed: {e}'
 
     def is_available(self) -> bool:
-        """True якщо діарізація може бути запущена (token + import ok)."""
+        """True if diarization can be started (token + import ok)."""
         return self._import_error is None and bool(self.hf_token)
 
     def unavailability_reason(self) -> Optional[str]:
-        """Людиночитна причина недоступності, або None."""
+        """Human-readable reason for unavailability, or None."""
         if self._import_error:
             return self._import_error
         if not self.hf_token:
@@ -289,7 +289,7 @@ class DiarizationService:
             return 'cpu'
 
     def _ensure_pipeline(self):
-        """Lazy-load пайплайну з потокобезпечним guard'ом."""
+        """Lazy-load the pipeline with a thread-safe guard."""
         if self._pipeline is not None:
             return self._pipeline
         with self._pipeline_lock:
@@ -302,7 +302,7 @@ class DiarizationService:
             from pyannote.audio import Pipeline
             import torch
 
-            logger.info('Завантажую pyannote pipeline %s (~1.5GB при першому запуску)…',
+            logger.info('Loading pyannote pipeline %s (~1.5GB on first run)…',
                         self.model_id)
             t0 = time.time()
             pipeline = Pipeline.from_pretrained(
@@ -311,7 +311,7 @@ class DiarizationService:
             )
             device = self._resolve_device()
             pipeline.to(torch.device(device))
-            logger.info('Pipeline готовий (device=%s, %.1fs)', device, time.time() - t0)
+            logger.info('Pipeline ready (device=%s, %.1fs)', device, time.time() - t0)
             self._pipeline = pipeline
             return self._pipeline
 
@@ -326,19 +326,19 @@ class DiarizationService:
         progress_callback: Optional[Callable[[float], None]] = None,
         return_embeddings: bool = False,
     ) -> DiarizationResult:
-        """Універсальний діарізаційний прохід.
+        """Universal diarization pass.
 
         Args:
-            audio_path: WAV/MP3/будь-який підтримуваний pydub/ffmpeg формат.
-            min_speakers / max_speakers: bounds для алгоритму кластерізації.
-            num_speakers: точна кількість (override min/max).
-            progress_callback: викликається з float у [0.0, 1.0] (опц.).
-            return_embeddings: якщо True, у result.embeddings буде map
-                {raw_label: list[float]} з voice fingerprints для voice-id.
+            audio_path: WAV/MP3/any format supported by pydub/ffmpeg.
+            min_speakers / max_speakers: bounds for the clustering algorithm.
+            num_speakers: the exact count (overrides min/max).
+            progress_callback: called with a float in [0.0, 1.0] (optional).
+            return_embeddings: if True, result.embeddings will hold a map
+                {raw_label: list[float]} with voice fingerprints for voice-id.
 
         Returns:
-            DiarizationResult з сегментами {start, end, speaker} де speaker
-            — 'SPEAKER_00', 'SPEAKER_01', … (як зазначає pyannote).
+            DiarizationResult with segments {start, end, speaker} where speaker
+            is 'SPEAKER_00', 'SPEAKER_01', … (as pyannote names them).
         """
         audio_path = Path(audio_path)
         if not audio_path.is_file():
@@ -385,17 +385,17 @@ class DiarizationService:
                     pass
 
         # pipeline(..., return_embeddings=True) → tuple (Annotation, ndarray)
-        # інакше — звичайний Annotation
+        # otherwise - a regular Annotation
         embeddings_map: dict[str, list[float]] = {}
         if return_embeddings and isinstance(output, tuple) and len(output) == 2:
             annotation, embeddings_arr = output
             try:
                 # embeddings_arr shape: [num_speakers, embedding_dim]
-                # порядок labels у annotation.labels()
+                # order of labels in annotation.labels()
                 labels_in_order = list(annotation.labels())
                 for i, label in enumerate(labels_in_order):
                     if i < len(embeddings_arr):
-                        # Конвертуємо у звичайний list[float] (numpy → Python)
+                        # Convert to a regular list[float] (numpy → Python)
                         emb = embeddings_arr[i]
                         embeddings_map[str(label)] = [float(x) for x in emb]
             except Exception as e:
@@ -424,20 +424,20 @@ class DiarizationService:
         progress_callback: Optional[Callable[[float], None]] = None,
         return_embeddings: bool = False,
     ) -> DiarizationResult:
-        """Per-stream діарізація для recording-режиму.
+        """Per-stream diarization for recording mode.
 
-        Логіка:
-        - Якщо є ``mic_wav`` — діарізуємо, всі лейбли колапсуємо у ``'self'``.
-          Робимо це через VAD-equivalent прохід (повний pipeline), бо нам
-          цікаво лише "де є мовлення" — точна кластерізація між кількома
-          голосами біля мікрофона зайва.
-        - Якщо є ``system_wav`` — повна діарізація з ``max_speakers``
-          обмеженням; лейбли залишаються як SPEAKER_00, SPEAKER_01, ….
-        - Об'єднаний результат — список сегментів з обох потоків,
-          відсортований за часом старту. Таймлайни mic/system вже
-          синхронні (записувались паралельно), тому просто конкатенуємо.
+        Logic:
+        - If there is a ``mic_wav`` - diarize it, collapse all labels into ``'self'``.
+          We do this via a VAD-equivalent pass (the full pipeline), because we are
+          only interested in "where there is speech" - exact clustering between several
+          voices near the microphone is unnecessary.
+        - If there is a ``system_wav`` - full diarization with a ``max_speakers``
+          limit; labels stay as SPEAKER_00, SPEAKER_01, ….
+        - The merged result is a list of segments from both streams,
+          sorted by start time. The mic/system timelines are already
+          in sync (recorded in parallel), so we simply concatenate.
 
-        Якщо обидва None — повертає порожній результат.
+        If both are None - returns an empty result.
         """
         mic_path = Path(mic_wav) if mic_wav else None
         sys_path = Path(system_wav) if system_wav else None
@@ -456,10 +456,10 @@ class DiarizationService:
                 ))
             total_time += mic_result.processing_time_sec
             max_end = max(max_end, mic_result.duration_sec)
-            # Усереднюємо всі embeddings у one self-embedding (могло бути
-            # кілька SPEAKER_NN у mic'у, наприклад 'ви + друг поряд' — але
-            # ми колапсуємо у одну фіксовану особу 'self'). Беремо першу
-            # для простоти — якщо кілька, можна усередняти.
+            # Average all embeddings into one self-embedding (there could be
+            # several SPEAKER_NN in the mic, e.g. 'you + a friend nearby' - but
+            # we collapse into one fixed person 'self'). We take the first one
+            # for simplicity - if there are several, they could be averaged.
             if return_embeddings and mic_result.embeddings:
                 first_emb = next(iter(mic_result.embeddings.values()), None)
                 if first_emb:
@@ -481,7 +481,7 @@ class DiarizationService:
             total_time += sys_result.processing_time_sec
             max_end = max(max_end, sys_result.duration_sec)
             if return_embeddings and sys_result.embeddings:
-                # Лейбли SPEAKER_NN з system stream — додаємо як є
+                # SPEAKER_NN labels from the system stream - added as is
                 embeddings_map.update(sys_result.embeddings)
             if progress_callback:
                 try:
@@ -505,24 +505,24 @@ def assign_speakers_to_whisper_segments(
     diarization_segments: Iterable[DiarSegment],
     overlap_priority: tuple[str, ...] = (SELF_LABEL,),
 ) -> list[dict]:
-    """Збагачує whisper-сегменти полем ``speaker``.
+    """Enriches whisper segments with a ``speaker`` field.
 
-    Алгоритм: для кожного whisper-сегмента (з полями ``start``/``end``)
-    знаходимо діарізаційний інтервал з найбільшим overlap'ом і записуємо
-    його label як ``speaker``. При нульовому перетині — ``UNKNOWN_LABEL``.
+    Algorithm: for every whisper segment (with ``start``/``end`` fields)
+    we find the diarization interval with the largest overlap and write
+    its label as ``speaker``. With zero overlap - ``UNKNOWN_LABEL``.
 
-    ``overlap_priority`` — tie-breaker при рівних overlap'ах. За замовч.
-    'self' має пріоритет (якщо ви говорите одночасно з кимось у Meet —
-    мікрофон ваш безперечний, отже ваш сегмент).
+    ``overlap_priority`` - a tie-breaker for equal overlaps. By default
+    'self' has priority (if you speak simultaneously with someone in Meet -
+    the microphone is undeniably yours, hence the segment is yours).
 
     Args:
-        whisper_segments: ітерабельне з dict'ів {start, end, text, ...}.
-        diarization_segments: list/iter з :class:`DiarSegment`.
-        overlap_priority: послідовність labels від найвищого до найнижчого
-            пріоритету для tie-breaking.
+        whisper_segments: an iterable of dicts {start, end, text, ...}.
+        diarization_segments: a list/iterable of :class:`DiarSegment`.
+        overlap_priority: a sequence of labels from the highest to the lowest
+            priority for tie-breaking.
 
     Returns:
-        Новий список збагачених dict'ів (input не мутує).
+        A new list of enriched dicts (the input is not mutated).
     """
     diar_list = list(diarization_segments)
     priority_index = {label: i for i, label in enumerate(overlap_priority)}
@@ -543,7 +543,7 @@ def assign_speakers_to_whisper_segments(
         if not overlap_per_label:
             speaker = UNKNOWN_LABEL
         else:
-            # Сортуємо: спочатку за overlap (більше — краще), потім за priority
+            # Sort: first by overlap (more is better), then by priority
             def sort_key(item: tuple[str, float]):
                 lbl, ov = item
                 return (-ov, priority_index.get(lbl, len(priority_index)))
@@ -555,7 +555,7 @@ def assign_speakers_to_whisper_segments(
 
 
 def collect_unique_labels(segments: Iterable[dict]) -> list[str]:
-    """Повертає унікальні speaker-labels у порядку першої появи."""
+    """Returns the unique speaker labels in order of first appearance."""
     seen: dict[str, None] = {}
     for s in segments:
         sp = s.get('speaker')
@@ -571,24 +571,24 @@ def find_matching_speaker(
     saved_speakers: Sequence[tuple[int, Optional[bytes]]],
     threshold: float = DEFAULT_MATCH_THRESHOLD,
 ) -> Optional[tuple[int, float]]:
-    """Шукає у saved_speakers найкращий match для new_embedding.
+    """Looks in saved_speakers for the best match for new_embedding.
 
     Args:
-        new_embedding: щойно витягнутий embedding (list[float]).
-        saved_speakers: list of (speaker_id, embedding_blob) з БД.
-            speaker_id — int, embedding_blob — bytes або None.
-        threshold: мінімальна cosine similarity для match (default 0.75).
+        new_embedding: a freshly extracted embedding (list[float]).
+        saved_speakers: a list of (speaker_id, embedding_blob) from the DB.
+            speaker_id is an int, embedding_blob is bytes or None.
+        threshold: the minimum cosine similarity for a match (default 0.75).
 
     Returns:
-        (speaker_id, similarity) для найкращого match >= threshold.
-        None якщо нічого не підходить.
+        (speaker_id, similarity) for the best match >= threshold.
+        None if nothing fits.
 
-    T6.8: логує (DEBUG) СИРУ similarity найкращого кандидата — і прийнятого,
-    і відхиленого — щоб згодом зібрати розмічений validation-набір і
-    перевірити поріг 0.75 на precision/recall (зараз він емпіричний, без
-    такого тесту — див. DEFAULT_MATCH_THRESHOLD). Поріг тут НІКОЛИ не
-    змінюється — лише спостереження, рішення (return/None) те саме, що й до
-    цієї зміни.
+    T6.8: logs (DEBUG) the RAW similarity of the best candidate - both accepted
+    and rejected - to later collect a labeled validation set and
+    check the 0.75 threshold on precision/recall (for now it is empirical, without
+    such a test - see DEFAULT_MATCH_THRESHOLD). The threshold here is NEVER
+    changed - only observation, the decision (return/None) is the same as before
+    this change.
     """
     if not new_embedding:
         return None
@@ -622,23 +622,23 @@ def precision_recall_at_thresholds(
     pairs: Sequence[tuple[float, bool]],
     thresholds: Sequence[float] = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90),
 ) -> list[dict]:
-    """Каркас для майбутньої валідації voice-merge порогу (T6.8).
+    """Scaffold for the future validation of the voice-merge threshold (T6.8).
 
-    НЕ використовується в рантаймі і НЕ змінює :data:`DEFAULT_MATCH_THRESHOLD`
-    — чиста функція для offline-аналізу, коли зʼявиться розмічений набір
-    (напр. зібраний із DEBUG-логів :func:`find_matching_speaker` + ручна
-    розмітка «це справді той самий спікер?»). Тоді результат покаже, чи 0.75
-    справді оптимальний за precision/recall, замість здогадки.
+    NOT used at runtime and does NOT change :data:`DEFAULT_MATCH_THRESHOLD`
+    - a pure function for offline analysis, once a labeled set appears
+    (e.g. collected from the DEBUG logs of :func:`find_matching_speaker` + manual
+    labeling "is this really the same speaker?"). Then the result will show whether 0.75
+    really is optimal by precision/recall, instead of a guess.
 
     Args:
-        pairs: розмічені приклади [(cosine_similarity, is_same_speaker), ...].
-        thresholds: кандидатні пороги для порівняння.
+        pairs: labeled examples [(cosine_similarity, is_same_speaker), ...].
+        thresholds: candidate thresholds to compare.
 
     Returns:
         [{"threshold": float, "tp": int, "fp": int, "fn": int, "tn": int,
           "precision": float|None, "recall": float|None}, ...]
-        precision/recall — None, якщо знаменник 0 (немає позитивних
-        передбачень / немає позитивних прикладів).
+        precision/recall - None if the denominator is 0 (no positive
+        predictions / no positive examples).
     """
     out: list[dict] = []
     for thr in thresholds:
@@ -672,26 +672,26 @@ def run_diarization_for_audio(
     progress_callback: Optional[Callable[[float], None]] = None,
     return_embeddings: bool = False,
 ) -> tuple[list[dict], list[str], float, dict[str, list[float]]]:
-    """Високорівневий orchestration: діарізація + збагачення segments.
+    """High-level orchestration: diarization + segment enrichment.
 
-    Маршрутизує:
-    - source_type='recording' з manifest.streams_finalized → per-stream
-      (mic.wav як 'self', system.wav як SPEAKER_NN). Якщо stream-WAV-ів
-      немає (старий manifest) — fallback на mixed audio_path.
-    - інакше — diarize_audio(audio_path) на змішаному аудіо.
+    Routes:
+    - source_type='recording' with manifest.streams_finalized → per-stream
+      (mic.wav as 'self', system.wav as SPEAKER_NN). If there are no stream WAVs
+      (an old manifest) - fallback to the mixed audio_path.
+    - otherwise - diarize_audio(audio_path) on the mixed audio.
 
     Args:
-        audio_path: шлях до final mixed audio (MP3 / WAV).
-        whisper_segments: список dict'ів з transcribe_with_progress.
+        audio_path: path to the final mixed audio (MP3 / WAV).
+        whisper_segments: a list of dicts from transcribe_with_progress.
         source_type: 'file' | 'youtube' | 'recording'.
-        recording_manifest: manifest сесії (якщо recording).
-        progress_callback: для SSE update (опц.).
-        return_embeddings: якщо True, у tuple повертаємо також dict
-            {raw_label: embedding} для voice fingerprinting.
+        recording_manifest: the session manifest (if a recording).
+        progress_callback: for the SSE update (optional).
+        return_embeddings: if True, the tuple also returns a dict
+            {raw_label: embedding} for voice fingerprinting.
 
     Returns:
         (enriched_segments, unique_labels, processing_time_sec, embeddings_map)
-        embeddings_map порожній якщо return_embeddings=False.
+        embeddings_map is empty if return_embeddings=False.
     """
     svc = DiarizationService.get_instance()
     if not svc.is_available():
@@ -713,7 +713,7 @@ def run_diarization_for_audio(
                 return_embeddings=return_embeddings,
             )
         else:
-            # Старий manifest без streams_finalized — fallback на mix
+            # Old manifest without streams_finalized - fallback to the mix
             diar_result = svc.diarize_audio(
                 audio_path, progress_callback=progress_callback,
                 return_embeddings=return_embeddings,

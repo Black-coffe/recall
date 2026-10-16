@@ -1,23 +1,23 @@
-"""Єдиний retry-хелпер для викликів Claude API (REMEDIATION_PLAN Волна 3, T6.3).
+"""Single retry helper for Claude API calls (REMEDIATION_PLAN Wave 3, T6.3).
 
-Раніше кожен виклик ``client.messages.create/stream`` був загорнутий у
-``try/except: return None`` (або взагалі нічим) — жодного повтору на
-транзиентних помилках (429 rate-limit, 5xx/529 overloaded, timeout, обрив
-з'єднання). Один випадковий 429 валив увесь polish/RAG/copilot-виклик.
+Previously every ``client.messages.create/stream`` call was wrapped in
+``try/except: return None`` (or in nothing at all) — no retry on
+transient errors (429 rate-limit, 5xx/529 overloaded, timeout, dropped
+connection). One random 429 would fail the whole polish/RAG/copilot call.
 
-Ретраїмо ЛИШЕ транзиентне: 429, 5xx (включно з 529 overloaded), мережеві
-помилки/timeout. НЕ ретраїмо 4xx окрім 429 (400 invalid_request, 401 auth,
-403 permission, 404 not_found тощо) — повтор того самого невалідного запиту
-нічого не полагодить, лише витратить час і (для non-idempotent запитів)
-гроші.
+We retry ONLY the transient: 429, 5xx (including 529 overloaded), network
+errors/timeout. We do NOT retry 4xx other than 429 (400 invalid_request, 401 auth,
+403 permission, 404 not_found, etc.) — repeating the same invalid request
+fixes nothing, only wastes time and (for non-idempotent requests)
+money.
 
-Для стрімінгу: ``call_with_retry`` очікує callable, що виконує ВЕСЬ виклик
-заново (відкриває ``messages.stream(...)`` з нуля і повертає результат). Не
-намагається резюмувати ВСЕРЕДИНІ вже відкритого стріму — якщо частину
-відповіді вже віддано споживачу (наприклад, SSE-клієнту), повторювати
-виклик небезпечно (дубльований/пошкоджений вивід); у такому разі виклик
-має ловити помилку САМ і вирішувати, чи ретраїти, чи прокидати далі
-(див. ``app/services/rag.py::answer_question_stream``).
+For streaming: ``call_with_retry`` expects a callable that performs the WHOLE call
+anew (opens ``messages.stream(...)`` from scratch and returns the result). It does not
+try to resume INSIDE an already opened stream — if part of the
+answer has already been handed to the consumer (for example, an SSE client), repeating
+the call is unsafe (duplicated/corrupted output); in that case the caller
+must catch the error ITSELF and decide whether to retry or to propagate
+(see ``app/services/rag.py::answer_question_stream``).
 """
 from __future__ import annotations
 
@@ -31,27 +31,27 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# До 3 спроб разом (1 початкова + 2 повтори) — обмежений ліміт, не нескінченний.
+# Up to 3 attempts in total (1 initial + 2 retries) — a bounded limit, not infinite.
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_BASE_DELAY = 1.0    # секунди, подвоюється щоразу (exponential backoff)
-DEFAULT_MAX_DELAY = 20.0    # верхня межа затримки між спробами
+DEFAULT_BASE_DELAY = 1.0    # seconds, doubles each time (exponential backoff)
+DEFAULT_MAX_DELAY = 20.0    # upper bound of the delay between attempts
 
 
 def is_retryable_error(exc: BaseException) -> bool:
-    """Транзиентна помилка Claude API (429 / 5xx / 529 / мережа-timeout)?
+    """Is this a transient Claude API error (429 / 5xx / 529 / network-timeout)?
 
-    4xx окрім 429 (400/401/403/404/422 тощо) — НЕ транзиентні, повертає False.
+    4xx other than 429 (400/401/403/404/422 etc.) are NOT transient, returns False.
     """
     try:
         import anthropic
     except ImportError:
         return False
-    # Мережеві помилки / timeout — немає HTTP-відповіді взагалі, завжди транзиентні.
-    # anthropic.APITimeoutError — підклас APIConnectionError.
+    # Network errors / timeout — no HTTP response at all, always transient.
+    # anthropic.APITimeoutError is a subclass of APIConnectionError.
     if isinstance(exc, anthropic.APIConnectionError):
         return True
     status = getattr(exc, "status_code", None)
-    if isinstance(status, bool):  # bool є підкласом int — відсікаємо явно
+    if isinstance(status, bool):  # bool is a subclass of int — exclude explicitly
         return False
     if isinstance(status, int):
         return status == 429 or status >= 500
@@ -60,7 +60,7 @@ def is_retryable_error(exc: BaseException) -> bool:
 
 def backoff_delay(attempt: int, base_delay: float = DEFAULT_BASE_DELAY,
                    max_delay: float = DEFAULT_MAX_DELAY) -> float:
-    """Затримка (сек) перед `attempt`-им повтором (0-indexed): exponential + jitter."""
+    """Delay (sec) before the `attempt`-th retry (0-indexed): exponential + jitter."""
     return min(base_delay * (2 ** attempt), max_delay) + random.uniform(0, 0.5)
 
 
@@ -73,12 +73,12 @@ def call_with_retry(
     what: str = "claude-call",
     sleep: Callable[[float], None] = time.sleep,
 ) -> T:
-    """Виконати ``fn()`` з retry на транзиентних помилках, exponential backoff.
+    """Run ``fn()`` with retry on transient errors, exponential backoff.
 
-    ``fn`` викликається ПОВНІСТЮ ЗАНОВО на кожній спробі (для стрімінгу — весь
-    ``with client.messages.stream(...) as stream: ...`` блок від початку, а не
-    резюме середини). Після вичерпання спроб — останній виняток прокидається
-    як є (caller лишає свою існуючу try/except-поведінку без змін).
+    ``fn`` is called COMPLETELY ANEW on every attempt (for streaming — the whole
+    ``with client.messages.stream(...) as stream: ...`` block from the start, not
+    a resume of the middle). After attempts are exhausted, the last exception is re-raised
+    as is (the caller keeps its existing try/except behaviour unchanged).
     """
     attempt = 0
     while True:
@@ -89,7 +89,7 @@ def call_with_retry(
                 raise
             delay = backoff_delay(attempt, base_delay, max_delay)
             logger.warning(
-                "[%s] транзиентна помилка Claude API (спроба %d/%d): %s — повтор через %.1fс",
+                "[%s] transient Claude API error (attempt %d/%d): %s — retry in %.1fs",
                 what, attempt + 1, max_retries + 1, exc, delay,
             )
             sleep(delay)

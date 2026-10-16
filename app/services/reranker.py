@@ -1,37 +1,37 @@
-"""Локальний cross-encoder reranker (T6.4, Волна 4).
+"""Local cross-encoder reranker (T6.4, Wave 4).
 
-Другий етап переранжирування RAG-кандидатів: після гібридного RRF-злиття
-(вектор + FTS) і евристик свіжості/диверсифікації (`app/services/retrieval.py`)
-топ-пул кандидатів прогонятимемо через cross-encoder (`BAAI/bge-reranker-v2-m3`),
-що оцінює РЕАЛЬНУ семантичну релевантність пари (запит, текст чанку) — на
-відміну від RRF, який лише зливає два ранжирування без спільної шкали.
+The second stage of re-ranking RAG candidates: after the hybrid RRF merge
+(vector + FTS) and the freshness/diversification heuristics (`app/services/retrieval.py`)
+the top pool of candidates is run through a cross-encoder (`BAAI/bge-reranker-v2-m3`),
+which scores the REAL semantic relevance of a (query, chunk text) pair, unlike
+RRF, which merely merges two rankings without a common scale.
 
-Опційно і вимкнено за замовчуванням (`RECALL_RERANK_ENABLED`, читає
-`retrieval.py`/`rag.py`) — застосовується ЛИШЕ до RAG-чату «Запитай архів»
-(найвища ціна помилки з-поміж усіх споживачів `retrieval.search`). Copilot,
-categorize, MCP-пошук викликають `search()` без `rerank=True` — їх поведінка
-не змінюється.
+Optional and off by default (`RECALL_RERANK_ENABLED`, read by
+`retrieval.py`/`rag.py`); applied ONLY to the RAG chat "Ask the archive"
+(the highest cost of a mistake among all consumers of `retrieval.search`). Copilot,
+categorize and MCP search call `search()` without `rerank=True`, so their behaviour
+does not change.
 
-Чому bge-reranker-v2-m3 локально, а не LLM-rerank на Haiku: $0 (у дусі
-продукту, як e5-embeddings), приватно (нічого не йде назовні), і той самий
-sentence-transformers стек, що й `embeddings.py` — `CrossEncoder` уже є у
-встановленому sentence-transformers==3.4.1, нова залежність НЕ потрібна.
+Why bge-reranker-v2-m3 locally rather than an LLM rerank on Haiku: $0 (in the spirit of
+the product, like the e5 embeddings), private (nothing leaves the machine), and the same
+sentence-transformers stack as `embeddings.py`: `CrossEncoder` is already in the
+installed sentence-transformers==3.4.1, no new dependency is needed.
 
-Lazy-load моделі при першому реальному виклику (той самий патерн, що
-`embeddings._get_model`) — тяжка модель НЕ вантажиться, поки rerank не
-увімкнено і жодного разу не викликано. Graceful degradation: якщо модель/
-залежності недоступні або впав inference — WARNING (раз на процес) і
-повертаємо кандидатів у ВИХІДНОМУ порядку без переранжирування («усе
-деградує», як для embeddings/copilot).
+Lazy model load on the first real call (the same pattern as
+`embeddings._get_model`): the heavy model is NOT loaded while rerank is not
+enabled and has never been called. Graceful degradation: if the model/
+dependencies are unavailable or inference failed, a WARNING (once per process) and
+the candidates are returned in the ORIGINAL order without re-ranking ("everything
+degrades", as for embeddings/copilot).
 
-GPU: окремого GPU-семафора на рівні процесу в проєкті ще НЕМА (відкрита
-знахідка REMEDIATION_PLAN §12 "GPU-семафор", повʼязана з T2.5 — не
-реалізована). CrossEncoder вантажиться lazy-singleton'ом (як `embeddings._model`)
-і живе поруч з e5/whisper/pyannote на тій самій GPU без явної арбітрації VRAM —
-це той самий (поки не вирішений на рівні проєкту) компроміс, що вже є для
-e5-embeddings. Rerank вмикається ЛИШЕ для RAG-чату (низька частота відносно
-транскрипції/embedding), тому додатковий тиск на VRAM обмежений; за потреби
-(слабкий GPU) можна форсувати `RERANK_DEVICE=cpu`.
+GPU: there is NO process-wide GPU semaphore in the project yet (the open
+finding REMEDIATION_PLAN §12 "GPU semaphore", tied to T2.5, is not
+implemented). CrossEncoder is loaded as a lazy singleton (like `embeddings._model`)
+and lives next to e5/whisper/pyannote on the same GPU without explicit VRAM arbitration;
+this is the same (not yet solved at project level) compromise that already exists for
+e5 embeddings. Rerank is enabled ONLY for the RAG chat (low frequency relative to
+transcription/embedding), so the additional VRAM pressure is limited; if needed
+(a weak GPU) `RERANK_DEVICE=cpu` can be forced.
 """
 from __future__ import annotations
 
@@ -43,9 +43,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# bge-reranker-v2-m3: мультимовний (включно з UA/RU), лёгкий (568M), той
-# самий Hugging Face екосистема, що e5-large. Override через env для тестів
-# /ексериментів з іншою моделлю.
+# bge-reranker-v2-m3: multilingual (including UA/RU), light (568M), the same
+# Hugging Face ecosystem as e5-large. Override via env for tests
+# / experiments with another model.
 RERANK_MODEL = os.environ.get("RECALL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 
 _model = None
@@ -55,9 +55,9 @@ _warned_unavailable = False
 
 
 def is_available() -> bool:
-    """Чи можна рахувати rerank (sentence-transformers + torch імпортуються).
-    НЕ перевіряє, чи модель уже завантажена/скачана — це з'ясується лише при
-    реальному _get_model() (lazy)."""
+    """Whether rerank can be computed (sentence-transformers + torch import).
+    Does NOT check whether the model is already loaded/downloaded; that becomes clear only at the
+    real _get_model() (lazy)."""
     global _unavailable_reason
     try:
         import sentence_transformers  # noqa: F401
@@ -69,7 +69,7 @@ def is_available() -> bool:
 
 
 def unavailability_reason() -> str:
-    return _unavailable_reason or "sentence-transformers/torch недоступні"
+    return _unavailable_reason or "sentence-transformers/torch unavailable"
 
 
 def _get_model():
@@ -82,28 +82,28 @@ def _get_model():
         import torch
         from sentence_transformers import CrossEncoder
         device = os.environ.get("RERANK_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("[reranker] Завантаження %s на %s …", RERANK_MODEL, device)
+        logger.info("[reranker] Loading %s on %s …", RERANK_MODEL, device)
         t0 = time.time()
-        # use_safetensors=True — той самий захист, що embeddings.EMBED_MODEL: bge-reranker-v2-m3
-        # має ЛИШЕ model.safetensors (перевірено — немає pytorch_model.bin), тож це декларативно,
-        # але явно страхує від transformers>=4.56, який блокує torch.load(.bin) на torch<2.6
-        # (CVE-2025-32434), якщо колись хтось перемкне RECALL_RERANK_MODEL на .bin-only репо.
+        # use_safetensors=True is the same protection as embeddings.EMBED_MODEL: bge-reranker-v2-m3
+        # has ONLY model.safetensors (checked: there is no pytorch_model.bin), so this is declarative,
+        # but explicitly insures against transformers>=4.56, which blocks torch.load(.bin) on torch<2.6
+        # (CVE-2025-32434), if someone ever switches RECALL_RERANK_MODEL to a .bin-only repo.
         _model = CrossEncoder(RERANK_MODEL, device=device,
                               automodel_args={"use_safetensors": True})
-        logger.info("[reranker] Модель готова за %.1fs", time.time() - t0)
+        logger.info("[reranker] Model ready in %.1fs", time.time() - t0)
         return _model
 
 
 def rerank(query: str, candidates: list[dict], text_key: str = "text") -> list[dict]:
-    """Переранжувати candidates (список словників з полем text_key) за
-    реальною релевантністю до query через cross-encoder.
+    """Re-rank candidates (a list of dicts with a text_key field) by their
+    real relevance to query through the cross-encoder.
 
-    Повертає НОВИЙ список копій вхідних словників з доданим полем
-    "rerank_score" (float), відсортований спадно за цим скором.
+    Returns a NEW list of copies of the input dicts with an added
+    "rerank_score" (float) field, sorted descending by that score.
 
-    Graceful degradation: якщо модель недоступна (import) або inference
-    впав — лог WARNING (недоступність — раз на процес, щоб не спамити) і
-    повертає candidates у ВИХІДНОМУ порядку, БЕЗ змін (той самий список).
+    Graceful degradation: if the model is unavailable (import) or inference
+    failed, a WARNING is logged (unavailability once per process, to avoid spam) and
+    candidates are returned in the ORIGINAL order, UNCHANGED (the same list).
     """
     global _warned_unavailable
     if not candidates:
@@ -111,8 +111,8 @@ def rerank(query: str, candidates: list[dict], text_key: str = "text") -> list[d
     if not is_available():
         if not _warned_unavailable:
             logger.warning(
-                "[reranker] Недоступний (%s) — rerank пропущено, кандидати "
-                "повертаються у вихідному порядку.", unavailability_reason(),
+                "[reranker] Unavailable (%s); rerank skipped, candidates "
+                "returned in the original order.", unavailability_reason(),
             )
             _warned_unavailable = True
         return candidates
@@ -123,7 +123,7 @@ def rerank(query: str, candidates: list[dict], text_key: str = "text") -> list[d
         scores = model.predict(pairs)
         elapsed = time.time() - t0
         logger.info(
-            "[reranker] rerank: %d кандидатів за %.3fs (%.1fмс/кандидат)",
+            "[reranker] rerank: %d candidates in %.3fs (%.1fms/candidate)",
             len(candidates), elapsed, elapsed * 1000 / max(len(candidates), 1),
         )
         scored = list(zip(candidates, scores))
@@ -134,9 +134,9 @@ def rerank(query: str, candidates: list[dict], text_key: str = "text") -> list[d
             c2["rerank_score"] = float(s)
             out.append(c2)
         return out
-    except Exception as exc:  # захист від несподіваних збоїв моделі (OOM, тощо)
+    except Exception as exc:  # guard against unexpected model failures (OOM, etc.)
         logger.warning(
-            "[reranker] Помилка rerank (%s) — кандидати повертаються у "
-            "вихідному порядку.", exc, exc_info=True,
+            "[reranker] Rerank error (%s); candidates returned in the "
+            "original order.", exc, exc_info=True,
         )
         return candidates

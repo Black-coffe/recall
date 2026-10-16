@@ -23,10 +23,10 @@
     };
 
     let st = null;   // { file, category_id, busy }
-    // T5.6: bgJob — фонове додавання документа, запущене ЦИМ view (модульний
-    // scope — переживає render()/destroy() у межах вкладки). Guard проти
-    // дублю: поки не завершиться, повторний захід у /documents показує
-    // статус-бейдж замість дропзони.
+    // T5.6: bgJob — a background document addition started by THIS view (module
+    // scope — survives render()/destroy() within the tab). Guard against
+    // a duplicate: until it finishes, a repeated visit to /documents shows a
+    // status badge instead of the dropzone.
     let bgJob = null;      // { label }
 
     const extOf = (n) => (n.split('.').pop() || '').toLowerCase();
@@ -67,8 +67,8 @@
         const input = ctx.mount.querySelector('#rcDocFile');
         const body = ctx.mount.querySelector('#rcDocBody');
 
-        // T5.6: фонове додавання з попереднього заходу ще триває — не даємо
-        // почати друге, поки не завершиться.
+        // T5.6: a background addition from a previous visit is still going — we do not let
+        // a second one start until it finishes.
         if (bgJob) {
             drop.hidden = true;
             body.innerHTML = bgNoticeHTML(bgJob.label);
@@ -145,13 +145,13 @@
         ctx.mount.querySelectorAll('#rcDocTitle,#rcDocDesc,#rcDocCat,#rcDocStart,#rcDocBack,#rcDocClear').forEach(e => { e.disabled = disabled; });
     }
 
-    // T5.6: XHR лишається один виклик (api.js не займаємо) — реальний прогрес
-    // байтів під час завантаження чесний і лишений як є. Розбір документа
-    // (парсинг/OCR/дедуп по хешу) йде синхронно на бекенді в тому ж потоці
-    // запиту, незалежно від клієнтського зʼєднання — тож щойно байти дійшли
-    // (onUploadDone), розрив зʼєднання більше не втрачає роботу. З цього
-    // моменту показуємо статус-бейдж «можна закрити вкладку»; .then()/.catch()
-    // довершують UI (включно з showDuplicate) лише якщо view ще активний.
+    // T5.6: XHR stays a single call (we do not touch api.js) — the real byte progress
+    // during upload is honest and left as is. Document parsing
+    // (parsing/OCR/dedup by hash) runs synchronously on the backend in the same request
+    // thread, regardless of the client connection — so as soon as the bytes arrive
+    // (onUploadDone), a dropped connection no longer loses the work. From this
+    // moment we show the status badge «можна закрити вкладку»; .then()/.catch()
+    // finish the UI (including showDuplicate) only if the view is still active.
     function start(ctx, force) {
         if (!st || !st.file || st.busy || bgJob) return;
         st.category_id = (ctx.mount.querySelector('#rcDocCat') || {}).value || st.category_id || '';

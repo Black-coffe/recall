@@ -1,35 +1,36 @@
-"""Зобовʼязання (Трек 1) — нормалізація дедлайнів, власників, stale/dedup + запити.
+"""Commitments (Track 1) — normalizing deadlines and owners, stale/dedup passes, and queries.
 
-**Проблема, яку закриває модуль** (гриль-сесія 24.07.2026; бриф і план лежать
-локально в `docs/grill/` та `docs/plans/` — у git їх немає навмисно, бо вони
-описують конкретику особистого архіву):
-`action_items.due` зберігався як сира фраза з розмови — «завтра», «четвер»,
-«наступний тиждень», «Q3 2026» (426 різних значень на задачу, заповнено 29%).
-Питання «що треба зробити мені/команді цього тижня» на таких даних не відповідається
-в принципі: немає ні дати, ні надійного власника, а всі задачі висять у статусі
-`open` (жодна не закривалась з травня).
+**The problem this module closes** (grilling session of 24 Jul 2026; the brief and
+plan live locally in `docs/grill/` and `docs/plans/` — deliberately not in git,
+since they describe specifics of the personal archive):
+`action_items.due` was stored as the raw phrase from the conversation — "tomorrow",
+"Thursday", "next week", "Q3 2026" (426 distinct values over tasks, 29% filled).
+The question "what must I/the team do this week" cannot be answered on such data:
+there is neither a date nor a reliable owner, and every task sits in status
+`open` (none had been closed since May).
 
-**Що робить модуль:**
+**What the module does:**
 
-1. `parse_due()` — розгортає сиру фразу в ISO-дату відносно **дати зустрічі**
-   (`transcriptions.meeting_date`), бо «завтра» 14 травня і «завтра» вчора — різні дні.
-   Разом з датою повертає `precision`: `day|week|month|quarter|soon|next_meeting|
-   recurring`. Це навмисно — «якнайшвидше» НЕ вдає точну дату, а стає `soon`;
-   «до наступної зустрічі» лишається без дати (`next_meeting`). Фальшива точність
-   у зводі гірша за чесне «терміну немає».
-2. Offline-проходи (`backfill_due`, `link_owners`, `dedup`, `mark_stale`) — окремі,
-   ідемпотентні, кожен має `--dry-run`. НЕ вбудовані в enrich, щоб не гальмувати
-   основний шлях (той самий принцип, що `entity_dedup.py`).
-3. Read-запити (`list_commitments`, `dropped_commitments`, `stale_topics`,
-   `weekly_digest`) — спільне ядро для MCP-тулзів і UI-ендпоінтів.
+1. `parse_due()` — expands a raw phrase into an ISO date relative to the **meeting date**
+   (`transcriptions.meeting_date`), because "tomorrow" on 14 May and "tomorrow" yesterday are
+   different days. Together with the date it returns `precision`: `day|week|month|quarter|soon|
+   next_meeting|recurring`. This is deliberate — "as soon as possible" does NOT pretend to be
+   an exact date but becomes `soon`; "by the next meeting" stays dateless (`next_meeting`).
+   False precision in the digest is worse than an honest "no deadline".
+2. Offline passes (`backfill_due`, `link_owners`, `dedup`, `mark_stale`) — separate,
+   idempotent, each has `--dry-run`. NOT built into enrich, so the main path is not
+   slowed down (same principle as `entity_dedup.py`).
+3. Read queries (`list_commitments`, `dropped_commitments`, `stale_topics`,
+   `weekly_digest`) — a shared core for the MCP tools and the UI endpoints.
 
-**Сира фраза не переписується.** `due` лишається як є, обчислене йде в `due_date`/
-`due_precision` — у видачі показуємо обидві, щоб помилка парсера була видимою.
+**The raw phrase is not rewritten.** `due` stays as is, the computed value goes into `due_date`/
+`due_precision` — we show both in the output so a parser error stays visible.
 
-**Залежності:** лише stdlib + `app.db.connection` + `app.services.categories`
-(теж без важких залежностей — фільтр напрямок/теги/період, C6 спеки
-`directions-projects-tags`, ADR-023 §C). Модуль імпортується з
-`mcp_server.py` (stdio-процес), тому НЕ тягне embeddings/torch — див.
+**Dependencies:** stdlib only + `app.db.connection` + `app.services.categories`
+(also free of heavy dependencies — direction/tags/period filter, C6 of the
+`directions-projects-tags` spec, ADR-023 section C). The module is imported from
+`mcp_server.py` (a stdio process), so it must NOT pull in embeddings/torch — see
+memory `mcp-stdio-no-heavy-models`.
 memory `mcp-stdio-no-heavy-models`.
 
 CLI:
@@ -52,37 +53,37 @@ from app.services import categories
 
 logger = logging.getLogger(__name__)
 
-# --- Класи точності ------------------------------------------------------------
+# --- Precision classes ---------------------------------------------------------
 P_DAY = "day"
 P_WEEK = "week"
 P_MONTH = "month"
 P_QUARTER = "quarter"
-P_SOON = "soon"                # «якнайшвидше», «найближчим часом» — дата орієнтовна
-P_NEXT_MEETING = "next_meeting"  # «до наступної зустрічі» — дати немає принципово
-P_RECURRING = "recurring"      # «щомісяця» — не дедлайн, а ритм
-P_EVENT = "event"              # «після дзвінка з Acmecorp», «після свят» — привʼязка
-                               # до події, а не до календаря: дата зʼявиться, коли
-                               # подія станеться, вигадувати її тут — брехня
+P_SOON = "soon"                # «якнайшвидше», «найближчим часом» — the date is approximate
+P_NEXT_MEETING = "next_meeting"  # «до наступної зустрічі» — there is no date by design
+P_RECURRING = "recurring"      # «щомісяця» — not a deadline but a rhythm
+P_EVENT = "event"              # «після дзвінка з Acmecorp», «після свят» — tied to an
+                               # event, not to the calendar: the date appears when the
+                               # event happens, inventing one here would be a lie
 
-# Скільки днів вважати «найближчим часом» (для P_SOON). Три дні — компроміс:
-# менше = задача одразу протермінована, більше = губиться відчуття терміновості.
+# How many days count as "in the near term" (for P_SOON). Three days is a compromise:
+# fewer = the task is overdue at once, more = the sense of urgency is lost.
 SOON_DAYS = 3
 
-# Дефолт для mark_stale: задача зі зустрічі, старшої за стільки днів, і без
-# майбутнього терміну — вже не «цього тижня», а історія. 90 днів ≈ квартал.
+# Default for mark_stale: a task from a meeting older than this many days and with no
+# future deadline is no longer "this week" but history. 90 days ~ a quarter.
 STALE_DAYS = 90
 
-# Чому задачу знято (`action_items.stale_reason`). Причин дві, і плутати їх не
-# можна: вік — це «давно було», відсутність сліду — «про це більше не говорили».
-# Друге доказове, і саме його можна відкотити гуртом, не чіпаючи перше.
+# Why a task was dropped (`action_items.stale_reason`). There are two reasons and they
+# must not be confused: age means "it was long ago", no trace means "it was not discussed again".
+# The latter is evidence-based, and it can be rolled back in bulk without touching the former.
 REASON_AGE = "age"
 REASON_NO_TRACE = "no_trace"
 
-# Поріг схожості для dedup (частка спільних значущих токенів, Jaccard).
+# Similarity threshold for dedup (share of shared significant tokens, Jaccard).
 DEDUP_THRESHOLD = 0.75
 
-# Стем → день тижня (0 = понеділок). Порівнюємо за префіксом, щоб покрити
-# відмінки: «понеділка», «наступної пʼятниці», «до четверга».
+# Stem -> weekday (0 = Monday). Compared by prefix to cover
+# cases: «понеділка», «наступної пʼятниці», «до четверга».
 _WEEKDAYS: dict[str, int] = {
     "понеділ": 0, "понедельник": 0,
     "вівтор": 1, "вторник": 1, "второк": 1,
@@ -108,7 +109,7 @@ _MONTHS: dict[str, int] = {
     "груд": 12, "декабр": 12, "december": 12,
 }
 
-# Фрази, що НЕ дають дати, але дають клас.
+# Phrases that give no date but give a class.
 _NEXT_MEETING_RE = re.compile(
     r"наступн\w*\s+(зустріч|встреч|дзвінк|дзвонк|звонк|созвон|колл|call)|"
     r"наступн\w*\s+(міт|мит)|на\s+наступн\w*\s+(зустріч|дзвінк)")
@@ -116,15 +117,15 @@ _RECURRING_RE = re.compile(r"^(що\w+|раз\s+(в|на)\s+\w+|регулярн
 _SOON_RE = re.compile(
     r"якнайшвидше|якомога\s+швидше|найближч\w*\s+час|найближчим\s+часом|термінов|срочн|"
     r"асап|asap|негайно|як\s+тільки|найближч\w*\s+дн|кілька\s+дн|декілька\s+дн")
-# Термін, привʼязаний до події («після дзвінка», «до зустрічі з Толіком»).
-# `після` з обовʼязковим пробілом, щоб не зачепити «післязавтра».
+# A deadline tied to an event («після дзвінка», «до зустрічі з Толіком»).
+# `після` requires a trailing space so it does not catch «післязавтра».
 _EVENT_RE = re.compile(
     r"\bпісля\s+|\bпосле\s+|по\s+завершенн|по\s+підсумк|"
-    # «до зустрічі з Толіком»: службове «до» вже зрізане в _norm_phrase, тому
-    # ловимо і голу форму «зустрічі з …».
+    # «до зустрічі з Толіком»: the service word «до» is already stripped in _norm_phrase, so
+    # we also catch the bare form «зустрічі з …».
     r"(^|\s)(зустріч|дзвінк|мітинг|кол)\w*\s+з\s+|найближч\w*\s+мітинг")
-# Абревіатури днів тижня — ТІЛЬКИ як цілий токен: за префіксом «ср» зловило б
-# «срочно», «пт» — «птн» тощо.
+# Weekday abbreviations — ONLY as a whole token: by prefix «ср» would catch
+# «срочно», «пт» — «птн», etc.
 _WEEKDAY_ABBR = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "нд": 6, "вс": 6}
 
 _STOPWORDS = {
@@ -135,22 +136,22 @@ _STOPWORDS = {
 
 
 # ============================================================
-# Парсер дедлайну
+# Deadline parser
 # ============================================================
 
 def _norm_phrase(raw: str) -> str:
-    """Нормалізація сирої фрази: lowercase, апострофи, час і дужки геть."""
+    """Normalize a raw phrase: lowercase, apostrophes, drop time and parentheses."""
     s = (raw or "").strip().lower()
     s = s.replace("ʼ", "'").replace("’", "'").replace("`", "'")
     s = re.sub(r"\([^)]*\)", " ", s)              # «07.04.2026 (вівторок)»
-    # Час прибираємо ЛИШЕ у формі з двокрапкою: крапкова форма нерозрізнима з
-    # датою («27.03.2026» — не 27 годин 03 хвилини), і саме на ній парсер раніше
-    # мовчки втрачав усі dd.mm-дати.
+    # Strip the time ONLY in the colon form: the dotted form is indistinguishable from a
+    # date («27.03.2026» is not 27 hours 03 minutes), and it is where the parser used to
+    # silently lose every dd.mm date.
     s = re.sub(r"\b([01]?\d|2[0-3]):[0-5]\d\b", " ", s)   # «завтра до 11:30»
     s = re.sub(r"\b(о|в|до)\s+\d{1,2}\s*(год|часов|ч)\b", " ", s)
     s = re.sub(r"[«»\"]", " ", s)
     s = re.sub(r"\s+", " ", s).strip(" ,.;:!?-–—")
-    # Прибрати службові прийменники на початку — вони не змінюють дату.
+    # Drop leading service prepositions — they do not change the date.
     s = re.sub(r"^(до|не\s+пізніше|не\s+позднее|станом\s+на|desired|by)\s+", "", s)
     return s.strip()
 
@@ -160,12 +161,12 @@ def _end_of_month(year: int, month: int) -> date:
 
 
 def _week_end(anchor: date) -> date:
-    """Пʼятниця тижня anchor (робочий кінець тижня, не неділя)."""
+    """Friday of the anchor week (working end of the week, not Sunday)."""
     return anchor + timedelta(days=(4 - anchor.weekday()))
 
 
 def _next_weekday(anchor: date, wd: int, *, next_week: bool = False) -> date:
-    """Найближче настання дня тижня СТРОГО після anchor (anchor+1..anchor+7)."""
+    """The nearest occurrence of a weekday STRICTLY after anchor (anchor+1..anchor+7)."""
     delta = (wd - anchor.weekday()) % 7
     if delta == 0:
         delta = 7
@@ -183,7 +184,7 @@ def _match_prefix(token: str, table: dict[str, int]) -> Optional[int]:
 
 
 def _find_weekday(s: str) -> Optional[int]:
-    """День тижня у фразі. «середина» НЕ вважається середою."""
+    """Weekday in the phrase. «середина» is NOT counted as Wednesday."""
     for token in re.findall(r"[а-яіїєґёa-z']+", s):
         if token in _WEEKDAY_ABBR:
             return _WEEKDAY_ABBR[token]
@@ -204,13 +205,13 @@ def _find_month(s: str) -> Optional[int]:
 
 
 def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
-    """Розібрати ОДНУ (вже нормалізовану) фразу. None — не розпізнано."""
+    """Parse ONE (already normalized) phrase. None means not recognized."""
     if not s:
         return None
 
-    # --- класи без дати (перевіряємо ПЕРШИМИ) ---------------------------------
-    # Інакше «після завтрашньої стратсесії» стало б просто «завтра», втративши
-    # умову, від якої термін насправді залежить.
+    # --- classes without a date (checked FIRST) --------------------------------
+    # Otherwise «після завтрашньої стратсесії» would become just «завтра», losing the
+    # condition the deadline actually depends on.
     if _RECURRING_RE.search(s):
         return (None, P_RECURRING)
     if _NEXT_MEETING_RE.search(s):
@@ -218,7 +219,7 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
     if _EVENT_RE.search(s):
         return (None, P_EVENT)
 
-    # --- явні дати ------------------------------------------------------------
+    # --- explicit dates -------------------------------------------------------
     m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", s)
     if m:
         try:
@@ -265,14 +266,14 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
             d = _end_of_month(year, month)
             prec = P_MONTH
         if not year_m and d < anchor:
-            # Місяць без року і вже в минулому → наступний рік.
+            # A month without a year that is already in the past -> next year.
             try:
                 d = d.replace(year=year + 1)
             except ValueError:
                 d = _end_of_month(year + 1, month)
         return (d, prec)
 
-    # --- квартали -------------------------------------------------------------
+    # --- quarters -------------------------------------------------------------
     m = re.search(r"\bq([1-4])\b|\b([1-4])\s*(?:кв|квартал)", s)
     if m:
         q = int(m[1] or m[2])
@@ -283,7 +284,7 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
             d = _end_of_month(year + 1, q * 3)
         return (d, P_QUARTER)
 
-    # --- «через N днів/тижнів/місяців» ----------------------------------------
+    # --- «через N днів/тижнів/місяців» (in N days/weeks/months) ---------------
     m = re.search(r"через\s+(\d+)\s*(дн|тижн|недел|місяц|месяц)", s)
     if m:
         n = int(m[1])
@@ -293,8 +294,8 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
         if unit.startswith(("тижн", "недел")):
             return (anchor + timedelta(weeks=n), P_WEEK)
         return (_end_of_month(*_add_months(anchor, n)), P_MONTH)
-    # «через тиждень» / «протягом тижня» — це +7 днів від зустрічі, а НЕ пʼятниця
-    # поточного тижня (загальна гілка «тижн» нижче), тому ловимо окремо.
+    # «через тиждень» / «протягом тижня» is +7 days from the meeting, NOT Friday of the
+    # current week (the general «тижн» branch below), so we catch it separately.
     if re.search(r"(через|протягом)\s+(тиждень|тижня|неделю|недели)", s):
         return (anchor + timedelta(days=7), P_WEEK)
     m = re.search(r"протягом\s+(\d+)(?:\s*-\s*(\d+))?\s*(дн|тижн)", s)
@@ -303,7 +304,7 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
         return ((anchor + timedelta(days=n), P_DAY) if m[3].startswith("дн")
                 else (anchor + timedelta(weeks=n), P_WEEK))
 
-    # --- «з 15-го числа» ------------------------------------------------------
+    # --- «з 15-го числа» (from the 15th) --------------------------------------
     m = re.search(r"\b(\d{1,2})\s*-?\s*(?:го|е)?\s*числа", s)
     if m:
         day = int(m[1])
@@ -316,11 +317,11 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
             d = date(y, mth, min(day, monthrange(y, mth)[1]))
         return (d, P_DAY)
 
-    # --- дні відносно anchor --------------------------------------------------
+    # --- days relative to anchor ----------------------------------------------
     if re.search(r"післязавтра|послезавтра", s):
         return (anchor + timedelta(days=2), P_DAY)
-    # «наступного дня», «ранок наступного дня», «до кінця наступного дня» — це
-    # завтра відносно зустрічі. Має стояти ДО загальної гілки «наступн…тиждень».
+    # «наступного дня», «ранок наступного дня», «до кінця наступного дня» is
+    # tomorrow relative to the meeting. Must come BEFORE the general «наступн…тиждень» branch.
     if re.search(r"наступн\w*\s+(дн|день)|следующ\w*\s+(дн|день)", s):
         return (anchor + timedelta(days=1), P_DAY)
     if re.search(r"кін(ец|ц)\w*\s+дня|до\s+кінця\s+дня|протягом\s+дня", s):
@@ -328,10 +329,10 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
     if re.search(r"\bзавтра\b", s):
         return (anchor + timedelta(days=1), P_DAY)
     if re.search(r"сьогодні|сегодня|today", s):
-        # «сьогодні-завтра» вже покрито гілкою «завтра» вище (діапазон → пізніша межа)
+        # «сьогодні-завтра» is already covered by the «завтра» branch above (range -> later bound)
         return (anchor, P_DAY)
 
-    # --- тижні ----------------------------------------------------------------
+    # --- weeks ----------------------------------------------------------------
     next_week = bool(re.search(r"наступн|следующ|майбутн", s))
     if re.search(r"вихідн|выходн", s):
         base = anchor + timedelta(days=(5 - anchor.weekday()) % 7 or 7)
@@ -343,9 +344,9 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
         we = _week_end(anchor)
         return ((we + timedelta(days=7), P_WEEK) if next_week else (we, P_WEEK))
 
-    # --- місяці/роки без назви ------------------------------------------------
+    # --- months/years without a name ------------------------------------------
     if re.search(r"місяц|месяц", s):
-        if next_week:  # «наступного місяця»
+        if next_week:  # «наступного місяця» (next month)
             y, mth = _add_months(anchor, 1)
             return (_end_of_month(y, mth), P_MONTH)
         return (_end_of_month(anchor.year, anchor.month), P_MONTH)
@@ -353,7 +354,7 @@ def _parse_one(s: str, anchor: date) -> Optional[tuple[Optional[date], str]]:
         year = anchor.year + 1 if next_week else anchor.year
         return (date(year, 12, 31), P_MONTH)
 
-    # --- «найближчим часом» — орієнтир, а не дата -----------------------------
+    # --- «найближчим часом» (in the near term) — a guideline, not a date ------
     if _SOON_RE.search(s):
         return (anchor + timedelta(days=SOON_DAYS), P_SOON)
 
@@ -366,16 +367,16 @@ def _add_months(d: date, n: int) -> tuple[int, int]:
 
 
 def parse_due(raw: Optional[str], anchor: Optional[str | date]) -> tuple[Optional[str], Optional[str]]:
-    """Сира фраза дедлайну → (ISO-дата | None, precision | None).
+    """Raw deadline phrase -> (ISO date | None, precision | None).
 
     Args:
-        raw: значення `action_items.due` як його дав Claude («завтра», «Q3 2026»).
-        anchor: дата зустрічі (ISO-рядок або date) — точка відліку для відносних
-            виразів. Без неї відносні фрази не розбираються (тільки абсолютні).
+        raw: the `action_items.due` value as Claude produced it («завтра», «Q3 2026»).
+        anchor: the meeting date (ISO string or date) — the reference point for relative
+            expressions. Without it relative phrases are not parsed (absolute ones only).
 
     Returns:
-        (None, None) — не розпізнано; (None, precision) — клас без дати
-        (`next_meeting`/`recurring`); (iso, precision) — розібрано.
+        (None, None) — not recognized; (None, precision) — a class without a date
+        (`next_meeting`/`recurring`); (iso, precision) — parsed.
     """
     s = _norm_phrase(raw or "")
     if not s:
@@ -391,8 +392,8 @@ def parse_due(raw: Optional[str], anchor: Optional[str | date]) -> tuple[Optiona
     if anchor_d is None:
         anchor_d = date.today()
 
-    # Діапазон («понеділок-вівторок», «четвер-п'ятниця», «сьогодні-завтра»):
-    # беремо ПІЗНІШУ межу — це і є дедлайн.
+    # Range («понеділок-вівторок», «четвер-п'ятниця», «сьогодні-завтра»):
+    # take the LATER bound — that is the deadline.
     parts = [p.strip() for p in re.split(r"\s*[-–—/]\s*|\s+або\s+|\s+или\s+", s) if p.strip()]
     results: list[tuple[Optional[date], str]] = []
     if len(parts) > 1:
@@ -415,7 +416,7 @@ def parse_due(raw: Optional[str], anchor: Optional[str | date]) -> tuple[Optiona
 
 
 # ============================================================
-# Offline-проходи
+# Offline passes
 # ============================================================
 
 def _rows(conn, sql: str, params: Iterable = ()) -> list:
@@ -423,7 +424,7 @@ def _rows(conn, sql: str, params: Iterable = ()) -> list:
 
 
 def backfill_due(db_path: str, *, dry_run: bool = False, limit: Optional[int] = None) -> dict:
-    """Заповнити due_date/due_precision для наявних задач (ідемпотентно)."""
+    """Fill due_date/due_precision for existing tasks (idempotent)."""
     stats = {"scanned": 0, "parsed": 0, "unparsed": 0, "updated": 0, "by_precision": {}}
     samples: list[dict] = []
     sql = (
@@ -465,8 +466,8 @@ def backfill_due(db_path: str, *, dry_run: bool = False, limit: Optional[int] = 
 
 
 def _normalize_name(name: str) -> str:
-    """Той самий ключ, що enrichment._normalize (свідома копія 6 рядків: цей
-    модуль імпортується з stdio-MCP і не має тягнути embeddings/torch)."""
+    """The same key as enrichment._normalize (a deliberate 6-line copy: this
+    module is imported from the stdio MCP and must not pull in embeddings/torch)."""
     if not name:
         return ""
     s = name.strip().lower()
@@ -475,18 +476,18 @@ def _normalize_name(name: str) -> str:
 
 
 def link_owners(db_path: str, *, dry_run: bool = False) -> dict:
-    """Прив'язати owner_name → person-сутність (це ж зливає «Юлія»/«Юля»)."""
+    """Link owner_name -> person entity (this also merges «Юлія»/«Юля»)."""
     stats = {"scanned": 0, "linked": 0, "unmatched": {}}
     with get_db_connection(db_path) as conn:
         index: dict[str, int] = {}
-        # Сутності, чиє ВЛАСНЕ імʼя — одне слово («Юлія», «Андрій»). Тільки вони
-        # годяться для фолбеку по імені: аліаси для цього непридатні, бо серед
-        # них трапляється сміття збагачення — сутності «Andrij Kovalenko» з
-        # ютуб-лекції дістався аліас «Andrei», і через нього 43 задачі власника
-        # архіву («Andrii Melnyk» → перший токен «andrei») поїхали під
-        # чужим імʼям. Тезка, записана повним імʼям, теж не підходить: «Андрій
-        # Ткаченко» не робить «Андрія» з розмови Ткаченкоом. Двох однослівних тезок
-        # бути не може — схема тримає UNIQUE(type, normalized_name).
+        # Entities whose OWN name is a single word («Юлія», «Андрій»). Only they
+        # qualify for the by-name fallback: aliases do not, because enrichment junk
+        # lands among them — the «Andrij Kovalenko» entity from a YouTube lecture got the
+        # alias «Andrei», and through it 43 tasks of the archive owner
+        # («Andrii Melnyk» -> first token «andrei») ended up under somebody
+        # else's name. A namesake recorded under a full name does not fit either:
+        # «Андрій Ткаченко» does not make the «Андрій» of a conversation into Yermak. There cannot be
+        # two single-word namesakes — the schema holds UNIQUE(type, normalized_name).
         short: dict[str, int] = {}
         for r in _rows(conn, "SELECT id, normalized_name FROM entities WHERE type = 'person'"):
             if r["normalized_name"]:
@@ -505,7 +506,7 @@ def link_owners(db_path: str, *, dry_run: bool = False) -> dict:
             stats["scanned"] += 1
             key = _normalize_name(r["owner_name"])
             eid = index.get(key)
-            if eid is None and " " in key:            # «Юля Гончар» → «юля»
+            if eid is None and " " in key:            # «Юля Гончар» -> «юля»
                 eid = short.get(key.split(" ")[0])
             if eid is None:
                 stats["unmatched"][key] = stats["unmatched"].get(key, 0) + 1
@@ -521,20 +522,20 @@ def link_owners(db_path: str, *, dry_run: bool = False) -> dict:
 
 
 def relink_owners(db_path: str, *, dry_run: bool = True) -> dict:
-    """Перевісити задачі, коли для їхнього `owner_name` зʼявилася ТОЧНІША людина.
+    """Re-point tasks when a MORE PRECISE person has appeared for their `owner_name`.
 
-    `link_owners` заповнює лише порожнє і має фолбек по першому токену: «Dmytro
-    Lebid» без свого рядка в графі осідав на сутності «Dmytro». Далі його вже
-    ніщо не знімало — прив'язка робиться один раз, і 40 задач Лебедя лишались
-    висіти на рядку, куди фолбек ще й доклав 34 задачі зовнішнього юриста
-    «Dmytro S». Свод «хто кому що винен» показував одну людину замість двох.
+    `link_owners` fills only empty values and has a first-token fallback: «Dmytro
+    Lebid» without a row of his own in the graph settled on the «Dmytro» entity. Nothing
+    ever unhooked him again — linking happens once, and 40 of Lebid's tasks stayed
+    hanging on the row where the fallback also put 34 tasks of the external lawyer
+    «Dmytro S». The "who owes whom what" digest showed one person instead of two.
 
-    Тут рухаємо тільки те, що доведено ПОВНИМ написанням: `owner_name` збігся з
-    канонічним іменем або аліасом сутності цілком. Здогадів немає взагалі —
-    фолбеку по першому токену тут свідомо НЕ повторюємо, інакше перевішування
-    ганяло б задачі між тезками на кожному проході.
+    Here we move only what a FULL spelling proves: `owner_name` matched the
+    entity's canonical name or alias entirely. No guesses at all —
+    we deliberately do NOT repeat the first-token fallback, otherwise re-linking
+    would shuffle tasks between namesakes on every pass.
 
-    Ідемпотентна: другий прогін не рухає нічого.
+    Idempotent: a second run moves nothing.
     """
     stats = {"dry_run": dry_run, "scanned": 0, "relinked": 0, "moves": {}}
     with get_db_connection(db_path) as conn:
@@ -567,8 +568,8 @@ def relink_owners(db_path: str, *, dry_run: bool = True) -> dict:
             conn.commit()
         stats["relinked"] = len(updates)
     stats["moves"] = dict(sorted(stats["moves"].items(), key=lambda kv: -kv[1]))
-    # Прикидка і запис мусять звучати по-різному: інакше оператор бачить
-    # «relinked=40», нічого не застосовує і думає, що задачі вже переїхали.
+    # The estimate and the write must sound different: otherwise the operator sees
+    # «relinked=40», applies nothing and thinks the tasks have already moved.
     logger.info("relink_owners: scanned=%s %s=%s", stats["scanned"],
                 "would_relink" if dry_run else "relinked", stats["relinked"])
     return stats
@@ -581,19 +582,18 @@ def _tokens(text: str) -> set[str]:
 
 def _term_df(conn, term: str, *, before: Optional[str] = None,
              cache: Optional[dict] = None) -> Optional[int]:
-    """У скількох чанках трапляється слово. None — якщо FTS не зрозумів токен.
+    """In how many chunks a word occurs. None if FTS did not understand the token.
 
-    `before` обмежує рахунок записами НЕ ПІЗНІШЕ вказаної дати, і це не
-    оптимізація, а вимога коректності: рідкість, порахована по всьому архіву,
-    підіграє вердикту «упущено». Слово, яке після задачі якраз і спливало, має
-    через ті згадки БІЛЬШИЙ df, тож вибір «найрідкісніших» його відкидає — і
-    лишає ті слова, яких потім не було. Тобто метрика сама собі доводить
-    відсутність. Замір на живому архіві: «ендавменту» 2 проти «стратегії» 1 у
-    крихітному корпусі — і задача, чий предмет ПОВЕРНУВСЯ, оголошувалась
-    загубленою.
+    `before` limits the count to records NO LATER than the given date, and this is not
+    an optimization but a correctness requirement: rarity counted over the whole archive
+    flatters the "dropped" verdict. A word that surfaced after the task has a HIGHER
+    df through those mentions, so picking the "rarest" discards it — and keeps
+    the words that never came up later. The metric would prove the silence by itself.
+    Measured on the live archive: «ендавменту» 2 vs «стратегії» 1 in a tiny corpus — and
+    a task whose subject HAD come back was declared lost.
 
-    `cache` — словник на один виклик: задачі однієї зустрічі ділять і дату, і
-    половину слів, тож повторний рахунок був би платою ні за що.
+    `cache` — a dict per call: tasks of one meeting share both the date and half of
+    the words, so recounting would be paying for nothing.
     """
     key = (term, before)
     if cache is not None and key in cache:
@@ -611,8 +611,8 @@ def _term_df(conn, term: str, *, before: Optional[str] = None,
                 "WHERE f.chunks_fts MATCH ? AND t.deleted_at IS NULL "
                 "AND COALESCE(t.meeting_date, substr(t.created_at,1,10)) <= ?",
                 (f'"{term}"', before)).fetchone()["n"]
-    except Exception as exc:                   # екзотичні токени ламають синтаксис
-        logger.debug("_term_df: пропущено %r (%s)", term, exc)
+    except Exception as exc:                   # exotic tokens break the syntax
+        logger.debug("_term_df: skipped %r (%s)", term, exc)
         n = None
     if cache is not None:
         cache[key] = n
@@ -621,58 +621,58 @@ def _term_df(conn, term: str, *, before: Optional[str] = None,
 
 def _rare_terms(conn, task: str, *, limit: int = 2,
                 before: Optional[str] = None, cache: Optional[dict] = None) -> list[str]:
-    """Слова, за якими задачу можна впізнати в іншому тексті — НАЙРІДКІСНІШІ.
+    """Words by which a task can be recognized in other text — the RAREST ones.
 
-    Раніше тут стояли найдовші слова, і це давало систематичну брехню: найдовше
-    слово української задачі — це загальне дієслово («продовжувати»,
-    «організувати», «переглянути»), а впізнає задачу коротка власна назва
-    («BUEF», «Archicad», «Notion»). Заміряно на живих даних: 15 із них
-    (7.5%) оголошувались «живими» лише через загальне слово — «Продовжувати
-    роботу по ендавменту BUEF» вважалась спливлою, бо «стратегії» трапляється в
-    архіві 509 разів. Помилок у зворотний бік — нуль. Тобто «що ми упустили»
-    мовчало саме там, де мало говорити.
+    The longest words used to be picked here, which gave systematic lies: the longest
+    word of a Ukrainian task is a generic verb («продовжувати»,
+    «організувати», «переглянути»), while a task is recognized by a short proper name
+    («BUEF», «Archicad», «Notion»). Measured on live data: 15 of them
+    (7.5%) were declared "alive" only through a generic word — «Продовжувати
+    роботу по ендавменту BUEF» counted as resurfaced because «стратегії» occurs in
+    the archive 509 times. Zero errors in the opposite direction. So "what we dropped"
+    stayed silent exactly where it should have spoken.
 
-    Рідкість беремо з того самого індексу, яким потім шукаємо (FTS5): це і
-    точно, і дешево — лічильник іде по індексу, не по текстах.
+    Rarity is taken from the same index we later search with (FTS5): this is both
+    accurate and cheap — the counter walks the index, not the texts.
 
-    Слова, яких у корпусі НЕМА (df = 0), відкидаємо навмисно: нуль влучань по
-    них нічого не доводить. Помилка розпізнавання («ресепшіоніст» замість
-    «ресепціоніст») інакше робила б будь-яку задачу «упущеною».
+    Words that are ABSENT from the corpus (df = 0) are discarded on purpose: zero hits
+    on them prove nothing. A recognition error («ресепшіоніст» instead of
+    «ресепціоніст») would otherwise make any task "dropped".
 
-    **Дивимось УСІ значущі слова, а не найдовші з них.** Перша версія цієї
-    функції зберігала попередній відбір «12 найдовших» — і тим самим викидала
-    рівно ті короткі власні назви, заради яких її й писали: у задачі з довгим
-    формулюванням «buef» (4 символи) не доживав до підрахунку рідкості. Плюс
-    зріз ішов по множині, тобто межа залежала від порядку обходу `set` і вибір
-    термінів не відтворювався між запусками. Лічильник по індексу коштує
-    мікросекунди — економити на ньому не було на чому.
+    **We look at ALL significant words, not just the longest.** The first version of this
+    function kept the earlier "12 longest" selection — and so threw out exactly
+    the short proper names it was written for: in a task with a long
+    wording «buef» (4 characters) did not survive to the rarity count. Besides,
+    the cut went over a set, so the boundary depended on `set` iteration order and the
+    choice of terms was not reproducible between runs. The index counter costs
+    microseconds — there was nothing to save on it.
 
-    Сортуємо ЛИШЕ за рідкістю на момент задачі, а рівних розводимо за абеткою.
-    Спокуса додати другим ключем рідкість у всьому архіві («на ранній задачі
-    корпус тонкий, і звичайне слово виглядає рідкісним») — пастка: у повній
-    рідкості сидять і згадки ПІСЛЯ задачі, тож слово, яке потім спливало, має
-    більший df і таким ключем програє тому, яке не спливало. Це рівно те
-    підігрування вердикту, задля усунення якого й існує `before`. Тест
-    `..._stays_silent_when_the_subject_really_came_back` ловить саме це.
+    We sort ONLY by rarity at the time of the task and break ties alphabetically.
+    The temptation to add archive-wide rarity as a second key («on an early task
+    the corpus is thin and an ordinary word looks rare») is a trap: full rarity
+    includes mentions AFTER the task, so a word that did resurface has a larger df and
+    loses by that key to one that did not. That is exactly the rigging of the verdict
+    that `before` exists to remove. The test `..._stays_silent_when_the_subject_really_came_back`
+    catches exactly that.
 
-    Лишається відома межа: на найраніших задачах корпус ще малий, і звичайне
-    слово може стати «найрідкіснішим». Помилка ця йде в безпечний бік — таке
-    слово знайдеться пізніше, і задача лишиться відкритою.
+    A known limit remains: on the earliest tasks the corpus is still small and an ordinary
+    word may become the "rarest". This error goes the safe way — such a word
+    turns up later and the task stays open.
     """
     scored: list[tuple[int, str]] = []
-    for term in sorted(_tokens(task)):         # sorted — щоб вибір відтворювався
+    for term in sorted(_tokens(task)):         # sorted — so the choice is reproducible
         df = _term_df(conn, term, before=before, cache=cache)
-        if df:                                 # None або 0 — доказом бути не може
+        if df:                                 # None or 0 cannot serve as proof
             scored.append((df, term))
     scored.sort()
     return [t for _, t in scored[:limit]]
 
 
 def dedup(db_path: str, *, dry_run: bool = False, threshold: float = DEDUP_THRESHOLD) -> dict:
-    """Позначити повтори однієї задачі з різних зустрічей (dup_of → найсвіжіша).
+    """Mark repeats of one task from different meetings (dup_of -> the most recent).
 
-    Статус не змінюється: дублі лишаються в БД і доступні за прямим запитом,
-    але зникають зі зводів (ті фільтрують dup_of IS NULL).
+    The status does not change: duplicates stay in the DB and are available by direct query,
+    but vanish from digests (those filter on dup_of IS NULL).
     """
     stats = {"groups": 0, "marked": 0, "samples": []}
     with get_db_connection(db_path) as conn:
@@ -727,11 +727,11 @@ def dedup(db_path: str, *, dry_run: bool = False, threshold: float = DEDUP_THRES
 
 def mark_stale(db_path: str, *, days: int = STALE_DAYS, dry_run: bool = False,
                today: Optional[date] = None) -> dict:
-    """Задачі зі старих зустрічей без майбутнього терміну → status='stale'.
+    """Tasks from old meetings with no future deadline -> status='stale'.
 
-    Не видалення: `stale` лишається доступним прямим запитом (`status='stale'`),
-    але не засмічує понеділковий звід. Задача з датою в майбутньому (напр.
-    «Q3 2026») stale НЕ стає, навіть якщо зустріч давня.
+    Not a deletion: `stale` stays available by direct query (`status='stale'`),
+    but does not clutter the Monday digest. A task with a date in the future (e.g.
+    «Q3 2026») does NOT become stale even if the meeting is old.
     """
     t = today or date.today()
     cutoff = (t - timedelta(days=days)).isoformat()
@@ -760,35 +760,35 @@ def sweep_dropped(db_path: str, *, days: int = 180, min_age_days: int = 30,
                   dry_run: bool = True, undated_only: bool = False,
                   sources: Optional[Sequence[str]] = None,
                   today: Optional[date] = None) -> dict:
-    """Зняти обіцянки, чия тема замовкла: status='open' → 'stale' (no_trace).
+    """Drop promises whose topic went quiet: status='open' -> 'stale' (no_trace).
 
-    Чому це взагалі потрібно. `status='open'` в архіві означає не «висить», а
-    «ніхто ніколи не закривав»: `done` стоїть у ОДНІЄЇ задачі з 3879. Живих
-    задач 1721, з них 1242 без дати — і ці 1242 не потрапляють у жодне вікно
-    зводу за датою. Зняти їх за віком (`mark_stale`) — це чекати 90 днів і
-    ховати разом і живе, і мертве.
+    Why this exists at all. `status='open'` in the archive means not "pending" but
+    "nobody ever closed it": `done` is set on ONE task out of 3879. There are 1721 live
+    tasks, 1242 of them without a date — and those 1242 fall into no digest window by
+    date. Dropping them by age (`mark_stale`) means waiting 90 days and
+    hiding the living together with the dead.
 
-    Критерій тут інший і чесніший: **після зустрічі тема більше не спливала в
-    жодному джерелі**. Ось таке і треба зняти, а не «виконати» — рамка продукту
-    говорить про звід зобовʼязань із хвостом, де більшість рядків ніколи не
-    будуть виконані.
+    The criterion here is different and fairer: **after the meeting the topic never
+    surfaced in any source again**. That is what should be dropped, rather than
+    "completed" — the product frame is a digest of commitments with a tail where most
+    rows will never be fulfilled.
 
-    **Скільки це знімає.** Заміром на живих даних без дати одне найрідкісніше
-    слово оголошувало замовклими 38%. Прохід знімає ВТРИЧІ менше (на живому
-    архіві 93 з 1154, тобто 8%), і це не розбіжність, а різні критерії: тут
-    мусять НЕ спливти ОБИДВА терміни. Строгість навмисна — рішення пишеться в
-    БД, тож помиляємось на користь «лишити відкритою».
+    **How much this drops.** Measured on 120 undated tasks, one rarest word
+    declared 38% quiet. The pass drops THREE times fewer (on the live
+    archive 93 of 1154, i.e. 8%), and this is not a discrepancy but different criteria: here
+    BOTH terms must fail to surface. The strictness is deliberate — the decision is written to
+    the DB, so we err on the side of "leave it open".
 
-    Відрізняється від `dropped_commitments` (той самий критерій) двома речами,
-    бо там видача для читання, а тут прохід по завалу:
-      * немає стелі на зустріч і немає ліміту — знімаємо все, що підпадає;
-      * карантин довший (30 днів проти 14): рішення пише в БД, тож помилятись
-        на користь «лишити відкритою».
+    It differs from `dropped_commitments` (the same criterion) in two ways,
+    because that one is a read output and this one is a pass over the backlog:
+      * no per-meeting ceiling and no limit — we drop everything that qualifies;
+      * a longer quarantine (30 days vs 14): the decision writes to the DB, so
+        we err on the side of "leave it open".
 
-    Задача з датою В МАЙБУТНЬОМУ не знімається ніколи — як і в `mark_stale`.
-    `undated_only` звужує прохід до задач без дати взагалі.
+    A task with a date IN THE FUTURE is never dropped — same as in `mark_stale`.
+    `undated_only` narrows the pass to tasks without any date.
 
-    Ідемпотентний: вдруге не знайде нічого (рядки вже не 'open'). Зворотна дія —
+    Idempotent: a second run finds nothing (the rows are no longer 'open'). The reverse —
     `UPDATE action_items SET status='open', stale_at=NULL, stale_reason=NULL
     WHERE stale_reason='no_trace'`.
     """
@@ -829,17 +829,17 @@ def sweep_dropped(db_path: str, *, days: int = 180, min_age_days: int = 30,
         for r in rows:
             terms = _rare_terms(conn, r["task"], before=r["meeting_date"], cache=df_cache)
             if len(terms) < 2:
-                # Нема за чим судити — лишаємо відкритою. Мовчазне зняття
-                # «про всяк випадок» знищило б рівно ті задачі, про які ми
-                # найменше знаємо.
+                # Nothing to judge by — leave it open. A silent drop
+                # "just in case" would destroy exactly the tasks we know
+                # least about.
                 stat["unjudged"] += 1
                 continue
             fts_q = " OR ".join(f'"{w}"' for w in terms)
             try:
                 hit = conn.execute(
-                    # JOIN, а не rowid IN (SELECT …): друга форма змушує SQLite
-                    # щоразу будувати повний список чанків архіву — 228 мс проти
-                    # 0.1 мс на запит, тобто чотири хвилини на прохід замість секунд.
+                    # JOIN, not rowid IN (SELECT ...): the second form makes SQLite
+                    # build the full list of archive chunks every time — 228 ms vs
+                    # 0.1 ms per query, i.e. four minutes per pass instead of seconds.
                     "SELECT COUNT(*) AS n FROM chunks_fts f "
                     "JOIN chunks ch ON ch.id = f.rowid "
                     "JOIN transcriptions tt ON tt.id = ch.transcription_id "
@@ -867,28 +867,28 @@ def sweep_dropped(db_path: str, *, days: int = 180, min_age_days: int = 30,
                 "stale_reason = ? WHERE id = ?",
                 [(now, REASON_NO_TRACE, i) for i in doomed])
             conn.commit()
-    logger.info("sweep_dropped: кандидатів=%s знято=%s живих=%s без вердикту=%s dry_run=%s",
+    logger.info("sweep_dropped: candidates=%s marked=%s alive=%s unjudged=%s dry_run=%s",
                 stat["candidates"], stat["marked"], stat["alive"], stat["unjudged"], dry_run)
     return stat
 
 
 # ============================================================
-# Read-запити (спільні для MCP і UI)
+# Read queries (shared by MCP and UI)
 # ============================================================
 
 _WINDOWS = ("this_week", "next_week", "overdue", "soon", "no_date", "all")
 
 
 def _window_bounds(window: str, today: Optional[date] = None) -> tuple[Optional[str], Optional[str]]:
-    """(from_iso, to_iso) для вікна. None означає «без межі»."""
+    """(from_iso, to_iso) for the window. None means "no bound"."""
     t = today or date.today()
     monday = t - timedelta(days=t.weekday())
     if window == "this_week":
-        # Нижня межа — не понеділок, а СЬОГОДНІ (коли звід читають у понеділок,
-        # це те саме). Інакше вікна перетинаються: задача з дедлайном у вівторок,
-        # прочитана в суботу, потрапляє і в «цього тижня», і в «протерміновано» —
-        # на живому зводі це було 6 дублів із 15 рядків. «Цього тижня» означає
-        # «ще встигаємо», прострочене живе у своєму ведрі.
+        # The lower bound is not Monday but TODAY (when the digest is read on Monday
+        # it is the same). Otherwise the windows overlap: a task due Tuesday,
+        # read on Saturday, lands in both "this week" and "overdue" —
+        # on the live digest that was 6 duplicates out of 15 rows. "This week" means
+        # "we can still make it"; overdue items live in their own bucket.
         return (max(monday, t).isoformat(), (monday + timedelta(days=6)).isoformat())
     if window == "next_week":
         nm = monday + timedelta(days=7)
@@ -903,16 +903,16 @@ def _window_bounds(window: str, today: Optional[date] = None) -> tuple[Optional[
 def _scope_clauses(category_id: Optional[int], tags: Optional[list[str]],
                    since: Optional[str] = None, until: Optional[str] = None,
                    *, alias: str = "t") -> tuple[str, list]:
-    """Напрямок/теги/період — один фрагмент WHERE, спільний для `_commitments_filter`
-    і `commitments_coverage` (ремонт п.1+11 раунду 3: до цього знаменник ігнорував
-    tags/since/until, а `_commitments_filter` і coverage склеювали ці ж три фрагменти
-    двома різними способами — одна різала власний `" AND "` руками, друга додавала їх
-    як є).
+    """Direction/tags/period — one WHERE fragment shared by `_commitments_filter`
+    and `commitments_coverage` (repair of items 1+11 of round 3: before this the denominator ignored
+    tags/since/until, and `_commitments_filter` and coverage glued these same three fragments
+    in two different ways — one cut its own `" AND "` by hand, the other appended them
+    as is).
 
-    Кожен фрагмент (`categories.filter_sql/tags_sql/date_sql`, C2) уже починається з
-    `" AND "` — повертаємо конкатенацію як є, ліпити до готового `WHERE ...` без
-    зрізань. `alias` — псевдонім `transcriptions` у запиті (усюди `"t"`); теги завжди
-    йдуть через `ai.transcription_id` — прив'язані лише до `action_items`.
+    Each fragment (`categories.filter_sql/tags_sql/date_sql`, C2) already starts with
+    `" AND "` — we return the concatenation as is, to be attached to a ready
+    `WHERE ...` without trimming. `alias` is the alias of `transcriptions` in the query (always `"t"`);
+    tags always go through `ai.transcription_id` — bound only to `action_items`.
     """
     sql = ""
     params: list = []
@@ -929,16 +929,16 @@ def _commitments_filter(*, window: str, owner: Optional[str], category_id: Optio
                         status: str, include_dups: bool, today: Optional[date],
                         tags: Optional[list[str]] = None, since: Optional[str] = None,
                         until: Optional[str] = None) -> tuple[str, list]:
-    """Умови вибірки задач — спільні для видачі і для лічильника.
+    """Conditions for selecting tasks — shared by the listing and the counter.
 
-    Винесено, щоб `count_commitments` рахував ТОЧНО ту саму множину, яку
-    показує `list_commitments`. Дві копії умов розʼїхались би на першій же
-    правці, а розбіжність тут — це «показано 50, всього 3» або навпаки.
+    Extracted so `count_commitments` counts EXACTLY the same set that
+    `list_commitments` shows. Two copies of the conditions would drift apart on the first
+    edit, and a mismatch here means "shown 50, total 3" or the reverse.
 
-    Повертає готовий ` WHERE ...` (не список умов): `category_id`/`tags`
-    йдуть через `app.services.categories.filter_sql/tags_sql` (C6, ADR-023
-    §C) — єдине джерело SQL для розкриву «напрямок = він сам + проєкти» і
-    OR-фільтра тегів, а не друга копія того самого підзапиту тут.
+    Returns a ready ` WHERE ...` (not a list of conditions): `category_id`/`tags`
+    go through `app.services.categories.filter_sql/tags_sql` (C6, ADR-023
+    section C) — the single source of SQL for the expansion "direction = itself + projects" and
+    the OR filter of tags, rather than a second copy of the same subquery here.
     """
     where = ["t.deleted_at IS NULL"]
     params: list = []
@@ -948,12 +948,11 @@ def _commitments_filter(*, window: str, owner: Optional[str], category_id: Optio
     if not include_dups:
         where.append("ai.dup_of IS NULL")
     if owner:
-        # Третя гілка — аліаси графа. Після злиття сутностей людина живе під
-        # ОДНИМ канонічним імʼям, а всі інші її написання стають аліасами: у
-        # власника архіву це 40 варіантів («Мельник», «@johndoe», «Andrii»).
-        # Без цієї гілки питання «що на Мельнику» давало нуль при 204 живих
-        # задачах — саме злиття сутностей від цього і не рятує, а навпаки
-        # переносить написання туди, куди фільтр не дивився.
+        # The third branch is graph aliases. After entities are merged a person lives under
+        # ONE canonical name, and all their other spellings become aliases: for
+        # the archive owner that is 40 variants («Мельник», «@johndoe», «Andrii»).
+        # Without this branch the question «що на Мельнику» returned zero with live data — the entity merge itself does not save it, it rather
+        # moves the spellings to where the filter did not look.
         where.append("(e.canonical_name LIKE ? OR ai.owner_name LIKE ? OR EXISTS("
                      "SELECT 1 FROM entity_aliases ea "
                      "WHERE ea.entity_id = e.id AND ea.alias LIKE ?))")
@@ -982,14 +981,14 @@ def count_commitments(db_path: str, *, window: str = "this_week", owner: Optiona
                       include_dups: bool = False, today: Optional[date] = None,
                       tags: Optional[list[str]] = None, since: Optional[str] = None,
                       until: Optional[str] = None) -> int:
-    """Скільки задач у вікні НАСПРАВДІ — без ліміту видачі.
+    """How many tasks are ACTUALLY in the window — without the listing limit.
 
-    Потрібне, щоб поруч із обрізаним списком стояло не лише «всього задач», а й
-    «скільки в цьому вікні». Знаменник біля обрізаного списку без цього числа
-    робить гірше, ніж його відсутність: читач вважає видимі рядки всім вікном.
+    Needed so that next to a truncated list there is not only "total tasks" but also
+    "how many in this window". A denominator beside a truncated list without this number
+    is worse than none: the reader takes the visible rows for the whole window.
 
-    `tags`/`since`/`until` — ті самі осі, що й `list_commitments` (C6):
-    `count_commitments` мусить рахувати ТОЧНО ту саму множину.
+    `tags`/`since`/`until` — the same axes as `list_commitments` (C6):
+    `count_commitments` must count EXACTLY the same set.
     """
     if window not in _WINDOWS:
         window = "this_week"
@@ -1010,10 +1009,10 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
                      today: Optional[date] = None,
                      tags: Optional[list[str]] = None, since: Optional[str] = None,
                      until: Optional[str] = None) -> list[dict]:
-    """Задачі за вікном/власником/напрямком. Повертає і сиру фразу, і дату.
+    """Tasks by window/owner/direction. Returns both the raw phrase and the date.
 
-    `tags` — назви тегів (OR); разом із `category_id` — перетин (AND).
-    `since`/`until` — ISO-дата по даті зустрічі запису, обидві межі включно.
+    `tags` — tag names (OR); together with `category_id` — intersection (AND).
+    `since`/`until` — ISO date on the record's meeting date, both bounds inclusive.
     """
     if window not in _WINDOWS:
         window = "this_week"
@@ -1024,26 +1023,26 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
     sql = (
         "SELECT ai.id, ai.task, ai.due AS due_raw, ai.due_date, ai.due_precision, "
         "ai.status, ai.stale_at, ai.transcription_id, ai.source, "
-        # `owner` — канонічне імʼя з графа (воно зливає «Юля»/«Юлія»/«Julia
-        # Bondarenko» в одну людину), `owner_said` — як прозвучало в задачі.
-        # Друге поле не косметика: на живих даних частина задачпоказували
-        # НЕ те імʼя, що в задачі, і серед них 43 задачі власника архіву
-        # («Andrii Melnyk») їхали під іменем «Andrij Kovalenko» — сутність
-        # із ютуб-лекції, якій дістався аліас «Andrei». Поки видно обидва імені,
-        # крива звʼязка помітна; коли видно лише канонічне — вона невидима.
+        # `owner` is the canonical name from the graph (it merges «Юля»/«Юлія»/«Julia
+        # Bondarenko» into one person), `owner_said` is how it was spoken in the task.
+        # The second field is not cosmetic: in live data some tasksshowed
+        # NOT the name from the task, and among them 43 tasks of the archive owner
+        # («Andrii Melnyk») went under the name «Andrij Kovalenko» — an entity
+        # from a YouTube lecture that got the alias «Andrei». While both names are visible,
+        # a crooked link is noticeable; when only the canonical one is shown it is invisible.
         "COALESCE(e.canonical_name, ai.owner_name) AS owner, "
         "ai.owner_name AS owner_said, "
         "t.source_name AS meeting, c.name AS category, "
-        # Волна 5.2: звід має казати не лише «що», а й «куди написати». Для
-        # задачі з переписки джерело — конкретне повідомлення, тож поруч із
-        # текстом їдуть чат, автор репліки і посилання на неї. Для дзвінка ці
-        # поля порожні, і це чесно: там адреси немає.
+        # Wave 5.2: the digest must say not only "what" but also "where to write". For
+        # a task from a chat the source is a concrete message, so next to the
+        # text go the chat, the author of the message and a link to it. For a call these
+        # fields are empty, honestly: there is no address there.
         #
-        # `link` є не завжди: у legacy-групах (chat_id без префікса -100)
-        # посилання на повідомлення у Telegram фізично не існує — це 1453 записи
-        # з 3959, серед них робочі чати. Тому адресою служить пара
-        # (`chat_id`, `msg_id`), як уже зроблено у видачі пошуку
-        # (`retrieval.py`), а `link` — зручність там, де він можливий.
+        # `link` is not always present: in legacy groups (chat_id without the -100 prefix)
+        # a Telegram message link physically does not exist — records
+        # of 3959, working chats among them. So the address is the pair
+        # (`chat_id`, `msg_id`), as already done in search output
+        # (`retrieval.py`), and `link` is a convenience where possible.
         "t.source_type, t.tg_chat_title AS chat, t.tg_sender AS said_by, "
         "t.tg_link AS link, t.tg_chat_id AS chat_id, t.tg_message_id AS msg_id, "
         "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
@@ -1052,15 +1051,15 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
         "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
         "LEFT JOIN categories c ON c.id = t.category_id "
         + where_sql + " "
-        # Протерміноване сортуємо СВІЖИМ ВГОРУ: задача, що прострочена вчора,
-        # ще жива, а торішня — археологія (і часто просто кривий витяг дати).
-        # Решта вікон — найближчий дедлайн першим.
+        # Overdue is sorted FRESHEST FIRST: a task overdue since yesterday
+        # is still alive, while last year's is archaeology (and often just a bad date extraction).
+        # The other windows — nearest deadline first.
         #
-        # Тай-брейк — ДАТА РОЗМОВИ, і лише потім id. До Волни 5.1 id збігався з
-        # хронологією, тож «id DESC» читалось як «свіже вгорі». Задачі з
-        # переписки вставлені останніми, але кажуть про травень — на одному лише
-        # id вони витіснили дзвінки з ведра «без дати» (15 із 15) не тому, що
-        # важливіші, а тому, що записані пізніше.
+        # Tie-break is the CONVERSATION DATE, and only then id. Before Wave 5.1 id matched
+        # chronology, so "id DESC" read as "fresh on top". Tasks from
+        # chats were inserted last but talk about May — on id alone they pushed calls out
+        # of the "no date" bucket (15 of 15) not because they were
+        # more important but because they were recorded later.
         + ("ORDER BY ai.due_date DESC, meeting_date DESC, ai.id DESC LIMIT ?"
            if window == "overdue"
            else "ORDER BY ai.due_date IS NULL, ai.due_date, meeting_date DESC, "
@@ -1076,27 +1075,27 @@ def commitments_coverage(db_path: str, *, owner: Optional[str] = None,
                          status: str = "open",
                          tags: Optional[list[str]] = None, since: Optional[str] = None,
                          until: Optional[str] = None) -> dict:
-    """Знаменник до вікон: скільки задач узагалі має дату, а скільки її не має.
+    """Denominator for the windows: how many tasks have a date at all and how many do not.
 
-    Вікна `this_week`/`overdue`/`soon` фільтрують по `due_date`, а він є лише в
-    частина живих задач. Тому «цього тижня — 5» читається як «справ
-    майже немає», хоча задач просто не мають дати й у жодне вікно за датою
-    не потраплять. Це та сама вада, що й у `stale_topics` до перевірки текстом:
-    твердження вірне про свій шар і хибне про архів.
+    The windows `this_week`/`overdue`/`soon` filter on `due_date`, which exists in only
+    some live tasks. So "this week — 5" reads as "there is
+    almost nothing to do", although tasks simply have no date and will fall into no
+    date window. It is the same flaw as in `stale_topics` before the text check:
+    the claim is true about its own layer and false about the archive.
 
-    Рахуємо ПІД ТИМИ Ж фільтрами (власник/напрямок/статус/`tags`/`since`/`until`),
-    інакше знаменник говорив би про чужі задачі: `list_action_items(tags="AI")`
-    до ремонту п.1 раунду 3 віддавав відфільтрований `items` поруч з архівними
-    `coverage.total`/`note` («3 із 3 задач дати не мають» при одній задачі з
-    тегом) — знаменник мусить рахувати ТОЧНО ту саму множину, що й `items`/
-    `window_matched` (`count_commitments`), через спільний `_scope_clauses`.
-    `undated_share` — частка без дати; вона і є відповідь на «наскільки повно
-    вікно бачить».
+    We count UNDER THE SAME filters (owner/direction/status/`tags`/`since`/`until`),
+    otherwise the denominator would speak about other tasks: `list_action_items(tags="AI")`
+    before the repair of item 1 of round 3 returned a filtered `items` next to the archive-wide
+    `coverage.total`/`note` ("3 of 3 tasks have no date" with one task
+    having the tag) — the denominator must count EXACTLY the same set as `items`/
+    `window_matched` (`count_commitments`), via the shared `_scope_clauses`.
+    `undated_share` is the share without a date; it is the answer to "how completely
+    does the window see".
 
-    Параметра `today` тут свідомо немає, хоча вікна його мають: знаменник — це
-    стан таблиці («скільки задач узагалі має дату»), а не зріз на дату. Приймати
-    його й ігнорувати означало б обіцяти відтворюваний звід за минулий день і
-    підсовувати сьогоднішній знаменник.
+    There is deliberately no `today` parameter here, although the windows have it: the denominator is
+    the state of the table ("how many tasks have a date at all"), not a cut at a date. Accepting
+    it and ignoring it would promise a reproducible digest for a past day while
+    slipping in today's denominator.
     """
     where = ["t.deleted_at IS NULL", "ai.dup_of IS NULL"]
     params: list = []
@@ -1125,15 +1124,15 @@ def commitments_coverage(db_path: str, *, owner: Optional[str] = None,
         "dated": dated,
         "undated": total - dated,
         "undated_share": round((total - dated) / total, 3) if total else 0.0,
-        "note": ("вікна за датою бачать лише задачі з due_date; "
-                 f"{total - dated} із {total} задач дати не мають і живуть у window='no_date'"),
+        "note": ("date windows see only tasks with a due_date; "
+                 f"{total - dated} of {total} tasks have no date and live in window='no_date'"),
     }
 
 
-"""Джерела, де обіцянку дає учасник розмови, тобто ми або той, з ким ми
-говоримо. `document` і `youtube` — матеріали третіх осіб: у PDF інвесторам
-«обіцянки» дають чужі компанії, у ролику — спікер зі сцени. Ми їх не давали,
-тож у «що ми упустили» їм не місце."""
+"""Sources where a promise is made by a participant of the conversation, i.e. we or the one
+we are talking to. `document` and `youtube` are third-party material: in a PDF for investors
+other companies make the "promises", in a video — a speaker on stage. We did not make them,
+so they do not belong in "what we dropped"."""
 _OWN_SOURCES = ("recording", "meeting_archive", "telegram", "file")
 
 
@@ -1142,29 +1141,29 @@ def dropped_commitments(db_path: str, *, days: int = 30, limit: int = 20,
                         sources: Optional[Sequence[str]] = None,
                         max_per_meeting: int = 3,
                         today: Optional[date] = None) -> list[dict]:
-    """Обіцянки без сліду: задача була, а після її зустрічі тема не спливала.
+    """Promises with no trace: the task existed, but after its meeting the topic did not surface.
 
-    Рахуємо по FTS5: беремо два НАЙРІДКІСНІШІ терміни задачі (див. `_rare_terms`
-    — саме вони її впізнають) і питаємо, чи є вони у чанках ПІЗНІШИХ записів
-    (будь-якого джерела — дзвінок, TG, документ). Нуль влучань = розмова про це
-    більше не поверталась.
+    Counted via FTS5: we take the task's two RAREST terms (see `_rare_terms`
+    — they are what recognizes it) and ask whether they occur in chunks of LATER records
+    (any source — call, TG, document). Zero hits = the conversation never
+    returned to it.
 
-    `min_age_days` — карантин: задача зі вчорашнього дзвінка формально теж «без
-    сліду» (після неї ще нічого не було), але це не забуття, а нормальний хід
-    справ. Беремо лише те, що мало час спливти й не спливло.
+    `min_age_days` — quarantine: a task from yesterday's call is formally also "without a
+    trace" (nothing came after it), but that is not forgetting, it is the normal course
+    of things. We take only what had time to surface and did not.
 
-    `sources` — типи записів, з яких беруться кандидати (`_OWN_SOURCES` за
-    замовчуванням, `["all"]` знімає фільтр). Без нього звід заповнювався чужими
-    зобовʼязаннями: 7 із 10 «упущених» приїхали з одного інвесторського PDF
-    («Complete ISO 27001 certification audit», власник — Northwind Vision).
-    Вони справді не спливали в розмовах — бо ніколи й не були нашими.
+    `sources` — record types the candidates come from (`_OWN_SOURCES` by
+    default, `["all"]` removes the filter). Without it the digest filled up with other people's
+    commitments: 7 of 10 "dropped" came from one investor PDF
+    («Complete ISO 27001 certification audit», owner — Northwind Vision).
+    They really did not surface in conversations — because they were never ours.
 
-    `max_per_meeting` — стеля на внесок ОДНОГО запису. Фільтр за джерелом ловить
-    чужі документи, але не ловить курс, який власник прослухав: «Интенсив по
-    подбору идеи» — це `recording`, і його конспект дав 7 рядків із 44 (16%
-    списку) — кроки уроку, які нікому не обіцяли. Довга сесія витісняє з видачі
-    десяток інших зустрічей просто тим, що вона довга. Той самий запобіжник
-    стоїть у видачі пошуку (`retrieval._MAX_PER_MEETING`).
+    `max_per_meeting` — a ceiling on the contribution of ONE record. The source filter catches
+    other people's documents but not a course the owner listened to: «Интенсив по
+    подбору идеи» is a `recording`, and its notes gave 7 rows of 44 (16% of
+    the list) — lesson steps nobody promised. A long session pushes a dozen
+    other meetings out of the output simply by being long. The same safeguard
+    sits in search output (`retrieval._MAX_PER_MEETING`).
     """
     t = today or date.today()
     lo = (t - timedelta(days=days)).isoformat()
@@ -1184,8 +1183,8 @@ def dropped_commitments(db_path: str, *, days: int = 30, limit: int = 20,
                      "ai.owner_name AS owner_said, "
                      "t.source_name AS meeting, t.id AS tid, t.source_type, "
                      "t.tg_chat_title AS chat, t.tg_sender AS said_by, t.tg_link AS link, "
-                     # Пара id — адреса там, де посилання не існує (legacy-групи);
-                     # див. коментар у list_commitments.
+                     # The id pair is the address where a link does not exist (legacy groups);
+                     # see the comment in list_commitments.
                      "t.tg_chat_id AS chat_id, t.tg_message_id AS msg_id, "
                      "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
                      "FROM action_items ai "
@@ -1204,8 +1203,8 @@ def dropped_commitments(db_path: str, *, days: int = 30, limit: int = 20,
             if per_meeting.get(r["tid"], 0) >= max_per_meeting:
                 crowded += 1
                 continue
-            # Рідкість — по корпусу СТАНОМ НА зустріч задачі: інакше пізніші
-            # згадки самі себе й викреслюють (див. `_term_df`).
+            # Rarity is over the corpus AS OF the task's meeting: otherwise later
+            # mentions strike themselves out (see `_term_df`).
             terms = _rare_terms(conn, r["task"], before=r["meeting_date"], cache=df_cache)
             if len(terms) < 2:
                 unjudged += 1
@@ -1213,18 +1212,18 @@ def dropped_commitments(db_path: str, *, days: int = 30, limit: int = 20,
             fts_q = " OR ".join(f'"{w}"' for w in terms)
             try:
                 hit = conn.execute(
-                    # JOIN, а не rowid IN (SELECT …): друга форма змушує SQLite
-                    # щоразу будувати повний список чанків архіву — 228 мс проти
-                    # 0.1 мс на запит, тобто чотири хвилини на прохід замість секунд.
+                    # JOIN, not rowid IN (SELECT ...): the second form makes SQLite
+                    # build the full list of archive chunks every time — 228 ms vs
+                    # 0.1 ms per query, i.e. four minutes per pass instead of seconds.
                     "SELECT COUNT(*) AS n FROM chunks_fts f "
                     "JOIN chunks ch ON ch.id = f.rowid "
                     "JOIN transcriptions tt ON tt.id = ch.transcription_id "
                     "WHERE f.chunks_fts MATCH ? AND tt.deleted_at IS NULL AND tt.id <> ? "
                     "AND COALESCE(tt.meeting_date, substr(tt.created_at,1,10)) > ?",
                     (fts_q, r["tid"], r["meeting_date"] or lo)).fetchone()["n"]
-            except Exception as exc:           # FTS-синтаксис на екзотичних токенах
+            except Exception as exc:           # FTS syntax on exotic tokens
                 logger.debug("dropped_commitments: FTS skip id=%s (%s)", r["id"], exc)
-                unjudged += 1                  # як і в `sweep_dropped`: не судимо ≠ судимо
+                unjudged += 1                  # as in `sweep_dropped`: not judged != judged
                 continue
             if hit == 0:
                 per_meeting[r["tid"]] = per_meeting.get(r["tid"], 0) + 1
@@ -1237,24 +1236,24 @@ def dropped_commitments(db_path: str, *, days: int = 30, limit: int = 20,
                             "chat_id": r["chat_id"], "msg_id": r["msg_id"],
                             "terms": terms})
     if unjudged:
-        # Мовчазне обрізання читається як «перевірено все»: задача, чиїх слів
-        # нема в індексі (запис не почанковано, або модель переказала обіцянку
-        # своїми словами), не «спливала» і не «загубилась» — про неї просто
-        # нічим судити.
-        logger.info("dropped_commitments: %s задач без придатних термінів "
-                    "(не судимо)", unjudged)
+        # Silent truncation reads as "everything checked": a task whose words
+        # are not in the index (the record is not chunked, or the model retold the promise
+        # in its own words) did not "surface" and did not "get lost" — there is simply
+        # nothing to judge it by.
+        logger.info("dropped_commitments: %s tasks without usable terms "
+                    "(not judged)", unjudged)
     if crowded:
-        logger.info("dropped_commitments: %s задач приховано стелею "
+        logger.info("dropped_commitments: %s tasks hidden by the ceiling "
                     "max_per_meeting=%s", crowded, max_per_meeting)
     return out
 
 
 def _fts_phrase(name: str) -> Optional[str]:
-    """Фраза для пошуку назви теми в тексті. «SHA (акціонерна угода Acmecorp)» → «SHA».
+    """A phrase for finding a topic name in text. «SHA (акціонерна угода Acmecorp)» -> «SHA».
 
-    Дужковий хвіст — це пояснення, додане збагаченням, а не те, як тему звуть у
-    розмові. Надто коротке ядро (<3 символів) не шукаємо: воно збіглося б із
-    випадковими токенами і будь-яка тема здавалась би живою.
+    The parenthesized tail is an explanation added by enrichment, not how the topic is called
+    in conversation. A core that is too short (<3 characters) is not searched: it would match
+    random tokens and any topic would look alive.
     """
     head = (name or "").split("(")[0].strip()
     head = head.strip(" \t\n\r.,;:!?\"'`«»[]{}-–—")
@@ -1264,23 +1263,23 @@ def _fts_phrase(name: str) -> Optional[str]:
 def stale_topics(db_path: str, *, days: int = 30, min_meetings: int = 3,
                  limit: int = 15, today: Optional[date] = None,
                  verify_text: bool = True) -> list[dict]:
-    """Теми/проєкти, які активно обговорювались і зникли з розмов на N днів.
+    """Topics/projects that were actively discussed and vanished from conversations for N days.
 
-    Кандидатів дає граф (`meeting_entities`), але САМ ГРАФ НЕ Є ДОКАЗОМ
-    МОВЧАННЯ: збагачення покриває 1035 із 3964 Telegram-записів, тож тема,
-    яку щодня пишуть у чаті, для графа «замовкла» тоді, коли її востаннє згадали
-    на дзвінку. На живому архіві так брехали частина тем— «Робота мовчить 36
-    днів» при 80 згадках у тексті, остання за чотири дні до зводу.
+    The graph supplies candidates (`meeting_entities`), but THE GRAPH ITSELF IS NOT PROOF
+    OF SILENCE: enrichment covers 1035 of 3964 Telegram records, so a topic
+    written about in a chat daily is "silent" for the graph from the moment it was last mentioned
+    on a call. On the live archive some topicslied this way — «Робота is silent for 36
+    days» with 80 mentions in the text, the last one four days before the digest.
 
-    Тому кожного кандидата перевіряємо ТЕКСТОМ (FTS по чанках): якщо назва
-    звучала пізніше за графову дату, беремо текстову дату і тему з переліку
-    прибираємо, коли мовчання вже не набирається. `last_seen_source` каже, звідки
-    дата: `graph` — тема не знайшлась у тексті, `text` — знайшлась пізніше.
-    `verify_text=False` повертає стару (довірливу) поведінку.
+    So we check every candidate against TEXT (FTS over chunks): if the name
+    sounded later than the graph date, we take the text date and drop the topic from the list
+    when the silence no longer adds up. `last_seen_source` says where the date comes
+    from: `graph` — the topic was not found in the text, `text` — found later.
+    `verify_text=False` returns the old (trusting) behaviour.
 
-    Межа перевірки: FTS тут без стемінгу (`unicode61`), тож ловиться точна форма
-    назви — «Резиденція» знайдеться, «Резиденції» ні. Помилка від цього йде в
-    бік «мовчить», тобто список лишається повнішим за реальність, а не порожнім.
+    Limit of the check: FTS here has no stemming (`unicode61`), so the exact form of the
+    name is caught — «Резиденція» is found, «Резиденції» is not. The error goes toward
+    "silent", i.e. the list stays fuller than reality, not empty.
     """
     t = today or date.today()
     cutoff = (t - timedelta(days=days)).isoformat()
@@ -1294,8 +1293,8 @@ def stale_topics(db_path: str, *, days: int = 30, min_meetings: int = 3,
         "GROUP BY e.id HAVING meetings >= ? AND last_seen < ? "
         "ORDER BY meetings DESC, last_seen DESC LIMIT ?"
     )
-    # Кандидатів беремо з запасом: частина відсіється на перевірці текстом, і
-    # без запасу звід віддавав би менше тем, ніж просили.
+    # Candidates are taken with a margin: some drop out on the text check, and
+    # without a margin the digest would return fewer topics than asked for.
     cand_limit = max(limit * 4, limit) if verify_text else limit
     out: list[dict] = []
     with get_db_connection(db_path) as conn:
@@ -1315,13 +1314,13 @@ def stale_topics(db_path: str, *, days: int = 30, min_meetings: int = 3,
                         "WHERE chunks_fts MATCH ? AND tt.deleted_at IS NULL "
                         "AND COALESCE(tt.meeting_date, substr(tt.created_at,1,10)) > ?",
                         (f'"{phrase}"', last_seen)).fetchone()
-                except Exception as exc:      # FTS-синтаксис на екзотичних назвах
+                except Exception as exc:      # FTS syntax on exotic names
                     logger.debug("stale_topics: FTS skip %r (%s)", r["canonical_name"], exc)
                     hit = None
                 if hit and hit["d"] and hit["d"] > last_seen:
                     last_seen, source, mentions = hit["d"], "text", hit["n"]
             days_silent = (t - date.fromisoformat(last_seen)).days
-            if days_silent < days:            # тема жива, просто граф про це не знає
+            if days_silent < days:            # the topic is alive, the graph just does not know
                 continue
             out.append({**dict(r), "last_seen": last_seen, "days_silent": days_silent,
                         "last_seen_source": source, "mentions_after_graph": mentions})
@@ -1331,16 +1330,16 @@ def stale_topics(db_path: str, *, days: int = 30, min_meetings: int = 3,
 
 
 def _recent_corrections(db_path: str, days: int, limit: int) -> list[dict]:
-    """Коментарі-виправлення за період — окреме відро зводу (Волна 5).
+    """Correction comments for the period — a separate digest bucket (Wave 5).
 
-    Навіщо у зводі. Виправлення — це місця, де АРХІВ ВВОДИТЬ В ОМАНУ: власник
-    прочитав запис і сказав, що насправді було інакше. Такий рядок дорожчий за
-    будь-яку задачу тижня, бо доки він не прочитаний, кожна відповідь по цьому
-    запису лишається неправильною. Але сам по собі він ніде не спливає: у
-    відрах зводу лише задачі й теми, а коментар — не задача.
+    Why in the digest. Corrections are the places where THE ARCHIVE MISLEADS: the owner
+    read a record and said it was actually different. Such a row is worth more than
+    any task of the week, because until it is read every answer about this
+    record stays wrong. But by itself it surfaces nowhere: the digest buckets
+    hold only tasks and topics, and a comment is not a task.
 
-    Порожньо на старій БД без міграції v37 — звід не має падати через
-    надбудову.
+    Empty on an old DB without migration v37 — the digest must not fail because of
+    an add-on.
     """
     from app.db.connection import get_db_connection
     try:
@@ -1356,15 +1355,15 @@ def _recent_corrections(db_path: str, days: int, limit: int) -> list[dict]:
                 "ORDER BY c.created_at DESC LIMIT ?",
                 (f"-{int(days)} days", int(limit))).fetchall()
     except Exception:
-        logger.debug("[digest] виправлення не долучено", exc_info=True)
+        logger.debug("[digest] corrections not attached", exc_info=True)
         return []
     return [dict(r) for r in rows]
 
 
 def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int = 30,
                   limit: int = 15, today: Optional[date] = None) -> dict:
-    """Понеділковий звід: цього тижня / протерміновано / упущено / теми, що
-    зникли / виправлення архіву."""
+    """Monday digest: this week / overdue / dropped / topics that
+    vanished / archive corrections."""
     return {
         "generated_for": (today or date.today()).isoformat(),
         "this_week": list_commitments(db_path, window="this_week", owner=owner,
@@ -1375,22 +1374,22 @@ def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int =
                                     limit=limit, today=today),
         "dropped": dropped_commitments(db_path, days=days_back, limit=limit, today=today),
         "stale_topics": stale_topics(db_path, days=days_back, limit=10, today=today),
-        # Місця, де архів виявився неправдивим і власник це виправив. Доки
-        # рядок не прочитаний, кожна відповідь по тому запису лишається хибною.
+        # Places where the archive turned out untrue and the owner corrected it. Until
+        # the row is read, every answer about that record stays wrong.
         "corrections": _recent_corrections(db_path, days_back, limit),
-        # Без знаменника звід читається як «справ на тиждень — пʼять». Насправді
-        # три перші відра ділять між собою лише датовану чверть задач. Знаменник
-        # рахується на стан таблиці й не залежить від `today` — див. докстрінг.
+        # Without a denominator the digest reads as "five things to do this week". In fact
+        # the first three buckets share only the dated quarter of tasks. The denominator
+        # is computed on the table state and does not depend on `today` — see the docstring.
         "coverage": commitments_coverage(db_path, owner=owner),
     }
 
 
 # ============================================================
-# Зміна статусу задачі з журналом (K5 k5-task-buttons)
+# Changing a task's status with a journal (K5 k5-task-buttons)
 # ============================================================
-# Єдиний писальний шлях для кнопок брифінгу (source='bot') і /tasks (source='web'):
-# зміна і подія в `action_item_events` — в одній транзакції, тож журнал не може
-# розійтись зі станом. MCP сюди не ходить (read-only, `mcp-read-first-strategy`).
+# The single write path for briefing buttons (source='bot') and /tasks (source='web'):
+# the change and the event in `action_item_events` — in one transaction, so the journal cannot
+# diverge from the state. MCP does not come here (read-only, `mcp-read-first-strategy`).
 
 STATUS_ACTIONS = ("done", "cancelled", "open")
 POSTPONE_DAYS = {"postpone:1": 1, "postpone:7": 7, "postpone:30": 30}
@@ -1400,7 +1399,8 @@ def _item_state(conn, item_id: int):
     row = conn.execute("SELECT id, status, due_date, due_precision FROM action_items "
                        "WHERE id = ?", (item_id,)).fetchone()
     if row is None:
-        raise LookupError(f"задачу {item_id} не знайдено")
+        from app.core.i18n import tr
+        raise LookupError(tr("svc_tasks.err.itemNotFound", id=item_id))
     return row
 
 
@@ -1423,14 +1423,15 @@ def _write_event(conn, row, *, source: str, actor: Optional[str], action: str,
 
 def apply_action(db_path: str, item_id: int, action: str, *, source: str,
                  actor: Optional[str] = None, today: Optional[date] = None) -> dict:
-    """Змінити статус (`done|cancelled|open`) або перенести термін (`postpone:1|7|30`).
+    """Change the status (`done|cancelled|open`) or postpone the deadline (`postpone:1|7|30`).
 
-    Перенос: `due_date` = сьогодні + N днів, `due_precision='day'`, статус → `open`
-    (і зі `stale` теж — власник щойно підтвердив, що задача жива). Сира фраза `due`
-    не переписується. → `{event_id, item_id, status, due_date}`.
-    Невідома задача → `LookupError`, невідома дія → `ValueError`; БД без змін."""
+    Postponing: `due_date` = today + N days, `due_precision='day'`, status -> `open`
+    (from `stale` too — the owner has just confirmed the task is alive). The raw `due` phrase
+    is not rewritten. -> `{event_id, item_id, status, due_date}`.
+    Unknown task -> `LookupError`, unknown action -> `ValueError`; the DB is unchanged."""
     if action not in STATUS_ACTIONS and action not in POSTPONE_DAYS:
-        raise ValueError(f"невідома дія: {action}")
+        from app.core.i18n import tr
+        raise ValueError(tr("svc_tasks.err.unknownAction", action=action))
     with get_db_connection(db_path) as conn:
         row = _item_state(conn, item_id)
         if action in POSTPONE_DAYS:
@@ -1444,19 +1445,21 @@ def apply_action(db_path: str, item_id: int, action: str, *, source: str,
 
 def undo_action(db_path: str, event_id: int, *, source: str,
                 actor: Optional[str] = None) -> dict:
-    """Скасувати подію: повернути статус і термін задачі, які були до неї.
+    """Undo an event: restore the task's status and deadline from before it.
 
-    Лише ОСТАННЯ подія задачі (інакше відкат затер би пізнішу зміну) → інакше `ValueError`.
-    Скасування — теж подія (`action='undo'`, `undo_of`), тож журнал лишається повним."""
+    Only the task's LAST event (otherwise the rollback would wipe a later change) -> else `ValueError`.
+    Undoing is an event too (`action='undo'`, `undo_of`), so the journal stays complete."""
     with get_db_connection(db_path) as conn:
         ev = conn.execute("SELECT * FROM action_item_events WHERE id = ?",
                           (event_id,)).fetchone()
         if ev is None:
-            raise LookupError(f"подію {event_id} не знайдено")
+            from app.core.i18n import tr
+            raise LookupError(tr("svc_tasks.err.eventNotFound", id=event_id))
         last = conn.execute("SELECT MAX(id) AS m FROM action_item_events WHERE item_id = ?",
                             (ev["item_id"],)).fetchone()["m"]
         if last != event_id or ev["action"] == "undo":
-            raise ValueError("скасувати можна лише останню дію над задачею")
+            from app.core.i18n import tr
+            raise ValueError(tr("svc_tasks.err.undoLastOnly"))
         row = _item_state(conn, ev["item_id"])
         return _write_event(conn, row, source=source, actor=actor, action="undo",
                             status=ev["old_status"], due_date=ev["old_due_date"],
@@ -1474,9 +1477,9 @@ def _cmd(args) -> int:
     elif args.command == "owners":
         res = link_owners(db, dry_run=args.dry_run)
     elif args.command == "relink":
-        # Тут dry_run за замовчуванням: команда рухає ВЖЕ привʼязані задачі.
-        # Явний --dry-run переважає --apply: із двох прочитань наміру беремо
-        # те, що нічого не пише.
+        # dry_run is the default here: the command moves tasks that are ALREADY linked.
+        # An explicit --dry-run beats --apply: of the two readings of intent we take
+        # the one that writes nothing.
         res = relink_owners(db, dry_run=args.dry_run or not args.apply)
     elif args.command == "dedup":
         res = dedup(db, dry_run=args.dry_run, threshold=args.threshold)
@@ -1489,7 +1492,7 @@ def _cmd(args) -> int:
                                   min_age_days=args.min_age,
                                   max_candidates=args.max_candidates)
     elif args.command == "sweep-dropped":
-        # Пише в БД, тому прикидка — за замовчуванням, а не за прапорцем.
+        # Writes to the DB, so the estimate is the default, not behind a flag.
         res = sweep_dropped(db, days=args.days, min_age_days=args.min_age,
                             undated_only=args.undated_only,
                             dry_run=args.dry_run or not args.apply)
@@ -1505,51 +1508,51 @@ def main(argv: Optional[list] = None) -> int:
 
     p = argparse.ArgumentParser(
         prog="commitments",
-        description="Нормалізація дедлайнів/власників задач + зводи (Трек 1).")
+        description="Normalization of task deadlines/owners + digests (Track 1).")
     p.add_argument("--db", default=default_db)
-    p.add_argument("--dry-run", action="store_true", help="Нічого не писати в БД")
-    # --dry-run приймається і ПІСЛЯ підкоманди (`backfill --dry-run`) — інакше
-    # найважливіший запобіжник спрацьовує лише при «правильному» порядку слів.
+    p.add_argument("--dry-run", action="store_true", help="Write nothing to the DB")
+    # --dry-run is also accepted AFTER the subcommand (`backfill --dry-run`) — otherwise
+    # the most important safeguard works only with the "right" word order.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--dry-run", action="store_true", help="Нічого не писати в БД")
+    common.add_argument("--dry-run", action="store_true", help="Write nothing to the DB")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("backfill", parents=[common], help="due → due_date/due_precision")
     sub.add_parser("owners", parents=[common], help="owner_name → owner_entity_id")
     rl = sub.add_parser("relink", parents=[common],
-                        help="Перевісити задачі на точнішу людину "
-                             "(за замовчуванням — прикидка)")
-    rl.add_argument("--apply", action="store_true", help="Виконати, а не прикинути")
-    d = sub.add_parser("dedup", parents=[common], help="Позначити дублі задач (dup_of)")
+                        help="Re-point tasks to a more precise person "
+                             "(estimate by default)")
+    rl.add_argument("--apply", action="store_true", help="Apply instead of estimating")
+    d = sub.add_parser("dedup", parents=[common], help="Mark duplicate tasks (dup_of)")
     d.add_argument("--threshold", type=float, default=DEDUP_THRESHOLD)
     s = sub.add_parser("stale", parents=[common],
-                       help="Старі задачі без майбутнього терміну → stale")
+                       help="Old tasks with no future deadline -> stale")
     s.add_argument("--days", type=int, default=STALE_DAYS)
-    g = sub.add_parser("digest", help="Показати звід (read-only)")
+    g = sub.add_parser("digest", help="Show the digest (read-only)")
     g.add_argument("--owner", default=None)
-    # Звід дивиться на 30 днів, а завал старший: 1242 живі задачі без дати
-    # тягнуться на три місяці, і «упущене» серед них видно лише ширшим вікном.
-    # Прохід не миттєвий (рідкість слів рахується по індексу), тому окремою
-    # командою, а не в зводі.
-    dr = sub.add_parser("dropped", help="Обіцянки без сліду за довший період (read-only)")
-    dr.add_argument("--days", type=int, default=120, help="Глибина вікна, днів")
+    # The digest looks at 30 days, but the backlog is older: 1242 live tasks without a date
+    # stretch over three months, and what is "dropped" among them is visible only with a wider window.
+    # The pass is not instant (word rarity is counted over the index), hence a separate
+    # command rather than part of the digest.
+    dr = sub.add_parser("dropped", help="Promises with no trace over a longer period (read-only)")
+    dr.add_argument("--days", type=int, default=120, help="Window depth, days")
     dr.add_argument("--min-age", type=int, default=14,
-                    help="Карантин: свіжі домовленості не рахуються загубленими")
+                    help="Quarantine: fresh agreements are not counted as lost")
     dr.add_argument("--limit", type=int, default=50)
-    # 300 — стеля зводу, і для ширшого вікна вона беззмістовна: кандидати
-    # відбираються `meeting_date DESC`, тож на 120 днях (задачі) старіший
-    # завал — саме той, заради якого команда й існує, — до перевірки не доходив.
+    # 300 is the digest ceiling, and for a wider window it is meaningless: candidates
+    # are selected by `meeting_date DESC`, so over 120 days (tasks) the older
+    # backlog — exactly what the command exists for — never reached the check.
     dr.add_argument("--max-candidates", type=int, default=3000)
 
     sw = sub.add_parser("sweep-dropped", parents=[common],
-                        help="Зняти обіцянки, чия тема замовкла (open → stale, no_trace)")
-    sw.add_argument("--days", type=int, default=180, help="Глибина вікна, днів")
+                        help="Drop promises whose topic went quiet (open -> stale, no_trace)")
+    sw.add_argument("--days", type=int, default=180, help="Window depth, days")
     sw.add_argument("--min-age", type=int, default=30,
-                    help="Карантин: свіжі домовленості не знімаємо")
+                    help="Quarantine: fresh agreements are not dropped")
     sw.add_argument("--undated-only", action="store_true",
-                    help="Лише задачі без дати")
+                    help="Only tasks without a date")
     sw.add_argument("--apply", action="store_true",
-                    help="Виконати (без нього — прикидка)")
+                    help="Apply (without it — an estimate)")
 
     args = p.parse_args(argv)
     if args.command == "dedup" and not hasattr(args, "threshold"):

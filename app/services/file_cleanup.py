@@ -1,13 +1,13 @@
-"""Фонова авточистка старих файлів (Phase 6.3).
+"""Background auto-cleanup of old files (Phase 6.3).
 
-Сценарій:
-- Кожні N годин перевіряти uploads/, youtube_downloads/.
-- Видаляти файли старше CLEANUP_AGE_DAYS (default 7 днів).
-- НЕ чіпає файли з audio_downloads БД (тільки orphan upload-temp).
-- НЕ чіпає файли з transcriptions БД (file_path якщо ще валідний).
-- Логує що видалив + сумарний розмір.
+Scenario:
+- Every N hours check uploads/, youtube_downloads/.
+- Delete files older than CLEANUP_AGE_DAYS (default 7 days).
+- Does NOT touch files from the audio_downloads DB (only orphan upload temp files).
+- Does NOT touch files from the transcriptions DB (file_path if still valid).
+- Logs what it deleted + the total size.
 
-Безпечно: глобальний lock у БД не потрібен — ALTER TABLE / DROP не робимо.
+Safe: a global DB lock is not needed — we do not run ALTER TABLE / DROP.
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class FileCleanupService:
         logger.info("FileCleanup stopped")
 
     def _run(self):
-        # Перший прохід через 60с після старту (даємо app прогрітися).
+        # First pass 60 s after start (let the app warm up).
         self._stop.wait(60)
         while not self._stop.is_set():
             try:
@@ -69,10 +69,10 @@ class FileCleanupService:
             self._stop.wait(self.check_interval)
 
     # -----------------------------------------------------
-    # Public for /api/admin/cleanup-now або тесту
+    # Public for /api/admin/cleanup-now or a test
     # -----------------------------------------------------
     def run_once(self) -> dict:
-        """Один прохід очищення. Повертає статистику."""
+        """One cleanup pass. Returns statistics."""
         protected = self._collect_protected_paths()
         cutoff = time.time() - self.max_age.total_seconds()
 
@@ -118,17 +118,17 @@ class FileCleanupService:
         return stats
 
     def _collect_protected_paths(self) -> Set[str]:
-        """Зібрати file_path з БД — їх НЕ чіпати, навіть якщо старі."""
+        """Collect file_path values from the DB — do NOT touch them, even if old."""
         protected: Set[str] = set()
         try:
             conn = sqlite3.connect(self.db_path)
             try:
-                # Файли активних аудіо-завантажень у бібліотеці
+                # Files of active audio downloads in the library
                 for row in conn.execute('SELECT file_path FROM audio_downloads WHERE file_path IS NOT NULL'):
                     p = row[0]
                     if p:
                         protected.add(str(Path(p).resolve()).lower())
-                # Файли YouTube-транскрипцій (можуть знадобитись для re-export)
+                # Files of YouTube transcriptions (may be needed for re-export)
                 for row in conn.execute("SELECT file_path FROM transcriptions WHERE source_type='youtube' AND file_path IS NOT NULL"):
                     p = row[0]
                     if p:

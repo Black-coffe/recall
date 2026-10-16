@@ -23,26 +23,26 @@
     ];
     const DEFAULT_MODEL = 'large-v3-turbo';
 
-    // Co-pilot (Phase 19): мега-налаштування на старті дзвінка.
+    // Co-pilot (Phase 19): mega-settings at call start.
     const CP_MODES = [{ v: 'light', l: 'capture.rec.cp.mode.light' }, { v: 'medium', l: 'capture.rec.cp.mode.medium' }, { v: 'hard', l: 'capture.rec.cp.mode.hard' }];
     const CP_IMP = [{ v: 'low', l: 'capture.rec.cp.imp.low' }, { v: 'medium', l: 'capture.rec.cp.imp.medium' }, { v: 'high', l: 'capture.rec.cp.imp.high' }];
 
-    // Паралельні записи (C9): G — чернетка налаштувань нового запису; кожен живий
-    // запис — свій S у `sessions` (власний SSE-читач і тік працюють у фоні).
-    // `st` — той S, з яким зараз працюємо: вибраний таб, або (на час SSE-події /
-    // тіку фонового запису) його власний S через withS(). DOM чіпаємо лише для
-    // вибраного (`$id` повертає null для решти), тож хелпери лишились як були.
+    // Parallel recordings (C9): G — the draft of the new recording's settings; every live
+    // recording has its own S in `sessions` (its own SSE reader and tick work in the background).
+    // `st` — the S we are working with right now: the selected tab, or (during an SSE event /
+    // tick of a background recording) its own S via withS(). We touch the DOM only for
+    // the selected one (`$id` returns null for the rest), so the helpers stayed as they were.
     let G = null;       // { devices, screens, videoAvailable, videoRegions, exclude, includeFor }
     const sessions = new Map();   // sid → S
-    let selSid = null;  // null = таб «+ Новий запис» (setup)
+    let selSid = null;  // null = the "+ Новий запис" tab (setup)
     let st = null;
-    let _letter = 0;    // A, B, C… — коротке імʼя запису в табах і питаннях
-    let _limitHit = false;   // 409 SESSION_LIMIT → ховаємо «+ Новий запис», поки хтось не завершиться
+    let _letter = 0;    // A, B, C… — a short recording name in the tabs and questions
+    let _limitHit = false;   // 409 SESSION_LIMIT → hide "+ Новий запис" until someone finishes
     let _models = null;
     let _cats = null;
     let _cpAvail = null;   // { enabled, local_llm_available, local_llm_reason, ... }
-    let _liveCmHotkey = null;   // Ctrl+Shift+K → фокус у поле живого коментаря (вибраного запису)
-    let currentCtx = null;      // ctx поточного рендера — для обробників, що живуть поза render()
+    let _liveCmHotkey = null;   // Ctrl+Shift+K → focus the live comment field (of the selected recording)
+    let currentCtx = null;      // ctx of the current render — for handlers that live outside render()
 
     function newS(sid) {
         const letter = String.fromCharCode(65 + (_letter++ % 26));
@@ -59,8 +59,8 @@
         selSid = null; st = null; _letter = 0; _limitHit = false;
         G = { devices: [], screens: [], videoAvailable: false, videoRegions: {}, exclude: null, includeFor: {}, preset: null };
     }
-    // K2: «Інші джерела» з підказки дзвінка → /record?app=<exe>&mic=<назва мікрофона>.
-    // Лише передвибір на формі; невідомі значення мовчки ігноруються.
+    // K2: "Other sources" from a call prompt → /record?app=<exe>&mic=<microphone name>.
+    // Only a preselection on the form; unknown values are silently ignored.
     function presetFrom(q) {
         const app = String((q && q.app) || '').trim().toLowerCase();
         if (!/^[\w .()-]{1,80}\.exe$/.test(app)) return null;
@@ -143,7 +143,7 @@
                     const r = await R.api.get('/api/recording/' + e.session_id + '/state');
                     snap = (r && r.state) || null;
                 } catch (err) {
-                    if (err && err.status === 404) continue;   // застарілий sid → без табу
+                    if (err && err.status === 404) continue;   // stale sid → no tab
                     snap = { status: typeof e.state === 'string' ? e.state : 'recording' };
                 }
                 if (snap && snap.is_active === false) continue;
@@ -154,7 +154,7 @@
         if (!ctx.isCurrent()) return;
         const first = sessions.keys().next();
         for (const S of sessions.values()) { connectSSE(ctx, S); startTick(ctx, S); }
-        // З передвибором дзвінка відкриваємо форму нового запису, а не живий таб.
+        // With a call preselection we open the new-recording form, not a live tab.
         select(ctx, (!first.done && !G.preset) ? first.value : null);
     }
 
@@ -183,7 +183,7 @@
     }
 
     // ---- tabs: one per recording + «+ Новий запис» ------------------------
-    // З одним записом табів немає — екран як до паралельних записів.
+    // With a single recording there are no tabs — the screen is as before parallel recordings.
     function select(ctx, sid) {
         selSid = sid && sessions.has(sid) ? sid : null;
         st = selSid ? sessions.get(selSid) : null;
@@ -228,7 +228,7 @@
         sessions.delete(S.sessionId);
         _limitHit = false;
     }
-    // Після save/discard: лишились інші записи → на перший із них; ні → як раніше.
+    // After save/discard: other recordings remain → go to the first of them; no → as before.
     function afterDrop(ctx, fallback) {
         const first = sessions.keys().next();
         if (!first.done) select(ctx, first.value);
@@ -247,17 +247,17 @@
         }).join('');
     }
     function langOpts() { return LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${R.t(l.l)}</option>`).join(''); }
-    // Дерево напрямків: <optgroup «Напрямок»> + «— Проєкт» усередині. Під
-    // селектом живий рядок шляху (`catPathLine`) — у закритому селекті видно
-    // лише «— Проєкт», без напрямку-батька.
+    // Category tree: <optgroup «Напрямок»> + «— Проєкт» inside. Under the
+    // select there is a live path line (`catPathLine`) — a closed select shows
+    // only «— Проєкт», without the parent category.
     function catOpts() {
         return UI.catOptions('', { first: 'none' });
     }
-    // Рядок «Напрямок → Проєкт» під селектом напрямку. Вішається на будь-який
-    // .rc-catsel рекордера: показує повний шлях обраного вузла (або нічого).
+    // The «Напрямок → Проєкт» line under the category select. Attached to any
+    // .rc-catsel of the recorder: shows the full path of the chosen node (or nothing).
     function bindCatPath(sel) {
         if (!sel || !sel.parentNode) return;
-        if (sel.parentNode.querySelector('[data-catpath]')) return;   // ідемпотентно: wireCopilot кличеться на кожен paint
+        if (sel.parentNode.querySelector('[data-catpath]')) return;   // idempotent: wireCopilot is called on every paint
         const line = document.createElement('div');
         line.setAttribute('data-catpath', '');
         line.className = 'rc-mono';
@@ -271,20 +271,20 @@
         paint();
     }
 
-    // ---- Co-pilot mega-settings (Phase 19, Крок 1) -------------------------
+    // ---- Co-pilot mega-settings (Phase 19, Step 1) -------------------------
     function cpOpts(arr, def) {
         return arr.map(o => `<option value="${o.v}"${o.v === def ? ' selected' : ''}>${R.t(o.l)}</option>`).join('');
     }
     function copilotPanel() {
-        if (!_cpAvail || !_cpAvail.enabled) return '';   // фіча вимкнена на бекенді
+        if (!_cpAvail || !_cpAvail.enabled) return '';   // the feature is disabled on the backend
         const status = _cpAvail.local_llm_available
             ? `<span class="rc-mono" style="color:var(--rc-ok)"><i class="fa-solid fa-circle-check"></i> ${R.t('capture.rec.cp.localReady')}</span>`
             : `<span class="rc-mono" style="color:var(--rc-warn,#fb8c00)" title="${U.esc(_cpAvail.local_llm_reason || '')}"><i class="fa-solid fa-circle-exclamation"></i> ${R.t('capture.rec.cp.ollamaNotReady')}</span>`;
-        // T5.2 (REMEDIATION_PLAN Волна 3): режим/важливість/бюджет — power-user
-        // налаштування, сховані за вкладеним "Розширені" — новий користувач, що
-        // розгортає "Ко-пілот наживо" на старті першого дзвінка, бачить лише
-        // напрямок + просте "лише локально" перемикання + пояснення поточного
-        // дефолту (medium/medium), а не 3 селекти й числове поле бюджету одразу.
+        // T5.2 (REMEDIATION_PLAN Wave 3): mode/importance/budget — power-user
+        // settings, hidden behind a nested "Розширені" — a new user who
+        // expands "Ко-пілот наживо" at the start of the first call sees only
+        // the category + a simple "local only" switch + an explanation of the current
+        // default (medium/medium), and not 3 selects and a numeric budget field at once.
         return `
             <details class="rc-rec-copilot" id="rcCopilot">
                 <summary style="cursor:pointer;font-weight:600"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.rec.cp.summary')} <span style="margin-left:8px;font-weight:400">${status}</span></summary>
@@ -340,8 +340,8 @@
         const vec = get('#rcCpVector');
         if (vec) cp.category_id = vec;
         const scope = (get('#rcCpScope') || '').trim();
-        if (scope) cp.scope_projects = scope;   // «Маяк, Олена» → зріз пошуку (Трек 2/3)
-        if (localOnly) cp.api_enabled = false;   // інакше — дефолт за важливістю (бекенд)
+        if (scope) cp.scope_projects = scope;   // «Маяк, Олена» → search slice (Track 2/3)
+        if (localOnly) cp.api_enabled = false;   // otherwise — the default by importance (backend)
         const b = get('#rcCpBudget');
         if (b && !localOnly) cp.budget_usd = parseFloat(b);
         return cp;
@@ -695,11 +695,11 @@
         if (second) loadAppsPrompt(ctx);
     }
 
-    // ---- другий запис: звучні застосунки + два питання (Ask 2) --------------
-    // «Виключити X з цього запису» — одна галочка на весь список (exclude несе
-    // один застосунок; друга галочка перемикає). «Лишити в A тільки X?» — для
-    // застосунків, які вже пише інший запис; відповідь застосовується до A лише
-    // ПІСЛЯ успішного старту нового запису.
+    // ---- second recording: sounding applications + two questions (Ask 2) --------------
+    // «Виключити X з цього запису» — one checkbox for the whole list (exclude carries
+    // one application; the second checkbox switches). «Лишити в A тільки X?» — for
+    // applications that another recording already records; the answer is applied to A
+    // only AFTER the new recording starts successfully.
     function appsPromptShell() {
         return `
             <div class="rc-recsrc rc-recsrc--prompt" id="rcRecApps">
@@ -772,8 +772,8 @@
             const o = sysSel.options[sysSel.selectedIndex];
             payload.system_device_name = o ? o.dataset.name : null;
         }
-        // K2: передвибір дзвінка — системний звук лише цього застосунку (include,
-        // пристрій loopback тоді не потрібен).
+        // K2: call preselection — system sound of this application only (include,
+        // the loopback device is not needed then).
         const preOnly = G.preset && ctx.mount.querySelector('#rcRecPresetOnly');
         if (preOnly && preOnly.checked && sysEn && sysEn.checked) {
             delete payload.system_device_index;
@@ -788,7 +788,7 @@
 
         const cp = collectCopilot(ctx);
         if (cp) payload.copilot = cp;
-        // Питання про звучні застосунки (лише коли вже йде інший запис).
+        // Question about sounding applications (only when another recording is already going).
         const others = liveSessions();
         if (others.length && payload.system_device_index != null && G.exclude) {
             payload.system_source = { mode: 'exclude', apps: [G.exclude] };
@@ -847,11 +847,11 @@
             connectSSE(ctx, S);
             startTick(ctx, S);
             select(ctx, S.sessionId);
-            // start-відповідь несе лише monitor_index; справжні track_id ('mon0',…) знає
-            // супервізор. Звіряємось зі state трохи згодом, щоб чипи стали канонічними
-            // (правильна мітка/статус + region) і live video_stats почали потрапляти в ціль.
+            // the start response carries only monitor_index; the real track_id ('mon0',…) is known to the
+            // supervisor. We reconcile with state a bit later so the chips become canonical
+            // (correct label/status + region) and live video_stats start landing on target.
             if (r.video && r.video.enabled) reconcileVideoTracks(ctx, S);
-            // «Лишити в A тільки X» — лише тепер, коли новий запис точно пішов.
+            // «Лишити в A тільки X» — only now, when the new recording has definitely started.
             for (const sid in narrow) {
                 if (narrow[sid] && narrow[sid].length && sessions.has(sid)) {
                     setSystemSource(ctx, sessions.get(sid), { mode: 'include', apps: narrow[sid].slice(), reason: 'user' });
@@ -871,9 +871,9 @@
         }
     }
 
-    // ---- системний звук запису: весь / тільки ці / усе крім цих (Ask 4) -----
-    // Тіло — рівно C5: {mode, apps, reason}. Відповідь (або подія source_changed)
-    // оновлює картку; коди помилок — тости, не консоль.
+    // ---- system sound of the recording: all / only these / everything except these (Ask 4) -----
+    // The body is exactly C5: {mode, apps, reason}. The response (or the source_changed event)
+    // updates the card; error codes are toasts, not console.
     async function setSystemSource(ctx, S, spec) {
         const body = { mode: spec.mode, apps: spec.mode === 'all' ? [] : (spec.apps || []), reason: spec.reason || 'user' };
         try {
@@ -923,7 +923,7 @@
         const cur = (S.systemSource && S.systemSource.mode === mode) ? (S.systemSource.apps || []) : [];
         const byExe = new Map();
         ((d && d.apps) || []).forEach(a => byExe.set(a.exe, a.label || a.exe));
-        cur.forEach(x => { if (!byExe.has(x)) byExe.set(x, x); });   // застосунок зараз мовчить — лишаємо у списку
+        cur.forEach(x => { if (!byExe.has(x)) byExe.set(x, x); });   // the application is silent right now — keep it in the list
         if (!byExe.size) {
             pick.innerHTML = `<span class="rc-mono rc-recsrc__muted">${(d && d.available === false) ? R.t('capture.rec.apps.listUnavailable') : R.t('capture.rec.apps.noneSoundingShort')}.</span>`;
             return;
@@ -945,20 +945,20 @@
         });
     }
 
-    // ---- ко-пілот: де працює, «перенести сюди» (Ask 8) ----------------------
+    // ---- co-pilot: where it works, «перенести сюди» (Ask 8) ----------------------
     function copilotOwner() {
         for (const S of sessions.values()) if (S.stage === 'active' && (S.copilotSessionId || S.copilotActive)) return S;
         return null;
     }
     function cpWhereHTML() {
         if (!_cpAvail || !_cpAvail.enabled) return '';
-        if (sessions.size < 2 && !st.cpOffer) return '';   // один запис — як раніше: віджет сам усе показує
+        if (sessions.size < 2 && !st.cpOffer) return '';   // one recording — as before: the widget shows everything itself
         return `<div class="rc-rec-hint rc-mono" id="rcRecCpWhere" style="margin-bottom:var(--rc-3)"></div>`;
     }
     function paintCpWhere() {
         const el = $id('rcRecCpWhere');
         if (!el) return;
-        // Власник: з відповіді COPILOT_BUSY (owner_session_id), інакше — хто з табів його тримає.
+        // Owner: from the COPILOT_BUSY response (owner_session_id), otherwise — whichever tab holds it.
         const ownerS = st.cpOffer ? sessions.get(st.cpOffer) : copilotOwner();
         const ownerSid = st.cpOffer || (ownerS && ownerS.sessionId) || null;
         const ownerName = ownerS ? tabName(ownerS) : R.t('capture.rec.cpbar.otherRecording');
@@ -1045,15 +1045,15 @@
         paintCpWhere();
     }
 
-    // ---- живий коментар оператора (Волна 4) --------------------------------
-    // Під час дзвінка руки зайняті розмовою, а не мишею, тож поле одне, завжди
-    // на видноті, і закривається одним Enter. Ctrl+Shift+K фокусує його з
-    // будь-якого місця сторінки — щоб думку можна було зафіксувати, не шукаючи
-    // курсором, поки співрозмовник говорить.
+    // ---- operator's live comment (Wave 4) --------------------------------
+    // During a call the hands are busy with the conversation, not the mouse, so there is one field, always
+    // in view, and it is closed with one Enter. Ctrl+Shift+K focuses it from
+    // anywhere on the page — so a thought can be captured without searching with
+    // the cursor while the interlocutor is speaking.
     //
-    // Момент запису беремо з таймера (st.elapsedSec), а не з годинника: якір
-    // потрібен ВІД ПОЧАТКУ ЗАПИСУ, бо після транскрибування коментар переїде
-    // на транскрипт і має вказувати в те саме місце доріжки.
+    // We take the moment of the recording from the timer (st.elapsedSec), not from the clock: the anchor
+    // is needed FROM THE START OF THE RECORDING, because after transcription the comment moves
+    // to the transcript and must point to the same place of the track.
     function liveCommentHTML() {
         return `
             <div class="rc-livecm" id="rcLiveCm">
@@ -1101,8 +1101,8 @@
         if (!inp || !st.sessionId) return;
         const body = (inp.value || '').trim();
         if (!body) return;
-        // Поле звільняємо ОДРАЗУ, до відповіді сервера: оператор друкує далі,
-        // а не чекає на HTTP. Помилку показуємо тостом і повертаємо текст.
+        // We free the field IMMEDIATELY, before the server's answer: the operator keeps typing
+        // instead of waiting for HTTP. We show the error as a toast and return the text.
         inp.value = '';
         const at = st.elapsedSec;
         try {
@@ -1125,7 +1125,7 @@
         try { rows = (await R.api.comments('recording_session', st.sessionId)).comments || []; }
         catch (_) { return; }
         if (!rows.length) { log.innerHTML = ''; return; }
-        // Показуємо останні — під час дзвінка потрібен слід, а не архів.
+        // We show the latest — during a call a trail is needed, not an archive.
         log.innerHTML = rows.slice(-4).map(c => `
             <div class="rc-livecm__item">
                 <span class="rc-livecm__at rc-mono">${fmt(c.anchor_time || 0)}</span>
@@ -1258,7 +1258,7 @@
         if (st.cpUsage) applyCopilotUsage(st.cpUsage);
     }
 
-    // Зміна режиму/важливості на льоту під час дзвінка (Крок 6).
+    // Changing mode/importance on the fly during a call (Step 6).
     async function changeSetting(field, value) {
         const S = st;
         if (!S || !S.copilotSessionId) return;
@@ -1296,7 +1296,7 @@
         refreshPill();
         if (lbl) lbl.textContent = paused ? R.t('capture.rec.resume') : R.t('capture.rec.pause');
         if (pauseBtn) { const i = pauseBtn.querySelector('i'); if (i) i.className = 'fa-solid ' + (paused ? 'fa-play' : 'fa-pause'); }
-        // ко-пілот: миттєво відобразити паузу/відновлення (SSE copilot_status прийде з лагом тіку)
+        // co-pilot: instantly show pause/resume (the SSE copilot_status arrives with the tick lag)
         if (st.copilotSessionId) setCpStatus(paused ? 'paused' : 'analyzing');
     }
 
@@ -1323,8 +1323,8 @@
     // monitoring died instead of staring at a frozen-but-seemingly-fine VU
     // meter. onReconnecting/onReconnected/onPermanentFail drive the pill +
     // banner (see pillState/showSseBanner/hideSseBanner above).
-    // Кожен запис тримає СВІЙ читач: фоновий таб оновлює лише свій S, DOM — тільки
-    // вибраний (withS + $id), тож перемикання табів не рве жоден потік.
+    // Each recording keeps ITS OWN reader: a background tab updates only its own S, the DOM — only the
+    // selected one (withS + $id), so switching tabs does not break any stream.
     function connectSSE(ctx, S) {
         haltSse(S);
         const ac = new AbortController();
@@ -1444,8 +1444,8 @@
         if (!data || data.track_id == null) return;
         const key = String(data.track_id);
         if (!st.videoTracks[key]) return;
-        // бекенд шле {track_id, stats:{fps,dropped,bytes}} — розпаковуємо вкладене
-        // (фолбек на плоске на випадок іншої форми події)
+        // the backend sends {track_id, stats:{fps,dropped,bytes}} — we unpack the nested one
+        // (fallback to the flat one in case of another event shape)
         const s = data.stats || data;
         st.videoTracks[key].fps = s.fps != null ? s.fps : st.videoTracks[key].fps;
         st.videoTracks[key].dropped = s.dropped != null ? s.dropped : st.videoTracks[key].dropped;
@@ -1462,15 +1462,15 @@
         }
         updateRecMeta();
     }
-    // п.5: підпис розміру області (◳ W×H) для трека, що пише виділений регіон екрана
+    // item 5: size label of the area (◳ W×H) for a track that records a selected screen region
     function regionLabel(t) {
         return (t && t.mode === 'region' && t.region && t.region.w)
             ? '◳ ' + t.region.w + '×' + t.region.h : '';
     }
-    // Канонічний пересбір відеотреків зі снапшоту state (get_state.video_tracks).
-    // Усуває рассинхрон ключів: start-відповідь дає лише monitor_index, а live-події
-    // (video_status/stats) і manifest — справжній track_id ('mon0'). Збираємо за
-    // канонічним track_id, зберігаючи вже накопичені live-байти/fps якщо снапшот їх не має.
+    // Canonical rebuild of video tracks from the state snapshot (get_state.video_tracks).
+    // Removes key desync: the start response gives only monitor_index, while live events
+    // (video_status/stats) and the manifest carry the real track_id ('mon0'). We collect by the
+    // canonical track_id, keeping already accumulated live bytes/fps if the snapshot lacks them.
     function applyStateVideoTracks(arr) {
         if (!Array.isArray(arr)) return;
         const next = {};
@@ -1493,7 +1493,7 @@
         st.videoTracks = next;
         renderVideoChips();
     }
-    // Одноразова звірка чипів зі state після старту (track_id стає канонічним).
+    // One-time reconciliation of chips with state after start (track_id becomes canonical).
     function reconcileVideoTracks(ctx, S) {
         const sid = S.sessionId;
         setTimeout(async () => {
@@ -1503,7 +1503,7 @@
                 if (s && s.success && s.state && Array.isArray(s.state.video_tracks) && s.state.video_tracks.length) {
                     withS(S, () => applyStateVideoTracks(s.state.video_tracks));
                 }
-            } catch (_) { /* лишаємо провіжн-чипи зі start-відповіді */ }
+            } catch (_) { /* keep the provisional chips from the start response */ }
         }, 1800);
     }
     function renderVideoChips() {
@@ -1536,7 +1536,7 @@
         if (val) { const db = (d.peak > 0.0001) ? (20 * Math.log10(d.peak)).toFixed(0) + ' dB' : '-∞'; val.textContent = db; }
     }
 
-    // Живі сегменти зберігаються в S (хвіст), щоб перемикання табів їх не губило.
+    // Live segments are kept in S (the tail), so switching tabs does not lose them.
     function appendSegments(segs) {
         if (!segs.length) return;
         st.segs.push(...segs);
@@ -1560,7 +1560,7 @@
         if (nearBottom) live.scrollTop = live.scrollHeight;
     }
 
-    // ---- Co-pilot: топік-смужка (Крок 2) ----------------------------------
+    // ---- Co-pilot: topic strip (Step 2) ----------------------------------
     function renderTopicStrip() {
         const el = $id('rcCpStrip');
         if (!el) return;
@@ -1585,7 +1585,7 @@
         }
     }
 
-    // ---- Co-pilot: індикатор стану (Крок 4) -------------------------------
+    // ---- Co-pilot: state indicator (Step 4) -------------------------------
     const CP_STATE = {
         analyzing: { txt: 'capture.rec.cp.state.analyzing', cls: 'is-analyzing' },
         paused:    { txt: 'capture.rec.cp.state.paused', cls: 'is-paused' },
@@ -1596,8 +1596,8 @@
     function applyCopilotStatus(data) {
         if (!data || !data.state) return;
         setCpStatus(data.state, data.reason);
-        // Трек 3: бюджет карток вичерпано. Тиша має бути ПОЯСНЕНОЮ — інакше
-        // читається як «копілот зламався», а не «він навмисно мовчить».
+        // Track 3: the card budget is exhausted. The silence must be EXPLAINED — otherwise
+        // it reads as "the copilot broke", not "it is silent on purpose".
         if (data.state === 'quiet' && data.reason === 'card_budget') {
             const n = data.suppressed || 0;
             showCpBanner(R.t('capture.rec.cp.budgetSpent') +
@@ -1605,7 +1605,7 @@
         }
         if (data.cards_shown != null) updateCardBudget(data.cards_shown);
     }
-    // «2/5» у шапці віджета: скільки уваги оператора вже витрачено.
+    // "2/5" in the widget header: how much of the operator's attention has been spent.
     function updateCardBudget(shown) {
         const el = $id('rcCpBudgetLbl');
         if (!el) return;
@@ -1619,7 +1619,7 @@
         el.hidden = false;
         el.textContent = text;
     }
-    // Лічильник вартості верифікації Claude (Крок 5): «$0.12 / $1.00».
+    // Claude verification cost counter (Step 5): "$0.12 / $1.00".
     function applyCopilotUsage(data) {
         if (!data) return;
         st.cpUsage = data;
@@ -1650,7 +1650,7 @@
         if (t) t.textContent = R.t(s.txt);
         const cp = $id('rcCp');
         if (cp) cp.classList.toggle('is-paused', state === 'paused');
-        // Деградація (Ollama впав) → банер; запис/STT працюють далі (Крок 9).
+        // Degradation (Ollama is down) → banner; recording/STT keep working (Step 9).
         const banner = $id('rcCpBanner');
         if (banner) {
             if (state === 'degraded') {
@@ -1660,19 +1660,19 @@
         }
     }
 
-    // ---- Co-pilot: картки-інсайти з діями (Крок 4) ------------------------
+    // ---- Co-pilot: insight cards with actions (Step 4) ------------------------
     const CP_KIND = {
         contradiction: { icon: 'fa-triangle-exclamation', lbl: 'capture.rec.cp.kind.contradiction' },
         question:      { icon: 'fa-circle-question',       lbl: 'capture.rec.cp.kind.question' },
         clarification: { icon: 'fa-lightbulb',             lbl: 'capture.rec.cp.kind.clarification' },
         fact:          { icon: 'fa-thumbtack',             lbl: 'capture.rec.cp.kind.fact' },
-        // Історія 27: системне попередження «скоуп неоднозначний» — своя картка
-        // (не інсайт диспетчера), тому без кнопок закріпити/оцінити/копнути глибше.
+        // Story 27: system warning "scope is ambiguous" — its own card
+        // (not a dispatcher insight), so no pin/rate/dig-deeper buttons.
         scope_notice:  { icon: 'fa-circle-info',            lbl: 'capture.rec.cp.kind.scope_notice' },
     };
     function applyCopilotInsight(data) {
         if (!data || !data.text) return;
-        // Антишум: дублікат (той самий тип+текст) не плодить картку — бампимо лічильник.
+        // Anti-noise: a duplicate (same type+text) does not spawn a card — we bump the counter.
         const key = data.kind + '::' + data.text.trim().toLowerCase();
         const dup = st.insights.find(i => i.key === key && !i.dismissed);
         if (dup) {
@@ -1690,19 +1690,19 @@
             pinned: false, feedback: null, escalated: false, dismissed: false,
         });
         if (st.insights.length > 60) {
-            // прибираємо найстарішу незакріплену
+            // remove the oldest unpinned
             const i = st.insights.findIndex(x => !x.pinned);
             if (i >= 0) st.insights.splice(i, 1);
         }
-        // Системне попередження не перемальовує пілюлю стану/банер degraded —
-        // це не сигнал «диспетчер щойно проаналізував», а окремий канал.
+        // A system warning does not redraw the state pill/degraded banner —
+        // this is not a "the dispatcher just analyzed" signal but a separate channel.
         if (data.kind !== 'scope_notice') setCpStatus('analyzing');
         const cp = $id('rcCp');
         if (cp && cp.classList.contains('is-collapsed')) { st.cpUnseen = (st.cpUnseen || 0) + 1; updateCount(); }
         renderInsights();
     }
-    // Крок 5 надсилатиме copilot_insight_update (апгрейд «локально»→«перевірено»);
-    // хендлер готовий тут, щоб віджет одразу вмів оновлювати бейдж картки.
+    // Step 5 will send copilot_insight_update (upgrade "local"→"verified");
+    // the handler is ready here so the widget can update the card badge right away.
     function applyCopilotInsightUpdate(data) {
         if (!data || data.id == null) return;
         const ins = st.insights.find(i => i.id === data.id);
@@ -1715,7 +1715,7 @@
     }
 
     function sortedInsights() {
-        // закріплені зверху, далі найновіші; відхилені не показуємо
+        // pinned on top, then the newest; dismissed ones are not shown
         const live = st.insights.filter(i => !i.dismissed);
         const pinned = live.filter(i => i.pinned).reverse();
         const rest = live.filter(i => !i.pinned).reverse();
@@ -1747,8 +1747,8 @@
         }).join(' ');
         const act = (a, ic, title, on) =>
             `<button class="rc-cp-act${on ? ' is-on' : ''}" data-act="${a}" title="${title}"><i class="fa-solid ${ic}"></i></button>`;
-        // Системне попередження про скоуп — не спостереження диспетчера: закріпити/
-        // оцінити/копнути глибше для нього безглузді, лишається тільки «прибрати».
+        // A system scope warning is not a dispatcher observation: pin/
+        // rate/dig-deeper make no sense for it, only "dismiss" remains.
         const isNotice = ins.kind === 'scope_notice';
         const actions = isNotice
             ? `<span class="rc-yt__spacer"></span>${act('dismiss', 'fa-xmark', R.t('capture.rec.cp.act.dismiss'), false)}`
@@ -1799,7 +1799,7 @@
         if (!st.copilotSessionId) return;
         R.api.post('/api/copilot/' + st.copilotSessionId + '/action', {
             action: action, event_id: ins.id, ts_offset_sec: ins.ts_offset_sec,
-        }).catch(() => { /* дія — best-effort, не блокуємо UI */ });
+        }).catch(() => { /* the action is best-effort, we do not block the UI */ });
     }
     function updateCount() {
         const cp = $id('rcCp');
@@ -1836,14 +1836,14 @@
             S.status = 'stopping';
         } catch (err) {
             errToast(err, R.t('capture.rec.stopFailed'));
-            // запис живий далі — повертаємо йому читач і тік
+            // the recording stays alive — we give it back its reader and tick
             if (ctx.isCurrent() && sessions.get(sid) === S && errCode(err) !== 'NOT_FOUND') { connectSSE(ctx, S); startTick(ctx, S); }
             return;
         }
         S.stage = 'stopname';
-        S.copilotSessionId = null; S.copilotActive = false;   // стоп запису завершує його ко-пілот (бекенд)
-        // Ask 3: сусіди, яким звузили системний звук, — пропонуємо повернути весь
-        // (за замовчуванням «так»: без відповіді застосується при збереженні/скасуванні).
+        S.copilotSessionId = null; S.copilotActive = false;   // stopping the recording ends its co-pilot (backend)
+        // Ask 3: neighbours whose system sound was narrowed — we offer to restore all of it
+        // (default "yes": without an answer it is applied on save/cancel).
         S.restore = liveSessions().filter(o => o !== S && o.systemSource && o.systemSource.mode && o.systemSource.mode !== 'all')
             .map(o => o.sessionId);
         _limitHit = false;
@@ -1882,8 +1882,8 @@
             row.querySelector('[data-restore-no]').addEventListener('click', done);
         });
     }
-    // Відповідь за замовчуванням — «так»: невідповідені питання застосовуються,
-    // коли зупинений запис зберігають або скасовують.
+    // The default answer is "yes": unanswered questions are applied
+    // when the stopped recording is saved or discarded.
     function applyPendingRestore(ctx, S) {
         const pend = (S.restore || []).slice();
         S.restore = [];
@@ -1960,8 +1960,8 @@
         try {
             sb = await R.api.post('/api/recording/' + sid + '/save', savePayload);
         } catch (err) {
-            // Finalize довший за дедлайн (504) → запис усе одно авто-реєструється
-            // на сервері. Не блокуємо — ведемо в Аудіотеку, де він зʼявиться.
+            // Finalize took longer than the deadline (504) → the recording is auto-registered anyway
+            // on the server. We do not block — we lead to the Audio library, where it will appear.
             if (err && err.status === 504) {
                 UI.toast(R.t('capture.rec.savingBg'), 'info');
                 dropSession(S);
@@ -1976,11 +1976,11 @@
 
         UI.toast(R.t('capture.rec.savedAs', { name: sb.name || R.t('capture.rec.untitled') }), 'success');
 
-        // Транскрипція — у ФОНІ (неблокуюча). Йдемо library-шляхом по download_id,
-        // щоб серверний active-tracker (/api/transcribe/active) позначив картку
-        // «транскрибується…». Запит НЕ чекаємо: postForm без abort-сигналу
-        // переживає навігацію, а сервер дорахує навіть якщо клієнт пішов. Юзер
-        // одразу бачить запис у Аудіотеці зі статусом — нічого «не зникає».
+        // Transcription is in the BACKGROUND (non-blocking). We go the library way by download_id,
+        // so the server active-tracker (/api/transcribe/active) marks the card
+        // "transcribing…". We do NOT wait for the request: postForm without an abort signal
+        // survives navigation, and the server finishes even if the client left. The user
+        // sees the recording in the Audio library with a status right away — nothing "disappears".
         if (want && sb.download_id) {
             const fd = new FormData();
             fd.append('source_type', 'library');
@@ -1988,13 +1988,13 @@
             fd.append('model', model);
             fd.append('language', lang);
             if (cat) fd.append('category_id', cat);
-            R.api.transcribe(fd).catch(() => { /* фоново; статус видно в Аудіотеці */ });
+            R.api.transcribe(fd).catch(() => { /* background; the status is visible in the Audio library */ });
             UI.toast(R.t('capture.rec.transcribingBg'), 'info');
         }
 
         dropSession(S);
         if (!ctx.isCurrent()) return;
-        // Інші записи ще йдуть → лишаємось на екрані запису; інакше — як раніше.
+        // Other recordings are still going → we stay on the recording screen; otherwise — as before.
         afterDrop(ctx, () => { reset(); R.router.navigate('/audio'); });
     }
 
@@ -2018,7 +2018,7 @@
         return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
     }
 
-    // ---- live REC meta: розмір файлу, швидкість росту, місце на диску --------
+    // ---- live REC meta: file size, growth rate, disk space --------
     const GIB = 1073741824, MIB = 1048576;
     function fmtBytes(b) {
         if (b == null) return '';
@@ -2043,7 +2043,7 @@
         const el = $id('rcRecMeta');
         if (!el) return;
         const total = recTotalBytes();
-        // середній bitrate з початку запису — стабільніший за миттєвий (аудіо тікає раз на 5с)
+        // average bitrate since the start of the recording — more stable than the instantaneous one (audio ticks once per 5s)
         const rateBps = st.elapsedSec > 1 ? total / st.elapsedSec : 0;
         const parts = [];
         parts.push('<span><i class="fa-solid fa-database"></i> ' + fmtBytes(total) + '</span>');
@@ -2052,15 +2052,15 @@
             let txt = '<i class="fa-solid fa-hard-drive"></i> ' + R.t('capture.rec.diskFree', { size: fmtBytes(st.diskFree) });
             let warn = st.diskFree < 2 * GIB;
             if (rateBps > 0) {
-                const left = st.diskFree / rateBps;        // секунд до заповнення
+                const left = st.diskFree / rateBps;        // seconds until full
                 txt += ' · ~' + fmtDur(left);
-                if (left < 600) warn = true;               // < 10 хв запасу
+                if (left < 600) warn = true;               // < 10 min of headroom
             }
             parts.push('<span class="rc-rec-meta__disk' + (warn ? ' is-warn' : '') + '">' + txt + '</span>');
         }
         el.innerHTML = parts.join('<span class="rc-rec-meta__sep">·</span>');
     }
-    // п.4: статус аудіо-дорожок — провалений потік підсвічує свій VU-рядок (не лише разовий toast)
+    // item 4: audio track status — a failed stream highlights its VU row (not only a one-off toast)
     function markStreamStatus() {
         const map = { mic: 'rcVuMic', system: 'rcVuSys' };
         for (const name in map) {
@@ -2075,10 +2075,10 @@
     R.views.record = {
         render,
         destroy() {
-            // Навігація геть рве читачі й тіки всіх записів (самі записи живуть на сервері).
+            // Navigation away breaks the readers and ticks of all recordings (the recordings themselves live on the server).
             for (const S of sessions.values()) haltS(S);
-            // Хоткей живе на document, тож без явного зняття він пережив би
-            // сторінку і ловив Ctrl+Shift+K у решті застосунку.
+            // The hotkey lives on document, so without explicit removal it would have outlived
+            // the page and caught Ctrl+Shift+K in the rest of the application.
             if (_liveCmHotkey) {
                 document.removeEventListener('keydown', _liveCmHotkey);
                 _liveCmHotkey = null;

@@ -1,10 +1,10 @@
-/* Recall — "Спікери" (граф архіву). Розширене керування спікерами діаризації:
-   список зі статистикою (скільки часу/записів/слів), додавання, перейменування,
-   видалення, ОБʼЄДНАННЯ дублікатів (pyannote часто плодить SPEAKER_NN, які
-   насправді одна людина) та ТАЙМЛАЙН активності по днях.
+/* Recall — "Спікери" (archive graph). Extended management of diarization speakers:
+   list with statistics (how much time/records/words), adding, renaming,
+   deletion, MERGING of duplicates (pyannote often spawns SPEAKER_NN that are
+   really one person) and an activity TIMELINE by day.
 
-   Бекенд: /api/speakers/stats, /api/speakers/<id>/timeline, /api/speakers/merge
-   (раніше доступні лише у /legacy — Phase 18 порт). */
+   Backend: /api/speakers/stats, /api/speakers/<id>/timeline, /api/speakers/merge
+   (previously available only in /legacy — Phase 18 port). */
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
@@ -200,8 +200,8 @@
         bar.querySelector('#rcMergeCancel').addEventListener('click', () => { state.selected.clear(); renderList(ctx); });
     }
 
-    // Приклади фраз спікера для preview перед обʼєднанням (щоб було видно,
-    // кого саме зливаємо — різні люди можуть мати схожі голоси діаризації).
+    // // Speaker phrase examples for the preview before merging (so it is visible
+    // // whom exactly we are merging — different people can have similar diarization voices).
     async function fetchSamples(id) {
         try { return await R.api.get(`/api/speakers/${id}/samples?limit=3`); }
         catch (_) { return null; }

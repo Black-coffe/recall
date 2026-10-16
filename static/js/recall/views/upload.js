@@ -23,10 +23,10 @@
 
     let st = null;        // { file, opts, busy }
     let _models = null;
-    // T5.6: bgJob — фонова транскрипція завантаженого файлу, запущена ЦИМ view
-    // (модульний scope — переживає render()/destroy() у межах вкладки).
-    // Guard проти дублю: поки не завершиться (успіх чи помилка), повторний
-    // захід у /upload показує статус-бейдж замість дропзони.
+    // T5.6: bgJob — a background transcription of the uploaded file, started by THIS view
+    // (module scope — survives render()/destroy() within the tab).
+    // Guard against a duplicate: until it finishes (success or error), a repeated
+    // visit to /upload shows a status badge instead of the dropzone.
     let bgJob = null;      // { label }
 
     async function loadModels() {
@@ -75,8 +75,8 @@
         const input = ctx.mount.querySelector('#rcFile');
         const body = ctx.mount.querySelector('#rcUpBody');
 
-        // T5.6: фонова транскрипція з попереднього заходу ще триває — не даємо
-        // почати другу, поки не завершиться.
+        // T5.6: a background transcription from a previous visit is still going — we do not let
+        // a second one start until it finishes.
         if (bgJob) {
             drop.hidden = true;
             body.innerHTML = bgNoticeHTML(bgJob.label);
@@ -176,16 +176,16 @@
     }
 
     // ---- transcribe (XHR upload progress, fire-and-forget after upload) ---
-    //   T5.6: XHR-запит лишається один (api.js не займаємо) — реальний прогрес
-    //   байтів під час завантаження чесний і залишений як є. Але раніше УВЕСЬ
-    //   виклик, включно з транскрипцією, чекався (`await`), тож єдиним сигналом
-    //   був статичний індетермінований спіннер без жодної підказки, що можна
-    //   спокійно закрити вкладку. Щойно байти дійшли до сервера
-    //   (onUploadDone) — подальша обробка йде синхронно в потоці запиту
-    //   незалежно від клієнтського зʼєднання, тож розрив після цього моменту
-    //   НЕ втрачає роботу. Тому з onUploadDone одразу показуємо статус-бейдж
-    //   «можна закрити вкладку», а .then()/.catch() довершують UI лише якщо
-    //   view ще активний.
+    //   T5.6: the XHR request stays a single one (we do not touch api.js) — the real byte
+    //   progress during upload is honest and left as is. But before, the WHOLE
+    //   call, including transcription, was awaited (`await`), so the only signal
+    //   was a static indeterminate spinner with no hint that one can
+    //   safely close the tab. As soon as the bytes reach the server
+    //   (onUploadDone) — further processing runs synchronously in the request thread
+    //   regardless of the client connection, so a drop after this moment
+    //   does NOT lose the work. So from onUploadDone we immediately show the status badge
+    //   «можна закрити вкладку», and .then()/.catch() finish the UI only if the
+    //   view is still active.
     function start(ctx) {
         if (!st || !st.file || st.busy || bgJob) return;
         const o = {
@@ -222,7 +222,7 @@
             fd,
             (pct) => setProgress(pct, false),
             () => {
-                // байти дійшли — далі безпечно навіть без цієї вкладки
+                // bytes arrived — from here it is safe even without this tab
                 const run2 = ctx.mount.querySelector('#rcUpRun');
                 if (run2) { run2.innerHTML = bgNoticeHTML(label); wireBgNotice(run2); }
                 UI.toast(R.t('capture.up.uploaded', { label }), 'info');

@@ -1,26 +1,26 @@
-"""Реєстр усіх env-змінних Recall (спек `config-registry-profiles`, story 01).
+"""Registry of all Recall env variables (spec `config-registry-profiles`, story 01).
 
-Єдине джерело істини для назви/дефолту/типу/групи/профілю/призначення
-кожного env-флагу, який читає код. Використовується для:
+Single source of truth for the name/default/type/group/profile/purpose
+of every env flag the code reads. Used for:
 
-  - генерації ``.env.example`` (``python -m app.core.settings env-example``);
-  - тесту повноти (``tests/test_settings_registry.py``) — кожна назва,
-    знайдена статичним скануванням ``os.environ.get/getenv/[...]`` у коді
+  - generating ``.env.example`` (``python -m app.core.settings env-example``);
+  - the completeness test (``tests/test_settings_registry.py``) — every name
+    found by static scanning of ``os.environ.get/getenv/[...]`` in the code
     (``app/``, ``app.py``, ``config.py``, ``mcp_server.py``,
     ``telegram_listener.py``, ``telegram_login.py``, ``whisper_manager_new.py``),
-    має тут запис;
-  - ``config.py::get_config()`` — бере рядкові дефолти звідси замість
-    дубльованих літералів, розсіяних по класу ``Config``.
+    has an entry here;
+  - ``config.py::get_config()`` — takes string defaults from here instead of
+    duplicated literals scattered across the ``Config`` class.
 
-Модуль НЕ імпортує ``app.*``, ``flask``, ``torch``, ``config`` — має лишатись
-завантажуваним будь-де без важких залежностей (памʼятка
+The module does NOT import ``app.*``, ``flask``, ``torch``, ``config`` — it must stay
+loadable anywhere without heavy dependencies (note
 ``mcp-stdio-no-heavy-models``).
 
-НЕ переписує виклики ``os.environ.get(...)`` у сервісах (Law 2 VULYK,
-non-goal плану `config-registry-profiles`) — більшість записів тут лише
-ДОКУМЕНТУЄ існуюче читання; саме читання лишається на місці у сервісі.
-Дублі дефолтів між ``config.py`` і сервісом (напр. ``RECALL_RERANK_ENABLED``)
-не усуваються — це борг наступних історій, фіксується у ``gates``.
+It does NOT rewrite ``os.environ.get(...)`` calls in services (Law 2 VULYK,
+non-goal of the plan `config-registry-profiles`) — most entries here only
+DOCUMENT the existing read; the read itself stays in place in the service.
+Duplicated defaults between ``config.py`` and a service (e.g. ``RECALL_RERANK_ENABLED``)
+are not removed — that is debt for later stories, recorded in ``gates``.
 """
 from __future__ import annotations
 
@@ -37,14 +37,14 @@ ProfileTag = Literal["all", "desktop", "headless"]
 
 @dataclass(frozen=True)
 class Setting:
-    """Один запис реєстру.
+    """One registry entry.
 
-    ``gates`` — обовʼязкова окрема від ``doc`` фраза: що саме цей флаг
-    вмикає/вимикає/обмежує. ``group`` визначає секцію згенерованого
-    ``.env.example`` (порядок секцій = порядок першої появи у ``REGISTRY``).
-    ``scope`` — 'config', якщо значення читає ``config.py`` у ``Config``
-    (і віддає через ``get_config()``), 'runtime' — якщо сервіс читає
-    ``os.environ`` напряму в момент виклику.
+    ``gates`` — a mandatory phrase separate from ``doc``: what exactly this flag
+    turns on/off/limits. ``group`` defines the section of the generated
+    ``.env.example`` (section order = order of first appearance in ``REGISTRY``).
+    ``scope`` — 'config' if the value is read by ``config.py`` in ``Config``
+    (and exposed through ``get_config()``), 'runtime' — if a service reads
+    ``os.environ`` directly at call time.
     """
 
     name: str
@@ -55,651 +55,651 @@ class Setting:
     gates: str
     profile: ProfileTag = "all"
     scope: Scope = "runtime"
-    #: Профіле-залежний дефолт (config-registry-fix-01, Contracts §Auth).
-    #: Не ``None`` → у профілі ``headless`` перекриває ``default`` (якщо
-    #: env-змінна не задана явно). Останнє поле датакласу навмисно — щоб усі
-    #: наявні позиційні виклики ``Setting(...)`` лишались валідними.
+    #: Profile-dependent default (config-registry-fix-01, Contracts §Auth).
+    #: Not ``None`` → in the ``headless`` profile it overrides ``default`` (if the
+    #: env variable is not set explicitly). The last dataclass field on purpose — so that all
+    #: existing positional ``Setting(...)`` calls stay valid.
     default_headless: str | None = None
 
 
 REGISTRY: tuple[Setting, ...] = (
-    # --- Сервер / профіль ---
-    Setting("FLASK_DEBUG", "false", "bool", "Сервер",
-            "Прапорець debug-режиму Flask.",
-            "DEBUG=True дозволяє дефолтний SECRET_KEY без hard-fail; DEBUG=False вимагає справжній ключ.",
+    # --- Server / profile ---
+    Setting("FLASK_DEBUG", "false", "bool", "Server",
+            "Flask debug mode flag.",
+            "DEBUG=True allows the default SECRET_KEY without a hard-fail; DEBUG=False requires a real key.",
             scope="config"),
-    Setting("FLASK_HOST", "127.0.0.1", "str", "Сервер",
-            "Безпечний дефолт (Волна 0/T1.1) — слухати лише локальну машину.",
-            "Мережевий bind (0.0.0.0) вимагає явного SECRET_KEY, інакше config.py hard-fail.",
+    Setting("FLASK_HOST", "127.0.0.1", "str", "Server",
+            "Safe default (Wave 0/T1.1) — listen only on the local machine.",
+            "A network bind (0.0.0.0) requires an explicit SECRET_KEY, otherwise config.py hard-fails.",
             scope="config"),
-    Setting("FLASK_PORT", "5050", "int", "Сервер",
-            "Порт Flask-сервера.", "Порт, на якому слухає app.py.", scope="config"),
-    Setting("RECALL_UI_LANG", "auto", "str", "Сервер",
-            "Мова інтерфейсу: auto (за мовою системи) | uk | en.",
-            "auto: системна uk → українська, інакше English; uk/en — явний вибір, сильніший за auto. "
-            "Змінюється в Налаштуваннях без рестарту."),
-    Setting("APP_ENV", "development", "str", "Сервер",
-            "Вибір класу конфігурації.",
+    Setting("FLASK_PORT", "5050", "int", "Server",
+            "Flask server port.", "The port app.py listens on.", scope="config"),
+    Setting("RECALL_UI_LANG", "auto", "str", "Server",
+            "Interface language: auto (by system language) | uk | en.",
+            "auto: system uk → Ukrainian, otherwise English; uk/en — an explicit choice, stronger than auto. "
+            "Changed in Settings without a restart."),
+    Setting("APP_ENV", "development", "str", "Server",
+            "Choice of configuration class.",
             "development|production|testing → DevelopmentConfig|ProductionConfig|TestingConfig.",
             scope="config"),
-    Setting("SECRET_KEY", "dev-secret-key-change-in-production", "secret", "Сервер",
-            "Ключ сесій Flask.",
-            "Дефолт/порожньо + DEBUG=False → автоген і запис у .env; те саме + мережевий bind → hard-fail.",
+    Setting("SECRET_KEY", "dev-secret-key-change-in-production", "secret", "Server",
+            "Flask session key.",
+            "Default/empty + DEBUG=False → autogen and write to .env; the same + a network bind → hard-fail.",
             scope="config"),
-    Setting("FORCE_CPU", "false", "bool", "Сервер",
-            "Форсувати CPU для whisper/embeddings/reranker.",
-            "true → GPU не використовується навіть за наявності CUDA.", scope="config"),
-    Setting("LOG_LEVEL", "INFO", "str", "Сервер",
-            "Рівень логування застосунку.", "Передається у basicConfig/RotatingFileHandler.",
+    Setting("FORCE_CPU", "false", "bool", "Server",
+            "Force CPU for whisper/embeddings/reranker.",
+            "true → the GPU is not used even when CUDA is available.", scope="config"),
+    Setting("LOG_LEVEL", "INFO", "str", "Server",
+            "Application log level.", "Passed to basicConfig/RotatingFileHandler.",
             scope="config"),
-    Setting("RECALL_PROFILE", "desktop", "str", "Сервер",
-            "desktop — повний застосунок (recorder, SPA-shell); headless — лише API/інжест.",
-            "headless вимикає RECORDING_ENABLED/RECORDING_VIDEO_ENABLED і SPA-shell/sw.js (404 'headless'); "
-            "інше значення → ValueError з profile().",
+    Setting("RECALL_PROFILE", "desktop", "str", "Server",
+            "desktop — the full application (recorder, SPA shell); headless — API/ingest only.",
+            "headless turns off RECORDING_ENABLED/RECORDING_VIDEO_ENABLED and the SPA shell/sw.js (404 'headless'); "
+            "any other value → ValueError from profile().",
             scope="config"),
-    Setting("RECALL_LOG_FORMAT", "text", "str", "Сервер",
-            "text|json — формат рядків логу.",
-            "json вмикає JsonFormatter на file+stream хендлерах у app.py.",
+    Setting("RECALL_LOG_FORMAT", "text", "str", "Server",
+            "text|json — log line format.",
+            "json turns on JsonFormatter on the file+stream handlers in app.py.",
             ),
 
-    # --- Транскрипція (whisper) ---
-    Setting("WHISPER_BACKEND", "faster", "str", "Транскрипція",
-            "faster (CTranslate2, дефолт) або openai (legacy fallback).",
-            "Обирає бекенд у whisper_manager_new.py.", scope="config"),
-    Setting("WHISPER_MAX_PARALLEL", "1", "int", "Транскрипція",
-            "Розмір семафора паралельних транскрипцій.",
-            "1 — faster-whisper не потокобезопасний на спільному handle моделі (whisper_manager_new.py); "
-            "live-ленти записів і повна транскрипція йдуть по черзі.", scope="config"),
-    Setting("WHISPER_BATCH_SIZE", "8", "int", "Транскрипція",
-            "batch_size для BatchedInferencePipeline на довгих файлах (faster backend).",
-            "Впливає лише на faster-whisper.", scope="config"),
-    Setting("WHISPER_MODEL_CACHE_SIZE", "3", "int", "Транскрипція",
-            "LRU-кеш кількох одночасно завантажених whisper-моделей (напр. 'small' live + 'medium' full).",
-            "Запобігає evict/reload моделі на CUDA між live- і full-транскрипцією."),
-    Setting("RECALL_PRELOAD_WHISPER", "1", "bool", "Транскрипція",
-            "Прогрів whisper-моделі у фоні одразу після старту застосунку.",
-            "0 → без прогріву, перший запит транскрипції холодний."),
-    Setting("RECALL_PRELOAD_WHISPER_MODEL", "large-v3-turbo", "str", "Транскрипція",
-            "Яку модель прогрівати.", "Дзеркалить TELEGRAM_WHISPER_MODEL за замовчуванням."),
-    Setting("RECALL_VOCAB_MODE", "hotwords", "str", "Транскрипція",
-            "Словник «важких» імен із графа сутностей (app/services/vocabulary.py, K1): off | hotwords | initial_prompt. "
-            "Дефолт за заміром K1: імена 15 % → 35 %, +11 % часу транскрипції.",
-            "hotwords/initial_prompt → ≈50 імен (≤223 токени) іде у faster-whisper на файлах, записах, живій "
-            "транскрипції і голосових TG; YouTube ніколи. off — виклик як до K1."),
-    Setting("WHISPER_MULTILINGUAL", "1", "bool", "Транскрипція",
-            "Визначення мови на кожному вікні до 30 с мовлення (не на фразу) — faster-whisper multilingual. "
-            "Дефолт за сліпими парами K1 (7 з 10).",
-            "1 → мова визначається на кожному вікні на повній транскрипції, файлах і голосових TG, але лише "
-            "коли мову не обрано (auto); явна мова (uk/ru/en) не перекривається (4.8.1). Жива транскрипція і "
-            "YouTube не отримують."),
+    # --- Transcription (whisper) ---
+    Setting("WHISPER_BACKEND", "faster", "str", "Transcription",
+            "faster (CTranslate2, default) or openai (legacy fallback).",
+            "Selects the backend in whisper_manager_new.py.", scope="config"),
+    Setting("WHISPER_MAX_PARALLEL", "1", "int", "Transcription",
+            "Size of the parallel transcription semaphore.",
+            "1 — faster-whisper is not thread-safe on a shared model handle (whisper_manager_new.py); "
+            "live streams of recordings and full transcription run one after another.", scope="config"),
+    Setting("WHISPER_BATCH_SIZE", "8", "int", "Transcription",
+            "batch_size for BatchedInferencePipeline on long files (faster backend).",
+            "Affects faster-whisper only.", scope="config"),
+    Setting("WHISPER_MODEL_CACHE_SIZE", "3", "int", "Transcription",
+            "LRU cache of several simultaneously loaded whisper models (e.g. 'small' live + 'medium' full).",
+            "Prevents evict/reload of the model on CUDA between live and full transcription."),
+    Setting("RECALL_PRELOAD_WHISPER", "1", "bool", "Transcription",
+            "Warm up the whisper model in the background right after the application starts.",
+            "0 → no warm-up, the first transcription request is cold."),
+    Setting("RECALL_PRELOAD_WHISPER_MODEL", "large-v3-turbo", "str", "Transcription",
+            "Which model to warm up.", "Mirrors TELEGRAM_WHISPER_MODEL by default."),
+    Setting("RECALL_VOCAB_MODE", "hotwords", "str", "Transcription",
+            "Vocabulary of \"hard\" names from the entity graph (app/services/vocabulary.py, K1): off | hotwords | initial_prompt. "
+            "Default per the K1 measurement: names 15 % → 35 %, +11 % transcription time.",
+            "hotwords/initial_prompt → ≈50 names (≤223 tokens) go to faster-whisper on files, recordings, live "
+            "transcription and TG voice messages; YouTube never. off — the call as before K1."),
+    Setting("WHISPER_MULTILINGUAL", "1", "bool", "Transcription",
+            "Language detection on every window of up to 30 s of speech (not per phrase) — faster-whisper multilingual. "
+            "Default per the K1 blind pairs (7 of 10).",
+            "1 → the language is detected on every window in full transcription, files and TG voice messages, but only "
+            "when no language is chosen (auto); an explicit language (uk/ru/en) is not overridden (4.8.1). Live transcription and "
+            "YouTube do not get it."),
 
     # --- Rate limits ---
     Setting("RATE_LIMIT_TRANSCRIBE", "60/minute", "str", "Rate limits",
-            "Ліміт flask-limiter для /api/transcribe.", "Формат flask-limiter (N/interval)."),
+            "Flask-limiter limit for /api/transcribe.", "Flask-limiter format (N/interval)."),
     Setting("RATE_LIMIT_YOUTUBE", "30/minute", "str", "Rate limits",
-            "Ліміт для YouTube-ендпоінтів.", "Формат flask-limiter (N/interval)."),
+            "Limit for YouTube endpoints.", "Flask-limiter format (N/interval)."),
     Setting("RATE_LIMIT_POLISH", "20/hour", "str", "Rate limits",
-            "Ліміт для Claude polish-запитів.", "Формат flask-limiter (N/interval)."),
+            "Limit for Claude polish requests.", "Flask-limiter format (N/interval)."),
     Setting("RATE_LIMIT_RECORDING_START", "10/minute", "str", "Rate limits",
-            "Ліміт запуску записів (Phase 9.10 hardening).",
-            "Кожна сесія ~10MB/хв на диску — низький лім запобігає script-driven abuse."),
+            "Limit on recording starts (Phase 9.10 hardening).",
+            "Each session is ~10MB/min on disk — a low limit prevents script-driven abuse."),
 
-    # --- Виконавці (job queue) ---
-    Setting("LIVE_EXECUTOR_WORKERS", "1", "int", "Виконавці",
-            "Розмір пулу для latency-критичних job (recording_finalize).",
-            "Один recorder одночасно зазвичай — 1 воркер завжди вільний, не чекає batch."),
-    Setting("BATCH_EXECUTOR_WORKERS", "2", "int", "Виконавці",
-            "Розмір пулу для решти job (tg_transcribe, video_analysis тощо).",
-            "Ці job можуть вантажити GPU (faster-whisper) — свідомо не збільшується."),
+    # --- Executors (job queue) ---
+    Setting("LIVE_EXECUTOR_WORKERS", "1", "int", "Executors",
+            "Pool size for latency-critical jobs (recording_finalize).",
+            "Usually one recorder at a time — 1 worker is always free, does not wait for a batch."),
+    Setting("BATCH_EXECUTOR_WORKERS", "2", "int", "Executors",
+            "Pool size for the rest of the jobs (tg_transcribe, video_analysis, etc.).",
+            "These jobs can load the GPU (faster-whisper) — deliberately not increased."),
 
-    # --- Автоочистка ---
-    Setting("AUTO_CLEANUP_ENABLED", "false", "bool", "Автоочистка",
-            "Вмикає періодичне видалення старих тимчасових файлів (Phase 6.3).",
-            "За дефолтом вимкнено — щоб локальний користувач не втратив файли випадково."),
-    Setting("AUTO_CLEANUP_DAYS", "7", "int", "Автоочистка",
-            "Вік файлів (днів), старші за який видаляються.", "Діє лише якщо AUTO_CLEANUP_ENABLED=true."),
+    # --- Auto cleanup ---
+    Setting("AUTO_CLEANUP_ENABLED", "false", "bool", "Auto cleanup",
+            "Turns on periodic deletion of old temporary files (Phase 6.3).",
+            "Off by default — so a local user does not lose files by accident."),
+    Setting("AUTO_CLEANUP_DAYS", "7", "int", "Auto cleanup",
+            "Age of files (days) beyond which they are deleted.", "Applies only if AUTO_CLEANUP_ENABLED=true."),
 
-    # --- Запис (recorder) ---
-    Setting("RECORDING_ENABLED", "", "bool", "Запис",
-            "Autodetect через імпорт pyaudiowpatch; '0'/'false' форсує вимкнення.",
-            "headless завжди False без спроби імпорту pyaudiowpatch (Assumption 3).", scope="config",
+    # --- Recording (recorder) ---
+    Setting("RECORDING_ENABLED", "", "bool", "Recording",
+            "Autodetect via the pyaudiowpatch import; '0'/'false' forces it off.",
+            "headless is always False without trying to import pyaudiowpatch (Assumption 3).", scope="config",
             profile="desktop"),
-    Setting("RECORDING_CHUNK_SECONDS", "5", "int", "Запис",
-            "Розмір чанка сесії запису.", "Raw PCM пишеться чанками для crash-resilience.", scope="config"),
-    Setting("RECORDING_SAMPLE_RATE", "48000", "int", "Запис",
-            "Частота дискретизації запису.", "WASAPI loopback + mic.", scope="config"),
-    Setting("RECORDING_CHANNELS", "2", "int", "Запис", "Кількість каналів запису.",
-            "Передається в RecordingService.start() як channels — кількість доріжок mic+system зведення.",
+    Setting("RECORDING_CHUNK_SECONDS", "5", "int", "Recording",
+            "Recording session chunk size.", "Raw PCM is written in chunks for crash resilience.", scope="config"),
+    Setting("RECORDING_SAMPLE_RATE", "48000", "int", "Recording",
+            "Recording sample rate.", "WASAPI loopback + mic.", scope="config"),
+    Setting("RECORDING_CHANNELS", "2", "int", "Recording", "Number of recording channels.",
+            "Passed to RecordingService.start() as channels — the number of mic+system mixdown tracks.",
             scope="config"),
-    Setting("RECORDING_MP3_BITRATE", "192k", "str", "Запис",
-            "Бітрейт фінального MP3 при зведенні.",
-            "Йде у finalize_session() як bitrate кодування final.mp3.", scope="config"),
-    Setting("RECORDING_KEEP_PCM", "False", "bool", "Запис",
-            "Не видаляти проміжні raw PCM після фіналізації.", "true — займає значно більше диска.",
+    Setting("RECORDING_MP3_BITRATE", "192k", "str", "Recording",
+            "Bitrate of the final MP3 at mixdown.",
+            "Goes to finalize_session() as the encoding bitrate of final.mp3.", scope="config"),
+    Setting("RECORDING_KEEP_PCM", "False", "bool", "Recording",
+            "Do not delete the intermediate raw PCM after finalization.", "true — takes much more disk.",
             scope="config"),
-    Setting("RECORDING_KEEP_WAV", "False", "bool", "Запис",
-            "Лишати роздільні mic.wav/system.wav після зведення у final.mp3.",
-            "За дефолтом видаляються — інакше ~1ГБ/сесію мертвого місця.", scope="config"),
-    Setting("RECORDING_MAX_ACTIVE", "2", "int", "Запис",
-            "Максимум одночасних записів (мінімум 1).",
-            "Діє лише якщо RECORDING_ENABLED; ще один старт понад ліміт → 409 SESSION_LIMIT "
+    Setting("RECORDING_KEEP_WAV", "False", "bool", "Recording",
+            "Keep the separate mic.wav/system.wav after mixdown into final.mp3.",
+            "Deleted by default — otherwise ~1GB/session of dead space.", scope="config"),
+    Setting("RECORDING_MAX_ACTIVE", "2", "int", "Recording",
+            "Maximum simultaneous recordings (minimum 1).",
+            "Applies only if RECORDING_ENABLED; one more start over the limit → 409 SESSION_LIMIT "
             "(RecordingService(max_active=...)).", scope="config", profile="desktop"),
-    Setting("RECORDING_MIN_DISK_MB", "500", "int", "Запис",
-            "Мінімум вільного місця (МБ), нижче якого запис не стартує.",
-            "Нижче — recording/screens.py відмовляє стартувати запис із повідомленням про нестачу диска.",
+    Setting("RECORDING_MIN_DISK_MB", "500", "int", "Recording",
+            "Minimum free space (MB) below which recording does not start.",
+            "Below it — recording/screens.py refuses to start a recording with a message about low disk space.",
             scope="config"),
-    Setting("RECORDING_AUTOPROMPT", "1", "bool", "Запис",
-            "Підказки дзвінка (K2, app/services/recording/call_watch.py): «Записати?», коли в застосунку "
-            "зі списку 30 с звучать і мікрофон, і звук; «Зупинити?», коли дзвінок скінчився.",
-            "1 → у процесі app.py (під __main__) щосекунди дивиться на аудіосесії і шле сповіщення Windows; "
-            "запис без натискання не стартує ніколи. 0 → потік не стартує, GET /api/recording/autoprompt "
-            "віддає enabled:false.", profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT", "1", "bool", "Recording",
+            "Call prompts (K2, app/services/recording/call_watch.py): \"Record?\" when an application "
+            "from the list has both microphone and sound active for 30 s; \"Stop?\" when the call is over.",
+            "1 → in the app.py process (under __main__) it looks at audio sessions every second and sends a Windows notification; "
+            "a recording never starts without a click. 0 → the thread does not start, GET /api/recording/autoprompt "
+            "returns enabled:false.", profile="desktop"),
     Setting("RECORDING_AUTOPROMPT_APPS",
             "zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,whatsapp.exe,"
-            "chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe", "str", "Запис",
-            "Застосунки-дзвонилки для підказок K2: імена exe через кому (без регістру, «.exe» можна не писати).",
-            "Лише ці застосунки можуть викликати «Записати?»; диктовки (VoiceDrop, Wispr Flow) сюди не "
-            "додавати — їхня розмова з мікрофоном не дзвінок.", profile="desktop"),
-    Setting("RECORDING_AUTOPROMPT_SECONDS", "30", "int", "Запис",
-            "Скільки секунд поспіль у дзвонилки мають бути активні мікрофон і звук (з голосом з обох "
-            "боків), перш ніж зʼявиться «Записати?».",
-            "Менше → підказка раніше, але більше шансів на хибну; працює лише з RECORDING_AUTOPROMPT.",
+            "chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe", "str", "Recording",
+            "Calling applications for K2 prompts: exe names separated by commas (case-insensitive, \".exe\" may be omitted).",
+            "Only these applications can trigger \"Record?\"; dictation tools (VoiceDrop, Wispr Flow) must not be added here "
+            "— their conversation with the microphone is not a call.", profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT_SECONDS", "30", "int", "Recording",
+            "How many seconds in a row the calling app must have both microphone and sound active (with voice on both "
+            "sides) before \"Record?\" appears.",
+            "Less → the prompt comes sooner, but more chance of a false one; works only with RECORDING_AUTOPROMPT.",
             profile="desktop"),
-    Setting("RECORDING_AUTOSTOP_SILENCE_MIN", "10", "int", "Запис",
-            "Хвилини тиші на обох доріжках після «Зупинити?», після яких запис зупиняється сам.",
-            "Діє лише на записи, про які вже спитали «Зупинити?»; запис зберігається повністю, "
-            "на паузі тиша не рахується.", profile="desktop"),
+    Setting("RECORDING_AUTOSTOP_SILENCE_MIN", "10", "int", "Recording",
+            "Minutes of silence on both tracks after \"Stop?\" after which the recording stops by itself.",
+            "Applies only to recordings that have already been asked \"Stop?\"; the recording is kept in full, "
+            "silence is not counted while paused.", profile="desktop"),
 
-    # --- Відео-запис (screen capture) ---
-    Setting("RECORDING_VIDEO_ENABLED", "True", "bool", "Відео-запис",
-            "Phase 22: захоплення екрана (ddagrab → NVENC).",
-            "Вимкнути якщо немає NVIDIA GPU; headless завжди False (Assumption 3).", scope="config",
+    # --- Video recording (screen capture) ---
+    Setting("RECORDING_VIDEO_ENABLED", "True", "bool", "Video recording",
+            "Phase 22: screen capture (ddagrab → NVENC).",
+            "Turn off if there is no NVIDIA GPU; headless is always False (Assumption 3).", scope="config",
             profile="desktop"),
-    Setting("RECORDING_FFMPEG_PATH", r"C:\ffmpeg\bin\ffmpeg.exe", "path", "Відео-запис",
-            "Шлях до ffmpeg для відео-пайплайна.",
-            "Не знайдено за шляхом — video_probe.ffmpeg_path() кидає помилку з підказкою встановити ffmpeg.",
+    Setting("RECORDING_FFMPEG_PATH", r"C:\ffmpeg\bin\ffmpeg.exe", "path", "Video recording",
+            "Path to ffmpeg for the video pipeline.",
+            "If not found at the path — video_probe.ffmpeg_path() raises an error with a hint to install ffmpeg.",
             scope="config"),
-    Setting("RECORDING_VIDEO_FPS", "30", "int", "Відео-запис", "FPS відео-запису.",
-            "FPS, з яким VideoCaptureSupervisor запускає ffmpeg-захоплення екрана.", scope="config"),
-    Setting("RECORDING_VIDEO_CODEC", "h264_nvenc", "str", "Відео-запис",
-            "Кодек NVENC для відео-запису.",
-            "Кодек, переданий у VideoCaptureSupervisor — nvenc-специфічний, вимагає NVIDIA GPU.",
+    Setting("RECORDING_VIDEO_FPS", "30", "int", "Video recording", "Video recording FPS.",
+            "The FPS with which VideoCaptureSupervisor launches ffmpeg screen capture.", scope="config"),
+    Setting("RECORDING_VIDEO_CODEC", "h264_nvenc", "str", "Video recording",
+            "NVENC codec for video recording.",
+            "The codec passed to VideoCaptureSupervisor — nvenc-specific, requires an NVIDIA GPU.",
             scope="config"),
-    Setting("RECORDING_VIDEO_QUALITY", "p5", "str", "Відео-запис",
+    Setting("RECORDING_VIDEO_QUALITY", "p5", "str", "Video recording",
             "nvenc -preset.",
-            "Передається як -preset у VideoCaptureSupervisor (nvenc).", scope="config"),
-    Setting("RECORDING_VIDEO_CQ", "23", "int", "Відео-запис",
-            "Константний quality-фактор nvenc.",
-            "Передається як -cq у VideoCaptureSupervisor; менше значення — вища якість і більший файл.",
+            "Passed as -preset to VideoCaptureSupervisor (nvenc).", scope="config"),
+    Setting("RECORDING_VIDEO_CQ", "23", "int", "Video recording",
+            "Constant quality factor of nvenc.",
+            "Passed as -cq to VideoCaptureSupervisor; a lower value means higher quality and a larger file.",
             scope="config"),
-    Setting("RECORDING_VIDEO_MAX_TRACKS", "3", "int", "Відео-запис",
-            "Максимум одночасних відео-доріжок (моніторів/вікон).",
-            "Оголошено в config.py, але жоден сервіс його не читає — обмеження кількості доріжок фактично "
-            "не застосовується.", scope="config"),
-    Setting("RECORDING_VIDEO_STOP_TIMEOUT_SEC", "8", "float", "Відео-запис",
-            "Таймаут очікування зупинки відео-процесу.",
-            "Скільки чекати graceful-стоп ffmpeg (proc.wait) у _graceful_stop_proc() перед terminate/kill.",
+    Setting("RECORDING_VIDEO_MAX_TRACKS", "3", "int", "Video recording",
+            "Maximum simultaneous video tracks (monitors/windows).",
+            "Declared in config.py, but no service reads it — the limit on the number of tracks is effectively "
+            "not applied.", scope="config"),
+    Setting("RECORDING_VIDEO_STOP_TIMEOUT_SEC", "8", "float", "Video recording",
+            "Timeout for waiting for the video process to stop.",
+            "How long to wait for the graceful stop of ffmpeg (proc.wait) in _graceful_stop_proc() before terminate/kill.",
             scope="config"),
-    Setting("RECORDING_BUILD_MASTER_MP4", "False", "bool", "Відео-запис",
-            "Збирати master MP4 з усіх доріжок після завершення.",
-            "true — finalize_video() додатково збирає master.mp4; false — лишаються тільки окремі доріжки.",
+    Setting("RECORDING_BUILD_MASTER_MP4", "False", "bool", "Video recording",
+            "Build a master MP4 from all tracks after completion.",
+            "true — finalize_video() additionally builds master.mp4; false — only the separate tracks remain.",
             scope="config"),
-    Setting("RECORDING_REGION_OVERLAY", "True", "bool", "Відео-запис",
-            "Показувати оверлей вибраної області захоплення.",
-            "false — VideoCaptureSupervisor не малює оверлей області захоплення на екрані під час запису.",
+    Setting("RECORDING_REGION_OVERLAY", "True", "bool", "Video recording",
+            "Show an overlay of the selected capture region.",
+            "false — VideoCaptureSupervisor does not draw the capture region overlay on the screen during recording.",
             scope="config"),
-    Setting("RECORDING_REGION_OVERLAY_COLOR", "#e5484d", "str", "Відео-запис",
-            "Колір оверлея області захоплення.",
-            "Діє лише коли RECORDING_REGION_OVERLAY=true.", scope="config"),
-    Setting("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES", "1500", "int", "Відео-запис",
-            "Максимум ключових кадрів на один аналіз відео (MAX_FRAMES).",
-            "Понад стелю найкоротші відрізки зливаються з сусідами (захист від «мигаючого» відео); "
-            "результат позначається capped. Див. docs/video-timeline.md.",
+    Setting("RECORDING_REGION_OVERLAY_COLOR", "#e5484d", "str", "Video recording",
+            "Colour of the capture region overlay.",
+            "Applies only when RECORDING_REGION_OVERLAY=true.", scope="config"),
+    Setting("RECORDING_VIDEO_ANALYSIS_MAX_FRAMES", "1500", "int", "Video recording",
+            "Maximum key frames per video analysis (MAX_FRAMES).",
+            "Above the ceiling the shortest segments are merged with their neighbours (protection against \"flickering\" video); "
+            "the result is marked capped. See docs/video-timeline.md.",
             scope="config"),
 
-    # --- Vision (опис кадрів) ---
+    # --- Vision (frame description) ---
     Setting("VIDEO_VISION_BACKEND", "local", "str", "Vision",
-            "local (Ollama VL, $0/офлайн, дефолт), claude (Anthropic vision, платно), off.",
-            "Усе деградує: нема моделі/ключа → опис порожній, кадри+OCR працюють як раніше.", scope="config"),
+            "local (Ollama VL, $0/offline, default), claude (Anthropic vision, paid), off.",
+            "Everything degrades: no model/key → the description is empty, frames+OCR work as before.", scope="config"),
     Setting("VIDEO_VISION_MODEL_LOCAL", "qwen2.5vl:7b", "str", "Vision",
-            "Локальна VL-модель Ollama для опису кадрів.",
-            "Діє лише коли VIDEO_VISION_BACKEND=local — модель, яку video_vision.py викликає через Ollama.",
+            "Local Ollama VL model for frame description.",
+            "Applies only when VIDEO_VISION_BACKEND=local — the model that video_vision.py calls via Ollama.",
             scope="config"),
     Setting("VIDEO_VISION_MODEL_CLAUDE", "claude-haiku-4-5", "str", "Vision",
-            "Claude vision-модель (якщо backend=claude).",
-            "Діє лише коли VIDEO_VISION_BACKEND=claude — модель, яку video_vision.py викликає через Anthropic API.",
+            "Claude vision model (if backend=claude).",
+            "Applies only when VIDEO_VISION_BACKEND=claude — the model that video_vision.py calls via the Anthropic API.",
             scope="config"),
     Setting("VIDEO_VISION_MAX_FRAMES", "120", "int", "Vision",
-            "Максимум кадрів на vision-опис.",
-            "Після стелі решта кадрів сесії лишаються з порожнім vision-описом (тільки OCR).", scope="config"),
+            "Maximum frames per vision description.",
+            "After the ceiling the rest of the session's frames keep an empty vision description (OCR only).", scope="config"),
     Setting("VIDEO_VISION_KEEPALIVE", "60s", "str", "Vision",
-            "Скільки Ollama тримає локальну vision-модель у VRAM після кадру.",
-            "Дефолт local_llm — 30 хв; 60 с звільняє ~5 ГБ за хвилину після пачки кадрів, а 0 перевантажував би "
-            "модель на кожному кадрі (замір 14.10.2026: 5.5–7.6 с/кадр проти 2.3–2.5)."),
+            "How long Ollama keeps the local vision model in VRAM after a frame.",
+            "The local_llm default is 30 min; 60 s frees ~5 GB a minute after a batch of frames, while 0 would reload "
+            "the model on every frame (measured 14.10.2026: 5.5–7.6 s/frame versus 2.3–2.5)."),
     Setting("VIDEO_VISION_TIMEOUT", "90", "float", "Vision",
-            "Таймаут виклику vision-моделі (секунди).",
-            "Таймаут HTTP-виклику describe_frame() до Ollama/Claude — вихід за нього best-effort лишає опис "
-            "кадру порожнім.", scope="config"),
+            "Timeout of the vision model call (seconds).",
+            "Timeout of the HTTP call describe_frame() to Ollama/Claude — going over it leaves the frame description "
+            "empty, best-effort.", scope="config"),
 
-    # --- Telegram: слухач акаунта ---
-    Setting("TELEGRAM_API_ID", "0", "int", "Telegram", "api_id з https://my.telegram.org/apps.",
-            "Разом з TELEGRAM_API_HASH + встановленим telethon вмикає TELEGRAM_ENABLED.", scope="config"),
-    Setting("TELEGRAM_API_HASH", "", "secret", "Telegram", "api_hash з https://my.telegram.org/apps.",
-            "Секрет — не в коді.", scope="config"),
+    # --- Telegram: account listener ---
+    Setting("TELEGRAM_API_ID", "0", "int", "Telegram", "api_id from https://my.telegram.org/apps.",
+            "Together with TELEGRAM_API_HASH + an installed telethon it turns on TELEGRAM_ENABLED.", scope="config"),
+    Setting("TELEGRAM_API_HASH", "", "secret", "Telegram", "api_hash from https://my.telegram.org/apps.",
+            "A secret — not in code.", scope="config"),
     Setting("TELEGRAM_SESSION", "telegram", "path", "Telegram",
-            "Базове імʼя файлу сесії Telethon (реальний дефолт — BASE_DIR/telegram, Telethon додає .session).",
-            "SQLite-файл сесії не можна відкрити двома клієнтами одночасно.", scope="config"),
+            "Base name of the Telethon session file (the real default is BASE_DIR/telegram, Telethon adds .session).",
+            "The SQLite session file cannot be opened by two clients at the same time.", scope="config"),
     Setting("TELEGRAM_CONTROL_HOST", "127.0.0.1", "str", "Telegram",
-            "Host localhost control-API дочірнього процесу-слухача.",
-            "На цьому host telegram_listener.py піднімає control-HTTP-сервер; app.py звертається на ту саму "
-            "адресу.", scope="config"),
+            "Host of the localhost control API of the child listener process.",
+            "On this host telegram_listener.py brings up the control HTTP server; app.py contacts the same "
+            "address.", scope="config"),
     Setting("TELEGRAM_CONTROL_PORT", "5051", "int", "Telegram",
-            "Порт localhost control-API слухача.", "Flask проксирує сюди list-dialogs/status/backfill.",
+            "Port of the listener's localhost control API.", "Flask proxies list-dialogs/status/backfill here.",
             scope="config"),
     Setting("TELEGRAM_WHISPER_MODEL", "large-v3-turbo", "str", "Telegram",
-            "Whisper-модель для голосових/аудіо/відео з TG.",
-            "large-v3-turbo — мультимовна, ~4x швидша за large-v3.", scope="config"),
+            "Whisper model for voice/audio/video from TG.",
+            "large-v3-turbo — multilingual, ~4x faster than large-v3.", scope="config"),
     Setting("TELEGRAM_WHISPER_LANG", "uk", "str", "Telegram",
-            "Мова транскрипції TG-медіа ('auto' — автовизначення).",
-            "Передається у транскрипцію голосових/аудіо з TG у app/blueprints/telegram.py як параметр language.",
+            "Transcription language of TG media ('auto' — autodetect).",
+            "Passed to the transcription of TG voice/audio in app/blueprints/telegram.py as the language parameter.",
             scope="config"),
     Setting("TELEGRAM_CATCHUP", "1", "bool", "Telegram",
-            "Догрузка повідомлень, що прийшли поки слухач не працював.",
-            "0 вимикає — на живих даних 30 втрачених буднів за 8 місяців без цього."),
+            "Catch-up of messages that arrived while the listener was not running.",
+            "0 turns it off — on live data, 30 lost working days in 8 months without it."),
     Setting("TELEGRAM_CATCHUP_DEBOUNCE_MIN", "15", "float", "Telegram",
-            "Не догоняти чат, якщо його вже догоняли менше N хвилин тому.",
-            "app.py під час розробки стартує десятки разів на день."),
+            "Do not catch up a chat if it was already caught up less than N minutes ago.",
+            "app.py starts dozens of times a day during development."),
     Setting("TELEGRAM_DIALOG_LIMIT", "500", "int", "Telegram",
-            "Скільки діалогів перелічувати (/dialogs, /coverage, догонка).",
-            "200 упиралось у стелю — «чату немає серед діалогів» не відрізнялось від «не вліз у вікно»."),
+            "How many dialogs to list (/dialogs, /coverage, catch-up).",
+            "200 hit the ceiling — \"the chat is not among the dialogs\" was indistinguishable from \"did not fit the window\"."),
     Setting("TELEGRAM_BACKFILL_DELAY", "0.5", "float", "Telegram",
-            "Пауза (сек) між повідомленнями при backfill/ремонті/догонці.",
-            "Затримка між повідомленнями в telegram_listener.py — запобігає FloodWaitError від Telegram API."),
+            "Pause (sec) between messages during backfill/repair/catch-up.",
+            "Delay between messages in telegram_listener.py — prevents FloodWaitError from the Telegram API."),
     Setting("TELEGRAM_SELF_NAME", "", "str", "Telegram",
-            "Імʼя власника в переписці (хто «я»).",
-            "Береться від слухача автоматично; задавати вручну лише якщо слухач не використовується."),
+            "The owner's name in the chat (who \"I\" am).",
+            "Taken from the listener automatically; set manually only if the listener is not used."),
     Setting("TELEGRAM_SELF_USERNAME", "", "str", "Telegram",
-            "Нікнейм власника (без @).", "Потрібен щоб ловити @згадки без ніка з сесії слухача."),
+            "The owner's nickname (without @).", "Needed to catch @mentions without the nickname from the listener session."),
     Setting("TELEGRAM_ORIGINAL_MAX_MB", "100", "int", "Telegram",
-            "Поріг (МБ), важчі за який оригінали voice/audio видаляються після витягу тексту.",
-            "tg-media-policy-02: рішення власника — видаляються ЛИШЕ оригінали важчі за поріг, "
-            "дрібні лишаються на диску; діє тільки якщо витяг тексту вдався."),
+            "Threshold (MB) above which voice/audio originals are deleted after text extraction.",
+            "tg-media-policy-02: owner decision — ONLY originals heavier than the threshold are deleted, "
+            "small ones stay on disk; applies only if text extraction succeeded."),
 
-    # --- Нитки Telegram-переписки ---
-    Setting("TG_THREAD_BURST_GAP_MIN", "180", "int", "Нитки Telegram",
-            "Пауза (хв), після якої розмова вважається новим сплеском.",
-            "180 — з заміру розподілу: на 30хв третина сплесків вироджується в одинаків, на 1440хв заходить кілька робочих днів."),
-    Setting("TG_THREAD_BATCH_MSGS", "25", "int", "Нитки Telegram",
-            "Скільки повідомлень за раз віддавати моделі для розбиття сплеску.",
-            "Разом з TG_THREAD_BATCH_CHARS ділить сплеск на під-пачки — межа спрацьовує першою з двох."),
-    Setting("TG_THREAD_BATCH_CHARS", "6000", "int", "Нитки Telegram",
-            "Стеля символів на під-пачку розбиття сплеску.",
-            "Без різання довгі сплески (до 338k символів) не влазять у контекст моделі."),
-    Setting("TG_THREAD_CANDIDATES", "5", "int", "Нитки Telegram",
-            "Скільки відкритих ниток чату показувати моделі як кандидатів на продовження.",
-            "Дефолт limit у open_threads() (tg_threads.py) — скільки кандидатів бачить модель розбиття."),
-    Setting("TG_THREAD_MODEL", "", "str", "Нитки Telegram",
-            "Модель для розбиття сплесків на нитки. Порожньо = взяти LOCAL_LLM_MODEL.",
-            "7B дала те саме розбиття, що й 32B, за вчетверо менший час."),
-    Setting("TG_THREAD_IDLE_DAYS", "3", "int", "Нитки Telegram",
-            "Скільки днів без нових повідомлень нитка лишається кандидатом на продовження.",
-            "3, а не 21 — на прогоні з вікном 21 день максимальний розрив упирався рівно в межу вікна, а не в зміст."),
-    Setting("TG_THREAD_MAX_MSGS", "30", "int", "Нитки Telegram",
-            "Мʼяка стеля обсягу нитки (забороняє НОВУ розмову, не рве поточну).",
-            "Без неї ниток зібрали значна частина архіву, найбільша — повідомлень за два місяці."),
+    # --- Telegram chat threads ---
+    Setting("TG_THREAD_BURST_GAP_MIN", "180", "int", "Telegram threads",
+            "Pause (min) after which a conversation counts as a new burst.",
+            "180 — from a distribution measurement: at 30 min a third of bursts degenerate into singletons, at 1440 min several working days get in."),
+    Setting("TG_THREAD_BATCH_MSGS", "25", "int", "Telegram threads",
+            "How many messages at a time to give the model for splitting a burst.",
+            "Together with TG_THREAD_BATCH_CHARS it divides a burst into sub-batches — whichever of the two limits hits first applies."),
+    Setting("TG_THREAD_BATCH_CHARS", "6000", "int", "Telegram threads",
+            "Character ceiling per sub-batch of burst splitting.",
+            "Without slicing, long bursts (up to 338k characters) do not fit in the model context."),
+    Setting("TG_THREAD_CANDIDATES", "5", "int", "Telegram threads",
+            "How many open chat threads to show the model as continuation candidates.",
+            "Default limit in open_threads() (tg_threads.py) — how many candidates the splitting model sees."),
+    Setting("TG_THREAD_MODEL", "", "str", "Telegram threads",
+            "Model for splitting bursts into threads. Empty = take LOCAL_LLM_MODEL.",
+            "7B gave the same split as 32B in a quarter of the time."),
+    Setting("TG_THREAD_IDLE_DAYS", "3", "int", "Telegram threads",
+            "How many days without new messages a thread stays a continuation candidate.",
+            "3, not 21 — in a run with a 21-day window the maximum gap hit exactly the window edge, not the content."),
+    Setting("TG_THREAD_MAX_MSGS", "30", "int", "Telegram threads",
+            "Soft ceiling of thread volume (forbids a NEW conversation, does not break the current one).",
+            "Without it a few threads collected a large share of the archive, the largest — messages over two months."),
 
-    # --- Сводки ниток Telegram ---
-    # Читає app/services/summaries.py:60-63 (production-rag-wave-b, історія 02).
-    # Записи ДОКУМЕНТУЮТЬ існуючі os.environ.get — дефолти скопійовані звідти
-    # дослівно, самі читання не переписувались (див. докстрінг модуля).
-    Setting("TG_SUMMARY_PREVIEW", "800", "int", "Сводки ниток",
-            "Превʼю одного повідомлення (символів) у промпті сводки нитки.",
-            "Обрізає кожне повідомлення, яке summaries.py кладе в промпт: превʼю показує форму "
-            "розмови, суцільний текст показав би лише початок одного вкладеного документа."),
-    Setting("TG_SUMMARY_MAX_CHARS", "20000", "int", "Сводки ниток",
-            "Стеля символів усього промпта сводки нитки.",
-            "_thread_messages() припиняє добирати повідомлення, щойно сума превʼю сягає цієї межі."),
-    Setting("TG_SUMMARY_MAX_MSGS", "200", "int", "Сводки ниток",
-            "Скільки повідомлень нитки максимум віддавати моделі.",
-            "Дефолт limit у _thread_messages() (summaries.py) — друга межа тієї ж пари "
-            "з TG_SUMMARY_MAX_CHARS, спрацьовує перша з двох."),
-    Setting("TG_SUMMARY_MODEL", "", "str", "Сводки ниток",
-            "Модель для сводок ниток. Порожньо = дефолтна модель проєкту.",
-            "Порожньо — summaries.py бере models.get_default_model()."),
+    # --- Telegram thread summaries ---
+    # Read by app/services/summaries.py:60-63 (production-rag-wave-b, story 02).
+    # The entries DOCUMENT the existing os.environ.get — defaults are copied from there
+    # verbatim, the reads themselves were not rewritten (see the module docstring).
+    Setting("TG_SUMMARY_PREVIEW", "800", "int", "Thread summaries",
+            "Preview of one message (characters) in the thread summary prompt.",
+            "Truncates every message that summaries.py puts into the prompt: the preview shows the shape of "
+            "the conversation, solid text would show only the start of one attached document."),
+    Setting("TG_SUMMARY_MAX_CHARS", "20000", "int", "Thread summaries",
+            "Character ceiling of the whole thread summary prompt.",
+            "_thread_messages() stops collecting messages as soon as the sum of previews reaches this limit."),
+    Setting("TG_SUMMARY_MAX_MSGS", "200", "int", "Thread summaries",
+            "How many thread messages to give the model at most.",
+            "Default limit in _thread_messages() (summaries.py) — the second limit of the same pair "
+            "with TG_SUMMARY_MAX_CHARS, whichever of the two hits first."),
+    Setting("TG_SUMMARY_MODEL", "", "str", "Thread summaries",
+            "Model for thread summaries. Empty = the project's default model.",
+            "Empty — summaries.py takes models.get_default_model()."),
 
-    # --- Досьє Telegram-чату ---
-    Setting("TG_CONTEXT_MIN_NEW", "30", "int", "Досьє чату",
-            "Скільки нових повідомлень накопичити перед перебудовою профілю чату.",
-            "Перебудова досьє в tg_chat_context.py не стартує, поки не набереться стільки нових повідомлень "
-            "(або не мине TG_CONTEXT_MAX_AGE_H)."),
-    Setting("TG_CONTEXT_MAX_AGE_H", "24", "int", "Досьє чату",
-            "Оновити навіть мовчазний чат раз на стільки годин.",
-            "Другий поріг тієї ж пари з TG_CONTEXT_MIN_NEW — спрацьовує навіть без нових повідомлень."),
-    Setting("TG_CONTEXT_THREADS", "12", "int", "Досьє чату",
-            "Скільки останніх ниток показувати моделі при побудові досьє.",
-            "Досьє про поточний стан справ, а не літопис."),
-    Setting("TG_CONTEXT_THREAD_SAMPLE", "4", "int", "Досьє чату",
-            "Скільки повідомлень нитки давати моделі для розбору.",
-            "LIMIT у SQL-запиті вибірки повідомлень нитки для побудови досьє (tg_chat_context.py)."),
-    Setting("TG_CONTEXT_MODEL", "", "str", "Досьє чату",
-            "Модель для побудови досьє чату. Порожньо = взяти LOCAL_LLM_MODEL.",
-            "32B на 24GB GPU непридатна для цієї задачі — заміряно, один чат не вклався і в 300с."),
-    Setting("TG_CONTEXT_TIMEOUT", "300", "float", "Досьє чату",
-            "Таймаут побудови досьє (сек).", "Пакетна задача, дефолтні 60с local_llm тут малі."),
+    # --- Telegram chat dossier ---
+    Setting("TG_CONTEXT_MIN_NEW", "30", "int", "Chat dossier",
+            "How many new messages to accumulate before rebuilding the chat profile.",
+            "Rebuilding the dossier in tg_chat_context.py does not start until this many new messages accumulate "
+            "(or TG_CONTEXT_MAX_AGE_H passes)."),
+    Setting("TG_CONTEXT_MAX_AGE_H", "24", "int", "Chat dossier",
+            "Refresh even a silent chat once per this many hours.",
+            "The second threshold of the same pair with TG_CONTEXT_MIN_NEW — fires even without new messages."),
+    Setting("TG_CONTEXT_THREADS", "12", "int", "Chat dossier",
+            "How many latest threads to show the model when building the dossier.",
+            "A dossier about the current state of affairs, not a chronicle."),
+    Setting("TG_CONTEXT_THREAD_SAMPLE", "4", "int", "Chat dossier",
+            "How many thread messages to give the model for analysis.",
+            "LIMIT in the SQL query that samples thread messages for building the dossier (tg_chat_context.py)."),
+    Setting("TG_CONTEXT_MODEL", "", "str", "Chat dossier",
+            "Model for building the chat dossier. Empty = take LOCAL_LLM_MODEL.",
+            "32B on a 24GB GPU is unsuitable for this task — measured, one chat did not finish even in 300s."),
+    Setting("TG_CONTEXT_TIMEOUT", "300", "float", "Chat dossier",
+            "Dossier building timeout (sec).", "A batch task, the default 60s of local_llm is too small here."),
 
-    # --- Зобовʼязання з переписки ---
-    Setting("TG_TASKS_TRIAGE_MODEL", "qwen2.5:7b-instruct", "str", "Зобовʼязання з переписки",
-            "Локальна модель відсіву ниток без домовленостей.",
-            "7B-клас: триаж — рішення так/ні, найдешевша задача каскаду."),
-    Setting("TG_TASKS_TRIAGE_TIMEOUT", "180", "float", "Зобовʼязання з переписки",
-            "Таймаут виклику триажу.",
-            "Переданий у local_llm-виклик триажу (max_tokens=200) в tg_tasks.py."),
-    Setting("TG_TASKS_TRIAGE_PREVIEW", "400", "int", "Зобовʼязання з переписки",
-            "Прев'ю символів повідомлення для триажу.",
-            "Символьна стеля _preview() кожного повідомлення, що йде в промпт триажу."),
-    Setting("TG_TASKS_TRIAGE_MAX_MSGS", "40", "int", "Зобовʼязання з переписки",
-            "Скільки повідомлень нитки показувати триажу.",
-            "Дефолт limit у thread_messages() — скільки останніх повідомлень бачить і триаж, і структурний "
-            "витяг."),
-    Setting("TG_TASKS_MODEL", "", "str", "Зобовʼязання з переписки",
-            "Claude-модель витягу структури. Порожньо = дефолтна модель архіву (CLAUDE_MODEL/DEFAULT_MODEL).",
-            "Порожньо — tg_tasks.py бере модель за замовчуванням архіву, не окрему."),
-    Setting("TG_TASKS_EFFORT", "low", "str", "Зобовʼязання з переписки",
-            "Effort для Claude-витягу структури зобовʼязань.", "Витяг структури — глибокий thinking не окупається."),
-    Setting("TG_TASKS_PREVIEW", "1500", "int", "Зобовʼязання з переписки",
-            "Прев'ю символів повідомлення для витягу (більше ніж у триажу).",
-            "Символьна стеля _preview() повідомлення при структурному витягу зобовʼязань (не триажі)."),
-    Setting("TG_TASKS_MAX_CHARS", "24000", "int", "Зобовʼязання з переписки",
-            "Стеля символів нитки для витягу структури.",
-            "Накопичення повідомлень нитки в tg_tasks.py зупиняється, щойно сумарна довжина перевищує цю "
-            "стелю."),
+    # --- Commitments from chat ---
+    Setting("TG_TASKS_TRIAGE_MODEL", "qwen2.5:7b-instruct", "str", "Commitments from chat",
+            "Local model for filtering out threads without agreements.",
+            "7B class: triage is a yes/no decision, the cheapest task of the cascade."),
+    Setting("TG_TASKS_TRIAGE_TIMEOUT", "180", "float", "Commitments from chat",
+            "Timeout of the triage call.",
+            "Passed to the local_llm triage call (max_tokens=200) in tg_tasks.py."),
+    Setting("TG_TASKS_TRIAGE_PREVIEW", "400", "int", "Commitments from chat",
+            "Message preview characters for triage.",
+            "The character ceiling of _preview() for each message that goes into the triage prompt."),
+    Setting("TG_TASKS_TRIAGE_MAX_MSGS", "40", "int", "Commitments from chat",
+            "How many thread messages to show triage.",
+            "Default limit in thread_messages() — how many latest messages both triage and the structured "
+            "extraction see."),
+    Setting("TG_TASKS_MODEL", "", "str", "Commitments from chat",
+            "Claude model for structure extraction. Empty = the archive's default model (CLAUDE_MODEL/DEFAULT_MODEL).",
+            "Empty — tg_tasks.py takes the archive's default model, not a separate one."),
+    Setting("TG_TASKS_EFFORT", "low", "str", "Commitments from chat",
+            "Effort for the Claude extraction of commitment structure.", "Structure extraction — deep thinking does not pay off."),
+    Setting("TG_TASKS_PREVIEW", "1500", "int", "Commitments from chat",
+            "Message preview characters for extraction (more than in triage).",
+            "The character ceiling of _preview() for a message in the structured extraction of commitments (not triage)."),
+    Setting("TG_TASKS_MAX_CHARS", "24000", "int", "Commitments from chat",
+            "Thread character ceiling for structure extraction.",
+            "Accumulating thread messages in tg_tasks.py stops as soon as the total length exceeds this "
+            "ceiling."),
 
-    # --- Питання без відповіді ---
-    Setting("TG_QUESTIONS_WINDOW_H", "24", "float", "Питання без відповіді",
-            "Годин присутності в чаті після питання, щоб вважати його побаченим.",
-            "Дефолт REPLY_WINDOW_H у tg_questions.py — вікно, у якому шукається відповідь/реакція на питання."),
-    Setting("TG_QUESTIONS_DAYS", "90", "int", "Питання без відповіді",
-            "Вікно (днів) пошуку питань без відповіді.",
-            "Ширше за звід задач (30 днів) — питання без відповіді часом висить місяцями."),
+    # --- Unanswered questions ---
+    Setting("TG_QUESTIONS_WINDOW_H", "24", "float", "Unanswered questions",
+            "Hours of presence in the chat after a question for it to count as seen.",
+            "Default REPLY_WINDOW_H in tg_questions.py — the window in which a reply/reaction to the question is looked for."),
+    Setting("TG_QUESTIONS_DAYS", "90", "int", "Unanswered questions",
+            "Window (days) for searching unanswered questions.",
+            "Wider than the task digest (30 days) — an unanswered question sometimes hangs for months."),
 
-    # --- Граф сутностей ---
-    Setting("TG_ENTITIES_MORPH_ENABLED", "0", "bool", "Граф сутностей",
-            "Вимикач морфо-матчера імен (відмінки/скорочення).",
-            "Дефолт вимкнено — мердж не змінює поведінку системи без свідомого ввімкнення."),
-    Setting("TG_ENTITIES_NAMES_TTL", "300", "float", "Граф сутностей",
-            "TTL (сек) кешу словника назв сутностей.",
-            "load_names — 6200 рядків на кожне повідомлення; короткий TTL, щоб нова сутність ловилась без рестарту."),
+    # --- Entity graph ---
+    Setting("TG_ENTITIES_MORPH_ENABLED", "0", "bool", "Entity graph",
+            "Switch of the morphological name matcher (cases/abbreviations).",
+            "Off by default — the merge does not change system behaviour without a conscious switch-on."),
+    Setting("TG_ENTITIES_NAMES_TTL", "300", "float", "Entity graph",
+            "TTL (sec) of the entity name dictionary cache.",
+            "load_names — 6200 rows per message; a short TTL so a new entity is caught without a restart."),
 
     # --- RAG retrieval ---
-    Setting("RAG_TOP_K", "12", "int", "RAG retrieval", "Скільки чанків повертає /api/memory/ask за замовчуванням.",
-            "Дефолт параметра k у /api/memory/ask, коли клієнт не передав свій."),
+    Setting("RAG_TOP_K", "12", "int", "RAG retrieval", "How many chunks /api/memory/ask returns by default.",
+            "Default of the k parameter in /api/memory/ask when the client did not pass its own."),
     Setting("RAG_RECENCY_WEIGHT", "0.25", "float", "RAG retrieval",
-            "Вага бусту свіжості поверх RRF-скору.", "Помірна навмисно — RRF лишається головним сигналом."),
+            "Weight of the recency boost on top of the RRF score.", "Moderate on purpose — RRF stays the main signal."),
     Setting("RAG_RECENCY_HALF_LIFE_DAYS", "180", "float", "RAG retrieval",
-            "Піврозпад бусту свіжості (днів).",
-            "Через стільки днів буст свіжості (RAG_RECENCY_WEIGHT) спадає вдвічі."),
+            "Half-life of the recency boost (days).",
+            "After this many days the recency boost (RAG_RECENCY_WEIGHT) halves."),
     Setting("RAG_MAX_PER_MEETING", "3", "int", "RAG retrieval",
-            "Максимум чанків з одного мітингу у фінальному топі (диверсифікація).",
-            "Стеля в retrieval.py диверсифікує топ — понад неї чанки того самого мітингу відкидаються."),
+            "Maximum chunks from one meeting in the final top (diversification).",
+            "The ceiling in retrieval.py diversifies the top — beyond it, chunks of the same meeting are dropped."),
     Setting("RAG_FTS_CUTOFF_MIN_WORDS", "3", "int", "RAG retrieval",
-            "Від скількох слів запиту вмикається м'який FTS relevance-cutoff (T6.8).",
-            "Разом з RAG_FTS_MIN_MATCHES вирізає з FTS-кандидатів чанки з надто малою кількістю збігів "
-            "термів."),
+            "From how many query words the soft FTS relevance cutoff turns on (T6.8).",
+            "Together with RAG_FTS_MIN_MATCHES it cuts from the FTS candidates the chunks with too few term "
+            "matches."),
     Setting("RAG_FTS_MIN_MATCHES", "2", "int", "RAG retrieval",
-            "Мінімум реальних збігів термів для запитів довших за cutoff.",
-            "Діє лише коли запит довший за RAG_FTS_CUTOFF_MIN_WORDS слів."),
+            "Minimum real term matches for queries longer than the cutoff.",
+            "Applies only when the query is longer than RAG_FTS_CUTOFF_MIN_WORDS words."),
     Setting("RAG_RERANK_POOL_SIZE", "24", "int", "RAG retrieval",
-            "Скільки топ-кандидатів (за RRF+recency) прогонити через cross-encoder rerank.",
-            "Діє лише коли RECALL_RERANK_ENABLED=1 — розмір пулу перед rerank-моделлю."),
+            "How many top candidates (by RRF+recency) to run through the cross-encoder rerank.",
+            "Applies only when RECALL_RERANK_ENABLED=1 — the pool size before the rerank model."),
     Setting("RECALL_RERANK_ENABLED", "0", "bool", "RAG retrieval",
-            "Вмикає локальний cross-encoder rerank (bge-reranker-v2-m3) для RAG-чату (T6.4).",
-            "Лише для app/services/rag.py — не для copilot/categorize/MCP. Дефолт дублюється у config.py "
-            "(документально, не усунуто — борг S4/S6)."),
+            "Turns on the local cross-encoder rerank (bge-reranker-v2-m3) for the RAG chat (T6.4).",
+            "Only for app/services/rag.py — not for copilot/categorize/MCP. The default is duplicated in config.py "
+            "(documented, not eliminated — debt S4/S6)."),
     Setting("RECALL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3", "str", "RAG retrieval",
-            "HF-модель cross-encoder rerank.",
-            "Діє лише коли RECALL_RERANK_ENABLED=1 — яку HF-модель завантажує reranker.py."),
+            "HF model for the cross-encoder rerank.",
+            "Applies only when RECALL_RERANK_ENABLED=1 — which HF model reranker.py loads."),
     Setting("RERANK_DEVICE", "", "str", "RAG retrieval",
-            "Пристрій для reranker ('cuda'/'cpu'). Порожньо = автовизначення.",
-            "Порожньо — reranker.py бере cuda за наявності torch.cuda.is_available(), інакше cpu."),
-    Setting("RAG_COMMENT_WEIGHT", "0.6", "float", "RAG retrieval — коментарі",
-            "Множник бусту коментарів відносно kind_weight (correction 1.0 … question 0.4).",
-            "Сильний тай-брейкер, не глушилка — щоб на будь-яке питання не видавались самі коментарі."),
-    Setting("RAG_COMMENT_CANDIDATE_CAP", "20", "int", "RAG retrieval — коментарі",
-            "Скільки кандидатів брати з окремого індексу коментарів.",
-            "Стеля кількості кандидатів з comment-індексу перед злиттям з основним RRF."),
-    Setting("RAG_COMMENT_MAX_SHARE", "0.34", "float", "RAG retrieval — коментарі",
-            "Максимальна частка топу, яку можуть зайняти коментарі.",
-            "Без стелі 30 посаджених коментарів забирали 115 слотів зі 120 при k=8 (Волна 2.5)."),
-    Setting("RAG_ATTACH_COMMENT_CAP", "8", "int", "RAG retrieval — коментарі",
-            "Максимум підшитих коментарів на одну відповідь.",
-            "Дефолт cap у функції підшивки коментарів до знахідки — понад нього коментарі відкидаються."),
-    Setting("RAG_THREAD_STITCH", "6", "int", "RAG retrieval — нитки",
-            "Скільки сусідів по TG-нитці підшивати до знахідки у промпт.",
-            "Відповідь — наступна репліка нитки, спільних слів із запитом у неї немає."),
-    Setting("RAG_THREAD_MSG_CHARS", "1500", "int", "RAG retrieval — нитки",
-            "Стеля символів на одне сусіднє повідомлення у підшивці нитки.",
-            "Діє на сусідів; сама знахідка (хіт) ріжеться окремо, до залишку RAG_THREAD_CHARS."),
-    Setting("RAG_THREAD_CHARS", "8000", "int", "RAG retrieval — нитки",
-            "Стеля символів на всю підшивку нитки (усі повідомлення разом).",
-            "Без неї одна довга нитка (156к символів) витісняла інші джерела з промпту."),
-    Setting("RAG_QUERY_REWRITE", "0", "bool", "RAG retrieval — переписування запиту",
-            "Вмикає 1-3 альтернативних формулювання запиту (Claude) як додаткові "
-            "vector+FTS підзапити, злиті тим самим RRF.",
-            "Дефолт вимкнено — вмикається точково для вимірювання гейтом "
-            "(evals/gate.py кличе retrieval.search без прапорця → читає цей env)."),
+            "Device for the reranker ('cuda'/'cpu'). Empty = autodetect.",
+            "Empty — reranker.py takes cuda if torch.cuda.is_available(), otherwise cpu."),
+    Setting("RAG_COMMENT_WEIGHT", "0.6", "float", "RAG retrieval — comments",
+            "Multiplier of the comment boost relative to kind_weight (correction 1.0 … question 0.4).",
+            "A strong tie-breaker, not a muffler — so that comments alone are not returned for any question."),
+    Setting("RAG_COMMENT_CANDIDATE_CAP", "20", "int", "RAG retrieval — comments",
+            "How many candidates to take from the separate comment index.",
+            "Ceiling of the number of candidates from the comment index before merging with the main RRF."),
+    Setting("RAG_COMMENT_MAX_SHARE", "0.34", "float", "RAG retrieval — comments",
+            "Maximum share of the top that comments may occupy.",
+            "Without a ceiling 30 planted comments took 115 slots out of 120 at k=8 (Wave 2.5)."),
+    Setting("RAG_ATTACH_COMMENT_CAP", "8", "int", "RAG retrieval — comments",
+            "Maximum attached comments per answer.",
+            "Default cap in the function that attaches comments to a finding — beyond it comments are dropped."),
+    Setting("RAG_THREAD_STITCH", "6", "int", "RAG retrieval — threads",
+            "How many neighbours of the TG thread to stitch to a finding in the prompt.",
+            "The answer is the next reply of the thread, it shares no words with the query."),
+    Setting("RAG_THREAD_MSG_CHARS", "1500", "int", "RAG retrieval — threads",
+            "Character ceiling per neighbouring message in the thread stitch.",
+            "Applies to neighbours; the finding itself (the hit) is cut separately, to the remainder of RAG_THREAD_CHARS."),
+    Setting("RAG_THREAD_CHARS", "8000", "int", "RAG retrieval — threads",
+            "Character ceiling for the whole thread stitch (all messages together).",
+            "Without it one long thread (156k characters) crowded other sources out of the prompt."),
+    Setting("RAG_QUERY_REWRITE", "0", "bool", "RAG retrieval — query rewriting",
+            "Turns on 1-3 alternative query formulations (Claude) as additional "
+            "vector+FTS subqueries merged by the same RRF.",
+            "Off by default — turned on selectively for measurement by the gate "
+            "(evals/gate.py calls retrieval.search without the flag → reads this env)."),
     Setting("RAG_QUERY_REWRITE_MODEL", "claude-haiku-4-5-20251001", "str",
-            "RAG retrieval — переписування запиту",
-            "Яка модель Claude генерує альтернативні формулювання запиту.",
-            "Діє лише коли RAG_QUERY_REWRITE=1 — дешевий допоміжний виклик перед основним RAG-запитом."),
+            "RAG retrieval — query rewriting",
+            "Which Claude model generates the alternative query formulations.",
+            "Applies only when RAG_QUERY_REWRITE=1 — a cheap auxiliary call before the main RAG query."),
 
-    # --- Ембеддинги ---
-    Setting("EMBED_MODEL", "intfloat/multilingual-e5-large", "str", "Ембеддинги",
-            "Модель ембеддингів (1024-dim, мультимовна).",
-            "bge-m3 відкинуто: не має safetensors, конфліктує з torch<2.6 pin (CVE-2025-32434). "
-            "Стиль префіксів запиту/пасажу (e5/qwen3/plain) embeddings.py визначає з НАЗВИ цієї моделі."),
-    Setting("EMBED_VERSION", "2", "int", "Ембеддинги",
-            "Версія нарізки/логіки ембедингів (T6.8) — бамп форсить re-embed архіву.",
-            "Змінюється ЛИШЕ в `.env` (ADR-016: дефолт коду не рухається за бойовою епохою). При зміні "
-            "формату нарізки або префікса номер беруть строго вище пари, яку тримає бойова БД "
+    # --- Embeddings ---
+    Setting("EMBED_MODEL", "intfloat/multilingual-e5-large", "str", "Embeddings",
+            "Embedding model (1024-dim, multilingual).",
+            "bge-m3 rejected: it has no safetensors, conflicts with the torch<2.6 pin (CVE-2025-32434). "
+            "The query/passage prefix style (e5/qwen3/plain) is determined by embeddings.py from the NAME of this model."),
+    Setting("EMBED_VERSION", "2", "int", "Embeddings",
+            "Version of the embedding chunking/logic (T6.8) — a bump forces a re-embed of the archive.",
+            "Changed ONLY in `.env` (ADR-016: the code default does not move with the live epoch). When the "
+            "chunking format or prefix changes, take a number strictly higher than the pair held by the live DB "
             "(`SELECT embedding_model, embedding_version, COUNT(*) FROM transcriptions GROUP BY 1, 2`), "
-            "і далі ганяють `reembed.run` — номер, який у БД уже є, залишив би новий формат у старій "
-            "епосі (stale_ids = 0). retrieval.search бере лише чанки поточної пари (EMBED_MODEL, "
-            "EMBED_VERSION) — вектори іншої епохи не порівнюються."),
-    Setting("EMBED_MAX_SEQ", "1024", "int", "Ембеддинги",
-            "Стеля довжини послідовності для моделі ембеддингів (у токенах).",
-            "Діє ЛИШЕ вниз: e5 зі своїми 512 не чіпається. Потрібна для моделей без "
-            "sentence_bert_config.json (Qwen3-Embedding): без стелі sentence-transformers бере "
-            "32768, чанки-монстри (документи/TG, до 18k токенів) з'їдають 17 ГБ VRAM і прохід "
-            "падає в 30 разів. 0 = стелю вимкнено."),
-    Setting("EMBED_DEVICE", "", "str", "Ембеддинги",
-            "Пристрій для embeddings ('cuda'/'cpu'). Порожньо = автовизначення.",
-            "Порожньо — embeddings.py бере cuda за наявності torch.cuda.is_available(), інакше cpu."),
-    Setting("RECALL_VECTOR_WARN_THRESHOLD", "50000", "int", "Ембеддинги",
-            "Поріг к-сті embedded-чанків, після якого логується WARNING про масштаб (T6.6).",
-            "Brute-force numpy vector search — сигнал планувати міграцію на ANN (sqlite-vec) заздалегідь."),
+            "and then run `reembed.run` — a number that already exists in the DB would leave the new format in the old "
+            "epoch (stale_ids = 0). retrieval.search takes only chunks of the current pair (EMBED_MODEL, "
+            "EMBED_VERSION) — vectors of another epoch are not compared."),
+    Setting("EMBED_MAX_SEQ", "1024", "int", "Embeddings",
+            "Sequence length ceiling for the embedding model (in tokens).",
+            "Works ONLY downward: e5 with its 512 is not touched. Needed for models without "
+            "sentence_bert_config.json (Qwen3-Embedding): without a ceiling sentence-transformers takes "
+            "32768, monster chunks (documents/TG, up to 18k tokens) eat 17 GB of VRAM and the pass "
+            "slows down 30 times. 0 = ceiling off."),
+    Setting("EMBED_DEVICE", "", "str", "Embeddings",
+            "Device for embeddings ('cuda'/'cpu'). Empty = autodetect.",
+            "Empty — embeddings.py takes cuda if torch.cuda.is_available(), otherwise cpu."),
+    Setting("RECALL_VECTOR_WARN_THRESHOLD", "50000", "int", "Embeddings",
+            "Threshold of the number of embedded chunks after which a WARNING about scale is logged (T6.6).",
+            "Brute-force numpy vector search — a signal to plan the migration to ANN (sqlite-vec) in advance."),
 
-    # --- OCR / документи ---
-    Setting("OCR_LANG", "ukr+rus+eng", "str", "OCR / документи",
-            "Мовні пакети Tesseract для OCR документів.",
-            "Бракує мовного пакету — pytesseract кидає TesseractError, document_parser.py фолбечить на "
-            "дефолтну мову (eng)."),
-    Setting("OCR_TESSERACT_CMD", "", "str", "OCR / документи",
-            "Шлях до tesseract.exe, якщо його нема в PATH.",
-            "Порожньо — PATH, а без нього стандартний шлях інсталятора "
+    # --- OCR / documents ---
+    Setting("OCR_LANG", "ukr+rus+eng", "str", "OCR / documents",
+            "Tesseract language packs for document OCR.",
+            "If a language pack is missing — pytesseract raises TesseractError, document_parser.py falls back to "
+            "the default language (eng)."),
+    Setting("OCR_TESSERACT_CMD", "", "str", "OCR / documents",
+            "Path to tesseract.exe if it is not in PATH.",
+            "Empty — PATH, and without it the standard installer path "
             "C:\\Program Files\\Tesseract-OCR\\tesseract.exe."),
-    Setting("OCR_TESSDATA_DIR", "", "str", "OCR / документи",
-            "Тека мовних пакетів Tesseract (ukr/rus/eng).",
-            "Порожньо — %LOCALAPPDATA%\\Recall\\tessdata, якщо тека є. Потрібна, бо в Program Files "
-            "без прав адміністратора мовні пакети не докласти."),
-    Setting("OCR_TESSDATA_FAST_DIR", "", "str", "OCR / документи",
-            "Швидкі мовні пакети (tessdata_fast) для OCR кадрів відео.",
-            "Порожньо — %LOCALAPPDATA%\\Recall\\tessdata_fast, якщо тека є; інакше відео-OCR бере "
-            "звичайні пакети. Документи завжди на звичайних."),
-    Setting("OCR_DPI", "200", "int", "OCR / документи",
-            "DPI рендеру сторінки PDF для OCR.",
-            "Передається у page.get_pixmap(dpi=...) перед OCR — вищий DPI підвищує якість ціною часу."),
-    Setting("OCR_MAX_PAGES", "50", "int", "OCR / документи",
-            "Кап синхронного OCR (сторінок).",
-            "Понад цю кількість сторінок document_parser.py більше не запускає OCR для документа."),
-    Setting("RECALL_IMPORT_ROOTS", "", "str", "OCR / документи",
-            "Список абсолютних директорій (розділених ';'), дозволених для import-folder.",
-            "Порожньо → import-folder заборонений звідусіль (deny-by-default, T1.3)."),
-    Setting("DATABASE", "whisper_history.db", "path", "OCR / документи",
-            "Шлях до SQLite БД для standalone CLI-запуску app/services/comments.py.",
-            "config.py тримає власний хардкод DATABASE='whisper_history.db' (дубль, non-goal 5 — не усунуто)."),
+    Setting("OCR_TESSDATA_DIR", "", "str", "OCR / documents",
+            "Folder of Tesseract language packs (ukr/rus/eng).",
+            "Empty — %LOCALAPPDATA%\\Recall\\tessdata, if the folder exists. Needed because in Program Files "
+            "language packs cannot be added without administrator rights."),
+    Setting("OCR_TESSDATA_FAST_DIR", "", "str", "OCR / documents",
+            "Fast language packs (tessdata_fast) for OCR of video frames.",
+            "Empty — %LOCALAPPDATA%\\Recall\\tessdata_fast, if the folder exists; otherwise video OCR takes "
+            "the regular packs. Documents always use the regular ones."),
+    Setting("OCR_DPI", "200", "int", "OCR / documents",
+            "DPI of the PDF page render for OCR.",
+            "Passed to page.get_pixmap(dpi=...) before OCR — a higher DPI improves quality at the cost of time."),
+    Setting("OCR_MAX_PAGES", "50", "int", "OCR / documents",
+            "Cap of synchronous OCR (pages).",
+            "Beyond this number of pages document_parser.py no longer runs OCR for the document."),
+    Setting("RECALL_IMPORT_ROOTS", "", "str", "OCR / documents",
+            "List of absolute directories (separated by ';') allowed for import-folder.",
+            "Empty → import-folder is forbidden everywhere (deny-by-default, T1.3)."),
+    Setting("DATABASE", "whisper_history.db", "path", "OCR / documents",
+            "Path to the SQLite DB for the standalone CLI run of app/services/comments.py.",
+            "config.py keeps its own hardcode DATABASE='whisper_history.db' (a duplicate, non-goal 5 — not eliminated)."),
 
     # --- Claude API ---
     Setting("ANTHROPIC_API_KEY", "", "secret", "Claude API",
-            "Ключ Anthropic. Без нього polish/enrichment/RAG-чат/копілот-верифікація/vision(claude) вимкнені.",
+            "Anthropic key. Without it polish/enrichment/RAG chat/copilot verification/vision(claude) are off.",
             "https://console.anthropic.com/settings/keys"),
     Setting("CLAUDE_MODEL", "claude-opus-5", "str", "Claude API",
-            "Дефолтна модель для тексту/RAG (єдина точка правди — app/services/models.py).",
-            "default_model() в app/services/models.py повертає це значення, якщо задане — інакше DEFAULT_MODEL "
-            "з коду."),
+            "Default model for text/RAG (single source of truth — app/services/models.py).",
+            "default_model() in app/services/models.py returns this value if set — otherwise DEFAULT_MODEL "
+            "from the code."),
     Setting("HF_TOKEN", "", "secret", "Claude API",
-            "Токен Hugging Face для pyannote (діаризація).",
-            "Вимагає прийняття ліцензії моделей pyannote/speaker-diarization-3.1 і pyannote/segmentation-3.0."),
+            "Hugging Face token for pyannote (diarization).",
+            "Requires accepting the licenses of the models pyannote/speaker-diarization-3.1 and pyannote/segmentation-3.0."),
 
-    # --- Копілот ---
-    Setting("COPILOT_ENABLED", "1", "bool", "Копілот",
-            "Вмикає живий ко-пілот дзвінка (Phase 19).",
-            "Деградує м'яко: нема Ollama/моделі → is_available()=False, запис/STT/RAG працюють як раніше.",
+    # --- Copilot ---
+    Setting("COPILOT_ENABLED", "1", "bool", "Copilot",
+            "Turns on the live call co-pilot (Phase 19).",
+            "Degrades softly: no Ollama/model → is_available()=False, recording/STT/RAG work as before.",
             scope="config"),
-    Setting("LOCAL_LLM_URL", "http://localhost:11434", "str", "Копілот",
-            "HTTP-адреса локального Ollama-сервісу.",
-            "Базовий URL, на який local_llm.py шле /api/generate і /api/tags до Ollama.", scope="config"),
-    Setting("LOCAL_LLM_MODEL", "qwen2.5:14b-instruct-q5_K_M", "str", "Копілот",
-            "Локальна модель-диспетчер копілота.",
-            "Модель за замовчуванням для всіх local_llm-викликів (копілот, нитки TG, досьє чату), якщо "
-            "виклик не перекрив своєю.", scope="config"),
-    Setting("LOCAL_LLM_KEEPALIVE", "30m", "str", "Копілот",
-            "Ollama keep_alive для моделі копілота.",
-            "Значення keep_alive у запиті до Ollama — скільки тримати модель у пам'яті GPU без вивантаження.",
+    Setting("LOCAL_LLM_URL", "http://localhost:11434", "str", "Copilot",
+            "HTTP address of the local Ollama service.",
+            "Base URL to which local_llm.py sends /api/generate and /api/tags to Ollama.", scope="config"),
+    Setting("LOCAL_LLM_MODEL", "qwen2.5:14b-instruct-q5_K_M", "str", "Copilot",
+            "Local dispatcher model of the copilot.",
+            "Default model for all local_llm calls (copilot, TG threads, chat dossier) if "
+            "the call did not override it with its own.", scope="config"),
+    Setting("LOCAL_LLM_KEEPALIVE", "30m", "str", "Copilot",
+            "Ollama keep_alive for the copilot model.",
+            "The keep_alive value in the request to Ollama — how long to keep the model in GPU memory without unloading.",
             scope="config"),
-    Setting("LOCAL_LLM_NUM_CTX", "8192", "int", "Копілот",
-            "Розмір контексту локальної моделі копілота.",
-            "Значення num_ctx у запиті до Ollama — довші промпти за цю межу модель обрізає/деградує.",
+    Setting("LOCAL_LLM_NUM_CTX", "8192", "int", "Copilot",
+            "Context size of the local copilot model.",
+            "The num_ctx value in the request to Ollama — prompts longer than this limit are truncated/degrade the model.",
             scope="config"),
-    Setting("LOCAL_LLM_TIMEOUT", "60", "float", "Копілот",
-            "Таймаут виклику локальної моделі копілота (сек).",
-            "Дефолтний timeout HTTP-запиту local_llm.py до Ollama, якщо виклик не передав свій.",
+    Setting("LOCAL_LLM_TIMEOUT", "60", "float", "Copilot",
+            "Timeout of the local copilot model call (sec).",
+            "Default HTTP request timeout of local_llm.py to Ollama if the call did not pass its own.",
             scope="config"),
     Setting("LOCAL_TITLE_MODEL", "hf.co/INSAIT-Institute/MamayLM-Gemma-3-12B-IT-v2.0-GGUF:Q5_K_M",
-            "str", "Назви записів",
-            "Локальна модель, що пропонує назву й опис запису (meta_suggest.py). Порожньо = LOCAL_LLM_MODEL.",
-            "Замір 14.10.2026 на #8677: MamayLM 12B ~40 с і три різні предметні варіанти; qwen2.5:7b за 10 с "
-            "давала майже однакові описи. Під час запису модель не кличеться взагалі (копілот)."),
-    Setting("LOCAL_TITLE_KEEPALIVE", "0", "str", "Назви записів",
-            "Ollama keep_alive для моделі назв. 0 = вивантажити одразу після відповіді.",
-            "Інакше 12B тримає VRAM ще 30 хв (LOCAL_LLM_KEEPALIVE), і дзвінок у цей час лишає копілот "
-            "і транскрипцію без місця. Ціна: кожна пропозиція з холодного старту (~45 с замість ~15)."),
-    Setting("LOCAL_TITLE_TIMEOUT", "180", "float", "Назви записів",
-            "Таймаут однієї пропозиції назви й опису (сек).",
-            "Дефолтні 60 с local_llm малі: 12B на холодному старті вантажиться у VRAM довше."),
-    Setting("COPILOT_MODEL_API", "claude-sonnet-5", "str", "Копілот",
-            "«Звичайна» Claude-модель верифікації важливого (local-first cascade).",
-            "Читається щоразу (не кешується) у copilot/config.py — модель для звичайної (не 'гнарлі') "
-            "ескалації до Claude."),
-    Setting("COPILOT_MODEL_API_GNARLY", "claude-opus-5", "str", "Копілот",
-            "Модель-арбітр для 'гнарлі'/uncertain кейсів копілота.",
-            "Свідомо ІНША модель за COPILOT_MODEL_API — не схлопувати."),
-    Setting("COPILOT_TOPIC_TICK_SEC", "6", "float", "Копілот",
-            "Період тіку топік-стейт-машини копілота (сек).",
-            "Період циклу _tick_sec у copilot/worker.py — як часто перевіряється стан топіка."),
-    Setting("COPILOT_TOPIC_WINDOW_CHARS", "200", "int", "Копілот",
-            "Мінімальне вікно символів для оцінки топіку копілота.",
-            "_min_window_chars у copilot/worker.py — доки вікно транскрипту менше, оцінка топіка не "
-            "запускається."),
+            "str", "Record titles",
+            "Local model that proposes a record's title and description (meta_suggest.py). Empty = LOCAL_LLM_MODEL.",
+            "Measurement 14.10.2026 on #8677: MamayLM 12B ~40 s and three different topical variants; qwen2.5:7b in 10 s "
+            "gave almost identical descriptions. During recording the model is not called at all (copilot)."),
+    Setting("LOCAL_TITLE_KEEPALIVE", "0", "str", "Record titles",
+            "Ollama keep_alive for the title model. 0 = unload right after the reply.",
+            "Otherwise 12B holds VRAM for another 30 min (LOCAL_LLM_KEEPALIVE), and a call during that time leaves the copilot "
+            "and transcription without room. Cost: every suggestion from a cold start (~45 s instead of ~15)."),
+    Setting("LOCAL_TITLE_TIMEOUT", "180", "float", "Record titles",
+            "Timeout of one title and description suggestion (sec).",
+            "The default 60 s of local_llm is too small: 12B on a cold start takes longer to load into VRAM."),
+    Setting("COPILOT_MODEL_API", "claude-sonnet-5", "str", "Copilot",
+            "\"Regular\" Claude model for verifying what is important (local-first cascade).",
+            "Read every time (not cached) in copilot/config.py — the model for the regular (not \"gnarly\") "
+            "escalation to Claude."),
+    Setting("COPILOT_MODEL_API_GNARLY", "claude-opus-5", "str", "Copilot",
+            "Arbiter model for the copilot's 'gnarly'/uncertain cases.",
+            "Deliberately a DIFFERENT model from COPILOT_MODEL_API — do not collapse."),
+    Setting("COPILOT_TOPIC_TICK_SEC", "6", "float", "Copilot",
+            "Tick period of the copilot topic state machine (sec).",
+            "Period of the _tick_sec loop in copilot/worker.py — how often the topic state is checked."),
+    Setting("COPILOT_TOPIC_WINDOW_CHARS", "200", "int", "Copilot",
+            "Minimum character window for evaluating a copilot topic.",
+            "_min_window_chars in copilot/worker.py — while the transcript window is smaller, topic evaluation does not "
+            "start."),
 
-    # --- Auth / доступ ---
-    Setting("RECALL_BIND_ALL", "", "bool", "Auth / доступ",
-            "Безпечний дефолт (Волна 0 / T1.1): слухати лише локальну машину. Вихід на\n"
-            "всю мережу — свідомий opt-in: RECALL_BIND_ALL=1 або FLASK_HOST=0.0.0.0.\n"
-            "Мережевий bind вимагає явного SECRET_KEY (інакше hard-fail) і, як правило,\n"
-            "RECALL_LOCAL_TRUSTED=0 + RECALL_API_KEY (див. нижче).",
-            "1 → SECRET_KEY-дефолт стає hard-fail (config.py), а не автоген.", scope="config"),
-    Setting("RECALL_LOCAL_TRUSTED", "1", "bool", "Auth / доступ",
-            "Запити з localhost не потребують ключа, поки увімкнено.",
-            "T1.2: вимкнути (0), якщо застосунок доступний по мережі і ключ треба навіть локально.",
+    # --- Auth / access ---
+    Setting("RECALL_BIND_ALL", "", "bool", "Auth / access",
+            "Safe default (Wave 0 / T1.1): listen only on the local machine. Going out to\n"
+            "the whole network is a conscious opt-in: RECALL_BIND_ALL=1 or FLASK_HOST=0.0.0.0.\n"
+            "A network bind requires an explicit SECRET_KEY (otherwise hard-fail) and, as a rule,\n"
+            "RECALL_LOCAL_TRUSTED=0 + RECALL_API_KEY (see below).",
+            "1 → the SECRET_KEY default becomes a hard-fail (config.py), not an autogen.", scope="config"),
+    Setting("RECALL_LOCAL_TRUSTED", "1", "bool", "Auth / access",
+            "Requests from localhost do not need a key while enabled.",
+            "T1.2: turn off (0) if the application is reachable over the network and a key is needed even locally.",
             default_headless="0"),
-    Setting("RECALL_API_KEY", "", "secret", "Auth / доступ",
-            "Ключ доступу для запитів НЕ з localhost (або RECALL_LOCAL_TRUSTED=0).",
-            "Заголовок X-Recall-Api-Key або Authorization: Bearer. Не задано → fail-closed для не-localhost."),
-    Setting("RECALL_PROXY_ALLOWED_IPS", "", "str", "Auth / доступ",
-            "Tailnet-IP пристроїв, яким можна в Recall через tailscale serve (через кому). У пристрою ДВІ адреси — "
-            "100.x і fd7a:… (IPv6): вписуй обидві, serve передає ту, якою прийшов клієнт.",
-            "Запит із localhost з X-Forwarded-For/Tailscale-User-Login — проксійований: без IP тут або ключа → 401. "
-            "Порожньо → через проксі нікого (сервер vps-prod у тому ж tailnet теж)."),
+    Setting("RECALL_API_KEY", "", "secret", "Auth / access",
+            "Access key for requests NOT from localhost (or RECALL_LOCAL_TRUSTED=0).",
+            "Header X-Recall-Api-Key or Authorization: Bearer. Not set → fail-closed for non-localhost."),
+    Setting("RECALL_PROXY_ALLOWED_IPS", "", "str", "Auth / access",
+            "Tailnet IPs of devices allowed into Recall via tailscale serve (comma-separated). A device has TWO addresses — "
+            "100.x and fd7a:… (IPv6): enter both, serve passes the one the client came with.",
+            "A localhost request with X-Forwarded-For/Tailscale-User-Login is proxied: without an IP here or a key → 401. "
+            "Empty → nobody through the proxy (the vps-prod server in the same tailnet too)."),
 
-    # --- MCP-сервер ---
-    Setting("RECALL_API_URL", "http://127.0.0.1:5050", "str", "MCP-сервер",
-            "Адреса живого Flask (app.py), на яку mcp_server.py проксирує write/live/AI-дії.",
-            "Базовий API_URL у mcp_server.py — куди йдуть усі проксійовані HTTP-запити до app.py."),
-    Setting("RECALL_MCP_READONLY", "", "bool", "MCP-сервер",
-            "Аварійний вимикач усіх записів MCP (на читання не впливає).",
-            "За замовчуванням вимкнено (порожньо) — окремий тумблер від архітектурного "
-            "read-first (32 read-only тулзи)."),
-    Setting("RECALL_MCP_KEY", "", "secret", "MCP-сервер",
-            "Bearer-ключ для http-транспорту mcp_server.py.",
-            "Потрібен ЛИШЕ для --transport http (слухає 127.0.0.1:5060); дефолтний stdio ключа не потребує.\n"
-            'Згенерувати: python -c "import secrets; print(secrets.token_urlsafe(32))"'),
-    Setting("RECALL_MCP_DEBUG_LOG", "", "str", "MCP-сервер",
-            "1/true → логувати кожен виклик MCP-тулзи у logs/mcp_calls.log; або явний шлях.",
-            "За замовчуванням вимкнено (нуль-оверхед)."),
-    Setting("MCP_PORT", "5060", "int", "MCP-сервер",
-            "Порт http-транспорту mcp_server.py.",
-            "Діє лише з --transport http; дефолтний stdio-транспорт цей порт не використовує."),
-    Setting("RECALL_MCP_VISUAL", "images", "str", "MCP-сервер",
-            "Що з візуальної стрічки відео MCP віддає в Claude: images | text | off.",
-            "images — кадри й текст з екрана (через стоп-лист); text — лише текст, get_frame відмовляє; "
-            "off — жодного візуального, і екранні чанки зникають із search/grep/ask_archive. "
-            "Невідоме значення = off. UI Recall не зачіпає."),
-    Setting("RECALL_PRIVATE_CATEGORIES", "Юридичне,Особисте", "str", "MCP-сервер",
-            "Напрямки/проєкти, чиє візуальне не йде назовні (назви через кому).",
-            "Назва ловиться на будь-якому рівні дерева разом з нащадками; тезки ховаються всі. "
-            "Той самий стоп-лист — для MCP і бота K4."),
-    Setting("RECALL_PRIVATE_WORDS_FILE", "", "str", "MCP-сервер",
-            "Файл стоп-слів/імен (по рядку, # — коментар).",
-            "Порожньо — private.txt у корені проєкту (у .gitignore; приклад — private.example.txt). "
-            "Нема файла — стоп-слів нема; нечитабельний — візуальне ховається."),
+    # --- MCP server ---
+    Setting("RECALL_API_URL", "http://127.0.0.1:5050", "str", "MCP server",
+            "Address of the live Flask (app.py) to which mcp_server.py proxies write/live/AI actions.",
+            "The base API_URL in mcp_server.py — where all proxied HTTP requests to app.py go."),
+    Setting("RECALL_MCP_READONLY", "", "bool", "MCP server",
+            "Emergency switch for all MCP writes (does not affect reading).",
+            "Off by default (empty) — a separate toggle from the architectural "
+            "read-first (32 read-only tools)."),
+    Setting("RECALL_MCP_KEY", "", "secret", "MCP server",
+            "Bearer key for the http transport of mcp_server.py.",
+            "Needed ONLY for --transport http (listens on 127.0.0.1:5060); the default stdio needs no key.\n"
+            'Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"'),
+    Setting("RECALL_MCP_DEBUG_LOG", "", "str", "MCP server",
+            "1/true → log every MCP tool call to logs/mcp_calls.log; or an explicit path.",
+            "Off by default (zero overhead)."),
+    Setting("MCP_PORT", "5060", "int", "MCP server",
+            "Port of the http transport of mcp_server.py.",
+            "Applies only with --transport http; the default stdio transport does not use this port."),
+    Setting("RECALL_MCP_VISUAL", "images", "str", "MCP server",
+            "What of the video visual timeline MCP gives to Claude: images | text | off.",
+            "images — frames and on-screen text (through the stop list); text — text only, get_frame refuses; "
+            "off — nothing visual, and screen chunks disappear from search/grep/ask_archive. "
+            "An unknown value = off. The Recall UI is not affected."),
+    Setting("RECALL_PRIVATE_CATEGORIES", "Юридичне,Особисте", "str", "MCP server",
+            "Directions/projects whose visual content does not go outside (names separated by commas).",
+            "The name is matched at any level of the tree together with descendants; namesakes are all hidden. "
+            "The same stop list — for MCP and the K4 bot."),
+    Setting("RECALL_PRIVATE_WORDS_FILE", "", "str", "MCP server",
+            "File of stop words/names (one per line, # — comment).",
+            "Empty — private.txt in the project root (in .gitignore; example — private.example.txt). "
+            "No file — no stop words; unreadable — the visual content is hidden."),
 
-    # --- Труби за розкладом (K4) ---
-    Setting("PIPES_ENABLED", "0", "bool", "Труби",
-            "Брифінги за розкладом (K4, app/services/pipes.py): файли pipes/*.md запускаються самі.",
-            "1 → у процесі app.py (під __main__) daemon-потік раз на 30 с запускає труби, чий момент настав, "
-            "і один раз доганяє пропущене при старті. 0 → потік не стартує, один рядок у лозі."),
-    Setting("PIPES_RETRY_MINUTES", "15", "int", "Труби",
-            "Через скільки хвилин повторити запуск труби, що впав (дані, бот, інший збій).",
-            "Збій не закриває момент розкладу: планувальник пробує знову, поки не доставить або не "
-            "вичерпає PIPES_RETRY_MAX."),
-    Setting("PIPES_RETRY_MAX", "6", "int", "Труби",
-            "Скільки спроб на один момент розкладу (разом із першою).",
-            "Після стількох помилок планувальник чекає наступного моменту; у бот приходить «спроби "
-            "вичерпано». 6 спроб по 15 хв — близько півтори години після 9:00."),
-    Setting("TELEGRAM_BOT_TOKEN", "", "secret", "Труби",
-            "Токен бота доставки від @BotFather (окремий бот, не акаунт слухача).",
-            "Без нього (або без TELEGRAM_BOT_CHAT_ID) труби не шлють нічого — кожен запуск пишеться "
-            "в історію з помилкою «бот не налаштований»."),
-    Setting("TELEGRAM_BOT_CHAT_ID", "", "str", "Труби",
-            "Чат власника, куди бот шле брифінги: `python -m app.services.tg_bot whoami` після /start боту.",
-            "Бот шле ЛИШЕ сюди; інших адресатів код не приймає."),
-    Setting("PIPES_MODEL", "claude-sonnet-5", "str", "Труби",
-            "Модель Claude, що пише 1–2 рядки «головне» над карткою брифінгу.",
-            "Оцінка вартості ДО виклику більша за budget_usd труби, нема ключа або помилка → "
-            "те саме повідомлення без рядка «головне»."),
-    Setting("RECALL_PUBLIC_URL", "", "str", "Труби",
-            "Адреса Recall, яку видно з телефона (напр. https://home-pc.<tailnet>.ts.net через tailscale serve).",
-            "База посилань у картках брифінгу в Telegram. Порожньо → RECALL_API_URL (відкриваються лише на цьому ПК)."),
+    # --- Scheduled pipes (K4) ---
+    Setting("PIPES_ENABLED", "0", "bool", "Pipes",
+            "Scheduled briefings (K4, app/services/pipes.py): the pipes/*.md files run by themselves.",
+            "1 → in the app.py process (under __main__) a daemon thread every 30 s runs the pipes whose moment has come, "
+            "and once catches up on what was missed at startup. 0 → the thread does not start, one line in the log."),
+    Setting("PIPES_RETRY_MINUTES", "15", "int", "Pipes",
+            "After how many minutes to retry a pipe run that failed (data, bot, other failure).",
+            "A failure does not close the schedule moment: the scheduler tries again until it delivers or "
+            "exhausts PIPES_RETRY_MAX."),
+    Setting("PIPES_RETRY_MAX", "6", "int", "Pipes",
+            "How many attempts per schedule moment (including the first).",
+            "After this many errors the scheduler waits for the next moment; the bot receives \"attempts "
+            "exhausted\". 6 attempts of 15 min — about an hour and a half after 9:00."),
+    Setting("TELEGRAM_BOT_TOKEN", "", "secret", "Pipes",
+            "Delivery bot token from @BotFather (a separate bot, not the listener account).",
+            "Without it (or without TELEGRAM_BOT_CHAT_ID) pipes send nothing — every run is written "
+            "to the history with the error \"bot not configured\"."),
+    Setting("TELEGRAM_BOT_CHAT_ID", "", "str", "Pipes",
+            "The owner's chat to which the bot sends briefings: `python -m app.services.tg_bot whoami` after /start to the bot.",
+            "The bot sends ONLY here; the code accepts no other recipients."),
+    Setting("PIPES_MODEL", "claude-sonnet-5", "str", "Pipes",
+            "Claude model that writes 1–2 lines of \"the main thing\" above the briefing card.",
+            "If the cost estimate BEFORE the call is above the pipe's budget_usd, there is no key or an error → "
+            "the same message without the \"main thing\" line."),
+    Setting("RECALL_PUBLIC_URL", "", "str", "Pipes",
+            "Recall address visible from a phone (e.g. https://home-pc.<tailnet>.ts.net via tailscale serve).",
+            "Base of links in the briefing cards in Telegram. Empty → RECALL_API_URL (open only on this PC)."),
 
-    # --- Логування ---
-    Setting("RECALL_LOG_TO_FILE", "0", "bool", "Логування",
-            "Вмикає RotatingFileHandler модульного logger'а 'whisper_ui'.",
-            "За дефолтом вимкнено — другий хендлер на спільному файлі блокував rollover на Windows (WinError 32)."),
+    # --- Logging ---
+    Setting("RECALL_LOG_TO_FILE", "0", "bool", "Logging",
+            "Turns on the RotatingFileHandler of the module logger 'whisper_ui'.",
+            "Off by default — a second handler on the shared file blocked rollover on Windows (WinError 32)."),
 )
 
 
 def by_name() -> dict[str, Setting]:
-    """Реєстр як словник {name: Setting}."""
+    """The registry as a dict {name: Setting}."""
     return {s.name: s for s in REGISTRY}
 
 
@@ -711,16 +711,16 @@ def _lookup(name: str) -> Setting:
         return _BY_NAME[name]
     except KeyError:
         raise KeyError(
-            f"env-змінна {name!r} не зареєстрована у app.core.settings.REGISTRY"
+            f"env variable {name!r} is not registered in app.core.settings.REGISTRY"
         ) from None
 
 
 def env(name: str) -> str:
-    """Сирий рядок з os.environ, інакше профіле-залежний дефолт з реєстру.
+    """Raw string from os.environ, otherwise the profile-dependent default from the registry.
 
-    Резолюція (config-registry-fix-01, Contracts §Auth):
-    ``os.environ[name]`` → ``default_headless`` (якщо ``profile() == 'headless'``
-    і поле не ``None``) → ``default``. KeyError, якщо назва не зареєстрована.
+    Resolution (config-registry-fix-01, Contracts §Auth):
+    ``os.environ[name]`` → ``default_headless`` (if ``profile() == 'headless'``
+    and the field is not ``None``) → ``default``. KeyError if the name is not registered.
     """
     setting = _lookup(name)
     if name in os.environ:
@@ -731,7 +731,7 @@ def env(name: str) -> str:
 
 
 def env_bool(name: str) -> bool:
-    """Типізований bool-читач. Truthy-набір: '1'/'true'/'yes'/'on' (регістронезалежно)."""
+    """Typed bool reader. Truthy set: '1'/'true'/'yes'/'on' (case-insensitive)."""
     return env(name).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -744,18 +744,18 @@ def env_float(name: str) -> float:
 
 
 def profile() -> str:
-    """RECALL_PROFILE → 'desktop' (дефолт) або 'headless'. Інше значення → ValueError."""
+    """RECALL_PROFILE → 'desktop' (default) or 'headless'. Any other value → ValueError."""
     raw = os.environ.get("RECALL_PROFILE", "desktop").strip().lower()
     if raw not in ("desktop", "headless"):
         raise ValueError(
-            f"RECALL_PROFILE={raw!r} невідомий — очікується 'desktop' або 'headless'"
+            f"RECALL_PROFILE={raw!r} is unknown — expected 'desktop' or 'headless'"
         )
     return raw
 
 
-#: Системні/тестові env-змінні, які тест повноти реєстру пропускає — вони не
-#: належать домену Recall (PATH, PYTEST_CURRENT_TEST тощо) і не мають дефолту,
-#: осмисленого для .env.example.
+#: System/test env variables that the registry completeness test skips — they do not
+#: belong to the Recall domain (PATH, PYTEST_CURRENT_TEST, etc.) and have no default
+#: meaningful for .env.example.
 IGNORED_ENV_NAMES = frozenset({
     "WERKZEUG_RUN_MAIN",
     "PATH",
@@ -767,13 +767,13 @@ IGNORED_ENV_NAMES = frozenset({
     "TMP",
     "PYTHONPATH",
     "PYTEST_CURRENT_TEST",
-    "OMP_THREAD_LIMIT",   # виставляється дочірнім tesseract на час відео-OCR
-    "TESSDATA_PREFIX",    # змінна самого tesseract; Recall бере теку з OCR_TESSDATA_DIR
+    "OMP_THREAD_LIMIT",   # set by the child tesseract during video OCR
+    "TESSDATA_PREFIX",    # tesseract's own variable; Recall takes the folder from OCR_TESSDATA_DIR
 })
 
-#: Змінні, що йдуть у згенерований .env.example АКТИВНИМИ (без '#'), бо
-#: потрібні для звичайного локального старту — решта коментується як
-#: довідкова/опціональна (той самий стиль, що мав ручний .env.example).
+#: Variables that go into the generated .env.example ACTIVE (without '#'), because
+#: they are needed for a normal local start — the rest is commented out as
+#: reference/optional (the same style the hand-written .env.example had).
 _ACTIVE_BY_DEFAULT = frozenset({
     "FLASK_DEBUG", "FLASK_HOST", "FLASK_PORT", "APP_ENV", "SECRET_KEY",
     "FORCE_CPU", "LOG_LEVEL",
@@ -781,11 +781,11 @@ _ACTIVE_BY_DEFAULT = frozenset({
 
 
 def render_env_example() -> str:
-    """Згенерувати вміст .env.example з REGISTRY."""
+    """Generate the contents of .env.example from REGISTRY."""
     lines: list[str] = [
-        "# Recall — приклад .env",
-        "# ЗГЕНЕРОВАНО з app/core/settings.py — не редагувати вручну.",
-        "# Оновити: .venv/Scripts/python.exe -m app.core.settings env-example > .env.example",
+        "# Recall — example .env",
+        "# GENERATED from app/core/settings.py — do not edit by hand.",
+        "# Update: .venv/Scripts/python.exe -m app.core.settings env-example > .env.example",
     ]
     seen_groups: list[str] = []
     for s in REGISTRY:
@@ -799,11 +799,11 @@ def render_env_example() -> str:
             for gate_line in s.gates.splitlines():
                 lines.append(f"# {gate_line}" if gate_line else "#")
         if s.default_headless is not None:
-            # Профіле-залежний дефолт: пояснювальний коментар (обидва значення)
-            # + один валідний dotenv-рядок (дефолт desktop), закоментований '# '.
-            # Розкоментувавши його, оператор отримує синтаксично коректний NAME=value.
+            # Profile-dependent default: an explanatory comment (both values)
+            # + one valid dotenv line (the desktop default), commented out with '# '.
+            # Uncommenting it gives the operator a syntactically correct NAME=value.
             lines.append(
-                f"# профілі — desktop={s.default}, headless={s.default_headless}"
+                f"# profiles — desktop={s.default}, headless={s.default_headless}"
             )
             lines.append(f"# {s.name}={s.default}")
         else:
@@ -815,7 +815,7 @@ def render_env_example() -> str:
 def _main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="app.core.settings")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("env-example", help="Друкує згенерований .env.example у stdout")
+    sub.add_parser("env-example", help="Prints the generated .env.example to stdout")
     args = parser.parse_args(argv)
     if args.command == "env-example":
         sys.stdout.write(render_env_example())

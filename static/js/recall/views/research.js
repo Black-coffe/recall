@@ -1,13 +1,13 @@
-/* Recall — "Дослідження бренду / великий експорт". Збирає з УСІХ джерел
-   (аудіо, документи, Telegram, YouTube, записи) кожну згадку бренду/теми
-   і віддає у двох формах:
-     • Оригінали (.md) — дослівні фрагменти за датою, 0 токенів, без AI.
-     • Саммарі (.md)   — структурований звіт дешевою моделлю (Haiku) ПО
-                          фрагментах (не по цілих стенограмах) → мінімум токенів.
+/* Recall — "Дослідження бренду / великий експорт". Collects from ALL sources
+   (audio, documents, Telegram, YouTube, recordings) every mention of a brand/topic
+   and hands it over in two forms:
+     • Originals (.md) — verbatim fragments by date, 0 tokens, no AI.
+     • Summary (.md)   — a structured report by a cheap model (Haiku) OVER
+                          fragments (not whole transcripts) → minimum tokens.
 
-   Пошук лексичний: варіанти написання через кому (Polaris, Поларіс, поларис).
-   Стан (запит/напрямок) живе в URL — deep-linkable. SSE саммарі — через
-   api.researchSummary (fetch-reader, НЕ EventSource — recall_sse_connection_gotcha). */
+   The search is lexical: spelling variants separated by commas (Polaris, Поларіс, поларис).
+   State (query/category) lives in the URL — deep-linkable. SSE summary — via
+   api.researchSummary (fetch-reader, NOT EventSource — recall_sse_connection_gotcha). */
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
@@ -18,8 +18,8 @@
 
     let state = null, abortCtl = null, lastPreview = null;
 
-    // C9: напрямок/проєкт/тег — три різні осі; той самий текст, що на решті
-    // екранів (09 дає спільні хелпери, не спільний компонент фільтр-бару).
+    // C9: category/project/tag are three different axes; the same text as on the rest of
+    // the screens (09 gives shared helpers, not a shared filter-bar component).
     const FILTER_HINT = () => R.t('knowledge.research.filterHint');
 
     async function render(ctx) {
@@ -111,8 +111,8 @@
         R.router.replace('/research' + (s ? '?' + s : ''));
     }
 
-    // C4: спільні осі фільтра для preview і обох експортів — один список,
-    // щоб нова вісь не загубилась в одному з трьох викликів.
+    // C4: shared filter axes for the preview and both exports — one list,
+    // so a new axis is not lost in one of the three calls.
     function axes() {
         return {
             category_id: state.category_id || undefined,
@@ -121,7 +121,7 @@
             until: state.until || undefined,
         };
     }
-    // Порожня видача з активними фільтрами — пояснити, ЩО саме звужує.
+    // An empty result with active filters — explain WHAT exactly narrows it.
     function filterExplain() {
         const bits = [];
         if (state.category_id && UI.catPath) { const p = UI.catPath(Number(state.category_id)); if (p) bits.push(R.t('knowledge.ask.explainIn', { path: p })); }
@@ -225,7 +225,7 @@
         try {
             await R.researchExport.runOriginals(
                 Object.assign({ q: state.q }, axes()), box, ctx);
-        } catch (_) { /* помилка вже відрендерена у box */ }
+        } catch (_) { /* error already rendered in the box */ }
         finally { if (btn) btn.disabled = false; }
     }
 
