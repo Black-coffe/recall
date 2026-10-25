@@ -47,7 +47,8 @@ D_ACTIONS = ("transcript_delete", "transcript_bulk_delete", "taxonomy_delete", "
              "speaker_delete", "speaker_merge", "enrich_backfill", "telegram_backfill",
              "settings_remove_anthropic_key", "mailbox_disconnect", "mailbox_delete", "mailbox_backfill",
              "mailbox_label_enrich", "audio_delete", "transcript_version_evict",
-             "document_import_folder", "document_reparse", "video_describe_claude")
+             "document_import_folder", "document_reparse", "video_describe_claude",
+             "telegram_enable_chat")
 
 # Flask endpoint name -> action. A new destructive route must join this table by hand;
 # tests/test_endpoints_smoke.py fails on a DELETE rule or a delete/merge/purge/backfill
@@ -72,6 +73,7 @@ _D_ROUTES: dict[str, str] = {
     "documents.import_folder": "document_import_folder",
     "documents.reparse_document": "document_reparse",
     "documents.reparse_job": "document_reparse",
+    "telegram.tg_enable_chat": "telegram_enable_chat",
 }
 
 
@@ -99,11 +101,21 @@ def _video_describes_with_claude(view_args: dict) -> bool:
     return describe and video_vision._backend(backend) == "claude"
 
 
+def _telegram_real_repair(view_args: dict) -> bool:
+    """A repair that would fetch messages (not a dry run). Mirrors the view's truthiness of
+    ``dry_run``; a body that is not an object raises (the predicate error gates the request)."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError("repair body is not an object")
+    return not body.get("dry_run")
+
+
 # Flask endpoint name -> (action, predicate over the view args). Gated for non-``ui`` callers
 # when the predicate is true; the view reads ``g.evict_allowed`` / ``g.approved_action``.
 _CONDITIONAL_D_ROUTES: dict[str, tuple] = {
     "transcription.retranscribe_transcription": ("transcript_version_evict", _retranscribe_would_evict),
     "transcription.analyze_video_endpoint": ("video_describe_claude", _video_describes_with_claude),
+    "telegram.tg_repair": ("telegram_backfill", _telegram_real_repair),
 }
 
 _D_EXEMPT: dict[str, str] = {

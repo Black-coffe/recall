@@ -1,6 +1,6 @@
 # services — video timeline, screen secrets, privacy
 
-last-verified: 2026-10-25 (live_frames.py, thumbs_pass start/window); 2026-10-18
+last-verified: 2026-10-25 (4.31.0 filter_chats; live_frames.py, thumbs_pass start/window); 2026-10-18
 
 Part of `app/services/*`; hub — [services.md](services.md). Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`;
 measurement and limits — `docs/video-timeline.md`. Video exists only in screen recordings.
@@ -55,6 +55,9 @@ No torch/flask — imported from the stdio-MCP; K4 uses it too. What does not le
 - `screen_chunk_allowed(chunk, private, words, mode)` (only `speaker='екран'`; `off`/private/stop word → no),
   `filter_screen_chunks(db, chunks)` → `(kept, hidden)`; `PrivacyError` → all screen chunks removed (fail closed).
 - `category_change_exposes(db, old_cid, new_cid)` (4.19.0) — True when a re-direction takes a label out of a private direction into
-  an open one or none (DB failure -> `PrivacyError`); consumer: `blueprints/mail.py` PATCH for `X-Recall-Actor: mcp`.
+  an open one or none (DB failure -> `PrivacyError`); consumers: `blueprints/mail.py` PATCH for `X-Recall-Actor: mcp`, `telegram_chats._set_category` (every caller).
+- `filter_chats(rows, *, db_path, key_id='chat_id', key_title, key_username, key_category='category_id')` (4.31.0, `:130`) — chats/dialogs a non-UI
+  caller may see: a row is dropped for a stop word in title/username, its own private `category_id` (`key_category=None` skips this, used for dialogs), or an id that is a
+  monitored chat in a private direction. Unreadable stop words / failed check -> `PrivacyError` (caller refuses the whole call). Consumers: `telegram.py` `/chats`, `/dialogs`.
 - Consumers: `rag._mcp_screen_filter` (`rag.py:320`; only `channel='mcp'`, calls `:368,:526` before Claude),
   `mcp_server.py` (see root.md), `pipes_privacy.py`. The Recall UI is not affected by the filter.

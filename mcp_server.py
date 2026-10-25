@@ -656,6 +656,19 @@ _TOOL_CLASS.update({
                                      paid=True),
     "document_reparse": _entry("D", "intake", ("transcription_id",), open_world=True, paid=True),
 })
+
+# Telegram chats and automation (mcp-telegram-automation). Tag names are free text: not echoed.
+# `pipes` shares the `paid` family (20 a day) with document_ingest/transcript_ai.
+_TOOL_CLASS.update({
+    "telegram_chats": _r("telegram", open_world=True),  # scope=dialogs asks the listener live
+    "telegram": _entry("W", "intake", ("action", "chat_id", "category_id")),
+    "telegram_enable_chat": _entry("D", "intake", ("chat_id", "category_id"), open_world=True),
+    "telegram_repair_preview": _r("metadata", open_world=True),
+    "telegram_backfill": _entry("D", "intake", ("chat_id", "mode", "limit"), open_world=True),
+    "automation_status": _r("system"),
+    "pipes": _entry("W", "paid", ("action", "name", "wait_seconds"), open_world=True, paid=True, cap=20,
+                    window_s=_DAY_S),
+})
 # One call changes at most this many ids (tasks, records, speakers); more is BULK_LIMIT before any HTTP.
 _AGENT_BULK_MAX = 5
 # Writes that the `read` profile still registers (unless RECALL_MCP_READONLY is on).
@@ -4218,6 +4231,139 @@ def document_reparse(transcription_id: int) -> dict:
     return {"ok": True, "job_id": res.get("job_id")}
 
 
+# ---- Telegram chats and automation (mcp-telegram-automation) -----------------------------------
+# Private chats are filtered by app.py for every non-UI caller; no tool here takes a recipient:
+# a pipe always goes to its configured bot chat.
+_TG_SCOPES = ("monitored", "dialogs")
+_TG_ACTIONS = ("set_category", "set_tags", "disable_chat")
+_TG_TAGS_MAX = 20
+_TG_BACKFILL_MODES = ("history", "repair")
+_TG_BACKFILL_MAX = 500
+_PIPES_ACTIONS = ("run",)
+_PIPE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _whole(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+@_tool
+def telegram_chats(scope: str = "monitored", category_id: Optional[int] = None) -> dict:
+    """Telegram chats Recall knows. scope: monitored (the chats Recall listens to, from the DB: works
+    without the listener; each row has its direction `category_id` and `tags`; `category_id` narrows
+    to a direction and its projects) | dialogs (every dialog of the account, asked live from the
+    listener: `{chat_id, title, type, monitored}`; LISTENER_OFFLINE when it is not running).
+    Chats of a private direction or with a private word are never returned."""
+    if scope not in _TG_SCOPES:
+        return _err("INVALID_ARGUMENT", f"Unknown scope {scope!r}.", hint="scope is monitored | dialogs.")
+    if scope == "dialogs":
+        if category_id is not None:
+            return _err("INVALID_ARGUMENT", "category_id narrows scope=monitored only.")
+        return _api("GET", "/api/telegram/dialogs", timeout=75.0)
+    params = {"category_id": int(category_id)} if category_id is not None else None
+    return _api("GET", "/api/telegram/chats", params=params)
+
+
+@_tool
+def telegram(action: str, chat_id: int, category_id: Optional[int] = None,
+             tags: Optional[list[str]] = None) -> dict:
+    """Change a monitored Telegram chat (a WRITE tool; every change is journaled, its undo is in the
+    daily brief). Actions:
+    - set_category(chat_id, category_id): the chat's direction for its future messages (null = none);
+      a move out of a private direction is refused with PRIVATE_CATEGORY_CHANGE;
+    - set_tags(chat_id, tags<=20): replace the chat's tag set (applied to its whole history);
+    - disable_chat(chat_id): stop listening; the way back is `telegram_enable_chat`.
+    NOT_MONITORED = Recall does not listen to this chat (see telegram_chats)."""
+    if action not in _TG_ACTIONS:
+        return _bad_action("telegram", action, _TG_ACTIONS)
+    if not _whole(chat_id):
+        return _err("INVALID_ARGUMENT", "chat_id must be a whole number.")
+    base = f"/api/telegram/chats/{chat_id}"
+    if action == "set_category":
+        if category_id is not None and not _whole(category_id):
+            return _err("INVALID_ARGUMENT", "category_id must be a whole number or null.")
+        return _w_call("telegram", "PATCH", f"{base}/category", {"category_id": category_id})
+    if action == "set_tags":
+        if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
+            return _err("INVALID_ARGUMENT", "set_tags needs tags: a list of tag names.")
+        if len(tags) > _TG_TAGS_MAX:
+            return _err("INVALID_ARGUMENT", f"At most {_TG_TAGS_MAX} tags per chat.")
+        return _w_call("telegram", "PUT", f"{base}/tags", {"tags": tags})
+    return _w_call("telegram", "POST", f"{base}/disable", {})
+
+
+@_tool
+def telegram_enable_chat(chat_id: int, category_id: Optional[int] = None) -> dict:
+    """Start listening to a Telegram chat (a new one is taken from the account's dialogs), optionally
+    in a direction. DESTRUCTIVE class: the owner confirms in a Windows dialog. History is not loaded
+    by this action: use telegram_backfill(mode='history') after it."""
+    if not _whole(chat_id) or (category_id is not None and not _whole(category_id)):
+        return _err("INVALID_ARGUMENT", "chat_id and category_id must be whole numbers.")
+    body = {"category_id": category_id} if category_id is not None else {}
+    return _done(_gated("telegram_enable_chat", "POST", f"/api/telegram/chats/{chat_id}/enable", body,
+                        timeout=60.0))
+
+
+@_tool
+def telegram_repair_preview(chat_id: int) -> dict:
+    """How many messages of a supergroup the archive misses (no change, no dialog): `{missing_total,
+    would_attempt, sample, live_last_id}`. Asks the listener live and may take up to two minutes.
+    The repair itself is telegram_backfill(mode='repair')."""
+    if not _whole(chat_id):
+        return _err("INVALID_ARGUMENT", "chat_id must be a whole number.")
+    return _api("POST", "/api/telegram/repair", body={"chat_id": chat_id, "dry_run": True}, timeout=120.0)
+
+
+@_tool
+def telegram_backfill(chat_id: int, mode: str = "history", limit: int = 200) -> dict:
+    """Load a monitored chat's past from Telegram. DESTRUCTIVE class: the owner confirms in a Windows
+    dialog. mode: history (the last `limit` messages) | repair (fetch up to `limit` messages missing
+    from a supergroup; see telegram_repair_preview first). limit is clamped to 1..500."""
+    if mode not in _TG_BACKFILL_MODES:
+        return _err("INVALID_ARGUMENT", f"Unknown mode {mode!r}.", hint="mode is history | repair.")
+    if not _whole(chat_id) or not _whole(limit):
+        return _err("INVALID_ARGUMENT", "chat_id and limit must be whole numbers.")
+    n = max(1, min(_TG_BACKFILL_MAX, limit))
+    if mode == "history":
+        return _done(_gated("telegram_backfill", "POST", "/api/telegram/backfill",
+                            {"chat_id": chat_id, "limit": n}, timeout=60.0))
+    return _done(_gated("telegram_backfill", "POST", "/api/telegram/repair",
+                        {"chat_id": chat_id, "dry_run": False, "max_messages": n}))
+
+
+@_tool
+def automation_status(sections: Optional[list[str]] = None) -> dict:
+    """What runs by itself: calls (call prompts: watched apps, pending record/stop prompts), pipes
+    (each brief: schedule, last run, cooldown_sec), pollers (scheduler, brief buttons, mail),
+    telegram (listener online, monitored/enabled chats, bot_configured). sections narrows to some of
+    calls | pipes | pollers | telegram (default all). Live events: wait_for(channel='system:calls')
+    and wait_for(channel='pipes', events=['pipe_run'])."""
+    params = None
+    if sections is not None:
+        if not isinstance(sections, list) or any(not isinstance(s, str) for s in sections):
+            return _err("INVALID_ARGUMENT", "sections must be a list of section names.")
+        params = {"sections": ",".join(sections)}
+    return _api("GET", "/api/automation/status", params=params)
+
+
+@_tool
+def pipes(action: str, name: str, wait_seconds: int = 0) -> dict:
+    """Run a configured pipe (a brief) now, to its fixed recipient (a WRITE tool, PAID: the brief may
+    call Claude; 20 a day shared with document_ingest/transcript_ai). action: run. Returns `{ok,
+    job_id, created}`; `wait_seconds` (0..25) waits once and adds `job` (its `result` is the run).
+    The schedule is not moved. Refusals: COOLDOWN (one run per 10 min, `retry_after_sec`),
+    ALREADY_RUNNING, PIPES_DISABLED (the scheduler is off), NOT_CONFIGURED (no bot), NOT_FOUND.
+    Pipe names and last runs: automation_status(sections=['pipes'])."""
+    if action not in _PIPES_ACTIONS:
+        return _bad_action("pipes", action, _PIPES_ACTIONS)
+    if not isinstance(name, str) or not _PIPE_NAME.match(name):
+        return _err("INVALID_ARGUMENT", "name must be a pipe name (letters, digits, '-', '_').")
+    res = _w_call("pipes", "POST", f"/api/pipes/{name}/run", {})
+    if not isinstance(res, dict) or res.get("ok") is False:
+        return res
+    return _with_job(res, res.get("job_id"), wait_seconds)
+
+
 # ============================== RESOURCES =====================================
 # The split into direct-DB/proxy is reference text for a human; it does NOT decide what is
 # registered. The source of truth is the FastMCP registry (`_registered_tool_names`);
@@ -4244,7 +4390,8 @@ _ABOUT_PROXY = (
     "taxonomy_delete", "taxonomy_merge", "speaker_merge", "speaker_delete", "transcript_delete",
     "enrich_backfill", "get_youtube_info", "list_audio_library", "audio_download", "audio_item",
     "transcribe", "document_ingest", "job_cancel", "transcript_ai", "models", "system_diagnostics",
-    "document_import_folder", "document_reparse",
+    "document_import_folder", "document_reparse", "telegram_chats", "telegram", "telegram_enable_chat",
+    "telegram_repair_preview", "telegram_backfill", "automation_status", "pipes",
 )
 
 
@@ -4337,7 +4484,15 @@ def about() -> str:
         "back FREE (`cached: true`), nothing is ever forced. PAID: `transcript_ai`, `document_ingest` (20 a day "
         "together), `transcribe` (enrichment follows when a key is set), `document_import_folder`, "
         "`document_reparse`. `models(download|check_updates)` (two a day), `system_diagnostics()` (a zip "
-        "under logs/diagnostics, once per 10 min).\n\n"
+        "under logs/diagnostics, once per 10 min).\n"
+        "11. **Telegram and automation:** `telegram_chats(scope=monitored|dialogs)` — the chats (private ones "
+        "are never shown); `telegram(set_category|set_tags|disable_chat)` (a move out of a private direction is "
+        "refused); `telegram_enable_chat` and `telegram_backfill(mode=history|repair)` ask the owner; "
+        "`telegram_repair_preview` counts the gaps without a change. `automation_status` — call prompts, pipes, "
+        "pollers, the listener; `pipes(action='run', name)` runs a brief now to its fixed recipient (10 min "
+        "cooldown, PAID). Events: `wait_for(channel='system:calls')` (call_start, prompt, prompt_withdrawn, "
+        "call_end, autostop) and `wait_for(channel='pipes', events=['pipe_run'])`. Undo of your chat and task "
+        "changes lives in the owner's daily brief (an undo button per item), not in a tool.\n\n"
         "## Autonomy (does it work without a running app.py?)\n"
         f"**Direct-DB, standalone ({len(direct_db)}):** "
         + ", ".join(f"`{n}`" for n in direct_db) +
@@ -4352,12 +4507,13 @@ def about() -> str:
         "app password or an API key is rejected on every tool).\n\n"
         "**Destructive tools** (`recall/class` D: `mailbox_backfill`, `mailbox_label_enrich`, "
         "`mailbox_disconnect`, `settings_remove_anthropic_key`, `taxonomy_delete`, `taxonomy_merge`, "
-        "`speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`, `document_import_folder`, `document_reparse`) run only after the owner presses «Yes» in a "
+        "`speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`, `document_import_folder`, `document_reparse`, `telegram_enable_chat`, "
+        "`telegram_backfill`) run only after the owner presses «Yes» in a "
         "Windows dialog that Recall itself raises; a denial is final, do not retry it on your own. Settings: "
         "`settings(set, key=ui_lang|copilot_enabled, value)`, `settings(test_anthropic_key)`.\n\n"
         "**Direction (ADR-042):** MCP is moving from read-first to the full function of the Recall UI, "
-        "tool by tool. What is not a tool yet (recording control, Telegram chat selection, "
-        "deleting audio) is done in the Recall UI.\n"
+        "tool by tool. What is not a tool yet (recording control, deleting audio) is done in the "
+        "Recall UI.\n"
     )
 
 

@@ -2,7 +2,7 @@
 domain: scheduled-pipes
 tags: [k4, k5, telegram-bot, privacy, scheduler, brief-cards]
 related: [video-timeline-and-screen-secrets.md, rag-context-integrity.md]
-last-verified: 2026-10-15
+last-verified: 2026-10-25
 ---
 
 # Scheduled pipes: what leaves the archive through the bot
@@ -25,7 +25,9 @@ Invariants:
 
 Task buttons (K5, 4.15.0): tasks in a brief are numbered and the message carries an inline keyboard (done / cancelled / postpone 1, 7, 30 days, undo). Presses arrive by `getUpdates` long-polling (`brief_actions.ButtonPoller`, `callback_query` only), not a webhook: Recall has no public address. A press made while the PC sleeps waits up to 24 h at Telegram and applies on wake; the brief footer says so.
 - A press is accepted only from `TELEGRAM_BOT_CHAT_ID`; any other chat gets "No access" and changes nothing.
-- Status and due date change only through `commitments.apply_action` / `undo_action` (bot and web `PATCH /api/memory/action-items/<id>`), which write the change and its `action_item_events` row in one transaction. Undo reverts only the latest event of a task. No MCP tool changes a task (the MCP writes are `video_analyze`, `mailbox` and `settings`); the pipe registry stays read-only.
+- Status and due date change only through `commitments.apply_action` / `undo_action` (bot and web `PATCH /api/memory/action-items/<id>`), which write the change and its `action_item_events` row in one transaction. Undo reverts only the latest event of a task. The MCP `task` tool (4.26.0) goes through the same route and is stamped `source='mcp'`; a pipe itself never writes (the registry stays read-only).
+- Daily MCP summary (4.31.0, `pipes/mcp-actions.md`, tool `mcp_actions`, no model): lists what non-UI callers did in 24 h. A line gets an undo button (`m:<n>:t|c:<ref>`) only while its event is the last for that task, or for that chat and kind; offered inverses are task actions, chat direction changes and chat disables only. A chat undo goes through `telegram_chats.undo_event(source='bot')` and is refused when a later change exists (including one made in the SPA without a journal row), when the move would leave a private direction, or when the event created the chat. Items carrying a private `category_id` are hidden like any private item.
+- A pipe can also be run on demand (`POST /api/pipes/<name>/run`, MCP `pipes`): same recipient, same filters, one run per 10 min per pipe, not moving the schedule; `trigger='mcp'`.
 - `tg_bot.whoami` sets `allowed_updates` explicitly because Telegram remembers the poller's `callback_query`-only filter.
 
 Verified in: `app/services/brief_actions.py` (`handle`, `ButtonPoller`), `app/services/commitments.py:1395-1463`, `app.py:1274-1281`, `app/services/pipes.py` (`run_pipe`, `render_claude`, `_next_attempt`), `app/services/pipes_cards.py` (`render`, `_Guard`, `link_base`), `app/services/pipes_privacy.py` (`filter_data`, `mask`, `leaked_words`), `app/services/tg_bot.py` (`send`, `split_text`), `app/core/auth.py:100-147` (`_proxied_client`, `_is_authorized`), `app.py:1250` (`_maybe_start_pipes`).

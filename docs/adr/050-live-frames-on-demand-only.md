@@ -15,14 +15,13 @@ alternative, verbatim):
 > A8 amended: the capture supervisor changes (C5) but the live service still writes nothing.
 
 > **Rejected alternative: a background live timeline.** A thread that runs the thumbs pass continuously during the
-> call and caches changes so a range request is instant. Rejected by the owner ("Только по запросу"), and it would be
+> call and caches changes so a range request is instant. Rejected by the owner ("on request only"), and it would be
 > a second consumer changing the live session's load profile (the A10 invariant of mcp-live-call). Also rejected:
 > the MCP process reading the session directory and running ffmpeg/Tesseract itself (`mcp-stdio-no-heavy-models`;
 > the privacy filter and secret masking live in app.py).
 
 ## Options
-1. Background live timeline (a thread that keeps scanning and caching). Rejected by the owner ("Только по запросу",
-   "on request only"). It would also change the live session's load profile.
+1. Background live timeline (a thread that keeps scanning and caching). Rejected by the owner ("on request only"). It would also change the live session's load profile.
 2. The MCP process decodes the session files itself. Rejected: the MCP process does not run heavy work, and the privacy
    filter and secret masking live in app.py.
 3. Each call spawns bounded ffmpeg work in app.py and writes nothing. Chosen.

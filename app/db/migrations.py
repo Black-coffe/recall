@@ -2244,5 +2244,26 @@ def init_database(db_path: str):
                   "categories.created_source, transcriptions.meta_source')")
         logger.info("Migration v55: provenance columns")
 
+    # === v56: tg_chat_events - journal of chat direction / enabled changes (mcp-telegram-automation) ===
+    # The previous value is recorded at change time so a change can be undone; values are text
+    # (category_id or '' for none; '0'|'1' for enabled).
+    if current_version < 56:
+        c.execute('''CREATE TABLE IF NOT EXISTS tg_chat_events (
+                        id INTEGER PRIMARY KEY,
+                        at TEXT NOT NULL,
+                        chat_id INTEGER NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('category','enabled')),
+                        old_value TEXT,
+                        new_value TEXT,
+                        source TEXT NOT NULL,
+                        actor TEXT,
+                        undone_at TEXT,
+                        undone_by_event_id INTEGER)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_tg_chat_events_chat '
+                  'ON tg_chat_events(chat_id, kind, id)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(56, 'tg_chat_events: journal of chat direction and enabled changes')")
+        logger.info("Migration v56: tg_chat_events")
+
     conn.commit()
     conn.close()

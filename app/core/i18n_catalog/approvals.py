@@ -72,6 +72,10 @@ MESSAGES: dict = {
         "uk": "Описати кадри відео через Claude.",
         "en": "Describe the video frames through Claude.",
     },
+    "approvals.action.telegram_enable_chat": {
+        "uk": "Увімкнути слухання чату Telegram.",
+        "en": "Start listening to a Telegram chat.",
+    },
     # object kind
     "approvals.kind.record": {"uk": "Запис", "en": "Record"},
     "approvals.kind.records": {"uk": "Записи", "en": "Records"},
@@ -170,7 +174,17 @@ MESSAGES: dict = {
         "uk": "Кадри відео покинуть компʼютер і підуть в Anthropic (Claude) на опис; це платно.",
         "en": "The video frames leave this computer for Anthropic (Claude) to be described; this is paid.",
     },
+    "approvals.impact.telegram_enable_chat": {
+        "uk": "Нові повідомлення чату підуть в архів. Історію ця дія не завантажує.",
+        "en": "New messages of the chat go into the archive. This action does not load the history.",
+    },
     # extras
+    "approvals.extra.tg_chat_new": {
+        "uk": "Чат новий для Recall: буде додано.", "en": "The chat is new to Recall: it will be added.",
+    },
+    "approvals.extra.tg_chat_known": {
+        "uk": "Чат уже є в Recall.", "en": "The chat is already in Recall.",
+    },
     "approvals.extra.merge_into": {"uk": "Куди: «{name}».", "en": "Into: «{name}»."},
     "approvals.extra.merge_into_none": {"uk": "Куди: без напрямку.", "en": "Into: no direction."},
     "approvals.extra.model": {"uk": "Модель: {model}.", "en": "Model: {model}."},

@@ -188,6 +188,70 @@ MESSAGES: dict = {
         "uk": "↩ скасувати",
         "en": "↩ undo",
     },
+    "telegram.brief.mcp.title": {
+        "uk": "🤖 Дії MCP",
+        "en": "🤖 MCP actions",
+    },
+    "telegram.brief.mcp.tool": {
+        "uk": "Дії MCP",
+        "en": "MCP actions",
+    },
+    "telegram.brief.mcp.total": {
+        "uk": "за добу: {n}",
+        "en": "in 24 h: {n}",
+    },
+    "telegram.brief.mcp.refused": {
+        "uk": "⛔ відхилено: {n}",
+        "en": "⛔ refused: {n}",
+    },
+    "telegram.brief.mcp.undoable": {
+        "uk": "Можна скасувати",
+        "en": "Can be undone",
+    },
+    "telegram.brief.mcp.task": {
+        "uk": "📌 {text} → {action}",
+        "en": "📌 {text} → {action}",
+    },
+    "telegram.brief.mcp.chatCategory": {
+        "uk": "💬 {text}: напрямок {old} → {new}",
+        "en": "💬 {text}: direction {old} → {new}",
+    },
+    "telegram.brief.mcp.chatDisabled": {
+        "uk": "💬 {text}: слухання вимкнено",
+        "en": "💬 {text}: listening turned off",
+    },
+    "telegram.brief.mcp.noAudit": {
+        "uk": "журналу дій MCP ще немає",
+        "en": "the MCP action log does not exist yet",
+    },
+    "telegram.btn.undo.button": {
+        "uk": "↩ скасувати",
+        "en": "↩ undo",
+    },
+    "telegram.btn.undo.done": {
+        "uk": "↩ скасовано",
+        "en": "↩ undone",
+    },
+    "telegram.btn.undo.notFound": {
+        "uk": "Подію {id} не знайдено",
+        "en": "Event {id} not found",
+    },
+    "telegram.btn.undo.already": {
+        "uk": "Вже скасовано",
+        "en": "Already undone",
+    },
+    "telegram.btn.undo.created": {
+        "uk": "Цей чат додано цією дією: скасування його не видаляє",
+        "en": "This action added the chat: undo does not remove it",
+    },
+    "telegram.btn.undo.notLast": {
+        "uk": "Після цього чат уже змінювали: скасовується лише остання зміна",
+        "en": "The chat changed again since: only the last change can be undone",
+    },
+    "telegram.btn.undo.private": {
+        "uk": "Не скасовано: це вивело б чат із приватного напрямку",
+        "en": "Not undone: it would take the chat out of a private direction",
+    },
     "telegram.btn.noAccess": {
         "uk": "Немає доступу",
         "en": "No access",
@@ -255,6 +319,26 @@ MESSAGES: dict = {
     "telegram.err.repairSupergroup": {
         "uk": "ремонт по id доступний лише для супергруп (-100…): у решті чатів message_id з глобальної послідовності акаунта. Для них — /backfill за датами",
         "en": "repair by id is only available for supergroups (-100…): in other chats message_id comes from the account's global sequence. Use /backfill by date for them",
+    },
+    "telegram.err.privacyCheck": {
+        "uk": "Не вдалося перевірити, які чати приватні, тому список не видано",
+        "en": "Could not check which chats are private, so the list is not given out",
+    },
+    "telegram.err.privateCategoryChange": {
+        "uk": "Переносити чат із приватного напрямку в неприватний тут заборонено",
+        "en": "Moving a chat out of a private direction is refused here",
+    },
+    "telegram.err.listenerOffline": {
+        "uk": "Слухач Telegram не відповідає: без нього новий чат не знайти",
+        "en": "The Telegram listener does not answer: a new chat cannot be found without it",
+    },
+    "telegram.err.categoryUnknown": {
+        "uk": "Такого напрямку немає",
+        "en": "No such direction",
+    },
+    "telegram.err.categoryRequired": {
+        "uk": "category_id обов'язковий (число або null)",
+        "en": "category_id is required (a number or null)",
     },
     "telegram.coverage.note": {
         "uk": ("behind_messages рахується лише для супергруп (-100…); пропуски в id "

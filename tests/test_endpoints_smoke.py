@@ -486,6 +486,8 @@ class TestApprovalGateCoverage:
         "mail.mail_accounts_disconnect", "mail.mail_backfill", "mail.mail_label_enrich",
         # mcp-pipeline: folder import and document re-parse (sync route and its job twin)
         "documents.import_folder", "documents.reparse_document", "documents.reparse_job",
+        # mcp-telegram-automation: enabling a chat (a new one is created from the listener's dialogs)
+        "telegram.tg_enable_chat",
     }
     PLAN_A2_AND_EXTRAS = {
         "comments.delete", "bookmarks.delete_bookmark", "bookmarks.delete_saved_search",

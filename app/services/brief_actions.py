@@ -8,14 +8,17 @@ waits on the Telegram side for up to 24 h and is applied after wake-up; an older
 is lost (a line about this is at the bottom of the brief).
 
 A change goes only through ``commitments.apply_action``/``undo_action`` (the journal
-``action_item_events``), MCP stays read-only. A press is accepted only from the chat
-``TELEGRAM_BOT_CHAT_ID``.
+``action_item_events``) or, for the daily MCP summary, ``telegram_chats.undo_event`` (the
+journal ``tg_chat_events``). A press is accepted only from the chat ``TELEGRAM_BOT_CHAT_ID``.
 
 ``callback_data`` carries everything needed (≤64 bytes, no state on our side):
     ``a:<n>:<id>:<action>`` — action on a task (done|cancelled|postpone:1|7|30)
     ``p:<n>:<id>``       — show the deadline choice
     ``b:<n>:<id>``       — back to the three buttons
     ``u:<n>:<event>``    — undo an event
+    ``m:<n>:t|c:<event>`` — undo an MCP action from the daily summary: a task event
+                            (``commitments.undo_action``) or a chat journal event
+                            (``telegram_chats.undo_event``)
     ``x``                — nothing (the caption after an action)
 """
 from __future__ import annotations
@@ -33,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 #: 3 buttons per task, the Telegram limit is 100 per message.
 MAX_ITEMS = 33
+MAX_BUTTONS = 100
+#: MCP-summary undo kinds → the letter in ``m:<n>:<letter>:<ref>``.
+_UNDO_KINDS = {"task": "t", "chat": "c"}
 POLL_TIMEOUT = 15            # < tg_bot.TIMEOUT: long-poll must not run into the HTTP timeout
 _DONE_KEYS = {"done": "done", "cancelled": "cancelled", "postpone:1": "postpone1",
               "postpone:7": "postpone7", "postpone:30": "postpone30"}
@@ -83,13 +89,44 @@ def done_row(n: int, action: str, event_id: int, due_date: Optional[str] = None,
     return [_btn(f"{n} {label}", "x"), _btn(_t("undo", lang), f"u:{n}:{event_id}")]
 
 
-def keyboard(item_ids: list[int]) -> Optional[dict]:
-    """Numbering from 1 in display order; None — there are no buttons."""
+def undo_row(n: int, kind: str, ref: int, lang: Optional[str] = None) -> list[dict]:
+    """An MCP-summary line: undo a task event (``t``) or a chat journal event (``c``)."""
+    return [_btn(f"{n} {_t('undo.button', lang)}", f"m:{n}:{_UNDO_KINDS[kind]}:{ref}")]
+
+
+def keyboard(item_ids: list[int], undo_items: Optional[list[dict]] = None) -> Optional[dict]:
+    """Numbering from 1 in display order; None — there are no buttons.
+
+    ``undo_items`` (``[{n, kind, ref}]`` from the MCP summary) add one row each, numbered
+    after the tasks, within Telegram's 100 buttons per message."""
     rows = [task_row(n, i) for n, i in enumerate(item_ids[:MAX_ITEMS], 1)]
+    room = MAX_BUTTONS - 3 * len(rows)
+    rows += [undo_row(int(u["n"]), u["kind"], int(u["ref"]))
+             for u in (undo_items or [])[:max(0, room)] if u.get("kind") in _UNDO_KINDS]
     return {"inline_keyboard": rows} if rows else None
 
 
 # ------------------------------------------------------------------ press
+
+class _UndoRefused(ValueError):
+    """A chat undo the journal refused; the message is the localized callback text."""
+
+
+def _undo_chat_event(db_path: str, event_id: int, actor: str, lang: str) -> None:
+    """``telegram_chats.undo_event`` with its refusals turned into callback text."""
+    from app.services import privacy, telegram_chats
+    try:
+        telegram_chats.undo_event(db_path, event_id, source="bot", actor=actor)
+    except LookupError as e:
+        raise _UndoRefused(_t("undo.notFound", lang, id=event_id)) from e
+    except ValueError as e:
+        key = "undo.already" if str(e) == "undone" else "undo.created" if str(e) == "created" else None
+        raise _UndoRefused(_t(key, lang) if key else str(e)) from e
+    except telegram_chats.UndoNotLast as e:
+        raise _UndoRefused(_t("undo.notLast", lang)) from e
+    except (telegram_chats.PrivateCategoryChange, privacy.PrivacyError) as e:
+        raise _UndoRefused(_t("undo.private", lang)) from e
+
 
 def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
     """One ``callback_query`` → a DB change + a new keyboard. → reply text (for tests)."""
@@ -126,6 +163,16 @@ def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
             new_row = task_row(n, res["item_id"])
             reply = _t("undone", lang)
             logger.info("Brief buttons: event %s undone", eid)
+        elif kind == "m" and len(parts) == 4 and parts[2] in ("t", "c"):
+            n, eid = int(parts[1]), int(parts[3])
+            if parts[2] == "t":
+                commitments.undo_action(db_path, eid, source="bot", actor=actor)
+            else:
+                _undo_chat_event(db_path, eid, actor, lang)
+            new_row = [_btn(f"{n} {_t('undo.done', lang)}", "x")]
+            reply = _t("undone", lang)
+            logger.info("Brief buttons: MCP %s event %s undone",
+                        "task" if parts[2] == "t" else "chat", eid)
         else:
             reply = _t("unknown", lang)
     except (LookupError, ValueError) as e:

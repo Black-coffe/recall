@@ -13,6 +13,8 @@ encrypted), so a pipe goes through two steps, both without a model:
 
 Fail closed: a direction was not verified (DB failure) → an item with a source is hidden.
 An item without a source (digest topics) is checked against stop words only.
+An item carrying ``category_id`` (the daily MCP summary) is dropped when that direction is
+private; ``category_id=None`` is "no direction" and is kept.
 """
 from __future__ import annotations
 
@@ -89,6 +91,15 @@ def _task_tids(db_path: str, data: dict) -> dict[int, int]:
         raise PrivacyError(str(e)) from e
 
 
+def _private_cats(db_path: str) -> set[int]:
+    try:
+        with get_db_connection(db_path) as conn:
+            return privacy.private_category_ids(conn)
+    except Exception as e:  # noqa: BLE001 - failure = direction unknown, hidden below
+        logger.warning("pipes_privacy: private directions not determined (%s) - hiding", e)
+        raise PrivacyError(str(e)) from e
+
+
 def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
     """→ (data without private items, how many were hidden).
 
@@ -98,11 +109,14 @@ def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
     lists = [it for res in data.values() if isinstance(res, dict)
              for v in res.values() if isinstance(v, list) for it in v]
     category_ok = True
+    private_cats: set[int] = set()
     try:
         task_tids = _task_tids(db_path, data)
         tids = {_source_tid(it, task_tids) for it in lists}
         tids.discard(None)
         private = privacy.private_tids(db_path, tids)
+        if any(isinstance(it, dict) and it.get("category_id") is not None for it in lists):
+            private_cats = _private_cats(db_path)
     except PrivacyError:
         category_ok, task_tids, private = False, {}, set()
 
@@ -121,6 +135,11 @@ def filter_data(data: dict, *, db_path: str) -> tuple[dict, int]:
             if not category_ok or tid is None or tid in private:
                 hidden += 1
                 return False
+        # An item carrying its direction directly (the daily MCP summary); None = no direction.
+        cat = item.get("category_id") if isinstance(item, dict) else None
+        if cat is not None and (not category_ok or int(cat) in private_cats):
+            hidden += 1
+            return False
         return True
 
     out: dict = {}

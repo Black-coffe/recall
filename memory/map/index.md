@@ -19,7 +19,7 @@ an entry point: where to go for a feature without rereading half the repo.
 | [root-processes.md](root-processes.md) | Separate processes: `telegram_listener.py`/`telegram_login.py`, `mcp_server.py` |
 | [blueprints.md](blueprints.md) | HTTP layer: overview of 18 blueprints (~190 endpoints) + system/events/automation/settings/connect/comments/documents/mail/copilot/speakers/bookmarks |
 | [blueprints-media.md](blueprints-media.md) | transcription (video, export), audio_library, youtube, recording (K2 autoprompt) |
-| [blueprints-memory.md](blueprints-memory.md) | memory (categories, tags, RAG, action-items), research, telegram |
+| [blueprints-memory.md](blueprints-memory.md) | memory (categories, tags, RAG, action-items), research, telegram (4.31.0: journaled chat category/enable/tags routes) |
 | [services.md](services.md) | `app/services/*` — hub: 11 slices `services-*.md` (media, video-privacy, pipes-bot, taxonomy, embeddings, retrieval, enrichment, telegram, mail, entities, infra) |
 | [services-mail.md](services-mail.md) | Gmail ingest (4.18.0): `mail_accounts`/`mail_imap`/`mail_parse`/`mail_sync` (+`MailPoller`), `document_ingest`; 4.19.0 `connect_links`/`secret_shape`/`settings_secrets` |
 | [services-infra.md](services-infra.md) | job_queue, sse_broker ring, env_file, error_codes; 4.22.0 approval gate (`approval_gate`/`approvals`/`approval_summaries`) + `audit_hooks`/`mcp_actions` |

@@ -1293,6 +1293,7 @@ def _maybe_start_call_watcher():
             stop_fn=stop_session,
             notifier=ToastNotifier(icon_path=os.path.join(_root, 'static', 'icon-192.png')),
             log_path=os.path.join(_root, 'logs', 'call_watch.jsonl'),
+            publisher=lambda event, data: sse_broker.publish("system:calls", event, data),
         )
     except Exception as e:
         logger.warning("Call hints failed to start: %s", e, exc_info=True)

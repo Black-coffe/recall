@@ -123,7 +123,7 @@ class TestPipeFile:
 
     def test_shipped_pipe_files_load(self):
         names = {p.name: p for p in pipes.load_pipes()}
-        assert set(names) == {"weekly-digest", "dropped-commitments", "open-questions"}
+        assert set(names) == {"weekly-digest", "dropped-commitments", "open-questions", "mcp-actions"}
         assert names["open-questions"].skip_if_empty is True
         assert names["open-questions"].schedule.expr == "0 9 * * 1-5"
         assert names["weekly-digest"].schedule.expr == "0 9 * * 1"
@@ -470,3 +470,177 @@ class TestNotCollected:
         run_pipe(self._q(), db_path=db, deliver=sent.append)
         assert "⚠️ Питання з Telegram не зібрано" in sent[0]
         assert "💡 Питань нема." in sent[0]
+
+
+# --------------------- story mcp-telegram-automation-03: lock, cooldown, mcp, event
+
+def _slow_tool(entered, gate):
+    def tool(db_path, now):
+        entered.set()
+        gate.wait(5)
+        return DATA_FULL
+    return tool
+
+
+class TestConcurrency:
+    def test_concurrent_same_pipe_one_runs_other_busy(self, db, no_key, monkeypatch):
+        import threading
+        gate, entered = threading.Event(), threading.Event()
+        monkeypatch.setitem(pipes.TOOLS, "weekly_digest", _slow_tool(entered, gate))
+        sent, results = [], []
+        t = threading.Thread(target=lambda: results.append(
+            run_pipe(_pipe(), db_path=db, deliver=sent.append, trigger="schedule")))
+        t.start()
+        try:
+            assert entered.wait(5)
+            busy = run_pipe(_pipe(), db_path=db, deliver=sent.append, trigger="mcp")
+        finally:
+            gate.set()
+            t.join(5)
+        assert busy == {"id": None, "pipe": "звід", "trigger": "mcp", "status": "busy",
+                        "rendered_by": None, "cost_usd": 0.0, "error": "busy", "chars": 0}
+        assert results[0]["status"] == "ok"
+        assert len(pipes.list_runs(db)) == 1 and len(sent) == 1
+
+    def test_different_pipes_run_concurrently(self, db, fake_tools, no_key, monkeypatch):
+        import threading
+        gate, entered = threading.Event(), threading.Event()
+        monkeypatch.setitem(pipes.TOOLS, "weekly_digest", _slow_tool(entered, gate))
+        fake_tools("open_questions", {"questions": [{"q": "Коли?"}], "me": {"name": "Андрій"}})
+        other = parse_pipe("---\nschedule: 0 9 * * *\ntools: open_questions\n"
+                           "channel: telegram\n---\nКоротко.", "питання")
+        t = threading.Thread(target=lambda: run_pipe(_pipe(), db_path=db,
+                                                     deliver=lambda x: None))
+        t.start()
+        try:
+            assert entered.wait(5)
+            res = run_pipe(other, db_path=db, deliver=lambda x: None)
+        finally:
+            gate.set()
+            t.join(5)
+        assert res["status"] == "ok" and res["id"] is not None
+
+    def test_scheduler_busy_leaves_moment_open(self, db, fake_tools, no_key):
+        fake_tools("weekly_digest", DATA_FULL)
+        sent = []
+        clock = {"t": datetime(2026, 10, 19, 9, 0)}
+        s = PipeScheduler([_pipe()], db_path=db, deliver=sent.append,
+                          clock=lambda: clock["t"], retry_minutes=15, retry_max=3)
+        lock = pipes._pipe_lock("звід")
+        lock.acquire()
+        try:
+            assert s.step() == []
+        finally:
+            lock.release()
+        assert pipes.list_runs(db) == [] and sent == []
+        clock["t"] = datetime(2026, 10, 19, 9, 1)
+        assert [(r["trigger"], r["status"]) for r in s.step()] == [("schedule", "ok")]
+
+
+class TestMcpTrigger:
+    def test_mcp_run_does_not_close_moment(self, db, fake_tools, no_key):
+        fake_tools("weekly_digest", DATA_FULL)
+        run_pipe(_pipe(), db_path=db, deliver=lambda t: None, trigger="mcp",
+                 now=datetime(2026, 10, 19, 9, 30))
+        sent = []
+        s = PipeScheduler([_pipe()], db_path=db, deliver=sent.append,
+                          clock=lambda: datetime(2026, 10, 19, 12, 0),
+                          retry_minutes=15, retry_max=3)
+        assert [r["trigger"] for r in s.step("catchup")] == ["catchup"]
+        assert len(sent) == 1
+
+
+class TestCooldown:
+    NOW = datetime(2026, 10, 19, 12, 0)
+
+    def _row(self, db, status, started, finished=None):
+        import sqlite3
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO pipe_runs (pipe, trigger, started_at, finished_at, status) "
+                         "VALUES ('звід', 'mcp', ?, ?, ?)", (started, finished, status))
+
+    def test_empty_table_is_free(self, db):
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 0
+
+    @pytest.mark.parametrize("status", ["ok", "skipped", "blocked"])
+    def test_recent_run_blocks(self, db, status):
+        self._row(db, status, "2026-10-19 11:56:00", "2026-10-19 11:57:00")
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 7 * 60
+
+    def test_error_does_not_block(self, db):
+        self._row(db, "error", "2026-10-19 11:58:00", "2026-10-19 11:59:00")
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 0
+
+    def test_old_run_is_free(self, db):
+        self._row(db, "ok", "2026-10-19 11:45:00", "2026-10-19 11:49:00")
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 0
+
+    def test_running_younger_than_stale_blocks(self, db):
+        self._row(db, "running", "2026-10-19 11:45:00")
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 15 * 60
+
+    def test_stale_running_is_free(self, db):
+        self._row(db, "running", "2026-10-19 11:00:00")
+        assert pipes.cooldown_remaining(db, "звід", now=self.NOW) == 0
+
+    def test_other_pipe_does_not_block(self, db):
+        self._row(db, "ok", "2026-10-19 11:59:00", "2026-10-19 11:59:00")
+        assert pipes.cooldown_remaining(db, "інша", now=self.NOW) == 0
+
+
+class TestRunEvent:
+    @pytest.fixture
+    def events(self, monkeypatch):
+        got = []
+        monkeypatch.setattr(pipes.sse_broker.broker, "publish",
+                            lambda ch, ev, data: got.append((ch, ev, data)))
+        return got
+
+    def _assert_event(self, events, res, status):
+        assert len(events) == 1
+        ch, ev, data = events[0]
+        assert (ch, ev) == ("pipes", "pipe_run")
+        assert data == {"pipe": "звід", "run_id": res["id"], "status": status,
+                        "trigger": res["trigger"], "rendered_by": res["rendered_by"],
+                        "cost_usd": res["cost_usd"]}
+
+    def test_ok_event_without_text(self, db, fake_tools, no_key, events):
+        fake_tools("weekly_digest", DATA_FULL)
+        res = run_pipe(_pipe(), db_path=db, deliver=lambda t: None, trigger="mcp")
+        self._assert_event(events, res, "ok")
+        assert "Олені" not in repr(events)
+
+    def test_skipped_event(self, db, fake_tools, no_key, events):
+        fake_tools("weekly_digest", {"this_week": [], "overdue": []})
+        res = run_pipe(_pipe(skip_if_empty="true"), db_path=db, deliver=lambda t: None)
+        self._assert_event(events, res, "skipped")
+
+    def test_blocked_event(self, db, fake_tools, no_key, events, tmp_path):
+        (tmp_path / "private.txt").write_bytes(b"\xff\xfe\xfa")
+        fake_tools("weekly_digest", DATA_FULL)
+        res = run_pipe(_pipe(), db_path=db, deliver=lambda t: None)
+        self._assert_event(events, res, "blocked")
+
+    def test_error_event(self, db, fake_tools, no_key, events):
+        fake_tools("weekly_digest", RuntimeError("boom"))
+        res = run_pipe(_pipe(), db_path=db, deliver=lambda t: None)
+        self._assert_event(events, res, "error")
+
+    def test_busy_publishes_nothing(self, db, fake_tools, no_key, events):
+        fake_tools("weekly_digest", DATA_FULL)
+        lock = pipes._pipe_lock("звід")
+        lock.acquire()
+        try:
+            assert run_pipe(_pipe(), db_path=db, deliver=lambda t: None)["status"] == "busy"
+        finally:
+            lock.release()
+        assert events == []
+
+    def test_broker_failure_keeps_status(self, db, fake_tools, no_key, monkeypatch):
+        def boom(*a):
+            raise RuntimeError("broker down")
+        monkeypatch.setattr(pipes.sse_broker.broker, "publish", boom)
+        fake_tools("weekly_digest", DATA_FULL)
+        res = run_pipe(_pipe(), db_path=db, deliver=lambda t: None)
+        assert res["status"] == "ok"
+        assert pipes.list_runs(db)[0]["status"] == "ok"

@@ -143,7 +143,8 @@ class CallWatcher:
 
     def __init__(self, *, apps: frozenset[str], prompt_seconds: float, autostop_minutes: float,
                  base_url: str, enumerate_calls, live_sessions, stop_fn, notifier,
-                 clock=time.monotonic, wall=time.time, log_path: str | None = None):
+                 clock=time.monotonic, wall=time.time, log_path: str | None = None,
+                 publisher=None):
         self.apps = frozenset(apps)
         self.prompt_seconds = float(prompt_seconds)
         self.autostop_sec = float(autostop_minutes) * 60.0
@@ -155,6 +156,7 @@ class CallWatcher:
         self._clock = clock
         self._wall = wall
         self._log_path = log_path
+        self._publisher = publisher
         self._lock = threading.Lock()
         self._calls: dict[str, _Call] = {}
         self._prompts: dict[str, _Prompt] = {}
@@ -200,6 +202,7 @@ class CallWatcher:
         effects: list = []
         with self._lock:
             self._tick_calls(now, snap, live, effects)
+            self._withdraw_recorded(live, effects)
             self._tick_autostop(now, live, effects)
             self._expire(now, effects)
         self._run_effects(effects)
@@ -237,6 +240,7 @@ class CallWatcher:
     def _confirm(self, now, call: _Call, live, effects) -> None:
         call.confirmed = True
         self._log('call_start', exe=call.exe, after_sec=round(now - call.since, 1))
+        self._emit(effects, 'call_start', exe=call.exe)
         for w in list(self._watches.values()):        # the call resumed in a recording we asked about
             if w.exe == call.exe:
                 self._drop_watch(w.sid, 'call_resumed', effects)
@@ -254,15 +258,18 @@ class CallWatcher:
              (tr('svc_recording.call.prompt.sources'), self._url(p.id, 'sources'))],
             launch_url=self._url(p.id, 'sources'), reminder=True))
         self._log('prompt', exe=call.exe, prompt=p.id)
+        self._emit(effects, 'prompt', kind='record', exe=call.exe)
 
     def _end_call(self, now, call: _Call, live, effects) -> None:
         del self._calls[call.exe]
         reason = 'inactive' if now - call.last_live >= END_INACTIVE_SEC else 'silence'
         self._log('call_end', exe=call.exe, reason=reason, duration_sec=round(now - call.since, 1))
+        self._emit(effects, 'call_end', exe=call.exe)
         if call.prompt_id and call.prompt_id in self._prompts:
             self._prompts.pop(call.prompt_id)
             effects.append(lambda pid=call.prompt_id: self._notifier.remove(pid))
             self._log('prompt_withdrawn', exe=call.exe, prompt=call.prompt_id)
+            self._emit(effects, 'prompt_withdrawn', kind='record', exe=call.exe, reason='call_end')
         for s in live:
             sid = s['sid']
             if s.get('is_paused') or sid in self._watches or not captures(call.exe, s.get('system_source')):
@@ -278,6 +285,7 @@ class CallWatcher:
                  (tr('svc_recording.call.ended.keep'), self._url(p.id, 'keep'))],
                 reminder=True))
             self._log('stop_prompt', exe=call.exe, prompt=p.id)
+            self._emit(effects, 'prompt', kind='stop', exe=call.exe, session_id=sid)
 
     def _tick_autostop(self, now, live, effects) -> None:
         by_sid = {s['sid']: s for s in live}
@@ -308,6 +316,7 @@ class CallWatcher:
             self._log('autostop_failed', exe=w.exe, error=type(exc).__name__)
             return
         self._log('autostop', exe=w.exe, silence_min=round(self.autostop_sec / 60, 1))
+        self._publish('autostop', {'exe': w.exe, 'label': app_label(w.exe), 'session_id': w.sid})
         self._notifier.show(f'{w.prompt_id}-done', tr('svc_recording.call.autostopped.title'),
                             tr('svc_recording.call.autostopped.body',
                                minutes=f'{self.autostop_sec / 60:g}'),
@@ -321,6 +330,19 @@ class CallWatcher:
                     self._watches.pop(p.session_id, None)
                 effects.append(lambda pid=pid: self._notifier.remove(pid))
                 self._log('prompt_expired', exe=p.exe, prompt=pid)
+                self._emit(effects, 'prompt_withdrawn', kind=p.kind, exe=p.exe, reason='expired')
+
+    def _withdraw_recorded(self, live, effects) -> None:
+        """A pending «record» prompt whose app a live recording already captures is withdrawn."""
+        for pid, p in list(self._prompts.items()):
+            if p.kind != 'record':
+                continue
+            if not any(captures(p.exe, s.get('system_source')) for s in live):
+                continue
+            self._prompts.pop(pid)
+            effects.append(lambda pid=pid: self._notifier.remove(pid))
+            self._log('prompt_withdrawn', exe=p.exe, prompt=pid, reason='session_started')
+            self._emit(effects, 'prompt_withdrawn', kind='record', exe=p.exe, reason='session_started')
 
     # ------------------------------------------------------------ actions (HTTP thread)
 
@@ -353,6 +375,7 @@ class CallWatcher:
                 self._watches.pop(p.session_id, None)
             effects.append(lambda: self._notifier.remove(token))
             self._log('click', exe=p.exe, prompt=token, action=action)
+            self._emit(effects, 'prompt_withdrawn', kind=p.kind, exe=p.exe, reason='consumed')
             info = {'kind': p.kind, 'exe': p.exe, 'label': app_label(p.exe),
                     'mic_endpoint': p.mic_endpoint, 'session_id': p.session_id}
         self._run_effects(effects)
@@ -368,6 +391,7 @@ class CallWatcher:
             self._prompts.pop(prompt_id)
             effects.append(lambda: self._notifier.remove(prompt_id))
             self._log('dismiss', exe=p.exe, prompt=prompt_id)
+            self._emit(effects, 'prompt_withdrawn', kind=p.kind, exe=p.exe, reason='dismissed')
         self._run_effects(effects)
         return True
 
@@ -389,6 +413,21 @@ class CallWatcher:
 
     def _url(self, token: str, action: str) -> str:
         return f'{self.base_url}/api/recording/autoprompt/{quote(token)}/{action}'
+
+    def _emit(self, effects, event: str, *, exe: str, **fields) -> None:
+        """Queue a publish as a side effect (runs outside the lock). Payload: no token, no URL."""
+        if self._publisher is None:
+            return
+        data = {**fields, 'exe': exe, 'label': app_label(exe)}
+        effects.append(lambda: self._publish(event, data))
+
+    def _publish(self, event: str, data: dict) -> None:
+        if self._publisher is None:
+            return
+        try:
+            self._publisher(event, data)
+        except Exception:
+            logger.warning('call watcher publish of %s failed', event, exc_info=True)
 
     @staticmethod
     def _run_effects(effects) -> None:

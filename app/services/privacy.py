@@ -127,6 +127,37 @@ def private_tids(db_path: str, tids: Iterable[int]) -> set[int]:
         raise PrivacyError(str(e)) from e
 
 
+def filter_chats(rows: list, *, db_path: str, key_id: str = 'chat_id', key_title: str = 'title',
+                 key_username: str = 'username', key_category: Optional[str] = 'category_id') -> list:
+    """Telegram chats or dialogs a non-UI caller may see. A row is dropped when its title or
+    username has a stop word, its own direction (``key_category``) is private, or its id is a
+    monitored chat in a private direction (descendants included). Unreadable stop words or a
+    failed direction check -> ``PrivacyError`` (the caller refuses the whole call)."""
+    words = stop_words()
+    try:
+        with get_db_connection(db_path) as conn:
+            cats = private_category_ids(conn)
+            private_ids: set = set()
+            if cats:
+                marks = ','.join('?' * len(cats))
+                private_ids = {r[0] for r in conn.execute(
+                    f'SELECT chat_id FROM tg_monitored_chats WHERE category_id IN ({marks})',
+                    sorted(cats))}
+    except Exception as e:  # noqa: BLE001 - any check failure = refuse
+        logger.warning("privacy: chats not verified (%s)", e)
+        raise PrivacyError(str(e)) from e
+    kept = []
+    for row in rows:
+        if has_stop_word(row.get(key_title), words) or has_stop_word(row.get(key_username), words):
+            continue
+        if key_category and row.get(key_category) in cats:
+            continue
+        if row.get(key_id) in private_ids:
+            continue
+        kept.append(row)
+    return kept
+
+
 def screen_chunk_allowed(chunk: dict, private: set, words: list[str], mode: str) -> bool:
     """May a chunk from on-screen text (speaker='екран') be given out via MCP?
     Other chunks are not affected by the filter."""

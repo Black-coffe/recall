@@ -36,6 +36,9 @@ comtypes+pycaw for process loopback). ADR-026 (+ amendments A1-A4). Wiki: `docs/
   `tick()` is testable). Call = listed exe with mic AND out Active for `prompt_seconds` and `SPEECH_PEAK=0.02` on both sides →
   toast «Record it?»; call end → «Stop recording?», then `autostop_minutes` of silence → `stop_fn` (Stop button path).
   `pending()/consume(token,action)/dismiss(id)`: one-time token, TTL 3 h. JSONL decision log (rotation 5 MB). `enumerate → None` keeps state.
+  4.31.0: `publisher=` (app.py:1296 -> `sse_broker.publish("system:calls", event, data)`) via `_emit` (queued as an effect, runs outside the lock; a publisher failure only warns):
+  `call_start`, `prompt{kind record|stop}`, `call_end`, `autostop`, `prompt_withdrawn{kind, exe, reason call_end|session_started|expired|consumed|dismissed}` (payload: no token, no URL).
+  `_withdraw_recorded`: a pending «record» prompt is withdrawn when a live recording already captures that app. Read by MCP `wait_for(channel='system:calls')` and `GET /api/automation/status` `calls`.
 - **toast.py** (K2) — Windows toasts via `powershell.exe -EncodedCommand` (WinRT), AUMID `Recall.CallPrompt`; `build_xml`, `show`,
   `remove`, `ensure_registered`. Buttons = protocol activation (URL). Returns `bool`, never raises.
 - **state.py** (4.20.0) — the one definition of "a recording is in progress": `recording_active(*, default=False)` :23 (any of `state.recording_service.
@@ -108,6 +111,6 @@ set) calls `after_save` (`recording.py:826-845`), so a second tab does not file 
 **Tests:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
 recording_service,recording_blueprint,session_store}.py`.
 
-last-verified: 2026-10-25 (live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: call_watch publisher, prompt_withdrawn; live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
 
 > **4.26.0:** autosave `http_json` sends the per-boot UI token (`autosave.py:221`), so its loopback calls count as `ui`, not as an agent (ADR-045).

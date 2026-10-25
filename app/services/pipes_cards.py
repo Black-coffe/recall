@@ -267,6 +267,55 @@ def _corrections(items: list, g: _Guard, base: str) -> list[str]:
     return ["\n".join(lines)]
 
 
+def _mcp_line(it: dict, g: _Guard) -> str:
+    text = g(it.get("text"), TASK_LEN) or _t("noText")
+    kind = it.get("kind")
+    if kind == "task":
+        from app.services.brief_actions import _done_label
+        act = str(it.get("action") or "")
+        return tr("telegram.brief.mcp.task", lang=server_lang(), text=text,
+                  action=html.escape(_done_label(act) or act, quote=False))
+    if kind == "chat_category":
+        return tr("telegram.brief.mcp.chatCategory", lang=server_lang(), text=text,
+                  old=g(it.get("old") or _t("noDir"), META_LEN),
+                  new=g(it.get("new") or _t("noDir"), META_LEN))
+    if kind == "chat_enabled":
+        return tr("telegram.brief.mcp.chatDisabled", lang=server_lang(), text=text)
+    return text
+
+
+def _mcp(res: dict, g: _Guard, *, first: int, undo_items: Optional[list],
+         titled: bool = True) -> list[str]:
+    """Daily MCP summary → paragraphs: group lines, then numbered items (``first`` + 1 …).
+    With ``undo_items`` (a list) the undoable items are appended as ``{n, kind, ref}``.
+    ``titled=False`` drops the section title (the message title already is it)."""
+    from app.services.brief_actions import MAX_ITEMS
+    groups = [x for x in res.get("groups") or [] if isinstance(x, dict)]
+    items = [x for x in res.get("items") or [] if isinstance(x, dict)]
+    if not groups and not items:
+        return []
+    out = []
+    total = _t('mcp.total', n=int(res.get('total') or 0))
+    head = f"<b>{_t('mcp.title')}</b> · {total}" if titled else total
+    lines = [head] + [f"• {g(x.get('tool'), META_LEN)} · {g(x.get('action'), META_LEN)}: "
+                      f"{int(x.get('count') or 0)}" for x in groups]
+    if res.get("refused"):
+        lines.append(_t("mcp.refused", n=int(res["refused"])))
+    out.append("\n".join(lines))
+    if items:
+        lines = [f"<b>{_t('mcp.undoable')}</b>"]
+        for i, it in enumerate(items[:MAX_ITEMS]):
+            n = first + i + 1
+            lines.append(f"<b>{n}.</b> {_mcp_line(it, g)}")
+            undo = it.get("undo")
+            if undo_items is not None and isinstance(undo, dict) and undo.get("ref") is not None:
+                undo_items.append({"n": n, "kind": undo.get("kind"), "ref": int(undo["ref"])})
+        if len(items) > MAX_ITEMS:
+            lines.append(_t("moreInRecall", n=len(items) - MAX_ITEMS))
+        out.append("\n".join(lines))
+    return out
+
+
 # ------------------------------------------------------------------ render
 
 _MD = re.compile(r"(\*\*|__|`+|~~)")
@@ -295,19 +344,23 @@ def link_base() -> str:
 
 
 def title_for(tools: Iterable[str]) -> str:
-    return " + ".join(_t("title." + t) if t in _TITLE_KEYS else t for t in tools)
+    return " + ".join(_t("title." + t) if t in _TITLE_KEYS
+                      else _t("mcp.title") if t == "mcp_actions" else t for t in tools)
 
 
 def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optional[str] = None,
            headline: Optional[str] = None, missing: Iterable[str] = (), hidden: int = 0,
            words: Optional[Iterable[str]] = None,
-           buttons: Optional[list] = None) -> tuple[str, list[str]]:
+           buttons: Optional[list] = None,
+           undo_items: Optional[list] = None) -> tuple[str, list[str]]:
     """→ (message HTML, stop words that occurred in fields). A non-empty list = do not send.
 
     ``words`` is the stop list (default ``privacy.stop_words()``; ``PrivacyError``
     propagates out). ``buttons`` (a list, K5): the tasks of the report and "missed" are numbered
     "1.", "2."…, their ids are appended there in number order (→ ``brief_actions.keyboard``),
-    and at the bottom a line appears saying the buttons work only with the PC on."""
+    and at the bottom a line appears saying the buttons work only with the PC on.
+    ``undo_items`` (a list): the MCP summary's undoable items, numbered after the tasks,
+    are appended as ``{n, kind, ref}`` (→ ``brief_actions.keyboard(..., undo_items)``)."""
     from app.services import privacy
     g = _Guard(privacy.stop_words() if words is None else words)
     base = (base_url or link_base()).rstrip("/")
@@ -328,8 +381,12 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
     if miss:
         paras.append("\n".join(miss))
     body: list[str] = []
+    mcp: list[dict] = []
     for tool, res in data.items():
         if not isinstance(res, dict):
+            continue
+        if "groups" in res and "items" in res:
+            mcp.append(res)
             continue
         if any(k in res for k in _TASK_KINDS):
             body += _blocks(_t("tasks"), _digest_tasks(res, d, g, base), d, g, base,
@@ -345,10 +402,14 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
         cov = res.get("coverage")
         if isinstance(cov, dict) and cov.get("total"):
             body.append(f"<i>{_t('coverage', dated=cov.get('dated', 0), total=cov['total'])}</i>")
+    for res in mcp:          # after the tasks: undo numbers continue the task numbers
+        first = len(buttons or []) + len(undo_items or [])
+        body += _mcp(res, g, first=first, undo_items=undo_items,
+                     titled=title != _t("mcp.title"))
     paras += body or [_t("nothingNew")]
     if hidden:
         paras.append(g(tr_n("telegram.brief.hidden", hidden, lang=server_lang())))
-    if buttons:
+    if buttons or undo_items:
         from app.services.brief_actions import footer
         paras.append(f"<i>{html.escape(footer(), quote=False)}</i>")
     return "\n\n".join(paras), sorted(g.leaked)

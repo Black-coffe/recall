@@ -136,6 +136,19 @@ def test_derivation_per_class():
     assert d_meta["recall/class"] == "D"
 
 
+def test_telegram_d_tools_derive_destructive_and_user_interaction():
+    full = load_mcp_copy()
+    tools = _tools(full)
+    for name in ("telegram_enable_chat", "telegram_backfill"):
+        ann = tools[name].annotations
+        assert (ann.readOnlyHint, ann.destructiveHint, ann.openWorldHint) == (False, True, True), name
+        assert tools[name].meta["anthropic/requiresUserInteraction"] is True, name
+        assert tools[name].meta["recall/class"] == "D", name
+    read = set(_tools(load_mcp_copy(profile="read")))
+    assert {"telegram_chats", "telegram_repair_preview", "automation_status"} <= read
+    assert not read & {"telegram", "pipes", "telegram_enable_chat", "telegram_backfill"}
+
+
 # --- profiles ---------------------------------------------------------------------------
 
 def test_default_profile_is_full():

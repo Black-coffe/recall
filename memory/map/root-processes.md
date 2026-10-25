@@ -1,7 +1,14 @@
 # root-processes — telegram_*, mcp_server.py
 
-last-verified: 2026-10-25 (live-video-frames 4.30.0: tool count + 2 tools); 2026-10-21 (mcp-pipeline 4.27.0: counts/registry block only); 2026-10-20 (mcp-archive-org 4.26.0: tool registry/counts/new tools re-read; mcp_server.py line numbers below :500 shifted by up to ~900, trust function names, `grep` them); 2026-10-19 (4.24.0)
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: tool count + 7 tools; older line numbers below :600 stale); 2026-10-25 (live-video-frames 4.30.0); 2026-10-21 (mcp-pipeline 4.27.0: counts/registry block only); 2026-10-20 (mcp-archive-org 4.26.0: tool registry/counts/new tools re-read; mcp_server.py line numbers below :500 shifted by up to ~900, trust function names, `grep` them); 2026-10-19 (4.24.0)
 
+**4.31.0 (mcp-telegram-automation): 89 tools = 54 R + 35 W/D.** Registry block `_TOOL_CLASS.update` at `mcp_server.py:662`; tools at :4251-4365; `_TG_SCOPES|_TG_ACTIONS|_TG_TAGS_MAX=20` :4238.
+New R: `telegram_chats(scope monitored|dialogs, category_id?)` (monitored from DB via `GET /api/telegram/chats`; dialogs asks the listener live, `/dialogs`, timeout 75 s, `category_id` only with monitored; private chats never returned),
+`telegram_repair_preview(chat_id)` (live, up to 2 min), `automation_status(sections?)` (`GET /api/automation/status`). New W: `telegram(action set_category|set_tags|disable_chat, chat_id, category_id?, tags<=20)`
+(family `intake`; `PATCH .../category`, `PUT .../tags`, `POST .../disable`; each journaled, undo lives in the owner's daily brief, not a tool), `pipes(action run, name, wait_seconds 0..25)` (family `paid`, 20/day, `POST /api/pipes/<name>/run`,
+adds `job` via `_with_job`; refusals `COOLDOWN|ALREADY_RUNNING|PIPES_DISABLED|NOT_CONFIGURED|NOT_FOUND`). New D (`_gated`): `telegram_enable_chat(chat_id, category_id?)` (`POST /api/telegram/chats/<id>/enable`),
+`telegram_backfill(chat_id, mode history|repair, limit 1..500)` (history -> `POST /api/telegram/backfill`; repair -> `POST /api/telegram/repair` `dry_run:false`, gated only when `approval_gate._telegram_real_repair`). `wait_for(channel='system:calls')` carries `call_start|prompt|prompt_withdrawn|...` (`recording.md`).
+`about()` text item 11 describes Telegram and automation. Counts below (82 = 51 R + 31) are superseded.
 **4.30.0 (live-video-frames): 82 tools = 51 R + 31 W/D.** New R (class `ocr`, `_TOOL_CLASS` :559-560, in the read profile :4239): `get_live_video(session_id)`, `get_live_frames(session_id, t | start,end,mode,step,min_res,limit<=12,cursor,track,size)`
 (`mcp_server.py:3156,3180`; proxies `GET /api/recording/<sid>/live-video|live-frames`, timeout 180 s). `_live_visual_refusal` refuses only `RECALL_MCP_VISUAL=off` (`MCP_VISUAL_OFF`); a running session has no direction, so only the stop-words apply
 (frame with a stop word or no OCR text -> dropped, `private_hidden`); `images` -> text head + Image parts, `text` -> text only. Not live -> `available:false` + hint to `get_frame`. Page with `next_t` -> `cursor`.

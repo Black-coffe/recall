@@ -1,6 +1,6 @@
 # services — `app/services/*` (hub)
 
-last-verified: 2026-10-21 (4.27.0 index entries)
+last-verified: 2026-10-25 (4.31.0 index entries)
 
 Business logic outside HTTP. The map is split into slices of ≤80 lines; this file is only an index.
 Language (4.17.0): service code, comments, docstrings and logs are English (`.claude/rules/code-language.md`, guard
@@ -14,16 +14,16 @@ Separate map files: [copilot.md](copilot.md), [recording.md](recording.md).
   TG link repair, `record_meta` (title/description); 4.27.0 pipeline: `transcription_run`, `transcript_ai`, `model_download`,
   `diagnostics`, `import_roots`; re-transcribe/versions.
 - [services-video-privacy.md](services-video-privacy.md) — video visual timeline (`video_frames/analysis/timeline`), `live_frames` (frames of a running recording, 4.30.0),
-  `screen_secrets`, `privacy` (what does not go outside via MCP/pipes).
+  `screen_secrets`, `privacy` (what does not go outside via MCP/pipes; `filter_chats` 4.31.0).
 - [services-pipes-bot.md](services-pipes-bot.md) — scheduled pipes (`pipes*`), cards, `brief_actions` buttons,
-  Bot API `tg_bot` (K4/K5).
+  Bot API `tg_bot` (K4/K5); 4.31.0: `mcp_actions` daily summary pipe + chat/task undo buttons.
 - [services-taxonomy.md](services-taxonomy.md) — `categories`: direction→project tree, tags, filters, `resolve_node`.
 - [services-embeddings.md](services-embeddings.md) — `embeddings` (chunks, prefixes, epochs), `reembed`, `summaries`.
 - [services-retrieval.md](services-retrieval.md) — `retrieval` (RRF, rewrite, explain, thread context), `archive_grep`,
   `reranker`, `rag` (Ask Archive), `query_rewrite`, `categorize`.
 - [services-enrichment.md](services-enrichment.md) — `enrichment`, `document_parser`, `text_polishing`, `research`,
   `commitments` (deadlines, digests, `apply_action`), `scope`.
-- [services-telegram.md](services-telegram.md) — `tg_threads`, `tg_chat_context`, `tg_tasks`, `tg_questions`.
+- [services-telegram.md](services-telegram.md) — `tg_threads`, `tg_chat_context`, `tg_tasks`, `tg_questions`, `telegram_chats` (journaled chat direction/enable changes, undo; 4.31.0).
 - [services-mail.md](services-mail.md) — Gmail ingest (4.18.0): `mail_accounts` (keyring, `connect_account`), `mail_imap` (read-only),
   `mail_parse`, `mail_sync` (+`MailPoller`), `document_ingest` (shared `ingest_file`); 4.19.0: `connect_links`, `secret_shape`,
   `settings_secrets` (one-time local secret pages, MCP never sees a password/key).

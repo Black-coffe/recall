@@ -324,6 +324,64 @@ def _telegram_backfill(conn, va, body):
                    extra="unverified")
 
 
+def _telegram_repair(conn, va, body):
+    """A real repair (gated as ``telegram_backfill`` for a non-ui caller): the chat and the batch
+    size the view would fetch. A body the view refuses is answered with the view's own 400."""
+    if not isinstance(body, dict):
+        raise Unsummarisable("bad_body")
+    if body.get("chat_id") is None:
+        raise Precondition("bad_chat", 400, {"success": False, "error": tr("telegram.err.chatIdRequired")})
+    try:
+        cid = int(body["chat_id"])
+        count = max(1, min(int(body.get("max_messages", 200)), 500))
+    except (TypeError, ValueError):
+        raise Precondition("bad_numbers", 400, {
+            "success": False, "error": tr("telegram.err.repairNumbers")}) from None
+    if not str(cid).startswith("-100"):
+        raise Precondition("not_supergroup", 400, {
+            "success": False, "error": tr("telegram.err.repairSupergroup")})
+    row = conn.execute("SELECT chat_id, title, username FROM tg_monitored_chats WHERE chat_id = ?",
+                       (cid,)).fetchone()
+    if row is not None:
+        return Summary("telegram_backfill", "chat", _cut(_unquote(row["title"] or row["username"] or cid)),
+                       str(cid), count, False)
+    return Summary("telegram_backfill", "chat", _cut(str(cid), 60), "", count, False, extra="unverified")
+
+
+def _telegram_enable_chat(conn, va, body):
+    """Enable a chat: its title from Recall, else from the listener's dialogs (one 10 s call);
+    whether the row is new, and the direction asked for."""
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise Unsummarisable("bad_body")
+    category_id = body.get("category_id")
+    direction = None
+    if category_id is not None:
+        if isinstance(category_id, bool) or not isinstance(category_id, int):
+            raise Unsummarisable("bad_category")
+        direction = _category(conn, category_id)
+        if direction is None:
+            raise Unsummarisable("not_found")
+    chat_id = va.get("chat_id")
+    row = conn.execute("SELECT title, username FROM tg_monitored_chats WHERE chat_id = ?",
+                       (chat_id,)).fetchone()
+    state, name = "known", None
+    if row is not None:
+        name = row["title"] or row["username"] or str(chat_id)
+    else:
+        from app.blueprints import telegram as tg
+        ok, data = tg._listener_call("/dialogs", timeout=10)
+        for d in ((data or {}).get("dialogs") or []) if ok else []:
+            if isinstance(d, dict) and d.get("id") == chat_id:
+                state, name = "new", d.get("title") or d.get("username") or str(chat_id)
+                break
+        if name is None:
+            raise Unsummarisable("not_found")
+    extra = state + ("|" + _cut(direction["name"]) if direction is not None else "")
+    return Summary("telegram_enable_chat", "chat", _cut(_unquote(name)), str(chat_id), 0, True, extra=extra)
+
+
 def _anthropic_key(conn, va, body):
     present = bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip())
     return Summary("settings_remove_anthropic_key", "setting", "ANTHROPIC_API_KEY", "", 0, False,
@@ -493,6 +551,8 @@ BUILDERS = {
     "documents.reparse_document": _document_reparse,
     "documents.reparse_job": _document_reparse,
     "transcription.analyze_video_endpoint": _video_describe_claude,
+    "telegram.tg_enable_chat": _telegram_enable_chat,
+    "telegram.tg_repair": _telegram_repair,
 }
 
 
@@ -586,6 +646,12 @@ def _extra_line(s: Summary, lang: str) -> str | None:
         return tr("approvals.extra.direction", lang=lang, name=s.extra)
     if s.action == "document_reparse":
         return tr("approvals.extra.source_file", lang=lang, name=s.extra)
+    if s.action == "telegram_enable_chat":
+        state, _, direction = (s.extra or "known").partition("|")
+        line = tr("approvals.extra.tg_chat_new" if state == "new" else "approvals.extra.tg_chat_known", lang=lang)
+        if direction:
+            line += " " + tr("approvals.extra.direction", lang=lang, name=direction)
+        return line
     if s.action == "settings_remove_anthropic_key":
         return tr("approvals.extra.key_present" if s.extra == "yes" else "approvals.extra.key_absent",
                   lang=lang)

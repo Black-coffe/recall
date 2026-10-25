@@ -8,6 +8,25 @@ versioning: [SemVer](https://semver.org/).
 ### Fixed
 - VULYK tooling (`/vulyk-evolve` 2026-10-16): `scripts/scope-check.sh` no longer counts its own `memory/stats/scope.jsonl` as a story's out-of-scope edit (false `scope_breach` on every rerun in the same tree); registered as override 2 in `scripts/recall-vulyk-overrides.sh`.
 
+## [4.31.0] — 2026-10-25
+
+### Added
+- Telegram chats through MCP: `telegram_chats` (monitored chats or the account's dialogs; private directions and
+  stop-word chats hidden from the agent), `telegram` (change a chat's direction or tags, disable it; a move out of a
+  private direction is refused), `telegram_enable_chat` and `telegram_backfill` (history or repair) behind the native
+  Windows dialog, `telegram_repair_preview` (dry run, no dialog). HTTP: `PATCH /api/telegram/chats/<id>/category`,
+  `POST /api/telegram/chats/<id>/disable|enable`; every MCP change is journaled in `tg_chat_events` (migration v56).
+- Pipes on demand: MCP `pipes(action=run)` / `POST /api/pipes/<name>/run` sends a brief to the fixed bot chat, with a
+  per-pipe lock and a 10-minute cooldown; on-demand runs (`trigger=mcp`) never close a scheduled moment. Each run
+  publishes `pipe_run` on the `pipes` channel of `wait_for`.
+- `automation_status` (MCP) / `GET /api/automation/status`: call prompts (kind, app, age only, never the one-shot
+  action links), pipes, pollers, Telegram listener and bot.
+- Call watcher events on `wait_for` channel `system:calls`: `call_start`, `prompt`, `prompt_withdrawn`, `call_end`,
+  `autostop`. A pending "record" prompt is withdrawn as soon as a recording captures that app.
+- Daily "MCP did this" brief (`pipes/mcp-actions.md`, 09:00, $0, silent on an empty day) with undo buttons where an
+  inverse exists: task changes, a disabled chat, a changed chat direction. Undo is refused if the value changed again.
+- MCP 82 → 89 tools (54 read-only).
+
 ## [4.30.0] — 2026-10-25
 
 ### Added

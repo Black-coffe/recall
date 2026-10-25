@@ -107,6 +107,12 @@ ERROR_CODES: dict[str, int] = {
     # live-video-frames: frames of a recording that is still running
     "PAST_LIVE_EDGE": 409,
     "NOT_RECORDED": 404,
+    # mcp-telegram-automation: Telegram chats, pipes on demand
+    "LISTENER_OFFLINE": 503,
+    "COOLDOWN": 429,
+    "PIPES_DISABLED": 409,
+    "NOT_CONFIGURED": 503,
+    "NOT_MONITORED": 404,
 }
 
 _BY_STATUS = {

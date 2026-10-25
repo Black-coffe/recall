@@ -2,10 +2,10 @@
 
 A local MCP server (`mcp_server.py`) that gives Claude Code / Claude Desktop control of Recall.
 A separate process that reuses the `app.services.*` services and the existing HTTP endpoints,
-with no logic duplication. **82 MCP tools (51 read-only + 31 write)**: the write tools are
+with no logic duplication. **89 MCP tools (54 read-only + 35 write)**: the write tools are
 `mailbox`, `settings`, `video_analyze`, `retranscribe` and `activate_transcript_version`, plus four destructive ones that run only after the owner
 presses «Yes» in a native Windows dialog raised by Recall (`mailbox_backfill`, `mailbox_label_enrich`,
-`mailbox_disconnect`, `settings_remove_anthropic_key`); archive organisation adds six more writes (`task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`) and six destructive tools behind the same dialog (`taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`); everything an agent writes is marked `source: mcp`; `system_status` and `transcript_suggest_meta` are reads. The intake pipeline adds two reads (`get_youtube_info`, `list_audio_library`), eight writes (`transcribe`, `document_ingest`, `audio_download`, `audio_item`, `job_cancel`, `transcript_ai`, `models`, `system_diagnostics`) and two destructive tools (`document_import_folder`, `document_reparse`). The owner's decision to move MCP from read-first to
+`mailbox_disconnect`, `settings_remove_anthropic_key`); archive organisation adds six more writes (`task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`) and six destructive tools behind the same dialog (`taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`); everything an agent writes is marked `source: mcp`; `system_status` and `transcript_suggest_meta` are reads. The intake pipeline adds two reads (`get_youtube_info`, `list_audio_library`), eight writes (`transcribe`, `document_ingest`, `audio_download`, `audio_item`, `job_cancel`, `transcript_ai`, `models`, `system_diagnostics`) and two destructive tools (`document_import_folder`, `document_reparse`). Telegram and automation add three reads (`telegram_chats`, `telegram_repair_preview`, `automation_status`), two writes (`telegram`, `pipes`) and two destructive tools (`telegram_enable_chat`, `telegram_backfill`). The owner's decision to move MCP from read-first to
 full control is [ADR-042](adr/042-mcp-full-control-supersedes-read-first.md); `recall://about`
 reports the live count and the write list of the running profile.
 
@@ -13,16 +13,16 @@ reports the live count and the write list of the running profile.
 
 | Env | Effect |
 |-----|--------|
-| `RECALL_MCP_PROFILE=full` (default) | registers every tool (80) |
-| `RECALL_MCP_PROFILE=read` | registers the read tools plus `video_analyze` (49 + 1 = 50 tools); an unknown value counts as `read` |
+| `RECALL_MCP_PROFILE=full` (default) | registers every tool (89) |
+| `RECALL_MCP_PROFILE=read` | registers the read tools plus `video_analyze` (54 + 1 = 55 tools); an unknown value counts as `read` |
 | `RECALL_MCP_READONLY=1` | registers no write tool at all, whatever the profile |
 
 The profile is decided at import, so a change needs a restart of the MCP process.
 
 ## Architecture (hybrid): what works without `app.py` and what does not
 
-18 tools read SQLite directly (autonomous); the other 28 are HTTP proxies to a running
-`app.py` (including the flagship `search_archive` and all three write tools).
+18 tools read SQLite directly (autonomous); the other 71 are HTTP proxies to a running
+`app.py` (including the flagship `search_archive` and every write tool).
 
 **Direct-DB, autonomous: work WITHOUT a running `app.py` (18):**
 `get_transcript`, `get_original_file`, `list_recent`, `list_categories`,
@@ -32,15 +32,21 @@ The profile is decided at import, so a change needs a restart of the MCP process
 These tools open SQLite directly via `get_db_connection`/`app.services.research`
 and make no HTTP calls. The MCP process never writes SQLite.
 
-**HTTP proxy, need a running `app.py` (28):**
-`search_archive`, `ask_archive`, `suggest_category`, `research_preview`,
-`research_summary`, `search_history`, `get_archive_stats`, `list_speakers`,
-`get_speaker_stats`, `get_speaker_timeline`, `list_bookmarks`, `list_saved_searches`,
-`get_job_status`, `get_active_recording`, `copilot_availability`, `telegram_status`,
-`email_status`, `telegram_coverage`, `get_live_transcript`, `ask_live`, `get_live_video`, `get_live_frames`, `video_analyze`,
-`get_visual_timeline`, `get_frame`, `get_frames_for_text`, `search_visual`, `mailbox`,
-`settings`, `wait_for`, `system_status`, `list_whisper_models`, `retranscribe`,
-`transcript_versions`, `activate_transcript_version`.
+**HTTP proxy, need a running `app.py` (71):**
+`search_archive`, `ask_archive`, `suggest_category`, `research_preview`, `research_summary`,
+`search_history`, `get_archive_stats`, `list_speakers`, `get_speaker_stats`, `get_speaker_timeline`,
+`list_bookmarks`, `list_saved_searches`, `get_job_status`, `get_active_recording`,
+`copilot_availability`, `telegram_status`, `email_status`, `telegram_coverage`,
+`get_live_transcript`, `ask_live`, `get_live_video`, `get_live_frames`, `video_analyze`,
+`get_visual_timeline`, `get_frame`, `get_frames_for_text`, `search_visual`, `mailbox`, `settings`,
+`wait_for`, `system_status`, `mailbox_backfill`, `mailbox_label_enrich`, `mailbox_disconnect`,
+`settings_remove_anthropic_key`, `list_whisper_models`, `retranscribe`, `transcript_versions`,
+`activate_transcript_version`, `task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`,
+`transcript_suggest_meta`, `taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`,
+`transcript_delete`, `enrich_backfill`, `get_youtube_info`, `list_audio_library`, `audio_download`,
+`audio_item`, `transcribe`, `document_ingest`, `job_cancel`, `transcript_ai`, `models`,
+`system_diagnostics`, `document_import_folder`, `document_reparse`, `telegram_chats`, `telegram`,
+`telegram_enable_chat`, `telegram_repair_preview`, `telegram_backfill`, `automation_status`, `pipes`.
 All of them call `_api()`/`_sse_collect()` against `http://127.0.0.1:5050`. The reason is
 deliberate: `search_archive`/`ask_archive` do not pull e5/torch into the stdio process (the warm
 model already lives in `app.py` memory), the live tools read the state of running

@@ -1,6 +1,6 @@
 # services — scheduled pipes and the Telegram bot
 
-last-verified: 2026-10-18 (4.20.0: only the `.env` load path changed)
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: `mcp_actions` tool/pipe, `m:` undo buttons, on-demand run); 2026-10-18 (4.20.0: `.env` load path)
 
 Part of `app/services/*`; hub — [services.md](services.md). K4 4.13.0, K5 4.14.0/4.15.0.
 `pipes.py` (:636) and `tg_bot.py` (:190) call `load_dotenv(ENV_PATH)` with `app.core.env_file.ENV_PATH` (repo root), not a cwd search.
@@ -15,7 +15,12 @@ frontmatter `schedule|tools|channel|budget_usd|skip_if_empty|max_tokens` + a pro
 the list/groups/links are assembled by code). History — `pipe_runs` (v50, `migrations.py:2085`).
 
 - **pipes.py** — `Cron.parse` (its own 5-field one, no croniter; local time; dom+dow both restricted → OR). `TOOLS` —
-  a CLOSED registry of read functions (`weekly_digest|dropped_commitments|open_questions`; any other key → `PipeError`).
+  a CLOSED registry of read functions (`weekly_digest|dropped_commitments|open_questions|mcp_actions`; any other key → `PipeError`).
+  4.31.0 `mcp_actions_summary(db, now=)` (`:181`): last 24 h (`MCP_WINDOW_H`) of `mcp_actions` with `actor != 'ui'` grouped by tool/action + `refused`
+  (decision != approved) + `items` = undoable events only while LAST for their task / chat+kind: task actions (`action_item_events`, `source='mcp'`),
+  chat direction changes and chat disables (`tg_chat_events`, `source='mcp'`; enable is not offered). Each item carries `category_id` + `undo {kind task|chat, ref}`.
+  No table -> `reason`. Pipe file `pipes/mcp-actions.md` (daily 09:00, `tools: [mcp_actions]`, `budget_usd: 0`, `skip_if_empty`: code-built, no model).
+  On demand: `POST /api/pipes/<name>/run` (`blueprints.md` § automation.py) runs `run_pipe(..., buttons=True, trigger='mcp')` as a `pipe_run` job.
   `parse_pipe`/`load_pipes` (an invalid one — skipped + warning). `run_pipe(pipe, db_path, deliver, …, buttons=False)` (`:414`)
   never throws: data → `pipes_privacy.filter_data` → `render_claude` (only the "headline", `HEADLINE_MAX_TOKENS=300`;
   the cost estimate BEFORE the call > `budget_usd`, no `ANTHROPIC_API_KEY` or a failure → `_PlainFallback`, cards without a "headline",
@@ -41,11 +46,14 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
 - **pipes_privacy.py** — a layer over `privacy.py`. `filter_data(data, *, db_path)` BEFORE rendering: an item with a stop word, from a private
   direction or with an undetermined source → dropped (fail closed; an unreadable `private.txt` → `PrivacyError` → `blocked`).
   `mask(text)` (IBAN, email, cards, phones, amounts with currency → `•••`), `leaked_words(text, words=None)`: a stop word that
-  survived assembly → `blocked` (the word is not written even to history). `hidden_line(n)`. `scrub_text` is defined but
+  4.31.0: an item carrying its own `category_id` (the MCP summary) is hidden when that direction is private or the check failed (`:138-142`).
+  A stop word that survived assembly → `blocked` (the word is not written even to history). `hidden_line(n)`. `scrub_text` is defined but
   `run_pipe` does not call it.
 - **brief_actions.py** — the buttons "done / not relevant / postpone" under the brief. `keyboard(item_ids)` →
   `{inline_keyboard}` (a row per task; `None` if empty). `callback_data` (≤64 B, stateless):
-  `a:<n>:<id>:<done|cancelled|postpone:1|7|30>`, `p|b:<n>:<id>` (deadline/back), `u:<n>:<event>` (undo), `x`.
+  `a:<n>:<id>:<done|cancelled|postpone:1|7|30>`, `p|b:<n>:<id>` (deadline/back), `u:<n>:<event>` (undo), `x`; 4.31.0 `m:<n>:t|c:<ref>` (undo a task event via `commitments.undo_action` / a chat event via
+  `telegram_chats.undo_event`, `source='bot'`; `keyboard(item_ids, undo_items=)` appends one `undo_row` per MCP-summary item; refusals `undo.notLast|private|already|created|notFound`
+  -> callback text). `pipes_cards._mcp` renders the block (`telegram.brief.mcp.*`), numbers continue after the task numbers.
   `handle(cq, *, db_path, transport)` (`:75`): chat ≠ `tg_bot._chat_id()` → `_t("noAccess", lang)` (`telegram.btn.noAccess`); the change ONLY via
   `commitments.apply_action/undo_action(source='bot', actor='tg:<id> @user')`; `LookupError|ValueError` → text in
   `answerCallbackQuery`. The row is looked up by NUMBER (`_row_number`), the base is the last keyboard in `_KEYBOARDS` (LRU 200;

@@ -1,6 +1,6 @@
 # root — core: app.py boot, config, state, whisper
 
-last-verified: 2026-10-21 (mcp-pipeline 4.27.0: whisper_manager_new section only; app.py/config unchanged by it); 2026-10-19 (autosave wiring; app.py line numbers not re-swept except the autosave ones)
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: call watcher publisher only; other app.py line numbers :1000+ shifted, trust names); 2026-10-21 (mcp-pipeline 4.27.0: whisper_manager_new section only; app.py/config unchanged by it); 2026-10-19 (autosave wiring; app.py line numbers not re-swept except the autosave ones)
 Adjacent slice: `root-processes.md` (telegram_*, mcp_server.py).
 
 ## app.py
@@ -28,7 +28,7 @@ CSP `form-action 'self'` :1044.
   (:1346-1348; with debug — only in the reloader child `WERKZEUG_RUN_MAIN=true`), they do not start under pytest.
 - Mail (4.18.0): `MAIL_POLL_ENABLED=0` -> no thread; else `MailPoller(app.config['DATABASE'])` :1301 -> `app.extensions['mail_poller']`; a start failure only warns
   (`POST /api/mail/sync` then 503 `MAIL_POLLER_OFF`). Logic — `services-mail.md`.
-- Call watcher (K2): `CallWatcher` -> `app.extensions['call_watcher']`; not Windows / no pycaw / `RECORDING_AUTOPROMPT=0` / no `recording_service` -> log line and exit.
+- Call watcher (K2): `_maybe_start_call_watcher` :1244 passes `publisher=lambda event, data: sse_broker.publish("system:calls", event, data)` (:1296, 4.31.0) -> ring channel read by MCP `wait_for`; `CallWatcher` -> `app.extensions['call_watcher']` (:1301, also read by `automation.py` status); not Windows / no pycaw / `RECORDING_AUTOPROMPT=0` / no `recording_service` -> log line and exit.
 - Pipes (K4/K5): `PIPES_ENABLED=0` -> exit. `PipeScheduler(...)` :1272 -> `app.extensions['pipe_scheduler']`; with `tg_bot.is_configured()` `ButtonPoller` :1284 -> `app.extensions['brief_buttons']`. Logic — `services.md`.
 **Робота (`app.state.робота`, read by `GET /api/ready`, formula in `blueprints.md`):** keys
 `database/job_queue/whisper/embeddings/telegram/boot_finished` (no `migrations`, `app/state.py:45-49`); whisper —

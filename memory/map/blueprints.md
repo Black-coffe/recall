@@ -6,9 +6,9 @@ shapes and they are NOT rewritten. Newer routes add `error_code`; every `error_c
 (`tests/test_error_codes.py`). MCP normalises the shape on its side (`root-processes.md`). The auth gate itself answers with `code`, not `error_code` (`auth.py:232`).
 Other slices: `blueprints-media.md` (transcription, audio_library, youtube, recording), `blueprints-memory.md` (memory, research, telegram).
 
-last-verified: 2026-10-21 (mcp-pipeline 4.27.0: system/events/documents/gate lines re-read); 2026-10-19 (mcp-mail-and-keys 4.24.0: mail gated routes, system.py APP_VERSION; 4.23.3 version bump; 4.23.2 version bump; recording-autosave, 4.23.0: new recording routes in `blueprints-media.md`; rest mcp-foundations-b 4.22.0)
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: automation.py status + pipe run; `APP_VERSION` in system.py:34 still reads "4.30.0"); 2026-10-21 (mcp-pipeline 4.27.0: system/events/documents/gate lines re-read); 2026-10-19 (mcp-mail-and-keys 4.24.0: mail gated routes, system.py APP_VERSION; 4.23.3 version bump; 4.23.2 version bump; recording-autosave, 4.23.0: new recording routes in `blueprints-media.md`; rest mcp-foundations-b 4.22.0)
 
-**Approval gate (4.22.0, 4.24.0, 4.27.0):** 19 endpoints are destructive and answer only after a native dialog (`approval_gate._D_ROUTES` :55; 4.27.0 adds `documents.import_folder`, `documents.reparse_document`, `documents.reparse_job`; `transcription.analyze_video_endpoint` is conditional, see `services-infra.md`; table and
+**Approval gate (4.22.0, 4.24.0, 4.27.0, 4.31.0 +`telegram.tg_enable_chat` = 20 entries):** 19 endpoints were destructive and answer only after a native dialog (`approval_gate._D_ROUTES` :55; 4.27.0 adds `documents.import_folder`, `documents.reparse_document`, `documents.reparse_job`; `transcription.analyze_video_endpoint` is conditional, see `services-infra.md`; table and
 order of checks — `services-infra.md`): transcription delete/bulk-delete, memory delete/merge category and tag + `start_backfill`,
 speakers delete/merge, `telegram.tg_backfill`, `settings_api.clear_anthropic_key`, `audio_library.delete_audio_download`, and four mail
 routes (`mail_accounts_delete` = `mailbox_delete`, `mail_accounts_disconnect`, `mail_backfill`, `mail_label_enrich`). They may also answer 400 `BAD_REQUEST` (+`reason`), 403 `APPROVAL_DENIED`, 409 `APPROVAL_PENDING` /
@@ -36,7 +36,11 @@ A job dict carries `error_code`, `cancel_requested`, `cancel_ignored` (`services
 finished -> 400 `{success:false, error, cancel_ignored:true}` (:82); a missing job -> 400 without the flag.
 4.27.0: `GET /api/jobs/<id>` (:83) takes `wait` (0..25 s, 250 ms steps until a finished state), `include_log=1` + `tail` (1..200, default 50; `log` = tail of `state.process_logs[job_id]`, `[]` if the kind never logged); the dict carries `result`/`result_truncated`. `GET /api/jobs` (:59) filters `kind`, `active_only`.
 
-## automation.py (~100, 4.20.0) — `GET /api/automation/events?channel=&events=&after=&timeout=` (blueprint `automation_bp`)
+## automation.py (~225; 4.31.0 adds status + pipe run) — `GET /api/automation/events?channel=&events=&after=&timeout=` (blueprint `automation_bp`)
+4.31.0: `GET /api/automation/status[?sections=calls,pipes,pollers,telegram]` (:165; unknown section 400 `INVALID_ARGUMENT`): `calls` (watcher allowlist: kind/exe/label/age_sec/session_id, never ids or URLs),
+`pipes` (schedule, tools, budget, `last_run`, `cooldown_sec`), `pollers` (scheduler/brief_buttons/mail present), `telegram` (`listener_online`, monitored/enabled counts, `bot_configured`).
+`POST /api/pipes/<name>/run` (:192): unknown pipe 404 `NOT_FOUND`, no scheduler 409 `PIPES_DISABLED`, no bot 503 `NOT_CONFIGURED`, running/fresh `running` row 409 `ALREADY_RUNNING` (+`job_id`),
+cooldown 429 `COOLDOWN` (+`retry_after_sec`), else 202 `{job_id, created, poll}`; job kind `pipe_run`, delivers to the fixed bot recipient with `trigger='mcp'`.
 Long poll over the `sse_broker` ring for MCP `wait_for`. Channel must start with `sse_broker.RING_PREFIXES` else 400 `INVALID_ARGUMENT`;
 `timeout` clamped 0..25 s; `recording:<sid>` with an unknown session (or no `recording_service`) -> 404 `NOT_FOUND`; the 5th concurrent
 waiter (`MAX_WAITERS=4`) -> 429 `TOO_MANY_WAITERS`. Default `events` on `recording:` = status, live_segment, copilot_insight, source_changed,

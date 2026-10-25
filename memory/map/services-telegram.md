@@ -1,6 +1,6 @@
 # services — Telegram: threads, dossiers, tasks, questions
 
-last-verified: 2026-10-15
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: telegram_chats.py)
 
 Part of `app/services/*`; hub — [services.md](services.md). Waves 4.5–5.3. Bot/pipes — [services-pipes-bot.md](services-pipes-bot.md);
 entity graph from TG — [services-entities.md](services-entities.md). Sibling channel Gmail (in-process poller, not a child process) —
@@ -20,6 +20,14 @@ entity graph from TG — [services-entities.md](services-entities.md). Sibling c
   new messages OR `TG_CONTEXT_MAX_AGE_H`=24 h), `get_context()`. CLI `refresh --dry-run|--force`, `show --chat`.
   MCP `get_chat_context`. *The model does NOT rewrite participant numbers; references to threads that were not shown are dropped; no
   Ollama → the hard part remains (`summary=None`, `model=None`). No torch — safe from the stdio-MCP.*
+- **telegram_chats.py** (4.31.0, no Flask import) — changes of a monitored chat's direction / enabled flag, each journaled in `tg_chat_events`
+  (migration v56, `migrations.py:2247`: `at, chat_id, kind category|enabled, old_value, new_value` as text — `''` = no direction, `'0'|'1'`
+  enabled — `source mcp|ui|bot`, `actor`, `undone_at`, `undone_by_event_id`; index `(chat_id, kind, id)`). `get_chats(db, category_id=)` (+`tags`),
+  `set_category` (refuses a move out of a private direction: `PrivateCategoryChange`; `PrivacyError` propagates), `set_enabled`,
+  `enable_chat` (creates the row from the listener's `dialogs`, none -> `ListenerOffline`; history NOT loaded), `undo_event` (`UndoNotLast` when a
+  later event of the same chat+kind exists OR the chat no longer holds the event's `new_value`; `ValueError('undone'|'created')`; an enable that created
+  the row is never undone by deleting it), `list_events`. No-op change writes no row (`event_id=None`). The listener polls `enabled=1`, so a DB write is the whole effect.
+  Callers: `blueprints/telegram.py` (`tg_chat_category|tg_disable_chat|tg_enable_chat`, `_chat_change` maps refusals), `brief_actions._undo_chat_event`.
 - **tg_tasks.py** (5.1) — commitments from chat as a cascade: `triage_candidates/triage_thread/triage_all` (local
   `TG_TASKS_TRIAGE_MODEL`=qwen2.5:7b-instruct, $0), `extract_candidates/extract_thread/extract_all` (Claude on the selected →
   `action_items` with `source='tg_thread'`), `stats()`. CLI `triage --dry-run|--chat|--force|--limit`, `extract …`, `stats`.

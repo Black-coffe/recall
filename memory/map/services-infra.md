@@ -1,6 +1,6 @@
 # services — infrastructure
 
-last-verified: 2026-10-21 (mcp-pipeline 4.27.0: job result, SLOW_KINDS, error codes, gate lines re-read); 2026-10-20 (retranscribe-versions 4.25.0: SLOW_KINDS, error_codes); 2026-10-19 (mcp-mail-and-keys, 4.24.0; gate/summaries line numbers re-read)
+last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: gate line, error codes); 2026-10-21 (mcp-pipeline 4.27.0: job result, SLOW_KINDS, error codes, gate lines re-read); 2026-10-20 (retranscribe-versions 4.25.0: SLOW_KINDS, error_codes); 2026-10-19 (mcp-mail-and-keys, 4.24.0; gate/summaries line numbers re-read)
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
@@ -48,6 +48,8 @@ Part of `app/services/*`; hub — [services.md](services.md).
     `_document_reparse` :442 (`documents.reparse_target`, `ReparseError`), `_video_describe_claude` :458 (no video -> 200 `NO_VIDEO` Precondition), `BUILDERS` :474, `_NON_UI_CHECKS` :533, `build` :540, `render` :605, `one_line` :625.
     `recording/state.py::RECORDING_BLOCKED` :16 declares `transcribe`, `video_analyze:describe_local`, `transcript_suggest_meta`, `transcript_ai:enrich`, `settings:copilot_disable`; `recording_active` :25.
     `job_queue.active_job_for_transcription` is now :432.
+  - 4.31.0: `D_ACTIONS` :46 now 19 (+`telegram_enable_chat`), `_D_ROUTES` :56 = 20 (+`telegram.tg_enable_chat`); `approval_summaries._telegram_enable_chat` :351 (dialog text from DB). `error_codes.py` +`PRIVATE_CATEGORY_CHANGE` 403 (:76, was mail-only, now also chats),
+    `LISTENER_OFFLINE` 503 (:111), `NOT_MONITORED` 404 (:115); `UNDO_NOT_LAST` 409 (:93) is also the chat-undo refusal. Texts `approvals.*`, `automation.*`, `telegram.*` catalogs gained the keys.
   - `app/services/approvals.py` (stdlib only): `ask(text, timeout_s)` :120 -> `Decision(status approved|denied|unavailable|pending)`;
     `APPROVAL_TIMEOUT_S=45`; `_slot` lock = one dialog at a time (`busy()` :116); `_show_dialog` :72 = `MessageBoxW` on a daemon thread
     (the test seam, replaced in `tests/conftest.py`); on timeout `_close_window` :101 posts «No» by the random-nonce title.

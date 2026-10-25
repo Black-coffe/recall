@@ -629,10 +629,23 @@ def _transcribe_and_finalize(tid: int, file_path: str, kind: str, caption: str, 
 @telegram_bp.route('/api/telegram/status', methods=['GET'])
 def tg_status():
     """Is the listener alive? Who is logged in? (proxy to the listener's control-API)."""
+    from app.services import tg_bot
     ok, data = _listener_call("/status", timeout=15)
+    bot = tg_bot.is_configured()
     if not ok:
-        return jsonify({"alive": False, **data})
-    return jsonify({"alive": True, **data})
+        return jsonify({"alive": False, **data, "bot_configured": bot})
+    return jsonify({"alive": True, **data, "bot_configured": bot})
+
+
+def _non_ui() -> bool:
+    """Actor rule of the spec: anything but the per-boot UI token is not the UI."""
+    from app.core import auth
+    return auth.classify_request()[0] != "ui"
+
+
+def _privacy_refusal():
+    return jsonify({"success": False, "error": tr("telegram.err.privacyCheck"),
+                    "error_code": "PRIVACY_CHECK_FAILED"}), 503
 
 
 @telegram_bp.route('/api/telegram/dialogs', methods=['GET'])
@@ -641,7 +654,18 @@ def tg_dialogs():
     only it holds the Telethon session). Offline → 503, the UI will suggest starting the listener."""
     ok, data = _listener_call("/dialogs", timeout=60)
     if not ok:
-        return jsonify({"success": False, **data}), 503
+        return jsonify({"success": False, **data, "error_code": "LISTENER_OFFLINE"}), 503
+    if _non_ui():
+        # An agent sees no identity fields and no private dialog (fail closed on a check failure).
+        from app.services import privacy
+        try:
+            rows = privacy.filter_chats(data.get("dialogs") or [], db_path=_db_path(),
+                                        key_id="id", key_category=None)
+        except privacy.PrivacyError:
+            return _privacy_refusal()
+        return jsonify({"success": True, "limit": data.get("limit"), "dialogs": [
+            {"chat_id": d.get("id"), "title": d.get("title"), "type": d.get("type"),
+             "monitored": bool(d.get("monitored"))} for d in rows]})
     return jsonify({"success": True, **data})
 
 
@@ -654,23 +678,105 @@ def tg_chats():
     its projects, a project id (a leaf) gives only itself. Each row carries `tags`
     (`categories.chat_tags`) — the set that all the chat's future history will inherit.
     """
+    from app.services import privacy, telegram_chats
     try:
-        frag, params = cat_svc.filter_sql("m.category_id", request.args.get("category_id"))
+        chats = telegram_chats.get_chats(_db_path(), category_id=request.args.get("category_id"))
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
-    with _conn(_db_path()) as conn:
-        rows = conn.execute(
-            "SELECT m.chat_id, m.title, m.username, m.chat_type, m.enabled, "
-            "m.category_id, m.last_message_id, c.name AS category_name "
-            "FROM tg_monitored_chats m LEFT JOIN categories c ON c.id = m.category_id "
-            f"WHERE 1=1{frag} ORDER BY m.enabled DESC, m.title", params
-        ).fetchall()
-        chats = []
-        for r in rows:
-            d = dict(r)
-            d["tags"] = cat_svc.chat_tags(conn, d["chat_id"])
-            chats.append(d)
+    if _non_ui():
+        try:
+            chats = privacy.filter_chats(chats, db_path=_db_path())
+        except privacy.PrivacyError:
+            return _privacy_refusal()
     return jsonify({"success": True, "chats": chats})
+
+
+def _chat_error(code: str, key: str, status: int):
+    return jsonify({"success": False, "error": tr(key), "error_code": code}), status
+
+
+def _chat_change(fn):
+    """Run a ``telegram_chats`` change and map its refusals to the spec's codes."""
+    from app.services import privacy, telegram_chats as tc
+    try:
+        return fn()
+    except tc.NotMonitored:
+        return _chat_error("NOT_MONITORED", "telegram.err.chatNotMonitored", 404)
+    except tc.PrivateCategoryChange:
+        return _chat_error("PRIVATE_CATEGORY_CHANGE", "telegram.err.privateCategoryChange", 403)
+    except tc.ListenerOffline:
+        return _chat_error("LISTENER_OFFLINE", "telegram.err.listenerOffline", 503)
+    except privacy.PrivacyError:
+        return _privacy_refusal()
+    except ValueError:
+        return _chat_error("INVALID_ARGUMENT", "telegram.err.categoryUnknown", 400)
+
+
+def _category_arg(data) -> tuple[bool, int | None]:
+    """``category_id`` from a body: (ok, value); null is "no direction", a bool or text is not ok."""
+    raw = data.get("category_id")
+    if raw is None:
+        return True, None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return False, None
+    return True, raw
+
+
+def _change_source() -> tuple[str, str]:
+    from app.core import auth
+    actor = auth.classify_request()[0]
+    return ("ui" if actor == "ui" else "mcp"), actor
+
+
+@telegram_bp.route('/api/telegram/chats/<int(signed=True):chat_id>/category', methods=['PATCH'])
+def tg_chat_category(chat_id: int):
+    """Change a monitored chat's direction (journaled for undo). Stored messages are not
+    re-categorised (parity with ``POST /chats``); a move out of a private direction is refused."""
+    from app.services import telegram_chats
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "category_id" not in data:
+        return _chat_error("INVALID_ARGUMENT", "telegram.err.categoryRequired", 400)
+    ok, category_id = _category_arg(data)
+    if not ok:
+        return _chat_error("INVALID_ARGUMENT", "telegram.err.categoryIdNumber", 400)
+    source, actor = _change_source()
+    return _chat_change(lambda: jsonify({"success": True, **telegram_chats.set_category(
+        _db_path(), chat_id, category_id, source=source, actor=actor)}))
+
+
+@telegram_bp.route('/api/telegram/chats/<int(signed=True):chat_id>/disable', methods=['POST'])
+def tg_disable_chat(chat_id: int):
+    """Stop listening to a monitored chat (journaled; the way back is ``telegram_enable_chat``)."""
+    from app.services import telegram_chats
+    source, actor = _change_source()
+
+    def _run():
+        res = telegram_chats.set_enabled(_db_path(), chat_id, False, source=source, actor=actor)
+        return jsonify({"success": True, "chat_id": chat_id, "enabled": False,
+                        "event_id": res["event_id"], "recovery": "telegram_enable_chat"})
+    return _chat_change(_run)
+
+
+@telegram_bp.route('/api/telegram/chats/<int(signed=True):chat_id>/enable', methods=['POST'])
+def tg_enable_chat(chat_id: int):
+    """Enable a chat (D: behind the approval dialog). A chat Recall does not know yet is created
+    from the listener's dialogs; history is not loaded by this action."""
+    from app.services import telegram_chats
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return _chat_error("INVALID_ARGUMENT", "telegram.err.categoryIdNumber", 400)
+    ok, category_id = _category_arg(data)
+    if not ok:
+        return _chat_error("INVALID_ARGUMENT", "telegram.err.categoryIdNumber", 400)
+    source, actor = _change_source()
+    dialogs = None
+    if not telegram_chats.is_monitored(_db_path(), chat_id):
+        ok, res = _listener_call("/dialogs", timeout=60)
+        dialogs = (res.get("dialogs") or []) if ok else None
+    return _chat_change(lambda: jsonify({"success": True, **telegram_chats.enable_chat(
+        _db_path(), chat_id, category_id=category_id, dialogs=dialogs, source=source, actor=actor)}))
 
 
 @telegram_bp.route('/api/telegram/chats', methods=['POST'])

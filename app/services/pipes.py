@@ -13,6 +13,10 @@ Deliberate limits:
   within ``budget_usd`` (estimated BEFORE the call), writes only 1-2 "headline" lines; no
   key, budget or error → the same message without those lines.
 - Every run is a row in ``pipe_runs`` (migration v50); a failure does not kill the thread.
+- Three callers share ``run_pipe``: the scheduler, the CLI and the on-demand MCP route
+  (trigger ``mcp``, a W action). A per-pipe lock makes a concurrent call return ``busy``
+  without a run; the route's 10-minute pause is ``cooldown_remaining``. Every finished
+  run publishes a ``pipe_run`` event (metadata only) on the ring channel ``pipes``.
 
 CLI:
     python -m app.services.pipes list            # pipes, schedule, next run
@@ -28,12 +32,12 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from app.core.i18n import server_lang, tr
-from app.services import brief_actions, pipes_cards, pipes_privacy
+from app.services import brief_actions, pipes_cards, pipes_privacy, sse_broker
 
 logger = logging.getLogger(__name__)
 
@@ -161,11 +165,89 @@ def _open_questions(db_path: str, now: datetime) -> dict:
     return tg_questions.open_questions(db_path, today=now)
 
 
+MCP_WINDOW_H = 24
+
+
+def _utc(dt: datetime) -> datetime:
+    """A naive local moment (the scheduler's clock) → naive UTC, for the UTC journals."""
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (name,)).fetchone() is not None
+
+
+def mcp_actions_summary(db_path: str, *, now: datetime) -> dict:
+    """What the MCP (any non-UI caller) did in the last 24 h, for the daily brief.
+
+    ``groups``: audited calls (``mcp_actions``, ``actor != 'ui'``) by tool and action;
+    ``refused``: those the gate did not let through (a ``decision`` other than ``approved``).
+    ``items``: one per undoable event, only the three inverses the owner named: a task
+    action (``action_item_events``), a chat the MCP disabled and a chat direction the MCP
+    changed (``tg_chat_events``); an event is undoable only while it is the last one for
+    its task / chat and kind (the undo functions refuse otherwise). Read-only."""
+    since = now - timedelta(hours=MCP_WINDOW_H)
+    since_utc = _utc(since)
+    with _connect(db_path) as conn:
+        if not _has_table(conn, "mcp_actions"):
+            return {"reason": tr("telegram.brief.mcp.noAudit", lang=server_lang()),
+                    "groups": [], "items": []}
+        rows = conn.execute(
+            "SELECT COALESCE(claimed_tool, endpoint, path) AS tool, "
+            "COALESCE(action, method) AS action, COUNT(*) AS n, "
+            "SUM(CASE WHEN decision IS NOT NULL AND decision != 'approved' THEN 1 ELSE 0 END) "
+            "AS refused FROM mcp_actions WHERE actor != 'ui' AND at >= ? "
+            "GROUP BY 1, 2 ORDER BY n DESC, tool, action",
+            (since_utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),)).fetchall()
+        groups = [{"tool": r["tool"], "action": r["action"], "count": r["n"]} for r in rows]
+        items: list[dict] = []
+        if _has_table(conn, "action_item_events"):
+            for r in conn.execute(
+                    "SELECT e.id, e.at, e.action, ai.task, t.category_id "
+                    "FROM action_item_events e JOIN action_items ai ON ai.id = e.item_id "
+                    "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
+                    "WHERE e.source = 'mcp' AND e.action != 'undo' AND e.at >= ? "
+                    "AND NOT EXISTS (SELECT 1 FROM action_item_events l "
+                    "WHERE l.item_id = e.item_id AND l.id > e.id) ORDER BY e.id",
+                    (since.isoformat(timespec="seconds"),)):
+                items.append({"at": r["at"], "kind": "task", "text": r["task"] or "",
+                              "action": r["action"], "category_id": r["category_id"],
+                              "undo": {"kind": "task", "ref": r["id"]}})
+        if _has_table(conn, "tg_chat_events"):
+            for r in conn.execute(
+                    "SELECT e.id, e.at, e.kind, m.title, m.category_id, "
+                    "co.name AS old_name, cn.name AS new_name "
+                    "FROM tg_chat_events e JOIN tg_monitored_chats m ON m.chat_id = e.chat_id "
+                    "LEFT JOIN categories co ON co.id = CAST(NULLIF(e.old_value, '') AS INTEGER) "
+                    "LEFT JOIN categories cn ON cn.id = CAST(NULLIF(e.new_value, '') AS INTEGER) "
+                    "WHERE e.source = 'mcp' AND e.undone_at IS NULL AND e.at >= ? "
+                    "AND (e.kind = 'category' OR (e.kind = 'enabled' AND e.new_value = '0' "
+                    "AND COALESCE(e.old_value, '') != '')) "
+                    "AND NOT EXISTS (SELECT 1 FROM tg_chat_events l WHERE l.chat_id = e.chat_id "
+                    "AND l.kind = e.kind AND l.id > e.id) ORDER BY e.id",
+                    (_ts(since_utc),)):
+                item = {"at": r["at"], "kind": "chat_" + r["kind"], "text": r["title"] or "",
+                        "category_id": r["category_id"],
+                        "undo": {"kind": "chat", "ref": r["id"]}}
+                if r["kind"] == "category":
+                    item.update(old=r["old_name"] or "", new=r["new_name"] or "")
+                items.append(item)
+    items.sort(key=lambda it: str(it["at"]).replace("T", " "))
+    return {"window_h": MCP_WINDOW_H, "total": sum(g["count"] for g in groups),
+            "refused": sum(r["refused"] or 0 for r in rows), "groups": groups, "items": items}
+
+
+def _mcp_actions(db_path: str, now: datetime) -> dict:
+    return mcp_actions_summary(db_path, now=now)
+
+
 #: Closed registry of read functions. A new function goes only here, read-only only.
 TOOLS: dict[str, Callable[[str, datetime], dict]] = {
     "weekly_digest": _weekly_digest,
     "dropped_commitments": _dropped_commitments,
     "open_questions": _open_questions,
+    "mcp_actions": _mcp_actions,
 }
 
 
@@ -291,12 +373,13 @@ def _next_attempt(db_path: str, pipe: str, due: datetime, now: datetime, *,
     A moment is closed if after it there is an ``ok``/``skipped``/``blocked`` or
     ``retry_max`` errors. ``error`` and a stuck ``running`` are NOT a run that
     happened: the week's brief must not be lost because of one failure at 9:00. A manual
-    ``pipes run`` (to stdout, not to the bot) does not close the moment.
+    ``pipes run`` (to stdout, not to the bot) and an on-demand ``mcp`` run do not close
+    the moment.
     """
     with _connect(db_path) as conn:
         rows = conn.execute(
             "SELECT status, started_at, finished_at FROM pipe_runs WHERE pipe = ? "
-            "AND trigger != 'manual' AND (scheduled_for >= ? OR started_at >= ?)",
+            "AND trigger NOT IN ('manual', 'mcp') AND (scheduled_for >= ? OR started_at >= ?)",
             (pipe, _ts(due), _ts(due))).fetchall()
     errors, last_error = 0, None
     for r in rows:
@@ -316,6 +399,65 @@ def _next_attempt(db_path: str, pipe: str, due: datetime, now: datetime, *,
     return errors + 1
 
 
+#: The pause after a run before an on-demand (MCP) run of the same pipe is allowed.
+COOLDOWN_MINUTES = 10
+
+
+def _parse_ts(s: Optional[str]) -> Optional[datetime]:
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S") if s else None
+
+
+def cooldown_remaining(db_path: str, name: str, *, now: datetime,
+                       minutes: int = COOLDOWN_MINUTES) -> int:
+    """Seconds until an on-demand run of ``name`` is allowed; 0 when free.
+
+    An ``ok``/``skipped``/``blocked`` run blocks for ``minutes`` after it finished; a
+    ``running`` row blocks until it turns stale (``STALE_RUNNING``); ``error`` does not
+    block. Only the on-demand route reads this: the scheduler and the CLI are not throttled.
+    """
+    window = timedelta(minutes=minutes)
+    cutoff = now - max(window, STALE_RUNNING)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT status, started_at, finished_at FROM pipe_runs "
+            "WHERE pipe = ? AND started_at >= ?", (name, _ts(cutoff))).fetchall()
+    left = timedelta(0)
+    for r in rows:
+        started = _parse_ts(r["started_at"])
+        if r["status"] == "running":
+            until = started + STALE_RUNNING
+        elif r["status"] in ("ok", "skipped", "blocked"):
+            until = (_parse_ts(r["finished_at"]) or started) + window
+        else:
+            continue
+        left = max(left, until - now)
+    return int(left.total_seconds() + 0.999) if left > timedelta(0) else 0
+
+
+_PIPE_LOCKS: dict[str, threading.Lock] = {}
+_PIPE_LOCKS_GUARD = threading.Lock()
+
+
+def _pipe_lock(name: str) -> threading.Lock:
+    with _PIPE_LOCKS_GUARD:
+        lock = _PIPE_LOCKS.get(name)
+        if lock is None:
+            lock = _PIPE_LOCKS[name] = threading.Lock()
+        return lock
+
+
+def _publish_run(res: dict) -> None:
+    """``pipe_run`` event for ``wait_for``: run metadata only, never the text."""
+    try:
+        sse_broker.broker.publish("pipes", "pipe_run", {
+            "pipe": res["pipe"], "run_id": res["id"], "status": res["status"],
+            "trigger": res["trigger"], "rendered_by": res["rendered_by"],
+            "cost_usd": res["cost_usd"]})
+    except Exception as e:  # noqa: BLE001 - the run is already recorded; the event is a courtesy
+        logger.warning("Pipe %s: pipe_run event not published (%s)", res["pipe"],
+                       type(e).__name__)
+
+
 # --------------------------------------------------------------- render
 
 def is_empty(data: dict) -> bool:
@@ -333,6 +475,8 @@ _TOOL_LABELS = ("weekly_digest", "dropped_commitments", "open_questions")
 
 
 def _tool_label(tool: str) -> str:
+    if tool == "mcp_actions":
+        return tr("telegram.brief.mcp.tool", lang=server_lang())
     return tr(f"telegram.brief.tool.{tool}", lang=server_lang()) if tool in _TOOL_LABELS else tool
 
 
@@ -439,7 +583,27 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
     last attempt, with silence in between.
     ``buttons`` (K5): tasks are numbered, and ``deliver`` also gets ``reply_markup``
     with buttons — so only for a delivery that accepts it (``tg_bot.send``).
+    A run of the same pipe already in progress (any caller) → ``status: "busy"``
+    with no ``pipe_runs`` row, no delivery and no event.
     """
+    lock = _pipe_lock(pipe.name)
+    if not lock.acquire(blocking=False):
+        logger.info("Pipe %s (%s): busy, another run is in progress", pipe.name, trigger)
+        return {"id": None, "pipe": pipe.name, "trigger": trigger, "status": "busy",
+                "rendered_by": None, "cost_usd": 0.0, "error": "busy", "chars": 0}
+    try:
+        return _run_pipe_locked(pipe, db_path=db_path, deliver=deliver, now=now,
+                                trigger=trigger, scheduled_for=scheduled_for,
+                                attempt=attempt, max_attempts=max_attempts,
+                                retry_minutes=retry_minutes, buttons=buttons)
+    finally:
+        lock.release()
+
+
+def _run_pipe_locked(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
+                     now: Optional[datetime], trigger: str,
+                     scheduled_for: Optional[datetime], attempt: int, max_attempts: int,
+                     retry_minutes: int, buttons: bool) -> dict:
     now = now or datetime.now()
     t0 = datetime.now()                   # duration by the real clock
     with _connect(db_path) as conn:
@@ -469,10 +633,11 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
             # Masks and stop words — on every field BEFORE escaping (inside render);
             # link base — pipes_cards.link_base() (RECALL_PUBLIC_URL → RECALL_API_URL).
             item_ids: Optional[list[int]] = [] if buttons else None
+            undo_items: Optional[list[dict]] = [] if buttons else None
             text, leaked = pipes_cards.render(
                 pipes_cards.title_for(pipe.tools), data, db_path=db_path,
                 today=now.date(), headline=headline, missing=missing, hidden=hidden,
-                buttons=item_ids)
+                buttons=item_ids, undo_items=undo_items)
             # Second line: a stop word must not survive message assembly either.
             leaked = leaked or pipes_privacy.leaked_words(html.unescape(text))
             if missing:
@@ -486,7 +651,8 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
                            error=f"stop word in the finished text ({len(leaked)}) — not sent")
             else:
                 delivering = True
-                kb = brief_actions.keyboard(item_ids) if item_ids else None
+                kb = (brief_actions.keyboard(item_ids or [], undo_items)
+                      if item_ids or undo_items else None)
                 if kb:
                     deliver(text, reply_markup=kb)
                 else:
@@ -511,6 +677,7 @@ def run_pipe(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None],
             "error=?, chars=? WHERE id=?",
             (_ts(now + (datetime.now() - t0)), res["status"], res["rendered_by"], res["cost_usd"],
              res["error"], res["chars"], run_id))
+    _publish_run(res)
     logger.info("Pipe %s (%s): %s, %s, %s chars", pipe.name, trigger, res["status"],
                 res["rendered_by"] or "-", res["chars"])
     return res
@@ -601,12 +768,15 @@ class PipeScheduler:
                                         retry_max=self.retry_max)
                 if attempt is None:
                     continue
-                out.append(run_pipe(pipe, db_path=self.db_path, deliver=self.deliver,
-                                    now=now, trigger="retry" if attempt > 1 else trigger,
-                                    scheduled_for=due, attempt=attempt,
-                                    max_attempts=self.retry_max,
-                                    retry_minutes=self.retry_minutes,
-                                    buttons=self.buttons))
+                res = run_pipe(pipe, db_path=self.db_path, deliver=self.deliver,
+                               now=now, trigger="retry" if attempt > 1 else trigger,
+                               scheduled_for=due, attempt=attempt,
+                               max_attempts=self.retry_max,
+                               retry_minutes=self.retry_minutes,
+                               buttons=self.buttons)
+                if res["status"] == "busy":
+                    continue                  # not a run: the moment stays open
+                out.append(res)
             except Exception as e:
                 logger.warning("Pipe scheduler: %s — %s", pipe.name, e, exc_info=True)
         return out

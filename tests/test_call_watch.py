@@ -31,7 +31,7 @@ class FakeNotifier:
 class Rig:
     """Ticks the watcher one simulated second at a time."""
 
-    def __init__(self, tmp_path=None, *, prompt_seconds=30, autostop_minutes=10):
+    def __init__(self, tmp_path=None, *, prompt_seconds=30, autostop_minutes=10, publisher=None):
         self.t = 0.0
         self.snap: dict | None = {}
         self.live: list[dict] = []
@@ -44,7 +44,8 @@ class Rig:
             autostop_minutes=autostop_minutes, base_url='http://127.0.0.1:5050',
             enumerate_calls=lambda: self.snap, live_sessions=lambda: self.live,
             stop_fn=self._stop, notifier=self.notifier,
-            clock=lambda: self.t, wall=lambda: 1_760_000_000.0 + self.t, log_path=self.log_path)
+            clock=lambda: self.t, wall=lambda: 1_760_000_000.0 + self.t, log_path=self.log_path,
+            publisher=publisher)
 
     def _stop(self, sid):
         if self.stop_error:
@@ -327,3 +328,104 @@ def test_call_prompt_texts_have_english_variant():
     from app.core.i18n import tr
     assert tr('svc_recording.call.prompt.title', lang='en', label='Zoom') == 'Recall · call in Zoom'
     assert tr('svc_recording.call.prompt.record', lang='en') == 'Record'
+
+
+# ---------------------------------------------------------------- publisher (system:calls)
+
+class Bus:
+    def __init__(self):
+        self.events = []
+
+    def __call__(self, event, data):
+        self.events.append((event, data))
+
+    def names(self):
+        return [e for e, _ in self.events]
+
+
+def _assert_no_secrets(bus, tokens):
+    for event, data in bus.events:
+        assert not {'id', 'mic_endpoint', 'actions'} & set(data), (event, data)
+        for value in data.values():
+            text = str(value)
+            assert 'http' not in text and '/api/' not in text, (event, data)
+            assert all(t not in text for t in tokens), (event, data)
+
+
+def test_publisher_sees_the_whole_call_without_tokens_or_urls(tmp_path):
+    bus = Bus()
+    r = Rig(tmp_path, autostop_minutes=1, publisher=bus)
+    r.run(31, app_snap())
+    tokens = [p['id'] for p in r.w.pending()]
+    assert bus.events == [('call_start', {'exe': 'zoom.exe', 'label': 'Zoom'}),
+                          ('prompt', {'kind': 'record', 'exe': 'zoom.exe', 'label': 'Zoom'})]
+    r.run(60, {})                                # call ends with the prompt unanswered
+    assert bus.events[2:] == [
+        ('call_end', {'exe': 'zoom.exe', 'label': 'Zoom'}),
+        ('prompt_withdrawn', {'kind': 'record', 'exe': 'zoom.exe', 'label': 'Zoom', 'reason': 'call_end'})]
+    # second call, this time recorded: stop prompt, then autostop
+    r.live = [recording(source={'mode': 'all'})]
+    r.run(120, app_snap())
+    r.run(30, {})
+    tokens += [p['id'] for p in r.w.pending()]
+    assert ('prompt', {'kind': 'stop', 'exe': 'zoom.exe', 'label': 'Zoom', 'session_id': 'rec1'}) in bus.events
+    r.run(120)
+    assert r.stopped == ['rec1']
+    assert bus.events[-1] == ('autostop', {'exe': 'zoom.exe', 'label': 'Zoom', 'session_id': 'rec1'})
+    _assert_no_secrets(bus, tokens)
+
+
+def test_publisher_reports_consumed_dismissed_and_expired():
+    bus = Bus()
+    r = Rig(publisher=bus)
+    r.run(31, app_snap())
+    [p] = r.w.pending()
+    assert r.w.dismiss(p['id'])
+    assert bus.events[-1] == ('prompt_withdrawn', {'kind': 'record', 'exe': 'zoom.exe', 'label': 'Zoom',
+                                                   'reason': 'dismissed'})
+    r.run(31, app_snap('teams.exe'))
+    [p] = r.w.pending()
+    assert r.w.consume(p['id'], 'record')['exe'] == 'teams.exe'
+    assert bus.events[-1][1]['reason'] == 'consumed'
+    r.run(31, app_snap('slack.exe'))
+    r.t += cw.PROMPT_MAX_AGE_SEC
+    r.run(1)
+    assert ('prompt_withdrawn', {'kind': 'record', 'exe': 'slack.exe', 'label': 'Slack',
+                                 'reason': 'expired'}) in bus.events
+    _assert_no_secrets(bus, [])
+
+
+def test_publisher_that_raises_does_not_break_the_tick(caplog):
+    def boom(event, data):
+        raise RuntimeError('broker down')
+    r = Rig(publisher=boom)
+    r.run(31, app_snap())                        # tick() would raise out of the loop otherwise
+    assert len(r.prompts('record')) == 1
+    assert len(r.w.pending()) == 1
+    assert 'publish of call_start failed' in caplog.text
+
+
+def test_record_prompt_withdrawn_once_a_session_captures_the_app(tmp_path):
+    bus = Bus()
+    r = Rig(tmp_path, publisher=bus)
+    snap = {**app_snap('teams.exe'), **app_snap('zoom.exe')}
+    r.run(31, snap)
+    by_exe = {p['exe']: p['id'] for p in r.w.pending()}
+    assert set(by_exe) == {'teams.exe', 'zoom.exe'}
+    r.live = [recording(source={'mode': 'include', 'apps': ['Teams.exe']})]
+    r.run(1)
+    assert [p['exe'] for p in r.w.pending()] == ['zoom.exe']
+    assert by_exe['teams.exe'] in r.notifier.removed
+    assert by_exe['zoom.exe'] not in r.notifier.removed
+    withdrawn = [e for e in r.events() if e['event'] == 'prompt_withdrawn']
+    assert withdrawn == [{**withdrawn[0], 'exe': 'teams.exe', 'reason': 'session_started'}]
+    assert ('prompt_withdrawn', {'kind': 'record', 'exe': 'teams.exe', 'label': 'Teams',
+                                 'reason': 'session_started'}) in bus.events
+    r.run(60)                                    # the recorded call does not re-prompt
+    assert [p['exe'] for p in r.w.pending()] == ['zoom.exe']
+
+
+def test_without_publisher_nothing_changes(tmp_path):
+    r = Rig(tmp_path)
+    r.run(31, app_snap())
+    assert [e['event'] for e in r.events()] == ['call_start', 'prompt']

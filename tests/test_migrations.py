@@ -1237,3 +1237,24 @@ def test_v55_provenance_columns_are_additive_and_idempotent(tmp_path: Path):
                             ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_v56_tg_chat_events_is_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # repeated run - no errors
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'tg_chat_events')
+        for col in ('id', 'at', 'chat_id', 'kind', 'old_value', 'new_value', 'source', 'actor',
+                    'undone_at', 'undone_by_event_id'):
+            assert col in cols, col
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                            "AND name='idx_tg_chat_events_chat'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 56"
+                            ).fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO tg_chat_events (at, chat_id, kind, source) "
+                         "VALUES ('2026-10-25', 1, 'title', 'mcp')")
+    finally:
+        conn.close()

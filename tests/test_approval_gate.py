@@ -324,6 +324,14 @@ def _case_reparse_job(conn, env):
                 count=1, undo=False, status=202, present=lambda c: "doc_import" not in calls["jobs"])
 
 
+def _case_enable_chat(conn, env):
+    conn.execute("INSERT INTO tg_monitored_chats (chat_id, title, enabled) VALUES (-100778, 'Вимкнений чат тест', 0)")
+    conn.commit()
+    return dict(method="post", path="/api/telegram/chats/-100778/enable", json={},
+                name="Вимкнений чат тест", count=0, undo=True,
+                present=lambda c: _alive(c, "tg_monitored_chats", "chat_id", -100778, "AND enabled = 0"))
+
+
 CASES = {
     "transcription.delete_transcription": ("transcript_delete", _case_history),
     "transcription.bulk_delete_transcriptions": ("transcript_bulk_delete", _case_bulk),
@@ -344,6 +352,7 @@ CASES = {
     "documents.import_folder": ("document_import_folder", _case_import_folder),
     "documents.reparse_document": ("document_reparse", _case_reparse),
     "documents.reparse_job": ("document_reparse", _case_reparse_job),
+    "telegram.tg_enable_chat": ("telegram_enable_chat", _case_enable_chat),
 }
 
 
