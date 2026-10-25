@@ -61,6 +61,8 @@ recording_service: Any = None  # RecordingService instance
 # Phase 9.10: list of session_ids that were recovered at startup.
 # The UI shows a banner with this list, cleared after acknowledgement.
 recording_recovery_log: Any = None
+# recording-autosave: AutosaveScheduler (deadline after finalize, hold/cancel from the save screen)
+recording_autosave: Any = None
 # Phase 12.26 (Big Bet): live transcribe worker
 live_transcribe_worker: Any = None
 # Phase 19 (Co-pilot): the live call co-pilot — persist + (later) live analysis

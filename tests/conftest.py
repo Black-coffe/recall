@@ -45,3 +45,31 @@ def _memory_keyring():
         yield
     finally:
         keyring.set_keyring(previous)
+
+
+class _DialogRecorder:
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, title, text):
+        self.calls.append((title, text))
+        return self.answer
+
+
+@pytest.fixture(autouse=True)
+def dialog_stub(monkeypatch):
+    """No test shows a window: the approval dialog answers No and records its calls."""
+    from app.services import approvals
+    stub = _DialogRecorder(approvals.IDNO)
+    monkeypatch.setattr(approvals, "_show_dialog", stub)
+    return stub
+
+
+@pytest.fixture
+def approve_dialogs(monkeypatch):
+    """Opt-in: the approval dialog answers Yes (requested after dialog_stub, so it wins)."""
+    from app.services import approvals
+    stub = _DialogRecorder(approvals.IDYES)
+    monkeypatch.setattr(approvals, "_show_dialog", stub)
+    return stub

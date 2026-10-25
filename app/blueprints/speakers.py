@@ -27,6 +27,7 @@ from collections import defaultdict
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core import auth
 from app.core.i18n import tr
 from app.repositories import speakers as speakers_repo
 from app.repositories import transcriptions as tx_repo
@@ -46,6 +47,14 @@ _COLOR_RE = re.compile(r'^#?[0-9a-fA-F]{6}$')
 def _get_db():
     from app.db.connection import get_db_connection
     return get_db_connection(current_app.config['DATABASE'])
+
+
+def _is_ui() -> bool:
+    return auth.classify_request()[0] == 'ui'
+
+
+def _coded_error(code: str, key: str, status: int):
+    return jsonify({'success': False, 'error_code': code, 'error': tr(key)}), status
 
 
 def _normalize_name(name: str) -> str:
@@ -196,6 +205,9 @@ def update_speaker(speaker_id):
         ).fetchone()
         if not existing:
             return jsonify({'success': False, 'error': tr('settings.speakers.err.not_found')}), 404
+        if not _is_ui() and conn.execute(
+                'SELECT is_self FROM speakers WHERE id = ?', (speaker_id,)).fetchone()['is_self']:
+            return _coded_error('IS_SELF', 'settings.speakers.err.is_self', 403)
 
         # On rename: check for a case-insensitive conflict (excluding this same id)
         new_name = next((v for k, v in fields_to_update if k == 'name'), None)
@@ -273,6 +285,20 @@ def patch_transcription_speakers(transcription_id):
         if not tx_repo.exists(conn, transcription_id):
             return jsonify({'success': False, 'error': tr('settings.speakers.err.tx_not_found')}), 404
 
+        agent = not _is_ui()
+        if agent:
+            # Existing ids only; validate the whole request before writing anything.
+            for raw_label, value in mapping.items():
+                if not isinstance(raw_label, str) or not raw_label or value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return _coded_error('SPEAKER_ID_REQUIRED', 'settings.speakers.err.speaker_id_required', 400)
+                row = conn.execute('SELECT is_self FROM speakers WHERE id = ?', (value,)).fetchone()
+                if row is None:
+                    return _coded_error('NOT_FOUND', 'settings.speakers.err.not_found', 404)
+                if row['is_self']:
+                    return _coded_error('IS_SELF', 'settings.speakers.err.is_self', 403)
+
         c = conn.cursor()
         usage_increments: list[int] = []  # speaker_ids whose usage_count must be raised
 
@@ -291,6 +317,24 @@ def patch_transcription_speakers(transcription_id):
                     'WHERE transcription_id = ? AND raw_label = ?',
                     (transcription_id, raw_label),
                 )
+                continue
+
+            if agent:
+                speaker_id = value
+                map_row = c.execute(
+                    'SELECT embedding FROM transcription_speaker_map '
+                    'WHERE transcription_id = ? AND raw_label = ?',
+                    (transcription_id, raw_label),
+                ).fetchone()
+                # Upsert keeps the label's own embedding; the speaker profile is never touched.
+                c.execute(
+                    'INSERT OR REPLACE INTO transcription_speaker_map '
+                    '(transcription_id, raw_label, speaker_id, embedding, source) '
+                    "VALUES (?, ?, ?, ?, 'mcp')",
+                    (transcription_id, raw_label, speaker_id,
+                     map_row['embedding'] if map_row else None),
+                )
+                usage_increments.append(speaker_id)
                 continue
 
             # Find or create the speaker by name

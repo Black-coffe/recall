@@ -2,18 +2,18 @@
 domain: recording
 tags: [recording, audio-source, process-loopback, multi-session, copilot]
 related: [rag-context-integrity]
-last-verified: 2026-10-08
+last-verified: 2026-10-19
 ---
 
 # Recording: audio sources, parallel sessions, single copilot
 
-Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0. Code: `app/services/recording/`.
+Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0; autosave 4.23.0 (`docs/specs/recording-autosave/plan.md`). Code: `app/services/recording/`.
 
 - **Sessions.** `RecordingService` holds up to `RECORDING_MAX_ACTIVE` (default 2) live sessions in a
   `sid → _ActiveSession` registry. The registry lock guards the dict only; each session has its own
   RLock, so one session's slow stop never blocks another. Over the limit → `SessionConflictError`
   → HTTP 409 `SESSION_LIMIT`. `active_session_id` is non-None only when exactly one session is live;
-  any "is something recording?" check must use `active_session_ids()` (reembed defer does).
+  any "is something recording?" check must use `active_session_ids()`: the one definition is `recording.state.recording_active()` (reembed defer and `suggest-meta` use it).
 - **Source boundary.** The service reaches audio only through the `AudioSource` protocol
   (`audio_source.py`). System audio is a `SystemSpec`: `all` | `include:[1..4 exe]` |
   `exclude:[exactly 1 exe]`; anything else is `UNSUPPORTED_SOURCE_SPEC` (400) before any start.
@@ -43,6 +43,15 @@ Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0. Code: `app/services/reco
   the call ends, then `RECORDING_AUTOSTOP_SILENCE_MIN` of silence on both tracks stops that recording through
   the normal stop path (finalized whole). Only apps on the `RECORDING_AUTOPROMPT_APPS` allow-list can be a
   call; a failed session enumeration holds state rather than reading as «call ended».
+- **A stopped recording is always saved (4.23.0, spec `recording-autosave`).** Whoever stops it (own Stop button, notification,
+  MCP, K2 autostop, another tab), finalize sets a server deadline `RECORDING_AUTOSAVE_SEC` (default 60; 0 = off) in
+  `manifest['autosave']`; the save screen counts down to the same moment. Editing the save screen only ever moves the deadline out
+  (hold, +10 min) and the typed name/description/direction travel with it and win over any guess. `/save` and `/discard` cancel it. At
+  the deadline the server runs the UI's own write path over loopback HTTP (transcribe, then title, then direction) so duplicate guard
+  and enrichment are identical. The direction is set only at k-NN confidence >= `RECORDING_AUTOSAVE_MIN_CONFIDENCE` (0.6), otherwise it
+  stays empty and the Audio library asks. The title waits while any recording is live (the local model is blocked then). Deadlines
+  survive a restart (re-armed with a fresh delay). **Invariant:** once a transcript exists or autosave is running/done, discard is
+  refused (409 `RECORDING_KEPT`), because deleting `final.mp3` would orphan the transcript.
 - **No guessing the session.** `/api/recordings/active` fills `session_id`/`state` only when exactly
   one session is live; MCP live tools and `/api/copilot/live-ask` without `session_id` answer
   `AMBIGUOUS_SESSION` when more than one is live.

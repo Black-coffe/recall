@@ -122,3 +122,17 @@ def test_language_detection_plurals_and_fallback():
     assert out["other"] == "3 days"
     assert out["unknown"] == "x.nope" and out["warned"] == 1
     assert out["header"] == {"X-Recall-Lang": "en"}
+
+
+_GATE_KEYS = ["waiting", "denied_no", "denied_timeout", "unavailable", "pending", "rate_ceiling"]
+
+
+def test_gate_keys_exist_in_both_languages_and_ui_uses_them():
+    """No JS unit runner: static check of the UI.gated error mapping (codes -> core.gate.* keys)."""
+    core = (JS / "i18n" / "core.js").read_text(encoding="utf-8")
+    ui = (JS / "ui.js").read_text(encoding="utf-8")
+    for key in _GATE_KEYS:
+        assert core.count(f'"core.gate.{key}"') == 2, key
+        assert f"core.gate.{key}" in ui, key
+    for code in ("APPROVAL_DENIED", "APPROVAL_UNAVAILABLE", "APPROVAL_PENDING", "RATE_CEILING"):
+        assert code in ui, code

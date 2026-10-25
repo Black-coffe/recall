@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="same-origin">
+<title>{{ title }}</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; color: #222; }
+.warn { background: #fff4d6; border: 1px solid #e0c36a; padding: .6rem .8rem; border-radius: 6px; }
+.err { color: #a11; }
+input[type=password] { width: 100%; padding: .5rem; margin: .3rem 0 1rem; box-sizing: border-box; }
+button { padding: .5rem 1.2rem; }
+</style>
+</head>
+<body>
+<h1>{{ title }}</h1>
+{% if gone %}
+<p>{{ gone }}</p>
+{% elif done %}
+<p>{{ done }}</p>
+{% if labels is not none %}
+<ul>{% for lb in labels %}<li>{{ lb }}</li>{% endfor %}</ul>
+<p>{{ done_hint }}</p>
+{% endif %}
+<p>{{ close_hint }}</p>
+{% else %}
+<p class="warn">{{ warning }}</p>
+{% if requested_by_line %}<p>{{ requested_by_line }}</p>{% endif %}
+{% if configured_line %}<p>{{ configured_line }}</p>{% endif %}
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+<form method="post" autocomplete="off">
+{% if address %}<p>{{ address_label }}: <strong>{{ address }}</strong></p>{% endif %}
+<label>{{ secret_label }}
+<input type="password" name="secret" autocomplete="off" required autofocus></label>
+<button type="submit">{{ submit }}</button>
+</form>
+{% endif %}
+</body>
+</html>

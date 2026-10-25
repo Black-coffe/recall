@@ -68,6 +68,18 @@ MESSAGES: dict = {
         "uk": "Помилка завантаження моделі",
         "en": "Failed to download the model",
     },
+    "core.system.model_unknown": {
+        "uk": "Невідома модель: {model}",
+        "en": "Unknown model: {model}",
+    },
+    "core.system.model_download_log_start": {
+        "uk": "Завантаження моделі {model}",
+        "en": "Downloading model {model}",
+    },
+    "core.system.diagnostic_write_failed": {
+        "uk": "Не вдалося записати діагностичний пакет",
+        "en": "Could not write the diagnostic package",
+    },
     "core.system.stats_failed": {
         "uk": "Помилка отримання статистики системи",
         "en": "Failed to get system statistics",

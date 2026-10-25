@@ -19,6 +19,7 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core import auth
 from app.core.i18n import tr
 from app.services import categories as cat_svc
 from app.services import record_meta
@@ -77,7 +78,9 @@ def download_audio_only():
         )
         existing = c.fetchone()
 
-    if existing and not data.get('force', False):
+    # A forced re-download is the UI's call only: an agent asking again gets the existing row.
+    force = bool(data.get('force', False)) and auth.classify_request()[0] == "ui"
+    if existing and not force:
         return jsonify({
             "success": True,
             "status": "exists",

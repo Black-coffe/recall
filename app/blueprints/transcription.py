@@ -1,6 +1,7 @@
 """Transcription endpoints (Phase 5.8).
 
 - POST   /api/transcribe                      (file/youtube → transcript)
+- POST   /api/transcribe/async                (the same as a `transcription` job)
 - GET    /api/history                         (list with filters + FTS)
 - GET    /api/history/<id>                    (get one)
 - PATCH  /api/history/<id>                    (custom title/description, v44)
@@ -21,14 +22,16 @@ import re
 import time
 from datetime import datetime
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import Blueprint, current_app, g, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
+from app.services.recording.state import recording_active
 from app import state
+from app.core import auth
 from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
 from app.services import categories as cat_svc
-from app.services import dedup_audio, meta_suggest, record_meta, text_polishing, vocabulary
+from app.services import dedup_audio, meta_suggest, record_meta, transcript_ai, transcription_run, vocabulary
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, format_srt_timestamp, is_video_file
 from app.utils.fts import sanitize_fts_query
@@ -53,21 +56,16 @@ def _make_extract_log(process_id):
 
 
 # ============================================================
-# T7.1: source_type resolution — one function per /api/transcribe scenario.
+# T7.1: source_type resolution - one function per /api/transcribe scenario.
 #
-# Each resolve_*_source() reads the current Flask request (form/files) and
-# returns (filepath, source_name, meta) on success. meta is a dict with the
-# fixed keys 'youtube_info', 'download_id', 'library_audio_id',
-# 'library_recording_sid', 'source_type' (source_type is normally an echo of
-# the input, EXCEPT resolve_library_source() which may inherit a different
-# one from the audio_downloads row — the caller must use it, not its own
-# local variable, from that point on).
+# Each resolve_*_source() reads the current Flask request (form/files), builds
+# the matching TranscribeParams and calls transcription_run.resolve(), which
+# returns (filepath, source_name, meta). meta has the fixed keys of
+# transcription_run.empty_source_meta(); a library row may inherit another
+# source_type - the caller must use meta['source_type'] from then on.
 #
 # On a validation failure, they raise _SourceResolutionError carrying the
-# exact (jsonify payload, status) the old inline code used to `return`
-# directly — the HTTP handler below turns that back into a response. This
-# keeps every original error message/status byte-for-byte while making each
-# scenario callable/testable on its own (e.g. via app.test_request_context()).
+# exact (jsonify payload, status) the sync route answers with.
 # ============================================================
 
 class _SourceResolutionError(Exception):
@@ -79,18 +77,23 @@ class _SourceResolutionError(Exception):
         self.status = status
 
 
-def _empty_source_meta(source_type: str) -> dict:
-    return {
-        'youtube_info': {},
-        'download_id': None,
-        'library_audio_id': None,
-        'library_recording_sid': None,
-        'source_type': source_type,
-        # editable-title-description-02: a copy from the Audio Library (only 'library'
-        # fills it), the form (request.form title/description) takes priority.
-        'title': None,
-        'description': None,
-    }
+_empty_source_meta = transcription_run.empty_source_meta
+
+
+def _sync_params(source: str, source_ref=None, **kw) -> transcription_run.TranscribeParams:
+    return transcription_run.TranscribeParams(
+        source=source, source_ref=source_ref,
+        db_path=current_app.config['DATABASE'],
+        upload_folder=current_app.config.get('UPLOAD_FOLDER'),
+        **kw,
+    )
+
+
+def _resolve_sync(params) -> tuple[str, str, dict]:
+    try:
+        return transcription_run.resolve(params)
+    except transcription_run.TranscribeError as e:
+        raise _SourceResolutionError(e.sync_body(), e.sync_status)
 
 
 def resolve_file_source() -> tuple[str, str, dict]:
@@ -118,112 +121,26 @@ def resolve_file_source() -> tuple[str, str, dict]:
         raise _SourceResolutionError({"success": False, "error": tr('transcript.err.filename_invalid')}, 400)
 
     file.save(filepath)
-    source_name = file.filename
     logger.info(f"File saved: {filepath}")
-
-    # If it is a video - extract the audio
-    if is_video_file(file.filename):
-        logger.info(f"Video file detected: {file.filename}")
-        audio_filename = f"{timestamp}_extracted_audio.mp3"
-        audio_filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], audio_filename)
-        if not _extract_audio_raw(filepath, audio_filepath, add_log=None):
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_extract_failed')}, 500)
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            logger.info(f"Video file removed: {filepath}")
-        filepath = audio_filepath
-        logger.info(f"Using the extracted audio: {filepath}")
-
-    return filepath, source_name, _empty_source_meta('file')
+    return _resolve_sync(_sync_params('file', filepath, original_name=file.filename))
 
 
 def resolve_youtube_source() -> tuple[str, str, dict]:
     """source_type='youtube': previously completed /api/youtube/download by download_id."""
-    download_id = request.form.get('download_id')
-    if not download_id or download_id not in state.download_progress:
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.download_id_invalid')}, 400)
-    progress = state.download_progress.get(download_id)
-    if progress['status'] != 'completed':
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.download_unfinished')}, 400)
-    filepath = progress['file_path']
-    youtube_info = progress['info']
-    source_name = youtube_info['title']
-    state.add_log(download_id, "transcribe", tr("svc_media.tx.log.start"), 55, "processing")
-    meta = _empty_source_meta('youtube')
-    meta['youtube_info'] = youtube_info
-    meta['download_id'] = download_id
-    return filepath, source_name, meta
+    return _resolve_sync(_sync_params('youtube', download_id=request.form.get('download_id') or ''))
 
 
 def resolve_recording_source() -> tuple[str, str, dict]:
     """source_type='recording': Phase 9.8, a finalized server-side recording session."""
-    sid = request.form.get('recording_session_id')
-    if not sid:
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_session_required')}, 400)
-    if state.recording_service is None:
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_disabled')}, 503)
-    try:
-        manifest = state.recording_service.store.read(sid)
-    except Exception:
-        logger.debug("recording manifest read failed for sid=%s", sid, exc_info=True)
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_session_not_found')}, 404)
-    if manifest.get('status') != 'finalized':
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_not_finalized')}, 400)
-    final_mp3 = manifest.get('final_mp3_path')
-    if not final_mp3 or not os.path.isfile(final_mp3):
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.rec_mp3_missing')}, 400)
-    source_name = manifest.get('name') or manifest.get('auto_name') or sid
-    return final_mp3, source_name, _empty_source_meta('recording')
+    return _resolve_sync(_sync_params('recording', request.form.get('recording_session_id')))
 
 
 def resolve_library_source() -> tuple[str, str, dict]:
     """source_type='library': Phase 9.10+, any Audio Library (audio_downloads) row by id.
 
     Inherits the row's original source_type ('youtube'/'recording'/'file') for
-    the transcriptions.source_type INSERT further downstream — the caller
-    MUST use meta['source_type'] from here on, not its own local variable.
-    """
-    audio_id = request.form.get('audio_download_id')
-    if not audio_id:
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_dl_required')}, 400)
-    try:
-        audio_id_int = int(audio_id)
-    except (TypeError, ValueError):
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_dl_not_number')}, 400)
-    with _get_db() as conn:
-        row = conn.execute(
-            'SELECT * FROM audio_downloads WHERE id = ?', (audio_id_int,)
-        ).fetchone()
-    if not row:
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.audio_lib_not_found')}, 404)
-    filepath = row['file_path']
-    if not filepath or not os.path.isfile(filepath):
-        raise _SourceResolutionError({"success": False, "error": tr('transcript.err.file_missing', path=filepath)}, 400)
-    source_name = row['title']
-    # Inherit the original source_type so the transcript in History
-    # is grouped correctly (YouTube → 'youtube', recording → 'recording')
-    inherited = (row['source_type'] if 'source_type' in row.keys() else None) or 'youtube'
-    meta = _empty_source_meta(inherited)
-    meta['library_audio_id'] = audio_id_int
-    # Inherit the Audio Library custom title/description - the form overrides this in transcribe().
-    meta['title'] = row['title'] if 'title' in row.keys() else None
-    meta['description'] = row['description'] if 'description' in row.keys() else None
-    # Phase 21: for a recording keep the sid → link the copilot session below.
-    if inherited == 'recording':
-        meta['library_recording_sid'] = row['recording_session_id'] if 'recording_session_id' in row.keys() else None
-    # If it is youtube - fill youtube_info for the INSERT
-    if inherited == 'youtube':
-        meta['youtube_info'] = {
-            'video_id': row['youtube_id'],
-            'title': row['title'],
-            'author': row['author'],
-            'duration': row['duration'],
-            'thumbnail': row['thumbnail_url'],
-            'original_url': row['youtube_url'],
-        }
-    return filepath, source_name, meta
+    the transcriptions.source_type INSERT further downstream."""
+    return _resolve_sync(_sync_params('library', request.form.get('audio_download_id')))
 
 
 _SOURCE_RESOLVERS = {
@@ -236,7 +153,7 @@ _SOURCE_RESOLVERS = {
 
 @transcription_bp.route('/api/transcribe', methods=['POST'])
 def transcribe():
-    """Transcribe audio (file upload or YouTube via download_id)."""
+    """Transcribe audio (file upload or YouTube via download_id), synchronously."""
     logger.info(f"=== DEBUG /api/transcribe ===")
     logger.info(f"request.form: {dict(request.form)}")
     logger.info(f"request.files keys: {list(request.files.keys())}")
@@ -244,8 +161,6 @@ def transcribe():
     logger.info(f"content_length: {request.content_length}")
 
     source_type = request.form.get('source_type', 'file')
-    model_name = request.form.get('model', 'base')
-    language = request.form.get('language', 'uk')
 
     # editable-title-description-02: custom title/description from the form -
     # validate BEFORE the resolver starts (file/download/transcription).
@@ -259,363 +174,92 @@ def transcribe():
     if resolver is None:
         return jsonify({"success": False, "error": tr('transcript.err.source_type_invalid')}), 400
     try:
-        filepath, source_name, meta = resolver()
+        resolved = resolver()
     except _SourceResolutionError as e:
         return jsonify(e.payload), e.status
 
-    # The form overrides the copy from the Audio Library (only the 'library' source carries it).
-    record_title = form_title if form_title is not None else meta['title']
-    record_description = form_description if form_description is not None else meta['description']
-
-    youtube_info = meta['youtube_info']
-    download_id = meta['download_id']
-    library_audio_id: int | None = meta['library_audio_id']  # for active_library_transcriptions
-    # If we transcribe a recording via the library path (audio_download_id) - the recording's
-    # sid for binding the copilot session is taken from the audio_downloads row,
-    # because the form has no recording_session_id.
-    library_recording_sid: str | None = meta['library_recording_sid']
-    # a library source may inherit another source_type (T7.1) - everything
-    # below (diarize/INSERT/enrichment) must follow that one.
-    source_type = meta['source_type']
-
-    if library_audio_id is not None and state.active_library_transcriptions is not None:
-        _existing_job = state.active_library_transcriptions.get(library_audio_id)
-        if _existing_job is not None:
-            # Post-wave finding 03.07.2026: a repeated POST with the same
-            # audio_download_id (a typical scenario - a client HTTP timeout
-            # retries the request while the first transcription is still running synchronously inside
-            # the previous request) started a SECOND full job (whisper+diarization
-            # again on the same file - wasted GPU time on hour-long recordings).
-            # 409 instead of a silent duplicate.
-            return jsonify({
-                "success": False,
-                "error": tr('transcript.err.already_running'),
-                "error_code": "ALREADY_RUNNING",
-                "active": _existing_job,
-            }), 409
-        state.active_library_transcriptions[library_audio_id] = {
-            'audio_download_id': library_audio_id,
-            'started_at': time.time(),
-            'stage': 'transcribing',
-            'progress': 0,
-        }
-
+    _cat_raw = request.form.get('category_id')
+    params = _sync_params(
+        source_type,
+        model=request.form.get('model') or 'large-v3',
+        language=request.form.get('language', 'uk'),
+        diarize=request.form.get('diarize', '').lower() in ('1', 'true', 'yes'),
+        category_id=int(_cat_raw) if (_cat_raw and _cat_raw.isdigit()) else None,
+        title=form_title,
+        description=form_description,
+        recording_session_id=request.form.get('recording_session_id'),
+    )
     try:
-        start_time = time.time()
+        result = transcription_run.run(params, resolved)
+    except transcription_run.TranscribeError as e:
+        return jsonify(e.sync_body()), e.sync_status
+    return jsonify(result)
 
-        def transcription_progress_callback(progress_info):
-            if not isinstance(progress_info, dict):
-                return
-            progress_value = progress_info.get('progress', 0)
-            if source_type == 'youtube' and download_id:
-                message = progress_info.get('message', tr("svc_media.tx.log.processing"))
-                overall_progress = 55 + (progress_value * 0.4)
-                segment = progress_info.get('segment')
-                if segment:
-                    try:
-                        state.sse_broker.publish(download_id, "segment", segment)
-                    except Exception:
-                        logger.debug(
-                            "SSE segment publish failed for %s (best-effort, does not block transcribe)",
-                            download_id, exc_info=True,
-                        )
-                state.add_log(download_id, "transcribe", message, overall_progress, "processing")
-            if library_audio_id is not None and state.active_library_transcriptions is not None:
-                entry = state.active_library_transcriptions.get(library_audio_id)
-                if entry is not None:
-                    entry['progress'] = progress_value
 
-        # K1: vocabulary and language - on files and recordings; YouTube gets {}.
-        vocab_kind = source_type if source_type in ('youtube', 'recording') else 'file'
-        result = state.whisper_manager.transcribe_with_progress(
-            filepath, model_name, language,
-            progress_callback=transcription_progress_callback,
-            decode_options=vocabulary.decode_options_for(vocab_kind, current_app.config['DATABASE']),
-        )
-        processing_time = time.time() - start_time
+def _async_bad(key: str, **kw):
+    return jsonify({"success": False, "error": tr(key, **kw), "error_code": "INVALID_ARGUMENT"}), 400
 
-        if "error" in result:
-            if source_type == 'youtube' and download_id:
-                state.add_log(download_id, "transcribe", tr("svc_media.tx.log.failed", error=result['error']), -1, "error")
-            return jsonify(result), 500
 
-        if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "transcribe", tr("svc_media.tx.log.done"), 95, "processing")
+_ASYNC_REF_FIELD = {
+    'library': 'audio_download_id',
+    'recording': 'recording_session_id',
+    'youtube': 'url',
+    'path': 'path',
+}
 
-        result["processing_time"] = round(processing_time, 2)
-        result["model_used"] = model_name
-        result["source_name"] = source_name
-        result["source_type"] = source_type
-        if source_type == 'youtube':
-            result["youtube_info"] = youtube_info
 
-        # Phase 10.3: speaker diarization (optional, always for a recording).
-        # A diarization error does NOT break transcribe - the feature can be turned off in .env
-        # by removing HF_TOKEN, then the segments are simply saved without speaker fields.
-        diarize_flag = request.form.get('diarize', '').lower() in ('1', 'true', 'yes')
-        should_diarize = source_type == 'recording' or diarize_flag
-        if should_diarize and library_audio_id is not None and state.active_library_transcriptions is not None:
-            entry = state.active_library_transcriptions.get(library_audio_id)
-            if entry is not None:
-                entry['stage'] = 'diarizing'
-                entry['progress'] = 1.0
-        unique_speaker_labels: list[str] = []
-        diar_embeddings: dict[str, list[float]] = {}
-        if should_diarize:
-            try:
-                from app.services.diarization_service import (
-                    DiarizationService, run_diarization_for_audio,
-                )
-                svc = DiarizationService.get_instance()
-                if not svc.is_available():
-                    logger.info(
-                        "Diarization disabled: %s - skipping",
-                        svc.unavailability_reason(),
-                    )
-                else:
-                    rec_manifest = None
-                    if source_type == 'recording':
-                        sid = request.form.get('recording_session_id')
-                        if sid and state.recording_service is not None:
-                            try:
-                                rec_manifest = state.recording_service.store.read(sid)
-                            except Exception:
-                                logger.debug(
-                                    "recording manifest read failed for diarization sid=%s "
-                                    "(continuing without manifest)", sid, exc_info=True,
-                                )
-                                rec_manifest = None
-                    diar_t0 = time.time()
-                    enriched_segs, unique_speaker_labels, diar_time, diar_embeddings = (
-                        run_diarization_for_audio(
-                            filepath,
-                            result['segments'],
-                            source_type=source_type,
-                            recording_manifest=rec_manifest,
-                            return_embeddings=True,  # Phase 10.6 voice fingerprinting
-                        )
-                    )
-                    result['segments'] = enriched_segs
-                    result['diarization_time'] = round(diar_time, 2)
-                    result['speakers_detected'] = unique_speaker_labels
-                    logger.info(
-                        "Diarization: found %d speakers in %.1fs (wall=%.1fs, embeddings=%d)",
-                        len(unique_speaker_labels), diar_time,
-                        time.time() - diar_t0, len(diar_embeddings),
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Diarization failed (continuing without it): %s", e, exc_info=True,
-                )
+@transcription_bp.route('/api/transcribe/async', methods=['POST'])
+def transcribe_async():
+    """Queue a transcription job (library | recording | youtube | path); 202 with its job_id.
 
-        # Phase 14: direction (category) - from the form, optional
-        _cat_raw = request.form.get('category_id')
-        category_id = int(_cat_raw) if (_cat_raw and _cat_raw.isdigit()) else None
+    A second call for the same source while its job is queued or running answers 200 with that
+    job_id and `created: false`. A non-UI caller is refused while a recording runs."""
+    data = request.get_json(silent=True) or {}
+    source = data.get('source')
+    field = _ASYNC_REF_FIELD.get(source) if isinstance(source, str) else None
+    if field is None:
+        return _async_bad('transcript.err.async_source_invalid')
+    ref = data.get(field)
+    if ref is None or (isinstance(ref, str) and not ref.strip()):
+        return _async_bad('transcript.err.async_ref_required', source=source, field=field)
+    try:
+        title = record_meta.normalize_title(data.get('title'))
+        description = record_meta.normalize_description(data.get('description'))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e), "error_code": "INVALID_ARGUMENT"}), 400
+    cat = data.get('category_id')
+    if cat is not None and cat != '':
+        if isinstance(cat, bool) or not str(cat).isdigit():
+            return _async_bad('transcript.err.category_id_invalid')
+        cat = int(cat)
+    else:
+        cat = None
+    diarize = data.get('diarize')
+    if diarize is not None and not isinstance(diarize, bool):
+        diarize = str(diarize).lower() in ('1', 'true', 'yes')
 
-        with _get_db() as conn:
-            c = conn.cursor()
-            # Audio dedup (Wave A): the same text uploaded a second time stays
-            # a record (its own comments/file/tasks), but is marked
-            # duplicate_of → the original's id and is NOT indexed - otherwise both
-            # copies compete for result slots with identical content.
-            text_hash = dedup_audio.hash_for(source_type, result['text'])
-            original = dedup_audio.find_original(conn, text_hash)
-            duplicate_of = original['id'] if original else None
-            if duplicate_of:
-                logger.info("Audio duplicate: the text matches #%s «%s» - the record "
-                            "is kept but not indexed", duplicate_of,
-                            original.get('source_name'))
-            c.execute('''INSERT INTO transcriptions
-                         (source_type, source_name, source_url, youtube_id, youtube_title,
-                          youtube_author, youtube_duration, youtube_thumbnail, file_path,
-                          transcript_text, language, model_used, processing_time, segments,
-                          category_id, content_hash, duplicate_of, title, description)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
-                source_type, source_name,
-                youtube_info.get('original_url') if source_type == 'youtube' else None,
-                youtube_info.get('video_id') if source_type == 'youtube' else None,
-                youtube_info.get('title') if source_type == 'youtube' else None,
-                youtube_info.get('author') if source_type == 'youtube' else None,
-                youtube_info.get('duration') if source_type == 'youtube' else None,
-                youtube_info.get('thumbnail') if source_type == 'youtube' else None,
-                filepath, result['text'], result['language'], model_name,
-                processing_time, json.dumps(result['segments']),
-                category_id, text_hash, duplicate_of, record_title, record_description,
-            ))
-            transcription_id = c.lastrowid
-            result['transcription_id'] = transcription_id
-            if duplicate_of:
-                result['duplicate_of'] = duplicate_of
-
-            # Phase 10.3: create transcription_speaker_map records for the detected
-            # labels. 'self' is automatically mapped to the seeded speaker is_self=1 ('Ви'),
-            # other labels (SPEAKER_00, ...) stay with a NULL speaker_id -
-            # the frontend shows "Спікер N" and offers naming.
-            #
-            # Phase 10.6: voice fingerprinting auto-match. For every new
-            # SPEAKER_NN with an embedding we compare cosine similarity to all
-            # saved speakers.embedding. Match >threshold → auto-link.
-            if unique_speaker_labels:
-                from app.services.diarization_service import (
-                    embedding_to_blob, find_matching_speaker,
-                )
-                self_id_row = c.execute(
-                    "SELECT id FROM speakers WHERE is_self = 1 LIMIT 1"
-                ).fetchone()
-                self_speaker_id = self_id_row[0] if self_id_row else None
-
-                # Load all saved speakers with embeddings in a single query
-                saved_speakers = c.execute(
-                    "SELECT id, embedding FROM speakers WHERE embedding IS NOT NULL AND is_self = 0"
-                ).fetchall()
-                saved_list = [(r[0], r[1]) for r in saved_speakers]
-
-                auto_matched = 0
-                for label in unique_speaker_labels:
-                    embedding = diar_embeddings.get(label)
-                    embedding_blob = embedding_to_blob(embedding) if embedding else None
-
-                    if label == 'self':
-                        sid_for_label = self_speaker_id
-                    else:
-                        # Try auto-match by embedding
-                        sid_for_label = None
-                        if embedding:
-                            match = find_matching_speaker(embedding, saved_list)
-                            if match:
-                                sid_for_label, sim = match
-                                auto_matched += 1
-                                logger.info(
-                                    "Auto-match: %s → speaker_id=%d (cosine=%.3f)",
-                                    label, sid_for_label, sim,
-                                )
-
-                    c.execute(
-                        'INSERT OR IGNORE INTO transcription_speaker_map '
-                        '(transcription_id, raw_label, speaker_id, embedding) '
-                        'VALUES (?, ?, ?, ?)',
-                        (transcription_id, label, sid_for_label, embedding_blob),
-                    )
-                if auto_matched:
-                    logger.info(
-                        "Voice fingerprinting: %d/%d speakers auto-identified",
-                        auto_matched, len(unique_speaker_labels),
-                    )
-            conn.commit()
-            # Enrich the response with the full speaker payload - so the UI can immediately
-            # render chips without an extra GET /api/history/<id>.
-            if unique_speaker_labels:
-                speaker_rows = c.execute('''
-                    SELECT m.raw_label, m.speaker_id, s.name, s.color, s.is_self
-                    FROM transcription_speaker_map m
-                    LEFT JOIN speakers s ON s.id = m.speaker_id
-                    WHERE m.transcription_id = ?
-                ''', (transcription_id,)).fetchall()
-                result['speakers'] = [
-                    {
-                        'raw_label': r['raw_label'],
-                        'speaker_id': r['speaker_id'],
-                        'name': r['name'],
-                        'color': r['color'],
-                        'is_self': bool(r['is_self']) if r['is_self'] is not None else False,
-                    }
-                    for r in speaker_rows
-                ]
-
-        state.metrics.inc("whisper_transcriptions_total", model=model_name, source=source_type)
-        state.metrics.observe_duration("whisper_transcription_duration_seconds", processing_time, model=model_name)
-        if unique_speaker_labels:
-            state.metrics.inc(
-                "whisper_diarizations_total", source=source_type,
-            )
-
-        # Phase 13: auto-enrichment (Meeting Memory). A background job - does NOT block
-        # the response. Extracts entities (people/projects/orgs), summary, action items
-        # in a single Claude call and fills the end-to-end graph for RAG search.
-        # Auto-disables if there is no ANTHROPIC_API_KEY (enrichment.is_available()).
-        # A duplicate is neither enriched nor chunked: the original's chunks already exist, and a copy
-        # would only duplicate them in results (and pay for the Claude card a second time).
-        try:
-            from app.services import enrichment
-            if duplicate_of:
-                result['enrichment'] = {"status": "skipped_duplicate"}
-            elif enrichment.any_available() and state.job_queue is not None:
-                _db_path = current_app.config['DATABASE']
-                _enrich_ch = f"enrich_{transcription_id}"
-
-                def _enrich_job(job, _tid=transcription_id, _db=_db_path, _ch=_enrich_ch):
-                    try:
-                        state.sse_broker.publish(_ch, "enrich", {"status": "running", "transcription_id": _tid})
-                    except Exception:
-                        logger.debug("SSE enrich 'running' publish failed for %s (best-effort)", _ch, exc_info=True)
-                    res = enrichment.enrich_transcription(_db, _tid)
-                    try:
-                        state.sse_broker.publish(_ch, "complete", {"status": "completed", **res})
-                    except Exception:
-                        logger.debug("SSE enrich 'complete' publish failed for %s (best-effort)", _ch, exc_info=True)
-                    return res
-
-                state.job_queue.submit(
-                    "enrichment", _enrich_job,
-                    meta={"transcription_id": transcription_id},
-                )
-                result['enrichment'] = {"status": "queued"}
-        except Exception as e:
-            logger.warning("Enrichment job not queued (continuing): %s", e)
-
-        # Phase 19 (Step 7): link the recording's copilot session to the created
-        # transcript → the copilot timeline opens from the transcript page.
-        if source_type == 'recording':
-            _rec_sid = request.form.get('recording_session_id') or library_recording_sid
-            if _rec_sid and state.copilot_service is not None:
-                try:
-                    _cs = state.copilot_service.get_by_recording(_rec_sid)
-                    if _cs:
-                        state.copilot_service.link_transcription(_cs['id'], transcription_id)
-                except Exception as e:
-                    logger.warning("copilot link to transcription failed: %s", e)
-
-            # Wave 4: comments written DURING the call hung on the recording
-            # session (the transcript did not exist yet). Now it exists - and this is
-            # where they must move: otherwise everything the owner dictated during
-            # the conversation would stay on an id that is not visible from any screen of the
-            # archive. anchor_time moves as is - the offset in the session and in the
-            # transcript is the same (seconds from the start of the recording).
-            if _rec_sid:
-                try:
-                    from app.services import comments as comments_svc
-                    moved = comments_svc.retarget(
-                        current_app.config['DATABASE'],
-                        'recording_session', _rec_sid,
-                        'transcription', transcription_id)
-                    if moved:
-                        result['comments_moved'] = moved
-                        logger.info("[comments] session %s → tx=%s: re-attached %d",
-                                    _rec_sid, transcription_id, moved)
-                except Exception as e:
-                    # Comments stay on the session and are not lost; a repeated run
-                    # or a manual retarget fixes it.
-                    logger.warning("comments retarget failed: %s", e)
-
-        # Phase 12.11 fix: do NOT delete the uploaded file after transcribe -
-        # it is needed for the audio player in the transcript view (Phase 12.3+).
-        # The file stays in UPLOAD_FOLDER; it is deleted only on DELETE of
-        # the transcription (handled in the delete endpoints).
-        if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "complete", tr("svc_media.tx.log.complete"), 100, "completed")
-        return jsonify(result)
-
-    except Exception as e:
-        logger.error(f"Transcription error: {e}", exc_info=True)
-        if source_type == 'youtube' and download_id:
-            state.add_log(download_id, "transcribe", tr("svc_media.tx.log.failed", error=e), -1, "error")
-        # On error the uploaded file is deleted - there is no transcription in the DB for it.
-        if source_type == 'file' and filepath and os.path.exists(filepath):
-            os.remove(filepath)
-        return jsonify({"success": False, "error": tr('transcript.err.transcribe_failed')}), 500
-    finally:
-        if library_audio_id is not None and state.active_library_transcriptions is not None:
-            state.active_library_transcriptions.pop(library_audio_id, None)
+    actor = auth.classify_request()[0]
+    params = transcription_run.TranscribeParams(
+        source=source,
+        source_ref=ref.strip() if isinstance(ref, str) else ref,
+        model=data.get('model') or 'large-v3',
+        language=data.get('language') or 'uk',
+        diarize=diarize,
+        category_id=cat,
+        title=title,
+        description=description,
+        recording_session_id=ref if source == 'recording' else None,
+        actor=actor,
+        db_path=current_app.config['DATABASE'],
+        upload_folder=current_app.config.get('UPLOAD_FOLDER'),
+        non_ui=actor != 'ui',
+        max_bytes=current_app.config.get('MAX_CONTENT_LENGTH'),
+    )
+    try:
+        out = transcription_run.submit(params)
+    except transcription_run.TranscribeError as e:
+        return jsonify(e.async_body()), e.status
+    return jsonify({"success": True, **out}), (202 if out['created'] else 200)
 
 
 @transcription_bp.route('/api/transcribe/active', methods=['GET'])
@@ -647,6 +291,8 @@ def get_history():
     tg_sender_q = (request.args.get('tg_sender') or '').strip()
     tg_chat_q = (request.args.get('tg_chat') or '').strip()
     yt_author_q = (request.args.get('yt_author') or '').strip()
+    # `deleted=1`: only the soft-deleted records (undo window), each with `deleted_at`.
+    deleted_only = request.args.get('deleted') == '1'
     # C4: direction (expanding to projects), tags (OR), period - a shared
     # set of filter axes for all list surfaces (`app/services/categories.py`).
     try:
@@ -661,7 +307,7 @@ def get_history():
         c = conn.cursor()
         # T4.6: soft-deleted (undo window) are never shown in lists/search -
         # a mandatory system filter, independent of query parameters.
-        where_clauses = ['deleted_at IS NULL']
+        where_clauses = ['deleted_at IS NOT NULL' if deleted_only else 'deleted_at IS NULL']
         params = []
         fts_query = None  # Phase 12.2: lifted out of the if-block for later use in the snippet
         if source_filter:
@@ -745,12 +391,14 @@ def get_history():
                        t.tg_chat_title, t.tg_sender, t.tg_link,
                        t.youtube_duration, t.youtube_author,
                        t.page_count, t.original_filename, t.meeting_date, t.enriched_at,
-                       t.duplicate_of,
+                       t.duplicate_of, t.file_path, t.active_version_id,
                        (SELECT COUNT(*) FROM action_items ai
                          WHERE ai.transcription_id = t.id
                            AND ai.status = 'open' AND ai.dup_of IS NULL) AS open_tasks,
                        (SELECT COUNT(DISTINCT m.speaker_id) FROM transcription_speaker_map m
                          WHERE m.transcription_id = t.id) AS speaker_count'''
+        if deleted_only:
+            cols += ', t.deleted_at'
         if fts_query:
             select_sql = f'''
                 SELECT {cols},
@@ -788,6 +436,7 @@ def get_history():
     items = []
     for t in transcriptions:
         item = dict(t)
+        item['has_media'] = _has_media(item.pop('file_path', None))
         item['display_name'] = record_meta.display_name(item)
         item['tags'] = tags_map.get(item['id'], [])
         item['suggested_tags'] = suggested_map.get(item['id'], [])
@@ -840,6 +489,7 @@ def get_transcription(transcription_id):
         record_tags = cat_svc.tags_for(conn, [transcription_id]).get(transcription_id, [])
         record_suggested = cat_svc.suggested_tags(conn, transcription_id)
     result = dict(transcription)
+    result['has_media'] = _has_media(result.get('file_path'))
     result['segments'] = json.loads(result['segments']) if result['segments'] else []
     result['speakers'] = [
         {
@@ -858,6 +508,100 @@ def get_transcription(transcription_id):
     # title/description come from SELECT * (v44); display_name is a derived field.
     result['display_name'] = record_meta.display_name(result)
     return jsonify(result)
+
+
+def _has_media(path) -> bool:
+    return bool(path) and os.path.isfile(path)
+
+
+def _retranscribe_error(code, **extra):
+    from app.services import retranscribe
+    status, body = retranscribe.error_body(code, **extra)
+    return jsonify(body), status
+
+
+@transcription_bp.route('/api/history/<int:transcription_id>/retranscribe', methods=['POST'])
+def retranscribe_transcription(transcription_id):
+    """Queue a re-run of the record with another installed model; the result becomes a version."""
+    from app.services import retranscribe
+    data = request.get_json(silent=True) or {}
+    model = data.get('model')
+    language = data.get('language')
+    diarize = data.get('diarize')
+    if not isinstance(model, str) or not model.strip():
+        return _retranscribe_error('MODEL_NOT_INSTALLED')
+    if language is not None and not isinstance(language, str):
+        return jsonify({'success': False, 'error': tr('transcript.err.bad_language'),
+                        'error_code': 'INVALID_ARGUMENT'}), 400
+    try:
+        res = retranscribe.submit(
+            transcription_id, model=model.strip(), language=language or None,
+            diarize=diarize if isinstance(diarize, bool) else None,
+            db_path=current_app.config['DATABASE'],
+            # The approval gate clears this for a non-UI caller, and sets
+            # `approved_action` when the owner approved dropping a version (ask 9).
+            allow_evict=(g.get('approved_action') == 'transcript_version_evict'
+                         or g.get('evict_allowed', True)))
+    except retranscribe.RetranscribeError as e:
+        return _retranscribe_error(e.code, **e.extra)
+    return jsonify({'success': True, **res}), 202
+
+
+def _record_missing(conn, tid):
+    return conn.execute('SELECT 1 FROM transcriptions WHERE id = ? AND deleted_at IS NULL',
+                        (tid,)).fetchone() is None
+
+
+@transcription_bp.route('/api/history/<int:transcription_id>/versions', methods=['GET'])
+def list_transcript_versions(transcription_id):
+    from app.services import retranscribe, transcript_versions as tv
+    with _get_db() as conn:
+        if _record_missing(conn, transcription_id):
+            return _retranscribe_error('NOT_FOUND')
+        listing = tv.list_versions(conn, transcription_id)
+    return jsonify({'success': True, 'active_version_id': listing['active_version_id'],
+                    'running_job_id': retranscribe.running_job_id(transcription_id),
+                    'versions': listing['versions']})
+
+
+@transcription_bp.route('/api/history/<int:transcription_id>/versions/<int:version_id>',
+                        methods=['GET'])
+def get_transcript_version(transcription_id, version_id):
+    from app.services import transcript_versions as tv
+    with _get_db() as conn:
+        if _record_missing(conn, transcription_id):
+            return _retranscribe_error('NOT_FOUND')
+        version = tv.get_version(conn, transcription_id, version_id)
+    if version is None:
+        return jsonify({'success': False, 'error': tr('transcript.err.version_not_found'),
+                        'error_code': 'NOT_FOUND'}), 404
+    return jsonify({'success': True, 'version': version})
+
+
+@transcription_bp.route(
+    '/api/history/<int:transcription_id>/versions/<int:version_id>/activate', methods=['POST'])
+def activate_transcript_version(transcription_id, version_id):
+    """Make a kept version the main one; search and RAG are re-embedded for this record only."""
+    from app.services import reembed, retranscribe, transcript_versions as tv
+    live = retranscribe.running_job_id(transcription_id)
+    if live:
+        return _retranscribe_error('ALREADY_RUNNING', job_id=live)
+    db_path = current_app.config['DATABASE']
+    with _get_db() as conn:
+        if _record_missing(conn, transcription_id):
+            return _retranscribe_error('NOT_FOUND')
+        try:
+            tv.activate(conn, transcription_id, version_id)
+            conn.commit()
+        except LookupError:
+            conn.rollback()
+            return jsonify({'success': False, 'error': tr('transcript.err.version_not_found'),
+                            'error_code': 'NOT_FOUND'}), 404
+        except Exception:
+            conn.rollback()
+            raise
+    status = reembed.schedule_record_reembed(transcription_id, db_path=db_path)
+    return jsonify({'success': True, 'active_version_id': version_id, 'reembed': status})
 
 
 @transcription_bp.route('/api/history/<int:transcription_id>', methods=['PATCH'])
@@ -881,6 +625,16 @@ def patch_transcription_meta(transcription_id):
     if 'description' in payload:
         kwargs['description'] = payload['description']
 
+    if auth.classify_request()[0] != 'ui':
+        from app.services import job_queue
+        job_id = job_queue.active_job_for_transcription(transcription_id)
+        if job_id:
+            return jsonify({"success": False, "error": tr('transcript.err.job_active'),
+                            "error_code": "JOB_ACTIVE", "job_id": job_id}), 409
+        kwargs['meta_source'] = 'mcp'
+    else:
+        kwargs['meta_source'] = None
+
     # Lazily, as in recording.py: the recording package pulls in WASAPI/finalize.
     from app.services.recording import library as rec_library
 
@@ -894,7 +648,8 @@ def patch_transcription_meta(transcription_id):
                     if record is not None else None)
             if link:
                 linked_changed = rec_library.sync_recording_meta(
-                    conn, link, {k: record[k] for k in kwargs}, store=_recording_store())
+                    conn, link, {k: record[k] for k in ('title', 'description') if k in kwargs},
+                    store=_recording_store())
     except ValueError as e:
         # A controlled normalization error (length) - its text was written for a person.
         return jsonify({"success": False, "error": str(e)}), 400
@@ -920,21 +675,6 @@ def _recording_store():
     return getattr(rs, 'store', None) if rs is not None else None
 
 
-def _recording_active() -> bool:
-    """Whether a recording is in progress - by the server's own sessions, not by the request body.
-
-    During a recording the local model belongs to the copilot: `local_llm.generate()`
-    holds the process-wide `_GEN_LOCK`, and 40 s of title suggestions would freeze the
-    hints in the call (`docs/defects/local-llm-during-recording.md`)."""
-    rs = state.recording_service
-    if rs is None:
-        return False
-    ids_fn = getattr(rs, 'active_session_ids', None)
-    if callable(ids_fn):
-        return bool(ids_fn())
-    return bool(getattr(rs, 'active_session_id', None))
-
-
 @transcription_bp.route('/api/history/<int:transcription_id>/suggest-meta', methods=['POST'])
 def suggest_transcription_meta(transcription_id):
     """Title and description variants from the local model (recording-meta-suggest spec).
@@ -942,7 +682,7 @@ def suggest_transcription_meta(transcription_id):
     Saves nothing - the chosen variant goes through a regular PATCH. While a recording is in progress,
     the model is not called at all: 409 ``RECORDING_ACTIVE``.
     """
-    if _recording_active():
+    if recording_active():
         return jsonify({
             'success': False,
             'error_code': 'RECORDING_ACTIVE',
@@ -1032,6 +772,10 @@ def bulk_delete_transcriptions():
             # Phase 10.3: clean the speaker map before deleting transcriptions
             conn.execute(
                 f'DELETE FROM transcription_speaker_map WHERE transcription_id IN ({placeholders})',
+                ids,
+            )
+            conn.execute(
+                f'DELETE FROM transcript_versions WHERE transcription_id IN ({placeholders})',
                 ids,
             )
             conn.execute(f'DELETE FROM transcriptions WHERE id IN ({placeholders})', ids)
@@ -1513,32 +1257,13 @@ def split_segment(transcription_id):
 
 
 # ============================================================
-# T7.7: shared helpers for the five near-identical Claude endpoints below
-# (polish/summarize/sentiment/translate/topics) — each used to inline its own
-# copy of "parse segments → load raw_label→name speaker map" and "call
-# text_polishing.* → RuntimeError becomes 400, anything else logged + generic
-# 500". Persistence/response shape genuinely differ per endpoint (see
-# REMEDIATION_PLAN T7.7) and are intentionally NOT folded in here.
+# T7.7: the five Claude endpoints below (polish/summarize/sentiment/translate/topics)
+# are thin views over `app/services/transcript_ai.py`, which owns the cache columns,
+# the Claude calls and the write-back. `_load_speaker_context` and
+# `_call_claude_endpoint` stay importable here for their existing tests.
 # ============================================================
 
-def _load_speaker_context(
-    conn, transcription_id: int, segments_json: str | None,
-) -> tuple[list[dict], bool, dict[str, str]]:
-    """Parse `segments` JSON and, if diarized, load the raw_label→name map."""
-    segments = json.loads(segments_json) if segments_json else []
-    has_speakers = any(s.get('speaker') for s in segments)
-    speaker_map: dict[str, str] = {}
-    if has_speakers:
-        sm_rows = conn.execute('''
-            SELECT m.raw_label, s.name
-            FROM transcription_speaker_map m
-            LEFT JOIN speakers s ON s.id = m.speaker_id
-            WHERE m.transcription_id = ?
-        ''', (transcription_id,)).fetchall()
-        for r in sm_rows:
-            if r['name']:
-                speaker_map[r['raw_label']] = r['name']
-    return segments, has_speakers, speaker_map
+_load_speaker_context = transcript_ai._load_speaker_context
 
 
 def _call_claude_endpoint(label: str, fn, *args, error_msg: str | None = None, **kwargs):
@@ -1558,6 +1283,18 @@ def _call_claude_endpoint(label: str, fn, *args, error_msg: str | None = None, *
         return None, (jsonify({"success": False, "error": error_msg or tr('transcript.err.claude_api_logs')}), 500)
 
 
+def _ai_sync(kind: str, transcription_id: int, **kw):
+    """A sync Claude route: ``{force, model}`` from the body, ``transcript_ai.run`` inline."""
+    data = request.get_json(silent=True) or {}
+    try:
+        out = transcript_ai.run(kind, transcription_id, model=data.get('model'),
+                                force=bool(data.get('force', False)),
+                                db_path=current_app.config['DATABASE'], **kw)
+    except transcript_ai.TranscriptAIError as e:
+        return jsonify(e.sync_body()), e.status
+    return jsonify({"success": True, "cached": out["cached"], **out["result"]})
+
+
 @transcription_bp.route('/api/transcription/<int:transcription_id>/polish', methods=['POST'])
 def polish_transcription(transcription_id):
     """Improve the transcript via the Claude API. Caches the result in the DB.
@@ -1566,75 +1303,7 @@ def polish_transcription(transcription_id):
     polish_diarized_transcript is used automatically, which keeps the
     speaker markup in the 'Name: text' format.
     """
-    if not text_polishing.is_available():
-        return jsonify({
-            "success": False,
-            "error": tr('transcript.err.api_key_env'),
-        }), 400
-
-    data = request.get_json(silent=True) or {}
-    model_override = data.get('model')
-    force = bool(data.get('force', False))
-
-    with _get_db() as conn:
-        row = tx_repo.get_by_id(conn, transcription_id,
-                                 columns=['id', 'transcript_text', 'polished_text', 'segments'])
-        if not row:
-            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
-
-        if row['polished_text'] and not force:
-            return jsonify({"success": True, "polished_text": row['polished_text'], "cached": True})
-
-        # Phase 10.7: detect diarized transcript and load speaker map
-        segments, has_speakers, speaker_map = _load_speaker_context(conn, transcription_id, row['segments'])
-
-    raw_text = row['transcript_text'] or ''
-    if not raw_text.strip() and not has_speakers:
-        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
-
-    if has_speakers:
-        logger.info(
-            "[polish] using diarized polish for transcription %d (%d segments, %d named speakers)",
-            transcription_id, len(segments), len(speaker_map),
-        )
-        result, err = _call_claude_endpoint(
-            "polish", text_polishing.polish_diarized_transcript, segments, speaker_map, model=model_override,
-        )
-    else:
-        result, err = _call_claude_endpoint(
-            "polish", text_polishing.polish_transcript, raw_text, model=model_override,
-        )
-    if err:
-        return err
-
-    polished = result["polished_text"]
-    if not polished:
-        return jsonify({"success": False, "error": tr('transcript.err.claude_empty')}), 500
-
-    with _get_db() as conn:
-        conn.execute(
-            'UPDATE transcriptions SET polished_text = ?, polished_at = CURRENT_TIMESTAMP, polished_model = ? WHERE id = ?',
-            (polished, result["model"], transcription_id),
-        )
-        conn.commit()
-
-    state.metrics.inc("whisper_polish_total", model=result["model"])
-    state.metrics.inc("whisper_polish_tokens_total", value=result["input_tokens"], model=result["model"], kind="input")
-    state.metrics.inc("whisper_polish_tokens_total", value=result["output_tokens"], model=result["model"], kind="output")
-    state.metrics.inc("whisper_polish_tokens_total", value=result["cache_read_tokens"], model=result["model"], kind="cache_read")
-
-    return jsonify({
-        "success": True,
-        "polished_text": polished,
-        "cached": False,
-        "model": result["model"],
-        "usage": {
-            "input_tokens": result["input_tokens"],
-            "output_tokens": result["output_tokens"],
-            "cache_read_tokens": result["cache_read_tokens"],
-            "cache_creation_tokens": result["cache_creation_tokens"],
-        },
-    })
+    return _ai_sync('polish', transcription_id)
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/summarize', methods=['POST'])
@@ -1643,136 +1312,13 @@ def summarize_transcription(transcription_id):
 
     Caches the JSON in summary_json. Body: {"force": bool, "model": str}.
     """
-    if not text_polishing.is_available():
-        return jsonify({
-            "success": False,
-            "error": tr('transcript.err.api_key_env'),
-        }), 400
-
-    data = request.get_json(silent=True) or {}
-    model_override = data.get('model')
-    force = bool(data.get('force', False))
-
-    with _get_db() as conn:
-        row = tx_repo.get_by_id(conn, transcription_id, columns=[
-            'id', 'transcript_text', 'polished_text', 'segments', 'summary_json',
-        ])
-        if not row:
-            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
-
-        if row['summary_json'] and not force:
-            try:
-                parsed = json.loads(row['summary_json'])
-                return jsonify({"success": True, "cached": True, **parsed})
-            except json.JSONDecodeError:
-                pass  # broken cache → regen
-
-        segments, has_speakers, speaker_map = _load_speaker_context(conn, transcription_id, row['segments'])
-
-    raw_text = row['transcript_text'] or ''
-    polished = row['polished_text'] or ''
-
-    # Priority: polished > diarized formatted > raw
-    diarized_text = None
-    if has_speakers and speaker_map:
-        # Reuse the polish formatter - it forms 'Name: text\n\nName: text'.
-        diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
-
-    body = polished if polished.strip() else (diarized_text or raw_text)
-    if not body or not body.strip():
-        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
-
-    result, err = _call_claude_endpoint(
-        "summarize", text_polishing.summarize_transcript,
-        text=body if not diarized_text else raw_text,
-        diarized_text=diarized_text,
-        model=model_override,
-    )
-    if err:
-        return err
-
-    payload = {
-        "summary": result["summary"],
-        "key_points": result["key_points"],
-        "action_items": result["action_items"],
-    }
-
-    with _get_db() as conn:
-        conn.execute(
-            'UPDATE transcriptions SET summary_json = ?, summary_at = CURRENT_TIMESTAMP, '
-            'summary_model = ? WHERE id = ?',
-            (json.dumps(payload, ensure_ascii=False), result["model"], transcription_id),
-        )
-        conn.commit()
-
-    state.metrics.inc("whisper_summarize_total", model=result["model"])
-    state.metrics.inc("whisper_summarize_tokens_total", value=result["input_tokens"], model=result["model"], kind="input")
-    state.metrics.inc("whisper_summarize_tokens_total", value=result["output_tokens"], model=result["model"], kind="output")
-
-    return jsonify({
-        "success": True,
-        "cached": False,
-        "model": result["model"],
-        "usage": {
-            "input_tokens": result["input_tokens"],
-            "output_tokens": result["output_tokens"],
-            "cache_read_tokens": result["cache_read_tokens"],
-        },
-        **payload,
-    })
+    return _ai_sync('summarize', transcription_id)
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/sentiment', methods=['POST'])
 def sentiment_transcription(transcription_id):
     """Phase 12.25: per-speaker sentiment analysis. Requires a diarized transcript."""
-    if not text_polishing.is_available():
-        return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
-
-    data = request.get_json(silent=True) or {}
-    force = bool(data.get('force', False))
-    model_override = data.get('model')
-
-    with _get_db() as conn:
-        row = tx_repo.get_by_id(conn, transcription_id, columns=['id', 'segments', 'sentiment_json'])
-        if not row:
-            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
-
-        if row['sentiment_json'] and not force:
-            try:
-                cached = json.loads(row['sentiment_json'])
-                return jsonify({"success": True, "cached": True, **cached})
-            except json.JSONDecodeError:
-                pass
-
-        segments, has_speakers, speaker_map = _load_speaker_context(conn, transcription_id, row['segments'])
-        if not has_speakers:
-            return jsonify({
-                "success": False,
-                "error": tr('transcript.err.sentiment_needs_diarization'),
-            }), 400
-
-    diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
-    if not diarized_text.strip():
-        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
-
-    result, err = _call_claude_endpoint(
-        "sentiment", text_polishing.analyze_sentiment, diarized_text, model=model_override,
-        error_msg=tr('transcript.err.claude_api'),
-    )
-    if err:
-        return err
-
-    payload = {"speakers": result['speakers'], "model": result['model']}
-    with _get_db() as conn:
-        conn.execute(
-            'UPDATE transcriptions SET sentiment_json = ? WHERE id = ?',
-            (json.dumps(payload, ensure_ascii=False), transcription_id),
-        )
-        conn.commit()
-
-    state.metrics.inc("whisper_sentiment_total", model=result["model"])
-
-    return jsonify({"success": True, "cached": False, **payload})
+    return _ai_sync('sentiment', transcription_id)
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/translate', methods=['POST'])
@@ -1782,160 +1328,49 @@ def translate_transcription(transcription_id):
     Body: {"target_lang": "en"|"uk"|"ru", "force": bool, "model": str}.
     Caches in translations_json: {lang_code: {text, model, created_at}}.
     """
-    if not text_polishing.is_available():
-        return jsonify({
-            "success": False,
-            "error": tr('transcript.err.api_key_unset'),
-        }), 400
-
     data = request.get_json(silent=True) or {}
-    target_lang = (data.get('target_lang') or '').strip().lower()
-    if not target_lang or len(target_lang) > 5:
-        return jsonify({"success": False, "error": tr('transcript.err.target_lang_required')}), 400
-    model_override = data.get('model')
-    force = bool(data.get('force', False))
-
-    with _get_db() as conn:
-        row = tx_repo.get_by_id(conn, transcription_id, columns=[
-            'id', 'transcript_text', 'polished_text', 'segments', 'language', 'translations_json',
-        ])
-        if not row:
-            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
-
-        if row['language'] and row['language'].lower() == target_lang:
-            return jsonify({
-                "success": False,
-                "error": tr('transcript.err.already_in_lang', lang=target_lang),
-            }), 400
-
-        translations = {}
-        if row['translations_json']:
-            try:
-                translations = json.loads(row['translations_json'])
-            except json.JSONDecodeError:
-                translations = {}
-
-        if target_lang in translations and not force:
-            return jsonify({
-                "success": True,
-                "cached": True,
-                "translated_text": translations[target_lang].get('text', ''),
-                "target_lang": target_lang,
-                "model": translations[target_lang].get('model', ''),
-            })
-
-        segments, has_speakers, speaker_map = _load_speaker_context(conn, transcription_id, row['segments'])
-
-    raw_text = row['transcript_text'] or ''
-    polished = row['polished_text'] or ''
-    diarized_text = None
-    if has_speakers and speaker_map:
-        diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
-    body_text = polished if polished.strip() else raw_text
-
-    if not body_text.strip() and not diarized_text:
-        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
-
-    result, err = _call_claude_endpoint(
-        "translate", text_polishing.translate_transcript,
-        text=body_text, target_lang=target_lang, diarized_text=diarized_text, model=model_override,
-    )
-    if err:
-        return err
-
-    translated = result['translated_text']
-    if not translated:
-        return jsonify({"success": False, "error": tr('transcript.err.claude_empty')}), 500
-
-    translations[target_lang] = {
-        'text': translated,
-        'model': result['model'],
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
-
-    with _get_db() as conn:
-        conn.execute(
-            'UPDATE transcriptions SET translations_json = ? WHERE id = ?',
-            (json.dumps(translations, ensure_ascii=False), transcription_id),
-        )
-        conn.commit()
-
-    state.metrics.inc("whisper_translate_total", model=result["model"], target_lang=target_lang)
-    state.metrics.inc("whisper_translate_tokens_total", value=result["input_tokens"], model=result["model"], kind="input")
-    state.metrics.inc("whisper_translate_tokens_total", value=result["output_tokens"], model=result["model"], kind="output")
-
-    return jsonify({
-        "success": True,
-        "cached": False,
-        "translated_text": translated,
-        "target_lang": target_lang,
-        "model": result['model'],
-        "usage": {
-            "input_tokens": result['input_tokens'],
-            "output_tokens": result['output_tokens'],
-            "cache_read_tokens": result['cache_read_tokens'],
-        },
-    })
+    return _ai_sync('translate', transcription_id, target_lang=data.get('target_lang'))
 
 
 @transcription_bp.route('/api/transcription/<int:transcription_id>/topics', methods=['POST'])
 def extract_topics_endpoint(transcription_id):
     """Phase 12.19: extract topic tags via Claude. Cache in topics_json."""
-    if not text_polishing.is_available():
-        return jsonify({"success": False, "error": tr('transcript.err.api_key_unset')}), 400
+    return _ai_sync('topics', transcription_id)
 
-    data = request.get_json(silent=True) or {}
-    force = bool(data.get('force', False))
-    model_override = data.get('model')
 
-    with _get_db() as conn:
-        row = tx_repo.get_by_id(conn, transcription_id, columns=[
-            'id', 'transcript_text', 'polished_text', 'segments', 'topics_json',
-        ])
-        if not row:
-            return jsonify({"success": False, "error": tr('transcript.err.tx_not_found')}), 404
+_AI_JOB_FIELDS = frozenset({'kind', 'target_lang'})
 
-        if row['topics_json'] and not force:
-            try:
-                cached = json.loads(row['topics_json'])
-                return jsonify({"success": True, "cached": True, "topics": cached.get('topics', [])})
-            except json.JSONDecodeError:
-                pass
 
-        segments, has_speakers, speaker_map = _load_speaker_context(conn, transcription_id, row['segments'])
+@transcription_bp.route('/api/transcription/<int:transcription_id>/ai-job', methods=['POST'])
+def transcript_ai_job(transcription_id):
+    """Run one Claude action in the background. Body: ``{kind, target_lang?}`` only.
 
-    body_text = row['polished_text'] or row['transcript_text'] or ''
-    diarized_text = None
-    if has_speakers and speaker_map:
-        diarized_text = text_polishing._format_diarized_input(segments, speaker_map)
-
-    if not body_text.strip() and not diarized_text:
-        return jsonify({"success": False, "error": tr('transcript.err.tx_empty')}), 400
-
-    result, err = _call_claude_endpoint(
-        "topics", text_polishing.extract_topics,
-        text=body_text, diarized_text=diarized_text, model=model_override,
-        error_msg=tr('transcript.err.claude_api'),
-    )
-    if err:
-        return err
-
-    payload = {"topics": result['topics'], "model": result['model']}
-    with _get_db() as conn:
-        conn.execute(
-            'UPDATE transcriptions SET topics_json = ? WHERE id = ?',
-            (json.dumps(payload, ensure_ascii=False), transcription_id),
-        )
-        conn.commit()
-
-    state.metrics.inc("whisper_topics_total", model=result["model"])
-
-    return jsonify({
-        "success": True,
-        "cached": False,
-        "topics": result['topics'],
-        "model": result['model'],
-    })
+    A cached result answers 200 at once with no job; otherwise 202 with the job_id, or 200
+    ``created: false`` with the live job for the same (record, kind, language). No forced
+    regeneration here. ``enrich`` is refused while a recording runs."""
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict) or set(data) - _AI_JOB_FIELDS:
+        return _async_bad('transcript.err.ai_unknown_field')
+    kind = data.get('kind')
+    if kind not in transcript_ai.KINDS:
+        return _async_bad('transcript.err.ai_kind_invalid')
+    target_lang = data.get('target_lang')
+    if kind == 'translate' and target_lang not in transcript_ai.TARGET_LANGS:
+        return _async_bad('transcript.err.ai_target_lang_invalid')
+    try:
+        out = transcript_ai.submit(kind, transcription_id,
+                                   target_lang=target_lang if kind == 'translate' else None,
+                                   actor=auth.classify_request()[0],
+                                   db_path=current_app.config['DATABASE'])
+    except transcript_ai.TranscriptAIError as e:
+        return jsonify(e.body()), e.status
+    if out['cached']:
+        return jsonify({"success": True, "cached": True, "status": "done", "result": out['result']})
+    if not out['created']:
+        return jsonify({"success": True, "cached": False, "created": False, "job_id": out['job_id']})
+    return jsonify({"success": True, "cached": False, "created": True, "job_id": out['job_id']}), 202
 
 
 #: Comment kinds that have an export label. Labelled server-side, not in the UI: the export

@@ -73,3 +73,19 @@ def test_visual_mode_unknown_is_off(monkeypatch, raw, mode):
 def test_visual_mode_default_is_images(monkeypatch):
     monkeypatch.delenv('RECALL_MCP_VISUAL', raising=False)
     assert privacy.visual_mode() == 'images'
+
+
+def test_category_change_exposes(db):
+    # 15 and 2 are private (2 is the personal root, 15 and 16 sit under a private name or its child)
+    assert privacy.category_change_exposes(db, 2, 1) is True
+    assert privacy.category_change_exposes(db, 17, 1) is True
+    assert privacy.category_change_exposes(db, 2, None) is True
+    assert privacy.category_change_exposes(db, 1, 2) is False
+    assert privacy.category_change_exposes(db, 1, 5) is False
+    assert privacy.category_change_exposes(db, 2, 17) is False
+    assert privacy.category_change_exposes(db, 16, 15) is False
+
+
+def test_category_change_db_failure(tmp_path):
+    with pytest.raises(privacy.PrivacyError):
+        privacy.category_change_exposes(str(tmp_path / 'нема' / 'r.db'), 2, 1)

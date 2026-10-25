@@ -3,7 +3,7 @@
 - GET  /api/process/logs/<process_id>          (polling fallback)
 - GET  /api/events/<process_id>                (SSE realtime)
 - GET  /api/jobs                                (list)
-- GET  /api/jobs/<job_id>                       (one)
+- GET  /api/jobs/<job_id>                       (one; ?wait=<0..25>&include_log=1&tail=<1..200>)
 - POST /api/jobs/<job_id>/cancel                (cancel)
 """
 import logging
@@ -60,22 +60,52 @@ def stream_events(process_id):
 def list_jobs():
     """Task list. ?kind=youtube_download&active_only=true"""
     kind = request.args.get('kind')
-    active_only = request.args.get('active_only', 'false').lower() == 'true'
+    active_only = request.args.get('active_only', 'false').lower() in ('true', '1')
     jobs = state.job_queue.list(kind=kind, active_only=active_only)
     return jsonify({"jobs": [j.to_dict() for j in jobs]})
 
 
+_WAIT_MAX_S = 25.0
+_WAIT_STEP_S = 0.25
+_TAIL_DEFAULT = 50
+_TAIL_MAX = 200
+
+
+def _arg_number(name, default, lo, hi, cast=float):
+    """A query number clamped to lo..hi; the default when absent or not a number."""
+    try:
+        value = cast(request.args.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(lo, min(hi, value))
+
+
 @events_bp.route('/api/jobs/<job_id>', methods=['GET'])
 def get_job(job_id):
+    """One job. ``wait`` polls until a terminal state or the timeout; ``include_log`` attaches
+    the last ``tail`` entries of the job's process log (``[]`` when the kind never logged)."""
+    from app.services.job_queue import FINISHED_STATES
     job = state.job_queue.get(job_id)
     if not job:
         return jsonify({"success": False, "error": "Job not found"}), 404
-    return jsonify(job.to_dict())
+    wait = _arg_number('wait', 0.0, 0.0, _WAIT_MAX_S)
+    deadline = time.monotonic() + wait
+    while job.state not in FINISHED_STATES and time.monotonic() < deadline:
+        time.sleep(min(_WAIT_STEP_S, max(0.0, deadline - time.monotonic())))
+    body = job.to_dict()
+    if request.args.get('include_log', '').lower() in ('1', 'true'):
+        tail = _arg_number('tail', _TAIL_DEFAULT, 1, _TAIL_MAX, cast=int)
+        logs = state.process_logs.get(job_id) if state.process_logs is not None else None
+        body["log"] = list(logs or [])[-tail:]
+    return jsonify(body)
 
 
 @events_bp.route('/api/jobs/<job_id>/cancel', methods=['POST'])
 def cancel_job(job_id):
     ok = state.job_queue.cancel(job_id)
     if not ok:
-        return jsonify({"success": False, "error": "Job cannot be cancelled (not found or already finished)"}), 400
+        body = {"success": False, "error": "Job cannot be cancelled (not found or already finished)"}
+        if state.job_queue.get(job_id) is not None:
+            body["cancel_ignored"] = True  # the job exists but already finished
+        return jsonify(body), 400
     return jsonify({"success": True, "message": "Cancellation requested"})

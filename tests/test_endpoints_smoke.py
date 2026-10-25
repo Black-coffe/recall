@@ -465,6 +465,56 @@ class TestExecutorPoolSplit:
     def test_job_queue_routes_recording_finalize_to_live_executor(self, app_module):
         jq = app_module.job_queue
         assert jq._executor_for_kind("recording_finalize") is app_module.live_executor
-        assert jq._executor_for_kind("enrichment_backfill") is app_module.executor
-        assert jq._executor_for_kind("doc_import") is app_module.executor
-        assert jq._executor_for_kind("youtube_download") is app_module.executor
+        assert jq._executor_for_kind("enrichment_backfill") is jq._slow_executor
+        assert jq._executor_for_kind("doc_import") is jq._slow_executor
+        assert jq._slow_executor is not app_module.executor
+        assert jq._executor_for_kind("youtube_download") is jq._slow_executor
+        assert jq._executor_for_kind("video_analysis") is jq._slow_executor
+        assert jq._executor_for_kind("enrichment") is app_module.executor
+
+
+class TestApprovalGateCoverage:
+    """mcp-foundations-b story 03: no destructive route of the real app escapes the gate table."""
+
+    PLAN_A1 = {
+        "transcription.delete_transcription", "transcription.bulk_delete_transcriptions",
+        "memory.delete_category", "memory.merge_category", "memory.delete_tag_route",
+        "memory.merge_tags_route", "memory.start_backfill", "speakers.delete_speaker",
+        "speakers.merge_speakers", "telegram.tg_backfill", "settings_api.clear_anthropic_key",
+        "mail.mail_accounts_delete", "audio_library.delete_audio_download",
+        # mcp-mail-and-keys: soft disconnect, backfill beyond 12 months, enrich on
+        "mail.mail_accounts_disconnect", "mail.mail_backfill", "mail.mail_label_enrich",
+        # mcp-pipeline: folder import and document re-parse (sync route and its job twin)
+        "documents.import_folder", "documents.reparse_document", "documents.reparse_job",
+    }
+    PLAN_A2_AND_EXTRAS = {
+        "comments.delete", "bookmarks.delete_bookmark", "bookmarks.delete_saved_search",
+        "speakers.unmerge_speakers", "memory.backfill_status", "telegram.tg_deleted",
+        "transcription.merge_segments",
+    }
+
+    def test_every_destructive_rule_is_gated_or_exempt(self, app_module):
+        import re
+        from app.core import approval_gate
+        loose = []
+        for rule in app_module.app.url_map.iter_rules():
+            name = rule.endpoint.rsplit(".", 1)[-1]
+            if "DELETE" in rule.methods or re.search(r"delete|merge|purge|backfill", name):
+                if rule.endpoint in approval_gate._D_ROUTES:
+                    continue
+                if approval_gate._D_EXEMPT.get(rule.endpoint, "").strip():
+                    continue
+                loose.append(f"{sorted(rule.methods)} {rule.rule} -> {rule.endpoint}")
+        assert not loose, loose
+
+    def test_gated_and_exempt_tables_match_the_plan(self, app_module):
+        from app.core import approval_gate
+        assert set(approval_gate._D_ROUTES) == self.PLAN_A1
+        assert set(approval_gate._D_EXEMPT) == self.PLAN_A2_AND_EXTRAS
+        assert all(reason.strip() for reason in approval_gate._D_EXEMPT.values())
+        endpoints = {r.endpoint for r in app_module.app.url_map.iter_rules()}
+        assert self.PLAN_A1 <= endpoints
+
+    def test_gate_sits_between_auth_and_audit(self, app_module):
+        names = [f.__name__ for f in app_module.app.before_request_funcs[None]]
+        assert names.index("_recall_auth_gate") < names.index("_recall_approval_gate") < names.index("_audit_start")

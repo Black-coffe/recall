@@ -17,12 +17,23 @@ import logging
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core import auth
 from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
 
 
 logger = logging.getLogger(__name__)
 bookmarks_bp = Blueprint('bookmarks', __name__)
+
+_AGENT_NOTE_MAX = 2000
+
+
+def _note_too_long(note):
+    """Non-UI callers (agents) are capped; the UI is unchanged."""
+    if isinstance(note, str) and len(note) > _AGENT_NOTE_MAX and auth.classify_request()[0] != 'ui':
+        return (jsonify({'success': False, 'error_code': 'INVALID_ARGUMENT',
+                         'error': tr('transcript.bm.note_too_long', max=_AGENT_NOTE_MAX)}), 400)
+    return None
 
 
 def _get_db():
@@ -51,6 +62,9 @@ def create_bookmark(transcription_id):
     note = data.get('note') or None
     if not isinstance(seg_idx, int) or seg_idx < 0:
         return jsonify({'success': False, 'error': tr('transcript.bm.seg_index_int')}), 400
+    too_long = _note_too_long(note)
+    if too_long:
+        return too_long
 
     with _get_db() as conn:
         tx = tx_repo.get_by_id(conn, transcription_id, columns=('segments',))
@@ -95,12 +109,14 @@ def create_bookmark(transcription_id):
 @bookmarks_bp.route('/api/bookmarks/<int:bookmark_id>', methods=['DELETE'])
 def delete_bookmark(bookmark_id):
     with _get_db() as conn:
-        c = conn.cursor()
-        c.execute('DELETE FROM segment_bookmarks WHERE id = ?', (bookmark_id,))
-        if c.rowcount == 0:
+        row = conn.execute(
+            'SELECT id, transcription_id, segment_index, note, created_at '
+            'FROM segment_bookmarks WHERE id = ?', (bookmark_id,)).fetchone()
+        if row is None:
             return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
+        conn.execute('DELETE FROM segment_bookmarks WHERE id = ?', (bookmark_id,))
         conn.commit()
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'deleted_snapshot': dict(row)})
 
 
 @bookmarks_bp.route('/api/bookmarks/<int:bookmark_id>', methods=['PATCH'])
@@ -109,6 +125,9 @@ def update_bookmark(bookmark_id):
     note = data.get('note')
     if note is not None and not isinstance(note, str):
         return jsonify({'success': False, 'error': tr('transcript.bm.note_string')}), 400
+    too_long = _note_too_long(note)
+    if too_long:
+        return too_long
     with _get_db() as conn:
         c = conn.cursor()
         c.execute('UPDATE segment_bookmarks SET note = ? WHERE id = ?', (note, bookmark_id))

@@ -188,6 +188,8 @@
             `<span class="rc-cmrow__kind rc-cmrow__kind--${U.esc(c.kind)}">${U.esc(KIND_LABEL[c.kind] || c.kind)}</span>`,
             c.pinned ? '<span class="rc-cmrow__pin"><i class="fa-solid fa-thumbtack"></i></span>' : '',
             c.source === 'live' ? `<span class="rc-cmrow__live">${T('knowledge.cmv.live')}</span>` : '',
+            c.source === 'mcp' ? `<span class="rc-cmrow__agent">${T('knowledge.comments.badge.agent')}</span>` : '',
+            c.source === 'mcp' && !c.confirmed_at ? `<button class="rc-btn rc-btn--xs rc-cmrow__confirm" data-confirm="${c.id}">${T('knowledge.comments.confirm')}</button>` : '',
             ts ? `<span class="rc-mono">${ts}</span>` : '',
             `<span>${U.esc(U.fmtDate(c.created_at))}</span>`,
             c.indexed ? '' : `<span class="rc-rec__warn">${T('knowledge.cmv.notIndexed')}</span>`,
@@ -206,6 +208,12 @@
     }
 
     function bind(ctx, rows) {
+        listEl.querySelectorAll('[data-confirm]').forEach(b =>
+            b.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try { await R.api.confirmComment(parseInt(b.dataset.confirm, 10)); await load(ctx); }
+                catch (err) { UI.toast((err && err.message) || '', 'error'); }
+            }));
         listEl.querySelectorAll('.rc-cmrow').forEach(el => {
             const href = el.dataset.href;
             if (!href) return;

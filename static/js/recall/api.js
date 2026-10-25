@@ -5,6 +5,11 @@
     const A = {};
     const L = (k) => window.Recall.t(k);
     const LH = () => window.Recall.i18n.headers();
+    // Per-boot UI token from the shell (empty when the shell was not trusted). Sent on every write.
+    const UH = () => {
+        const m = document.querySelector('meta[name="recall-ui-token"]');
+        return Object.assign({ 'X-Recall-UI': (m && m.content) || '' }, LH());
+    };
 
     // Default timeout for plain GET requests only (getJSON/A.get). NEVER
     // auto-applied to POST/PATCH/PUT/DELETE (send()) — many of those call
@@ -35,7 +40,7 @@
     }
 
     async function fetchOnce(url, opts) {
-        opts = Object.assign({}, opts, { headers: Object.assign({}, LH(), opts.headers) });
+        opts = Object.assign({}, opts, { headers: Object.assign({}, UH(), opts.headers) });
         const res = await fetch(url, opts);
         if (!res.ok) {
             let msg = 'HTTP ' + res.status;
@@ -111,7 +116,7 @@
     }
     // multipart/form-data POST (file upload, /api/transcribe) — same error contract.
     async function postForm(url, formData) {
-        const res = await fetch(url, { method: 'POST', body: formData, headers: Object.assign({ 'Accept': 'application/json' }, LH()) });
+        const res = await fetch(url, { method: 'POST', body: formData, headers: Object.assign({ 'Accept': 'application/json' }, UH()) });
         if (!res.ok) {
             let msg = 'HTTP ' + res.status;
             try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
@@ -119,6 +124,7 @@
         }
         return res.json();
     }
+    A.uiHeaders = UH;
     A.get = getJSON;
     A.post = (u, b, o) => send(u, 'POST', b, o);
     A.patch = (u, b, o) => send(u, 'PATCH', b, o);
@@ -148,6 +154,25 @@
     // Title and description variants from the local model (up to ~1 min, no timeout; 409 RECORDING_ACTIVE during recording).
     A.suggestMeta = (id) => A.post('/api/history/' + id + '/suggest-meta');
 
+    // Re-transcribe a record with another installed model (202 + job_id; refusals carry err.body.error_code).
+    A.retranscribe = (tid, body) => A.post('/api/history/' + tid + '/retranscribe', body);
+    // Transcript versions of a record (list / one with segments / make main).
+    A.versions = (tid) => getJSON('/api/history/' + tid + '/versions');
+    A.version = (tid, vid) => getJSON('/api/history/' + tid + '/versions/' + vid);
+    A.activateVersion = (tid, vid) => A.post('/api/history/' + tid + '/versions/' + vid + '/activate', {});
+    A.jobStatus = (id) => getJSON('/api/jobs/' + id);
+    // Poll a job every 2.5 s while the tab is visible. cb(job) runs on each answer and returns true
+    // to stop; the returned function stops the poll from outside.
+    A.pollJob = (id, cb) => {
+        const t = setInterval(async () => {
+            if (document.hidden) return;
+            let job;
+            try { job = await A.jobStatus(id); } catch (_) { return; }
+            if (cb(job) === true) clearInterval(t);
+        }, 2500);
+        return () => clearInterval(t);
+    };
+
     // — Ingest: YouTube → download → transcribe (lands in History/transcriptions) —
     A.models = () => getJSON('/api/models');
     A.youtubeInfo = (url) => A.post('/api/youtube/info', { url });
@@ -166,7 +191,7 @@
             const xhr = new XMLHttpRequest();
             xhr.open('POST', url);
             xhr.setRequestHeader('Accept', 'application/json');
-            const lh = LH(); for (const k in lh) xhr.setRequestHeader(k, lh[k]);
+            const lh = UH(); for (const k in lh) xhr.setRequestHeader(k, lh[k]);
             if (xhr.upload) {
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable && onUploadProgress) onUploadProgress(Math.round(e.loaded / e.total * 100));
@@ -213,7 +238,7 @@
 
     // — Bulk export (returns a file Response; caller handles the blob) —
     A.bulkExport = (ids, format) => fetch('/api/history/bulk_export', {
-        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, LH()),
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, UH()),
         body: JSON.stringify({ ids, format }),
     });
 
@@ -235,6 +260,7 @@
     A.commentUpdate = (id, patch) => A.patch('/api/comments/' + id, patch);
     A.commentDelete = (id) => A.del('/api/comments/' + id);
     A.commentRestore = (id) => A.post('/api/comments/' + id + '/restore');
+    A.confirmComment = (id) => A.post('/api/comments/' + id + '/confirm');
     A.commentMeta = () => getJSON('/api/comments/meta');
     // No client-side timeout (the POST default is 0 anyway): parsing is paid for, and
     // aborting a request that is already paid for is worse than waiting longer.
@@ -404,7 +430,7 @@
         try {
             res = await fetch(url, {
                 method: 'POST',
-                headers: Object.assign({ 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, LH()),
+                headers: Object.assign({ 'Content-Type': 'application/json', 'Accept': 'text/event-stream' }, UH()),
                 body: JSON.stringify(payload),
                 signal: combined,
             });
@@ -450,7 +476,7 @@
         const combined = combineSignals([signal, internalAc.signal]);
         let res;
         try {
-            res = await fetch(url, { headers: Object.assign({ 'Accept': 'text/event-stream' }, LH()), signal: combined });
+            res = await fetch(url, { headers: Object.assign({ 'Accept': 'text/event-stream' }, UH()), signal: combined });
         } catch (err) {
             if (signal && signal.aborted) return;
             throw err;

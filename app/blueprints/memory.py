@@ -22,6 +22,7 @@ from datetime import date as _date, timedelta as _timedelta
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app import state
+from app.core import auth
 from app.core.i18n import localize_sse, request_lang, tr
 from app.services import categories as cats
 from app.services import enrichment
@@ -39,6 +40,46 @@ _backfill_lock = threading.Lock()
 def _get_db():
     from app.db.connection import get_db_connection
     return get_db_connection(current_app.config['DATABASE'])
+
+
+def _is_ui() -> bool:
+    """The per-boot UI token marks the owner's SPA; everything else is an agent (MCP)."""
+    return auth.classify_request()[0] == 'ui'
+
+
+def _err(code: str, text: str, status: int):
+    """Refusal for a non-UI caller: machine `error_code` next to the human text."""
+    return jsonify({"success": False, "error": text, "error_code": code}), status
+
+
+#: Agent caps (ADR-042): a direction name after `clean_name`; the tag cap is `cats.TAG_NAME_MAX`.
+AGENT_CATEGORY_NAME_MAX = 60
+#: Agent bulk-category ceiling: `ids` only, at most this many.
+AGENT_BULK_MAX = 5
+
+
+def _agent_category_name_error(name):
+    if not _is_ui() and len(cats.clean_name(name)) > AGENT_CATEGORY_NAME_MAX:
+        return _err('INVALID_ARGUMENT',
+                    tr('knowledge.memory.err.category_name_long', max=AGENT_CATEGORY_NAME_MAX), 400)
+    return None
+
+
+def _agent_private_move_error(moves):
+    """Non-UI only: 403 when any `(old_cid, new_cid)` move takes a record out of a private
+    direction (`privacy.category_change_exposes`), 503 when the check itself fails.
+    The whole request is refused before anything is written."""
+    if _is_ui():
+        return None
+    from app.services import privacy
+    db = current_app.config['DATABASE']
+    try:
+        for old, new in moves:
+            if privacy.category_change_exposes(db, old, new):
+                return _err('PRIVATE_CATEGORY_CHANGE', tr('knowledge.memory.err.private_category_change'), 403)
+    except privacy.PrivacyError:
+        return _err('PRIVACY_CHECK_FAILED', tr('mail.err.privacyCheck'), 503)
+    return None
 
 
 # Normalisation, filter parsing and the `category_id` writers live in
@@ -277,6 +318,9 @@ def create_category():
     name = " ".join((data.get("name") or "").strip().split())
     if not name:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.name_empty')}), 400
+    err = _agent_category_name_error(name)
+    if err:
+        return err
     parent_id, err = _parse_parent_id(data.get("parent_id"))
     if err:
         return err
@@ -285,7 +329,8 @@ def create_category():
     try:
         with _get_db() as conn:
             node = cats.create_category(conn, name, color=color, icon=icon,
-                                        parent_id=parent_id)
+                                        parent_id=parent_id,
+                                        created_source=None if _is_ui() else 'mcp')
     except cats.CategoryError as exc:
         return _cat_error(exc)
     return jsonify({"success": True, "id": node["id"], "name": node["name"],
@@ -307,6 +352,9 @@ def update_category(cid: int):
     if "name" in data and data["name"] is not None:
         if not " ".join(str(data["name"]).strip().split()):
             return jsonify({"success": False, "error": tr('knowledge.memory.err.name_empty')}), 400
+        err = _agent_category_name_error(str(data["name"]))
+        if err:
+            return err
         kwargs["name"] = data["name"]
     for key in ("color", "icon"):
         if key in data and data[key] is not None:
@@ -324,6 +372,10 @@ def update_category(cid: int):
         kwargs["parent_id"] = parent_id
     if not kwargs:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.nothing_to_update')}), 400
+    # An agent may not change a private direction at all (privacy may be keyed by name).
+    err = _agent_private_move_error([(cid, None)])
+    if err:
+        return err
 
     try:
         with _get_db() as conn:
@@ -389,8 +441,13 @@ def set_transcription_category(tid: int):
         if cid is not None and not conn.execute(
                 "SELECT 1 FROM categories WHERE id = ?", (cid,)).fetchone():
             return jsonify({"success": False, "error": tr('knowledge.memory.err.category_not_found')}), 404
-        if not conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid,)).fetchone():
+        row = conn.execute("SELECT category_id FROM transcriptions WHERE id = ?",
+                           (tid,)).fetchone()
+        if not row:
             return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
+        err = _agent_private_move_error([(row["category_id"], cid)])
+        if err:
+            return err
         changed = cats.set_category(conn, [tid], cid)
     return jsonify({"success": True, "category_id": cid,
                     "reembed": _schedule_reembed(changed, "category_changed")})
@@ -422,6 +479,9 @@ def bulk_set_category():
         return jsonify({"success": False, "error": tr('knowledge.memory.err.category_id_bad')}), 400
     ids = data.get("ids")
     src = data.get("source_type")
+    if not _is_ui() and (src is not None or (isinstance(ids, (list, tuple))
+                                             and len(ids) > AGENT_BULK_MAX)):
+        return _err('BULK_LIMIT', tr('knowledge.memory.err.bulk_limit'), 400)
     if ids is not None:
         # `{"ids": "123"}` - a string is iterable too (by characters!), so without
         # the type check it would quietly fall apart into `[1, 2, 3]`.
@@ -440,6 +500,13 @@ def bulk_set_category():
                 (src,)).fetchall()]
         else:
             return jsonify({"success": False, "error": tr('knowledge.memory.err.ids_or_source')}), 400
+        if not _is_ui():
+            ph = ",".join("?" * len(targets))
+            olds = {r[0] for r in conn.execute(
+                f"SELECT category_id FROM transcriptions WHERE id IN ({ph})", targets)}
+            err = _agent_private_move_error([(old, cid) for old in olds])
+            if err:
+                return err
         # `updated` now counts records whose direction REALLY changed (not
         # all that fell under the UPDATE): exactly this list goes to re-embed, and
         # a mismatch between "updated" and "re-embedded" would only confuse.
@@ -580,12 +647,22 @@ def set_record_tags(tid: int):
     data = request.get_json(silent=True) or {}
     if "add" not in data and "remove" not in data:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.tag_add_remove')}), 400
+    ui = _is_ui()
     try:
         with _get_db() as conn:
             if not conn.execute("SELECT 1 FROM transcriptions WHERE id = ?", (tid,)).fetchone():
                 return jsonify({"success": False, "error": tr('knowledge.memory.err.transcript_not_found')}), 404
+            if not ui:
+                # An agent assigns existing tags only: an unknown name is refused before any
+                # write, nothing is created from the place of use.
+                for name in cats.parse_tags(data.get("add") or ()):
+                    if not conn.execute("SELECT 1 FROM tags WHERE name_norm = ?",
+                                        (cats.norm_name(name),)).fetchone():
+                        return _err('INVALID_ARGUMENT',
+                                    tr('knowledge.memory.err.tag_unknown', name=name), 400)
             changed = cats.set_tags(conn, tid, add=data.get("add") or (),
-                                    remove=data.get("remove") or ())
+                                    remove=data.get("remove") or (),
+                                    source='manual' if ui else 'mcp')
             tags = cats.tags_for(conn, [tid]).get(tid, [])
             suggested = cats.suggested_tags(conn, tid)
     except cats.CategoryError as exc:
@@ -1230,6 +1307,22 @@ def list_action_items():
     })
 
 
+def _task_action(aid: int, action: str):
+    """K5: the same write path as the brief buttons - with an event in the journal.
+    The UI writes `source='web'`; an agent `source='mcp'` and a repeated identical action
+    is not written again (`created:false`, the existing `event_id`)."""
+    from app.services import commitments
+    ui = _is_ui()
+    try:
+        res = commitments.apply_action(current_app.config['DATABASE'], aid, action,
+                                       source='web' if ui else 'mcp',
+                                       actor='web' if ui else 'mcp', dedupe=not ui)
+    except LookupError:
+        return jsonify({"success": False, "error": tr('knowledge.memory.err.task_not_found'),
+                        "error_code": "NOT_FOUND"}), 404
+    return jsonify({"success": True, **res})
+
+
 @memory_bp.route('/api/memory/action-items/<int:aid>', methods=['PATCH'])
 def update_action_item(aid: int):
     """Update a task status. Body: {"status": "open|done|cancelled"}."""
@@ -1237,14 +1330,40 @@ def update_action_item(aid: int):
     status = data.get('status')
     if status not in ('open', 'done', 'cancelled'):
         return jsonify({"success": False, "error": tr('knowledge.memory.err.status_bad')}), 400
-    # K5: the same write path as the brief buttons - with an event in the journal.
+    return _task_action(aid, status)
+
+
+@memory_bp.route('/api/memory/action-items/<int:aid>/postpone', methods=['POST'])
+def postpone_action_item(aid: int):
+    """Postpone a task. Body: {"days": 1|7|30} -> due_date = today + days, status open."""
     from app.services import commitments
+    data = request.get_json(silent=True) or {}
+    days = data.get('days')
+    action = f"postpone:{days}"
+    if not isinstance(days, int) or isinstance(days, bool)             or action not in commitments.POSTPONE_DAYS:
+        return _err('INVALID_ARGUMENT',
+                    tr('knowledge.memory.err.postpone_days_bad'), 400)
+    return _task_action(aid, action)
+
+
+@memory_bp.route('/api/memory/action-events/<int:eid>/undo', methods=['POST'])
+def undo_action_event(eid: int):
+    """Undo the last event of a task. An agent undoes only `source='mcp'` events."""
+    from app.services import commitments
+    ui = _is_ui()
     try:
-        commitments.apply_action(current_app.config['DATABASE'], aid, status,
-                                 source='web', actor='web')
-    except LookupError:
-        return jsonify({"success": False, "error": tr('knowledge.memory.err.task_not_found')}), 404
-    return jsonify({"success": True})
+        res = commitments.undo_action(current_app.config['DATABASE'], eid,
+                                      source='web' if ui else 'mcp',
+                                      actor='web' if ui else 'mcp',
+                                      only_source=None if ui else 'mcp')
+    except LookupError as exc:
+        return _err('NOT_FOUND', str(exc), 404)
+    except PermissionError:
+        return _err('NOT_MCP_EVENT', tr('knowledge.memory.err.not_mcp_event'), 403)
+    except ValueError:
+        return _err('UNDO_NOT_LAST', tr('knowledge.memory.err.undo_not_last'), 409)
+    return jsonify({"success": True, "item_id": res["item_id"], "status": res["status"],
+                    "due_date": res["due_date"], "undone_event_id": eid})
 
 
 # ============================================================

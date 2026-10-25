@@ -19,7 +19,7 @@
         { v: 'ru', l: 'capture.lang.ru' },
         { v: 'auto', l: 'capture.lang.auto' },
     ];
-    const DEFAULT_MODEL = 'large-v3-turbo';
+    const DEFAULT_MODEL = 'large-v3';
 
     let st = null;        // { file, opts, busy }
     let _models = null;

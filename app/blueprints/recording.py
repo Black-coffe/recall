@@ -12,8 +12,12 @@ Endpoints:
 - ``POST   /api/recording/<sid>/resume``  — resume.
 - ``POST   /api/recording/<sid>/stop``    — stop + push finalize to the background.
 - ``POST   /api/recording/<sid>/discard`` — cancel without finalize.
+- ``POST   /api/recording/<sid>/autosave/hold`` — the save screen is being edited: postpone autosave.
 - ``GET    /api/recording/<sid>/state``   — snapshot.
 - ``GET    /api/recording/<sid>/live-transcript`` — snapshot of live-preview segments (RAM).
+- ``GET    /api/recording/<sid>/live-video``  — screen video status of a running recording.
+- ``GET    /api/recording/<sid>/live-frame``  — one masked JPEG at ``t``.
+- ``GET    /api/recording/<sid>/live-frames`` — frames (base64 + masked OCR text), paged.
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
 - ``POST   /api/recording/<sid>/system-source`` — retarget system audio (ADR-026 D3).
 - ``GET    /api/recording/apps``          — applications that are sounding now (C3).
@@ -624,7 +628,8 @@ def autoprompt_action(token: str, action: str):
         except Exception as e:
             logger.exception("autoprompt stop crashed: %s", e)
             return _autoprompt_page(tr('capture.rec.page.stop_failed'), tr('capture.rec.page.see_log'), 500)
-        return redirect('/record')
+        # recording-autosave: land on THIS recording's save screen, not the empty setup form.
+        return redirect('/record?' + urlencode({'stopped': info['session_id']}))
 
     body: dict = {'system_source': {'mode': 'include', 'apps': [info['exe']]}}
     mic = _mic_for(info.get('mic_endpoint'))
@@ -640,6 +645,24 @@ def autoprompt_action(token: str, action: str):
         return _autoprompt_page(tr('capture.rec.page.not_started'),
                                 tr('capture.rec.page.limit', limit=payload.get('limit')), 409)
     return _autoprompt_page(tr('capture.rec.page.not_started'), payload.get('error') or tr('capture.rec.page.see_log'), code)
+
+
+def _autosave():
+    return getattr(state, 'recording_autosave', None)
+
+
+def _autosave_cancel(session_id: str, reason: str) -> dict:
+    """Cancel the deadline; returns the autosave state as it was BEFORE (empty if unknown)."""
+    sched = _autosave()
+    if sched is None:
+        return {}
+    try:
+        before = sched.info(session_id)
+        sched.cancel(session_id, reason)
+        return before
+    except Exception as e:
+        logger.warning("autosave cancel %s failed: %s", session_id, e)
+        return {}
 
 
 def stop_session(session_id: str, name: str | None = None) -> None:
@@ -726,6 +749,9 @@ def save_recording(session_id: str):
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
 
+    # recording-autosave: the user took the recording - the server must not autosave it too.
+    _autosave_cancel(session_id, 'saved')
+
     store = state.recording_service.store
     deadline = time.time() + _SAVE_FINALIZE_DEADLINE_SEC
     manifest = None
@@ -797,6 +823,30 @@ def save_recording(session_id: str):
             'error_code': 'NO_FINAL',
         }), 500
 
+    # A second save screen (the notification opened another tab) must not start a second
+    # transcription. Only a save that SUCCEEDED counts (a retry after a failed one must transcribe),
+    # and the mark is read and set in one locked write, so of two concurrent saves only one is first.
+    before: dict = {}
+
+    def _mark_saved(mf: dict) -> None:
+        a = dict(mf.get('autosave') or {})
+        before['saved'] = bool(a.get('saved'))
+        a['saved'] = True
+        mf['autosave'] = a
+
+    try:
+        store.modify(session_id, _mark_saved)
+    except SessionStoreError:
+        logger.debug("save: could not mark %s as saved", session_id, exc_info=True)
+    already_saved = before.get('saved', False)
+    # The tab transcribes it, but only the server files the direction (k-NN after indexing).
+    sched = _autosave()
+    if sched is not None and not already_saved:
+        try:
+            sched.after_save(session_id)
+        except Exception:
+            logger.warning("save: direction follow-up for %s not started", session_id, exc_info=True)
+
     return jsonify({
         'success': True,
         'download_id': reg['download_id'],
@@ -806,15 +856,25 @@ def save_recording(session_id: str):
         'file_size': reg['file_size'],
         'recording_session_id': session_id,
         'already_registered': not reg['created'],
+        'already_saved': already_saved,
     })
 
 
 @recording_bp.route('/api/recording/<session_id>/discard', methods=['POST'])
 def discard_recording(session_id: str):
-    """Cancel the recording without saving. Removes the session files completely."""
+    """Cancel the recording without saving. Removes the session files completely.
+
+    Refused (409 RECORDING_KEPT) once the recording has a transcript or its autosave is running or
+    done: deleting final.mp3 then would leave the transcript and the library row on a dead file.
+    """
     err = _require_service()
     if err:
         return err
+    if _recording_kept(session_id):
+        return jsonify({
+            'success': False, 'error': tr('capture.rec.err.kept'), 'error_code': 'RECORDING_KEPT',
+        }), 409
+    _autosave_cancel(session_id, 'discarded')
     try:
         state.recording_service.discard(session_id)
     except Exception as e:
@@ -834,6 +894,58 @@ def discard_recording(session_id: str):
     return jsonify({'success': True, 'session_id': session_id, 'status': 'discarded'})
 
 
+def _recording_kept(session_id: str) -> bool:
+    """True when discarding would destroy something already saved (see discard_recording)."""
+    sched = _autosave()
+    if sched is not None and sched.info(session_id).get('status') in ('running', 'done'):
+        return True
+    from app.db.connection import get_db_connection
+    db_path = current_app.config.get('DATABASE')
+    if not db_path:
+        return False   # no archive configured: nothing a discard could orphan
+    try:
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(
+                'SELECT 1 FROM audio_downloads a JOIN transcriptions t ON t.file_path = a.file_path '
+                'WHERE (a.recording_session_id = ? OR a.youtube_id = ?) AND t.deleted_at IS NULL LIMIT 1',
+                (session_id, f'recording_{session_id}'),
+            ).fetchone()
+    except Exception:
+        logger.warning("discard guard: transcript lookup for %s failed; refusing", session_id, exc_info=True)
+        return True
+    return row is not None
+
+
+@recording_bp.route('/api/recording/<session_id>/autosave/hold', methods=['POST'])
+def autosave_hold(session_id: str):
+    """The save screen is being edited: move the server autosave deadline out (recording-autosave)."""
+    err = _require_service()
+    if err:
+        return err
+    sched = _autosave()
+    if sched is None:
+        return jsonify({'success': True, 'autosave': {'at': None, 'status': 'off'}})
+    try:
+        state.recording_service.store.read(session_id)
+    except SessionStoreError:
+        return jsonify({'success': False, 'error': tr('capture.rec.err.session_not_found'),
+                        'error_code': 'NOT_FOUND'}), 404
+    data = request.get_json(silent=True) or {}
+    # A key present with an empty value clears what an earlier hold kept (None = cleared).
+    fields: dict = {}
+    try:
+        if 'name' in data:
+            fields['name'] = record_meta.normalize_title(data['name'] or None)
+        if 'description' in data:
+            fields['description'] = record_meta.normalize_description(data['description'] or None)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    if 'category_id' in data:
+        cat = data['category_id']
+        fields['category_id'] = int(cat) if isinstance(cat, int) or (isinstance(cat, str) and cat.isdigit()) else None
+    return jsonify({'success': True, 'autosave': sched.hold(session_id, fields)})
+
+
 # ---------------------------------------------------------------- state
 
 @recording_bp.route('/api/recording/<session_id>/state', methods=['GET'])
@@ -846,6 +958,14 @@ def get_state_endpoint(session_id: str):
         snapshot = state.recording_service.get_state(session_id)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
+    if snapshot.get('is_active') is False:
+        # recording-autosave: the save screen needs the deadline and the length of a stopped recording.
+        sched = _autosave()
+        snapshot['autosave'] = sched.info(session_id) if sched is not None else {'at': None, 'status': 'off'}
+        try:
+            snapshot['duration_sec'] = state.recording_service.store.read(session_id).get('total_duration_sec')
+        except SessionStoreError:
+            snapshot['duration_sec'] = None
     return jsonify({'success': True, 'state': snapshot})
 
 
@@ -957,6 +1077,197 @@ def get_live_transcript(session_id: str):
     })
 
 
+# --------------------------------------------------------- live-video (frames)
+
+# Contracts C2 (docs/specs/live-video-frames/plan.md). Edge, time mapping, masking and paging
+# are the live_frames service's; the routes only parse the query and map errors.
+_LIVE_VIDEO_SIZES = ('thumb', 'full')
+_LIVE_VIDEO_MODES = ('step', 'changes')
+_LIVE_VIDEO_ERR_KEYS = {
+    'NOT_FOUND': 'capture.live_video.err.not_found',
+    'NO_VIDEO': 'capture.live_video.err.no_video',
+    'INVALID_ARGUMENT': 'capture.live_video.err.invalid_argument',
+    'PAST_LIVE_EDGE': 'capture.live_video.err.past_edge',
+    'NOT_RECORDED': 'capture.live_video.err.not_recorded',
+}
+
+
+class _BadQuery(ValueError):
+    """A query value the live-video routes refuse before calling the service."""
+
+
+def _live_video_error(code: str, extra: dict | None = None):
+    from app.core.error_codes import status_for
+    body = {'success': False, 'error_code': code,
+            'error': tr(_LIVE_VIDEO_ERR_KEYS.get(code, 'capture.live_video.err.invalid_argument'))}
+    for k, v in (extra or {}).items():
+        body.setdefault(k, v)
+    return jsonify(body), status_for(code)
+
+
+def _bad_query(e: _BadQuery):
+    return _live_video_error('INVALID_ARGUMENT', {'detail': str(e)})
+
+
+def _q_float(name: str, *, positive: bool = False) -> float | None:
+    raw = request.args.get(name)
+    if raw is None or raw == '':
+        return None
+    try:
+        val = float(raw)
+    except ValueError as e:
+        raise _BadQuery(f'{name} must be a number') from e
+    if val != val or val in (float('inf'), float('-inf')):
+        raise _BadQuery(f'{name} must be a finite number')
+    if positive and val <= 0:
+        raise _BadQuery(f'{name} must be > 0')
+    if not positive and val < 0:
+        raise _BadQuery(f'{name} must be >= 0')
+    return val
+
+
+def _q_size() -> str:
+    size = request.args.get('size') or 'thumb'
+    if size not in _LIVE_VIDEO_SIZES:
+        raise _BadQuery(f'size must be one of {list(_LIVE_VIDEO_SIZES)}')
+    return size
+
+
+def _live_ffmpeg():
+    try:
+        from app.services.recording import video_probe
+        return video_probe.ffmpeg_path(current_app.config)
+    except Exception:
+        logger.debug("live frames: ffmpeg_path resolution failed, falling back to default",
+                     exc_info=True)
+        return None
+
+
+def _live_unavailable(body: dict) -> dict:
+    """The service's `available:false` answer with a `tr()` reason for the agent."""
+    code = body.get('reason')
+    key = ('capture.live_video.finished' if code == 'finalized'
+           else 'capture.live_video.not_active')
+    return {**body, 'success': True, 'reason': tr(key), 'reason_code': code}
+
+
+def _frame_json(frame: dict) -> dict:
+    import base64
+    out = {k: v for k, v in frame.items() if k != 'jpeg'}
+    out['image_b64'] = base64.b64encode(frame.get('jpeg') or b'').decode('ascii')
+    return out
+
+
+@recording_bp.route('/api/recording/<session_id>/live-video', methods=['GET'])
+def get_live_video(session_id: str):
+    """Recorded monitors, their fps and how far the screen video is readable (C2)."""
+    err = _require_service()
+    if err:
+        return err
+    from app.services import live_frames
+    svc = state.recording_service
+    try:
+        body = live_frames.status(session_id, store=svc.store, service=svc)
+    except live_frames.LiveFramesError as e:
+        return _live_video_error(e.code, e.extra)
+    if not body.get('available'):
+        return jsonify(_live_unavailable(body))
+    return jsonify({**body, 'success': True})
+
+
+@recording_bp.route('/api/recording/<session_id>/live-frame', methods=['GET'])
+def get_live_frame(session_id: str):
+    """One masked JPEG of the screen at timeline second ``t`` of a running recording (C2)."""
+    err = _require_service()
+    if err:
+        return err
+    from app.services import live_frames
+    try:
+        t = _q_float('t')
+        if t is None:
+            raise _BadQuery('t is required')
+        size = _q_size()
+    except _BadQuery as e:
+        return _bad_query(e)
+    svc = state.recording_service
+    try:
+        frame = live_frames.frame_at(session_id, t, track=request.args.get('track') or None,
+                                     size=size, store=svc.store, service=svc,
+                                     ffmpeg=_live_ffmpeg())
+    except live_frames.LiveFramesError as e:
+        return _live_video_error(e.code, e.extra)
+    if 'jpeg' not in frame:
+        return jsonify(_live_unavailable(frame))
+    resp = Response(frame['jpeg'], mimetype='image/jpeg')
+    resp.headers['X-Recall-Frame-T'] = str(frame.get('t'))
+    resp.headers['X-Recall-Frame-Video-T'] = str(frame.get('video_t'))
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@recording_bp.route('/api/recording/<session_id>/live-frames', methods=['GET'])
+def get_live_frames(session_id: str):
+    """Frames with base64 image + masked OCR text: ``t`` alone = one frame, else a range (C2).
+
+    Range query: ``start``, ``end``, ``mode=step|changes``, ``step``, ``min_res``,
+    ``limit`` (1..12), ``cursor`` (a previous ``next_t``, forwarded verbatim), ``track``, ``size``.
+    """
+    err = _require_service()
+    if err:
+        return err
+    from app.services import live_frames
+    track = request.args.get('track') or None
+    try:
+        size = _q_size()
+        t = _q_float('t')
+        if t is None:
+            start = _q_float('start')
+            end = _q_float('end')
+            cursor = _q_float('cursor')
+            step = _q_float('step', positive=True)
+            min_res = _q_float('min_res', positive=True)
+            mode = request.args.get('mode') or 'step'
+            if mode not in _LIVE_VIDEO_MODES:
+                raise _BadQuery(f'mode must be one of {list(_LIVE_VIDEO_MODES)}')
+            limit = 6
+            if request.args.get('limit') not in (None, ''):
+                try:
+                    limit = int(request.args['limit'])
+                except ValueError as e:
+                    raise _BadQuery('limit must be an integer') from e
+                if not 1 <= limit <= live_frames.MAX_FRAMES_PER_CALL:
+                    raise _BadQuery(f'limit must be 1..{live_frames.MAX_FRAMES_PER_CALL}')
+            begin = cursor if cursor is not None else start
+            if begin is not None and end is not None and begin > end:
+                raise _BadQuery('start must be <= end')
+    except _BadQuery as e:
+        return _bad_query(e)
+    svc = state.recording_service
+    deps = {'store': svc.store, 'service': svc, 'ffmpeg': _live_ffmpeg()}
+    try:
+        if t is not None:
+            frame = live_frames.frame_at(session_id, t, track=track, size=size, **deps)
+            if 'jpeg' not in frame:
+                return jsonify(_live_unavailable({**frame, 'frames': [], 'count': 0}))
+            return jsonify({
+                'success': True, 'session_id': session_id, 'available': True,
+                'track_id': frame.get('track_id'), 'mode': 'frame',
+                'frames': [_frame_json(frame)], 'count': 1, 'next_t': None,
+                'readable_until': None, 'scanned_until': frame.get('t'), 'truncated': False,
+            })
+        body = live_frames.frames_range(
+            session_id, start, end, mode=mode,
+            step=step if step is not None else 1.0,
+            min_res=min_res if min_res is not None else 1.0,
+            limit=limit, cursor=cursor, track=track, size=size, **deps)
+    except live_frames.LiveFramesError as e:
+        return _live_video_error(e.code, e.extra)
+    if not body.get('available'):
+        return jsonify(_live_unavailable(body))
+    return jsonify({**body, 'success': True,
+                    'frames': [_frame_json(f) for f in body.get('frames') or []]})
+
+
 @recording_bp.route('/api/recordings/recovered', methods=['GET'])
 def get_recovered_sessions():
     """List of session_ids that were recovered at application start.
@@ -989,6 +1300,47 @@ def get_recovered_sessions():
         'recovered': details,
         'count': len(details),
     })
+
+
+# Recordings older than this are history, not a pending question.
+_UNCATEGORIZED_DAYS = 30
+_UNCATEGORIZED_LIMIT = 5
+_UNCATEGORIZED_CANDIDATES = 3
+# suggest_category loads every labelled chunk per call: only the newest rows get candidates.
+_UNCATEGORIZED_SUGGEST = 3
+
+
+@recording_bp.route('/api/recordings/uncategorized', methods=['GET'])
+def recordings_uncategorized():
+    """Recent recording transcripts without a direction (recording-autosave, Ask 4).
+
+    The autosave files a recording only when the k-NN is confident; the rest land here so the
+    Audio library can ask the user. Each item carries up to three k-NN candidates.
+    """
+    from app.db.connection import get_db_connection
+    from app.services import categorize
+    db_path = current_app.config['DATABASE']
+    with get_db_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, title, source_name, created_at FROM transcriptions "
+            "WHERE source_type = 'recording' AND category_id IS NULL AND deleted_at IS NULL "
+            "AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT ?",
+            (f'-{_UNCATEGORIZED_DAYS} days', _UNCATEGORIZED_LIMIT),
+        ).fetchall()
+    items = []
+    for n, r in enumerate(rows):
+        try:
+            res = categorize.suggest_category(db_path, r['id']) if n < _UNCATEGORIZED_SUGGEST else {}
+        except Exception:
+            logger.warning("uncategorized: suggest_category failed for %s", r['id'], exc_info=True)
+            res = {}
+        items.append({
+            'transcription_id': r['id'],
+            'title': r['title'] or r['source_name'],
+            'created_at': r['created_at'],
+            'candidates': (res.get('candidates') or [])[:_UNCATEGORIZED_CANDIDATES],
+        })
+    return jsonify({'success': True, 'items': items})
 
 
 @recording_bp.route('/api/recordings/active', methods=['GET'])

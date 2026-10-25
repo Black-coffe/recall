@@ -9,6 +9,7 @@
     let bookmarks = {}, bookmarksOpen = false;   // {segment_index: {id, note}}
     let _onTime = null;   // audio timeupdate handler (segment ↔ playback sync)
     let copilotTL = null, copilotOpen = false, cpFilter = 'all';   // co-pilot timeline (Phase 19, Step 7)
+    let vers = null, verStop = null, verView = null, verCmp = null, verSaved = null;   // transcript versions bar / read-only view / compare
     let videoInfo = null, videoPolling = null;   // screen-video panel (Phase 23, Story B-C)
 
     // word-cloud stopwords (UA + RU + EN) — client-side, no endpoint
@@ -57,6 +58,7 @@
     }
 
     function paint(ctx, id, t) {
+        verStop = stopVerPoll(verStop); vers = null; verView = null; verCmp = null; verSaved = null;
         speakersOpen = false; bookmarksOpen = false; _onTime = null;   // panels/audio rebuilt on every (re)paint
         copilotTL = null; copilotOpen = false; cpFilter = 'all';
         const segs = t.segments || [];
@@ -113,6 +115,7 @@
                     <div id="rcSummaryPanel"></div>
                     <div id="rcCopilotPanel"></div>
                     <div id="rcPostproc"></div>
+                    <div id="rcVersions"></div>
                     <div id="rcTranscriptBody"></div>
                 </div>
             </div>
@@ -206,6 +209,7 @@
         });
 
         renderBody(ctx, t);
+        loadVersions(ctx, id, t);
         renderRelated(ctx, id, t);
         // show cached summary if present
         if (t.summary_json) { try { renderSummary(ctx, JSON.parse(t.summary_json)); } catch (_) {} }
@@ -662,6 +666,182 @@
             box.innerHTML = `<div class="rc-transcript">${U.esc(t.transcript_text || T('transcript.text.none'))}</div>`;
         }
     }
+
+    // ---- transcript versions: bar, read-only view, two-column compare ----
+    const REEMBED_KEY = {
+        queued: 'transcript.ver.reembed.queued', deferred: 'transcript.ver.reembed.deferred',
+        pending: 'transcript.ver.reembed.pending', skipped: 'transcript.ver.reembed.skipped',
+    };
+    function stopVerPoll(stop) { if (stop) stop(); return null; }
+
+    async function loadVersions(ctx, id, t) {
+        let d;
+        try { d = await R.api.versions(id); } catch (_) { return; }   // best-effort: the page works without versions
+        if (!ctx.isCurrent() || data !== t) return;
+        vers = d;
+        const list = d.versions || [];
+        if (!list.length && !d.running_job_id) return;
+        renderVersionBar(ctx, id, t);
+        if (d.running_job_id) {
+            verStop = stopVerPoll(verStop);
+            verStop = R.api.pollJob(d.running_job_id, (job) => {
+                if (!ctx.isCurrent()) return true;
+                if (job.state !== 'completed' && job.state !== 'failed') return false;
+                if (job.state === 'failed') UI.toast(job.error || T('transcript.ver.failed'), 'error');
+                render(ctx);
+                return true;
+            });
+        }
+    }
+
+    function fmtVerDate(s) {
+        const d = new Date(String(s || '').replace(' ', 'T') + 'Z');
+        return isNaN(d) ? String(s || '') : d.toLocaleString(R.i18n.lang === 'en' ? 'en-GB' : 'uk-UA', { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    function renderVersionBar(ctx, id, t) {
+        const box = ctx.mount.querySelector('#rcVersions');
+        if (!box || !vers) return;
+        const list = vers.versions || [];
+        const rows = list.map(v => {
+            const viewing = verView && verView.id === v.id;
+            return `<div class="rc-versions__row${v.is_active ? ' is-main' : ''}${viewing ? ' is-viewing' : ''}" data-vid="${v.id}">
+                <span class="rc-versions__model rc-mono">${U.esc(v.model_used || '?')}</span>
+                <span class="rc-versions__date rc-mono">${U.esc(fmtVerDate(v.created_at))}</span>
+                ${v.is_original ? `<span class="rc-versions__tag">${T('transcript.ver.original')}</span>` : ''}
+                ${v.is_active ? `<span class="rc-versions__tag is-main">${T('transcript.ver.main')}</span>` : ''}
+                <span class="rc-spacer"></span>
+                <button class="rc-btn rc-btn--sm" data-ver="view">${T('transcript.ver.view')}</button>
+                ${v.is_active ? '' : `<button class="rc-btn rc-btn--sm" data-ver="main">${T('transcript.ver.makeMain')}</button>`}
+                ${list.length > 1 ? `<button class="rc-btn rc-btn--sm" data-ver="compare">${T('transcript.ver.compare')}</button>` : ''}
+            </div>`;
+        }).join('');
+        box.innerHTML = `<div class="rc-versions">
+            <div class="rc-versions__head rc-mono"><i class="fa-solid fa-code-branch"></i> ${T('transcript.ver.title')}
+                ${vers.running_job_id ? `<span class="rc-versions__run"><i class="fa-solid fa-spinner fa-spin"></i> ${T('transcript.ver.running')}</span>` : ''}</div>
+            ${rows}
+            <div id="rcVerBanner"></div>
+        </div>`;
+        box.querySelectorAll('[data-ver]').forEach(b => b.addEventListener('click', () => {
+            const vid = parseInt(b.closest('[data-vid]').dataset.vid, 10);
+            if (b.dataset.ver === 'view') viewVersion(ctx, id, t, vid);
+            else if (b.dataset.ver === 'main') makeMain(ctx, id, vid);
+            else openCompare(ctx, id, t, vid);
+        }));
+        const ban = box.querySelector('#rcVerBanner');
+        if (verView) {
+            ban.innerHTML = `<div class="rc-versions__banner"><span>${T('transcript.ver.viewing', { model: U.esc(verView.model_used || '?'), date: U.esc(fmtVerDate(verView.created_at)) })}</span>
+                <span class="rc-spacer"></span>
+                ${verView.is_active ? '' : `<button class="rc-btn rc-btn--sm" id="rcVerBannerMain">${T('transcript.ver.makeMain')}</button>`}
+                <button class="rc-btn rc-btn--sm" id="rcVerBannerClose">${T('core.close')}</button></div>`;
+            const mm = ban.querySelector('#rcVerBannerMain');
+            if (mm) mm.addEventListener('click', () => makeMain(ctx, id, verView.id));
+            ban.querySelector('#rcVerBannerClose').addEventListener('click', () => leaveVersionView(ctx, id, t));
+        }
+    }
+
+    function enterReadOnly(ctx) {
+        if (!verSaved) verSaved = { mode, bookmarks };
+        bookmarks = {};
+        const tog = ctx.mount.querySelector('#rcViewToggle');
+        if (tog) tog.style.display = 'none';
+        const box = ctx.mount.querySelector('#rcTranscriptBody');
+        if (box) box.classList.add('rc-readonly');
+    }
+    function leaveVersionView(ctx, id, t) {
+        if (verSaved) { mode = verSaved.mode; bookmarks = verSaved.bookmarks; verSaved = null; }
+        verView = null; verCmp = null;
+        const tog = ctx.mount.querySelector('#rcViewToggle');
+        if (tog) {
+            tog.style.display = '';
+            tog.querySelectorAll('button').forEach(x => x.classList.toggle('is-active', x.dataset.mode === mode));
+        }
+        const box = ctx.mount.querySelector('#rcTranscriptBody');
+        if (box) box.classList.remove('rc-readonly');
+        renderBody(ctx, t);
+        renderVersionBar(ctx, id, t);
+    }
+
+    async function viewVersion(ctx, id, t, vid) {
+        let v;
+        try { v = (await R.api.version(id, vid)).version; }
+        catch (err) { UI.toast(err.message, 'error'); return; }
+        if (!ctx.isCurrent() || data !== t) return;
+        if (v.is_active) { leaveVersionView(ctx, id, t); return; }   // the main version is the normal render
+        enterReadOnly(ctx);
+        verCmp = null; verView = v;
+        const tv = Object.assign({}, t, { segments: v.segments || [], transcript_text: v.transcript_text || '', polished_text: '', speakers: v.speaker_map || [] });
+        mode = tv.segments.length ? 'segments' : 'text';
+        renderBody(ctx, tv);
+        renderVersionBar(ctx, id, t);
+    }
+
+    async function makeMain(ctx, id, vid) {
+        let r;
+        try { r = await R.api.activateVersion(id, vid); }
+        catch (err) {
+            const code = err && err.body && err.body.error_code;
+            if (code === 'ALREADY_RUNNING') UI.toast(T('transcript.ver.alreadyRunning'), 'info');
+            else UI.toast(err.message || T('transcript.ver.failed'), 'error');
+            return;
+        }
+        const k = REEMBED_KEY[r && r.reembed];
+        UI.toast(T('transcript.ver.madeMain') + (k ? ' ' + T(k) : ''), 'success');
+        if (ctx.isCurrent()) render(ctx);
+    }
+
+    async function openCompare(ctx, id, t, vid) {
+        const list = (vers && vers.versions) || [];
+        if (list.length < 2) return;
+        const main = list.find(v => v.is_active) || list[0];
+        const others = list.filter(v => v.id !== main.id).sort((x, y) => y.id - x.id);
+        const other = others.find(v => v.id === vid) || others[0];
+        verCmp = { aId: main.id, bId: other.id, cache: {} };
+        verView = null;
+        enterReadOnly(ctx);
+        await paintCompare(ctx, id, t);
+    }
+
+    async function cmpSegs(id, vid) {
+        if (!verCmp.cache[vid]) verCmp.cache[vid] = (await R.api.version(id, vid)).version.segments || [];
+        return verCmp.cache[vid];
+    }
+
+    async function paintCompare(ctx, id, t) {
+        const box = ctx.mount.querySelector('#rcTranscriptBody');
+        if (!box || !verCmp) return;
+        const list = vers.versions || [];
+        const cmp = verCmp;
+        let sa, sb;
+        try { sa = await cmpSegs(id, cmp.aId); sb = await cmpSegs(id, cmp.bId); }
+        catch (err) { UI.toast(err.message, 'error'); return; }
+        if (!ctx.isCurrent() || verCmp !== cmp) return;
+        const opts = (sel) => list.map(v => `<option value="${v.id}"${v.id === sel ? ' selected' : ''}>${U.esc((v.model_used || '?') + ' · ' + fmtVerDate(v.created_at))}${v.is_active ? ' *' : ''}</option>`).join('');
+        const cellHTML = (c, d) => {
+            if (!c) return '<div class="rc-cmp__blank"></div>';
+            const html = d ? d.map(w => w.diff ? `<mark class="rc-diff">${U.esc(w.text)}</mark>` : U.esc(w.text)).join(' ') : U.esc(c.text);
+            return `<div class="rc-seg" data-start="${c.start}" data-end="${c.end}"><div class="rc-seg__t">${U.fmtDuration(c.start)}</div><div class="rc-seg__txt">${html}</div></div>`;
+        };
+        const rows = R.compare.align(sa, sb).map(r => {
+            const d = (r.a && r.b) ? R.compare.diffWords(r.a.text, r.b.text) : null;
+            return `<div class="rc-cmp__row">${cellHTML(r.a, d && d.a)}${cellHTML(r.b, d && d.b)}</div>`;
+        }).join('');
+        box.innerHTML = `<div class="rc-cmp">
+            <div class="rc-cmp__head">
+                <select class="rc-select" id="rcCmpA" aria-label="${T('transcript.ver.cmpA')}">${opts(cmp.aId)}</select>
+                <select class="rc-select" id="rcCmpB" aria-label="${T('transcript.ver.cmpB')}">${opts(cmp.bId)}</select>
+                <button class="rc-btn rc-btn--sm" id="rcCmpClose">${T('core.close')}</button>
+            </div>
+            <div class="rc-seghint rc-mono"><i class="fa-solid fa-circle-play"></i> ${T('transcript.seg.hint')}</div>
+            ${rows || UI.empty(T('transcript.seg.none'), '', 'fa-clock')}
+        </div>`;
+        box.querySelector('#rcCmpA').addEventListener('change', (e) => { cmp.aId = parseInt(e.target.value, 10); paintCompare(ctx, id, t); });
+        box.querySelector('#rcCmpB').addEventListener('change', (e) => { cmp.bId = parseInt(e.target.value, 10); paintCompare(ctx, id, t); });
+        box.querySelector('#rcCmpClose').addEventListener('click', () => leaveVersionView(ctx, id, t));
+        setupSegmentSync(ctx, t, []);
+        renderVersionBar(ctx, id, t);
+    }
+
     function labelOf(raw) {
         if (raw === 'self') return T('transcript.speaker.you');
         const m = /^SPEAKER_(\d+)$/.exec(raw);
@@ -1191,7 +1371,7 @@
     async function doExport(fmt, t) {
         try {
             const res = await fetch(R.api.exportUrl(fmt), {
-                method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, R.i18n.headers()),
+                method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, R.api.uiHeaders()),
                 body: JSON.stringify(t),
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1214,6 +1394,7 @@
             copilotTL = null; copilotOpen = false; cpFilter = 'all';
             if (videoPolling) { clearInterval(videoPolling); videoPolling = null; }
             videoInfo = null;
+            verStop = stopVerPoll(verStop); vers = null; verView = null; verCmp = null; verSaved = null;
             data = null; mode = 'text';
         },
     };

@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 import mcp_server as m
+from tests.test_mcp_registry import load_mcp_copy
 from app.db.migrations import init_database
 from app.services import categories
 
@@ -305,11 +306,15 @@ def test_about_draws_the_tree(archive):
     assert "Особисте (1)" in text
 
 
-def test_about_still_reports_42_tools(archive):
+def test_about_reports_registered_tool_count(archive, monkeypatch):
     """Taxonomy neither adds nor removes tools (C6); 35 → 40 — the video visual timeline (4.10.0),
-    40 → 41 — the pipe history `list_pipe_runs` (K4), 41 → 42 — the mail tool (gmail-ingest)."""
-    assert len(m._registered_tool_names()) == 42
-    assert "42 tools" in m.about()
+    40 → 41 — the pipe history `list_pipe_runs` (K4), 41 → 42 — the mail tool (gmail-ingest), 42 → 44 — mailbox, settings,
+    44 → 45 — wait_for, 45 → 46 — list_mcp_actions, 46 → 51 — system_status and 4 D tools, 51 → 55 — retranscribe-versions tools, 55 → 68 — archive organisation (mcp-archive-org), 68 → 80 — the intake pipeline (mcp-pipeline). Counted on the full profile, not the developer's .env."""
+    full = load_mcp_copy()
+    monkeypatch.setattr(full, "DB_PATH", m.DB_PATH)
+    n = len(full._registered_tool_names())
+    assert n == 82
+    assert f"{n} tools" in full.about()
 
 
 # ============================================================
@@ -412,7 +417,10 @@ def test_research_export_unknown_tag_notes(archive):
 
 
 def test_research_export_invalid_date(archive):
-    assert "Filter error" in m.research_export("ВОДОСПАД", since="вчора")
+    """A crooked date is the error envelope, not a markdown string that reads as a report."""
+    res = m.research_export("ВОДОСПАД", since="вчора")
+    assert isinstance(res, dict) and res["ok"] is False
+    assert res["error_code"] == "INVALID_ARGUMENT" and "Filter error" in res["error"]
 
 
 # Docstrings — the three ADR §C filter paragraphs, in English

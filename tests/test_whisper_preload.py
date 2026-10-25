@@ -45,7 +45,7 @@ def test_preload_enabled_false_when_flag_is_0(monkeypatch):
 
 def test_resolve_preload_model_defaults_to_frontend_default():
     # Mirrors DEFAULT_MODEL from static/js/recall/views/{upload,record,...}.js
-    assert whisper_preload.resolve_preload_model() == 'large-v3-turbo'
+    assert whisper_preload.resolve_preload_model() == 'large-v3'
 
 
 def test_resolve_preload_model_env_override(monkeypatch):

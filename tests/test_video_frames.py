@@ -106,6 +106,18 @@ def test_thumbs_cache_skips_decoding(tmp_path, monkeypatch):
 
 
 @needs_ffmpeg
+def test_thumbs_pass_window_sees_only_changes_inside_it(tmp_path):
+    v = _make_video(tmp_path / 'three.mp4',
+                    [('red', 7), ('blue', 16), ('green', 18), ('white', 19)])
+    thumbs = vf.thumbs_pass(v, 20.0, start=15.0, window=20.0, ffmpeg=FFMPEG)
+    assert 19 <= len(thumbs) <= 21
+    segs = vf.select_thumbs(thumbs, 20.0, mask=vf.flicker_mask(thumbs))
+    found = _changes(segs)
+    assert len(found) == 1, found
+    assert abs(15.0 + found[0] - 23.0) <= 1.0, found
+
+
+@needs_ffmpeg
 def test_grab_frame_returns_image_without_writing(tmp_path):
     v = _make_video(tmp_path / 'g.mp4', [('red', 3), ('blue', 3)])
     before = set(tmp_path.iterdir())

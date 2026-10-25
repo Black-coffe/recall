@@ -142,7 +142,7 @@
                 listEl.innerHTML = UI.empty(T('knowledge.ent.none'),
                     filterExplain(lstate) || T('knowledge.ent.noneFiltered'), 'fa-diagram-project');
             } else {
-                const actions = [{ label: T('knowledge.ent.runEnrich'), icon: 'fa-wand-magic-sparkles', primary: true, onClick: () => runEnrichment(ctx) }];
+                const actions = [{ label: T('knowledge.ent.runEnrich'), icon: 'fa-wand-magic-sparkles', primary: true, onClick: (ev) => runEnrichment(ctx, ev.currentTarget) }];
                 listEl.innerHTML = UI.empty(T('knowledge.ent.none'),
                     T('knowledge.ent.noEnrich'),
                     'fa-diagram-project', actions);
@@ -178,9 +178,10 @@
         });
     }
 
-    async function runEnrichment(ctx) {
+    async function runEnrichment(ctx, btn) {
         try {
-            await R.api.post('/api/memory/backfill', {});
+            const r = await UI.gated(btn, () => R.api.post('/api/memory/backfill', {}).then((x) => x || {}));
+            if (r === undefined) return;
             UI.toast(T('knowledge.ent.enrichStarted'), 'success');
         } catch (err) {
             UI.toast((err && err.message) || T('knowledge.ent.enrichFail'), 'error');

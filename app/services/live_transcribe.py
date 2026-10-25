@@ -88,7 +88,7 @@ class LiveTranscribeWorker:
         self,
         whisper_manager,
         broker,
-        model_name: str = 'small',
+        model_name: str = 'large-v3-turbo',
         interval: float = DEFAULT_INTERVAL,
         db_path: Optional[str] = None,
     ):

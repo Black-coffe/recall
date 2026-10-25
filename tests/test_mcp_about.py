@@ -19,6 +19,12 @@ import pytest
 
 import mcp_server as m
 from app.db.migrations import init_database
+from tests.test_mcp_registry import load_mcp_copy
+
+
+def _full_registry() -> list[str]:
+    """The buckets describe the full profile; the developer's .env must not shrink it."""
+    return load_mcp_copy()._registered_tool_names()
 
 
 @pytest.fixture()
@@ -31,21 +37,21 @@ def db(tmp_path: Path, monkeypatch) -> str:
 
 def test_bucket_sum_matches_registered_count():
     """The sum of names in the two help buckets equals the number of registered tools."""
-    registered = m._registered_tool_names()
+    registered = _full_registry()
     bucketed = list(m._ABOUT_DIRECT_DB) + list(m._ABOUT_PROXY)
     assert len(bucketed) == len(registered)
 
 
 def test_every_registered_tool_is_bucketed():
     """A tool registered in FastMCP but not mentioned in any bucket is drift."""
-    registered = set(m._registered_tool_names())
+    registered = set(_full_registry())
     bucketed = set(m._ABOUT_DIRECT_DB) | set(m._ABOUT_PROXY)
     assert registered - bucketed == set()
 
 
 def test_no_bucketed_name_is_phantom():
     """A name in a bucket that is absent from the registry is drift too (a rename/removal)."""
-    registered = set(m._registered_tool_names())
+    registered = set(_full_registry())
     bucketed = set(m._ABOUT_DIRECT_DB) | set(m._ABOUT_PROXY)
     assert bucketed - registered == set()
 
@@ -106,7 +112,7 @@ def test_about_adding_a_tool_changes_the_reported_count(db, monkeypatch):
 def test_list_pipe_runs_is_direct_db():
     import mcp_server as m
     assert "list_pipe_runs" in m._ABOUT_DIRECT_DB
-    assert "list_pipe_runs" in m._registered_tool_names()
+    assert "list_pipe_runs" in _full_registry()
 
 
 def test_api_sends_the_english_language_header(monkeypatch):

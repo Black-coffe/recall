@@ -61,7 +61,7 @@ _CATEGORY_REF_TABLES = ("transcriptions", "audio_downloads",
 #: Allowed tag sources on a record (ADR §B): manual, Claude suggestion,
 #: inherited from a TG chat. `source` is needed for detaching - removing a tag
 #: from a chat only drops its own rows, the manual one stays.
-TAG_SOURCES = ("manual", "claude", "chat")
+TAG_SOURCES = ("manual", "claude", "chat", "mcp")
 
 #: Tag name length ceiling (ADR §B) - checked by the HTTP layer, only the constant lives here.
 TAG_NAME_MAX = 40
@@ -581,11 +581,12 @@ def _free_slug(conn, name: str, parent_id: "int | None") -> str:
 
 
 def create_category(conn, name, *, color=None, icon=None, parent_id=None,
-                    commit: bool = True) -> dict:
+                    commit: bool = True, created_source: "str | None" = None) -> dict:
     """Create a direction (`parent_id=None`) or a project inside a direction.
 
     The parent is checked FIRST: without it it is unclear among whom to look for a
-    duplicate, and the message "already exists in direction «X»" would have nothing to name."""
+    duplicate, and the message "already exists in direction «X»" would have nothing to name.
+    `created_source`: NULL for the owner/UI, `'mcp'` for an agent (provenance, ADR-042)."""
     clean = clean_name(name)
     _assert_plain_name(clean)
     _assert_parent(conn, None, parent_id)
@@ -593,10 +594,10 @@ def create_category(conn, name, *, color=None, icon=None, parent_id=None,
     order = conn.execute(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories").fetchone()[0]
     cur = conn.execute(
-        "INSERT INTO categories (name, name_norm, slug, color, icon, sort_order, parent_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO categories (name, name_norm, slug, color, icon, sort_order, parent_id, "
+        "created_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (clean, key, _free_slug(conn, clean, parent_id), color, icon, order,
-         int(parent_id) if parent_id is not None else None))
+         int(parent_id) if parent_id is not None else None, created_source))
     if commit:
         conn.commit()
     return get_category(conn, cur.lastrowid)

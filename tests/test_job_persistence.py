@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from app.core.i18n import tr
 from app.db.connection import get_db_connection
 from app.db.migrations import init_database
 from app.services.job_queue import JobQueue
@@ -120,6 +121,8 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
             assert got is not None
             assert got.state == "crashed"
             assert got.error
+            assert got.error_code == "JOB_CRASHED"
+            assert got.error == tr("svc_jobs.error.crashed")
 
             # Visible via list() too — just as via /api/jobs
             ids = [j.id for j in queue2.list()]

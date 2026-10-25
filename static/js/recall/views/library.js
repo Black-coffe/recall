@@ -39,6 +39,12 @@
     // T5.5: cap for "select all N filtered" — beyond this a filter should be
     // narrowed first rather than firing dozens of paginated fetches.
     const SELECT_ALL_CAP = 3000;
+    // Re-transcribe runs started from this tab: record id -> model. Survives row re-renders.
+    let rtRunning = new Map(), rtStops = [];
+    const RT_ERR = {
+        NO_MEDIA: 'library.rt.err.NO_MEDIA', MODEL_NOT_INSTALLED: 'library.rt.err.MODEL_NOT_INSTALLED',
+        RECORDING_ACTIVE: 'library.rt.err.RECORDING_ACTIVE', ALREADY_RUNNING: 'library.rt.err.ALREADY_RUNNING',
+    };
 
     // An empty result with active filters — explain WHAT exactly narrows
     // the result (path / tags / period), not just "nothing found".
@@ -334,7 +340,7 @@
                 e.stopPropagation();
                 const id = parseInt(btn.dataset.id, 10);
                 const row = curRows.find(r => r.id === id);
-                doSingleDelete(ctx, id, row && row.source_name);
+                doSingleDelete(ctx, id, row && row.source_name, btn);
             });
         });
         const openMeta = async (id, autoSuggest) => {
@@ -364,6 +370,12 @@
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 openMeta(parseInt(btn.dataset.id, 10), true);
+            });
+        });
+        listEl.querySelectorAll('[data-act="retranscribe"]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                doRetranscribe(ctx, parseInt(btn.dataset.id, 10));
             });
         });
         // Comments: counters in one request AFTER the rows render. We do not block
@@ -489,6 +501,11 @@
         const name = !selecting && UI.isUnnamedRecording(t)
             ? `<button class="rc-btn rc-btn--sm rc-rec__name" data-act="suggest" data-id="${t.id}" title="${U.esc(T('library.lib.suggestTitle'))}"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.lib.suggest')}</button>` : '';
         const del = !selecting ? `<button class="rc-iconbtn rc-rec__del" data-act="delete" data-id="${t.id}" title="${U.esc(T('library.lib.deleteRecord'))}" aria-label="${U.esc(T('library.lib.deleteRecord'))}"><i class="fa-solid fa-trash"></i></button>` : '';
+        const rtModel = rtRunning.get(t.id);
+        const rt = !selecting && rtModel
+            ? `<span class="rc-rec__rt" data-rt="${t.id}"><i class="fa-solid fa-spinner fa-spin"></i> ${U.esc(T('library.rt.running', { model: rtModel }))}</span>`
+            : (!selecting && t.has_media === true
+                ? `<button class="rc-iconbtn" data-act="retranscribe" data-id="${t.id}" title="${U.esc(T('library.rt.action'))}" aria-label="${U.esc(T('library.rt.action'))}"><i class="fa-solid fa-rotate"></i></button>` : '');
         return `<div class="rc-rec${selecting ? ' is-select' : ''}${selected.has(t.id) ? ' is-checked' : ''}" data-id="${t.id}" data-href="${U.esc(href)}">
             ${check}<span class="rc-rec__rail">${rail}</span>
             <div class="rc-rec__body">
@@ -498,7 +515,7 @@
                     : `<div class="rc-rec__meta">${p.meta}</div>` + (preview ? `<div class="rc-rec__preview">${preview}</div>` : '')}
                 ${rowTags(t)}
             </div>
-            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${name}${tgLink}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
+            <div class="rc-rec__aside">${cat}<span class="rc-rec__acts">${name}${tgLink}${rt}${edit}${del}</span><span class="rc-rec__id rc-mono">#${t.id}</span></div>
         </div>`;
     }
 
@@ -598,7 +615,7 @@
             <button class="rc-btn rc-btn--sm" id="rcBulkDelete"><i class="fa-solid fa-trash"></i> ${T('library.lib.delete')}</button>`;
         bar.querySelector('#rcBulkApply').addEventListener('click', () => doBulkCategory(ctx));
         bar.querySelector('#rcBulkExport').addEventListener('click', () => doBulkExport(ctx));
-        bar.querySelector('#rcBulkDelete').addEventListener('click', () => doBulkDelete(ctx));
+        bar.querySelector('#rcBulkDelete').addEventListener('click', (e) => doBulkDelete(ctx, e.currentTarget));
     }
 
     async function doBulkExport(ctx) {
@@ -636,39 +653,77 @@
         } catch (err) { UI.toast(err && err.message, 'error'); if (apply) apply.disabled = false; }
     }
 
+    // Re-transcribe: pick an installed model, start the job, poll it until it ends.
+    async function doRetranscribe(ctx, id) {
+        const row = curRows.find(r => r.id === id);
+        if (!row || rtRunning.has(id)) return;
+        let models = [];
+        try { const d = await R.api.models(); models = (Array.isArray(d) ? d : (d.models || [])).filter(m => m.downloaded === true); }
+        catch (_) { models = []; }
+        if (!models.length) { UI.toast(T('library.rt.noModels'), 'error'); return; }
+        const def = models.some(m => m.name === row.model_used) ? row.model_used : models[0].name;
+        const model = await UI.modal({
+            title: T('library.rt.title'),
+            icon: 'fa-rotate',
+            bodyHTML: `<div class="rc-rt-pick"><label class="rc-field__label" for="rcRtModel">${T('library.rt.model')}</label>
+                <select class="rc-select" id="rcRtModel">${models.map(m =>
+                    `<option value="${U.esc(m.name)}"${m.name === def ? ' selected' : ''}>${U.esc(m.name)}</option>`).join('')}</select></div>`,
+            actions: [
+                { label: T('library.rt.cancel'), value: null },
+                { label: T('library.rt.go'), primary: true, getValue: (ov) => ov.querySelector('#rcRtModel').value },
+            ],
+        });
+        if (!model) return;
+        let res;
+        try { res = await R.api.retranscribe(id, { model }); }
+        catch (err) {
+            const code = err && err.body && err.body.error_code;
+            UI.toast(RT_ERR[code] ? T(RT_ERR[code]) : T('library.rt.err.generic'), 'error');
+            return;
+        }
+        rtRunning.set(id, model);
+        UI.toast(T('library.rt.started', { model }), 'info');
+        if (ctx.isCurrent()) renderRows(ctx);
+        rtStops.push(R.api.pollJob(res.job_id, (job) => {
+            if (job.state !== 'completed' && job.state !== 'failed') return false;
+            rtRunning.delete(id);
+            if (job.state === 'completed') UI.toast(T('library.rt.done'), 'success');
+            else UI.toast(job.error || T('library.rt.failed'), 'error');
+            if (ctx.isCurrent()) load(ctx);
+            return true;
+        }));
+    }
+
     // Single deletion (soft-delete + undo-toast). Optimistically removes
     // the row from the list; if DELETE fails — puts the row back.
-    async function doSingleDelete(ctx, id, title) {
-        const ok = await UI.confirmModal({
-            title: T('library.lib.del.title'),
-            message: T('library.lib.del.message', { title: title || T('library.lib.recFallback', { id: id }) }),
-            confirmLabel: T('library.lib.delete'),
-        });
-        if (!ok) return;
+    async function doSingleDelete(ctx, id, title, btn) {
+        let done = false;
+        try {
+            await UI.gated(btn, async () => { await R.api.del('/api/history/' + id); done = true; });
+        } catch (err) {
+            UI.toast((err && err.message) || T('library.lib.del.fail'), 'error');
+            return;
+        }
+        if (!done) return;
         const idx = curRows.findIndex(r => r.id === id);
-        const removedRow = idx >= 0 ? curRows[idx] : null;
         if (idx >= 0) curRows.splice(idx, 1);
         selected.delete(id);
         renderRows(ctx);
-        try {
-            await R.api.del('/api/history/' + id);
-            if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
-            UI.actionToast(T('library.lib.del.done'), T('library.lib.del.undo'), async () => {
-                try {
-                    await R.api.post('/api/history/' + id + '/restore');
-                    UI.toast(T('library.lib.del.restored'), 'success');
-                    load(ctx);
-                    if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
-                } catch (e) { UI.toast((e && e.message) || T('library.lib.del.restoreFail'), 'error'); }
-            });
-        } catch (err) {
-            if (removedRow && ctx.isCurrent()) { curRows.splice(idx, 0, removedRow); renderRows(ctx); }
-            UI.toast((err && err.message) || T('library.lib.del.fail'), 'error');
-        }
+        if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
+        UI.actionToast(T('library.lib.del.done'), T('library.lib.del.undo'), async () => {
+            try {
+                await R.api.post('/api/history/' + id + '/restore');
+                UI.toast(T('library.lib.del.restored'), 'success');
+                load(ctx);
+                if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
+            } catch (e) { UI.toast((e && e.message) || T('library.lib.del.restoreFail'), 'error'); }
+        });
     }
 
-    async function doBulkDelete(ctx) {
+    async function doBulkDelete(ctx, gateBtn) {
         const ids = [...selected];
+        // Owner's call: bulk delete keeps its own modal first (type-to-confirm from
+        // BIG_N), then the request still goes through UI.gated and the Windows dialog.
         const BIG_N = 10; // from this count we require a conscious type-to-confirm
         const needsTypeConfirm = ids.length > BIG_N;
         const ok = await UI.modal({
@@ -695,7 +750,8 @@
         });
         if (!ok) return;
         try {
-            await R.api.post('/api/history/bulk_delete', { ids });
+            const res = await UI.gated(gateBtn, () => R.api.post('/api/history/bulk_delete', { ids }).then((x) => x || {}));
+            if (res === undefined) return;
             UI.toast(T('library.lib.bulkDel.done', { count: ids.length }), 'success');
             selecting = false; selected.clear();
             const btn = ctx.mount.querySelector('#rcLibSelect');
@@ -713,5 +769,5 @@
         return `<div class="rc-pager">${prev}<span class="rc-pager__info">${T('library.lib.pager.page', { page: R.i18n.num(page), pages: R.i18n.num(total), total: T('library.lib.pager.total', { count: d.total, num: R.i18n.num(d.total) }) })}</span>${next}</div>`;
     }
 
-    R.views.library = { render, destroy() { listEl = null; state = null; selecting = false; selected = new Set(); curRows = []; } };
+    R.views.library = { render, destroy() { rtStops.forEach(f => f()); rtStops = []; rtRunning = new Map(); listEl = null; state = null; selecting = false; selected = new Set(); curRows = []; } };
 })();

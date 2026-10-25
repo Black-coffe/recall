@@ -217,3 +217,9 @@ private.txt
 docs/chronicle/*
 !docs/chronicle/golden-questions.md
 # <<< litopys <<<
+
+# --- VULYK runtime artifacts (added by install.sh; safe to reorder or annotate) ---
+# Per-machine or derived. Committing any of them creates a second account of
+# something the repository already holds, which is the failure mode the framework
+# spends most of its checks preventing.
+*.vulyk-new

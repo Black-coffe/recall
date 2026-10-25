@@ -455,6 +455,34 @@
         }).then((v) => !!v);
     };
 
+    // Destructive action behind the Windows approval dialog. The pending HTTP
+    // request IS the wait: run() resolves only after the owner pressed Allow.
+    // Gate refusals become a toast and resolve undefined; other errors are rethrown.
+    const GATE_KEYS = {
+        APPROVAL_UNAVAILABLE: 'core.gate.unavailable',
+        APPROVAL_PENDING: 'core.gate.pending',
+    };
+    UI.gated = async function (btn, run, opts) {
+        opts = opts || {};
+        const old = btn ? btn.innerHTML : null;
+        const wasDisabled = btn ? btn.disabled : false;
+        if (btn) { btn.disabled = true; btn.textContent = opts.label || T('core.gate.waiting'); }
+        try {
+            return await run();
+        } catch (e) {
+            const b = (e && e.body) || {};
+            const code = b.error_code;
+            let msg = null;
+            if (code === 'APPROVAL_DENIED') msg = T(b.reason === 'timeout' ? 'core.gate.denied_timeout' : 'core.gate.denied_no');
+            else if (code === 'RATE_CEILING') msg = T('core.gate.rate_ceiling', { seconds: b.retry_after_sec != null ? b.retry_after_sec : (b.seconds || 0) });
+            else if (GATE_KEYS[code]) msg = T(GATE_KEYS[code]);
+            if (msg === null) throw e;
+            UI.toast(msg, 'error');
+        } finally {
+            if (btn) { btn.innerHTML = old; btn.disabled = wasDisabled; }
+        }
+    };
+
     // Branded replacement for window.prompt(). Resolves the trimmed string,
     // or null if cancelled. opts.required blocks the confirm click (and
     // Enter) while the field is empty, instead of silently closing.

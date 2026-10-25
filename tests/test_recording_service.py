@@ -454,6 +454,62 @@ def test_flush_loop_publishes_levels_to_sse():
         shutil.rmtree(store.base_dir, ignore_errors=True)
 
 
+class _ListBroker:
+    def __init__(self):
+        self.events: list[tuple[str, str, dict]] = []
+        self._lock = threading.Lock()
+
+    def publish(self, channel, event, data):
+        with self._lock:
+            self.events.append((channel, event, data))
+
+    def errors(self) -> list[dict]:
+        with self._lock:
+            return [d for _c, ev, d in self.events if ev == 'error']
+
+
+def _wait_errors(broker: _ListBroker) -> list[dict]:
+    deadline = time.time() + 3
+    while time.time() < deadline and not broker.errors():
+        time.sleep(0.05)
+    return broker.errors()
+
+
+def test_stream_error_event_carries_no_raw_text(store: SessionStore):
+    """A recorder callback error reaches SSE (and `wait_for`) as generic text + error_code."""
+    broker = _ListBroker()
+    svc = RecordingService(store=store, sse_broker=broker, chunk_seconds=1,
+                           recorder_factory=FakeRecorder, writer_factory=FakeWriter)
+    sid = svc.start(mic_device_index=10)
+    try:
+        FakeRecorder.instances[0]._callback_error = RuntimeError(r"C:\secret\device boom")
+        errs = _wait_errors(broker)
+        assert errs, "no error event published"
+        assert errs[0]['error_code'] == 'RECORDING_STREAM_FAILED'
+        assert errs[0]['stream'] and errs[0]['message']
+        assert all('boom' not in str(d) and 'secret' not in str(d) for d in errs)
+    finally:
+        svc.discard(sid)
+
+
+def test_flush_loop_crash_event_carries_no_raw_text(store: SessionStore, monkeypatch):
+    broker = _ListBroker()
+    svc = RecordingService(store=store, sse_broker=broker, chunk_seconds=1,
+                           recorder_factory=FakeRecorder, writer_factory=FakeWriter)
+
+    def _crash(active, last_flush):
+        raise RuntimeError("no such table: secret_sessions")
+
+    monkeypatch.setattr(svc, '_tick', _crash)
+    sid = svc.start(mic_device_index=10)
+    try:
+        errs = _wait_errors(broker)
+        assert errs and errs[0]['error_code'] == 'RECORDING_FAILED'
+        assert all('secret_sessions' not in str(d) for d in errs)
+    finally:
+        svc.discard(sid)
+
+
 # ---------------------------------------------------------------- recovery
 
 def test_recover_orphaned_marks_crashed(store: SessionStore):

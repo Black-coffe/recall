@@ -48,3 +48,5 @@ Part of `app/services/*`; hub — [services.md](services.md). Env registry — `
   - `_mcp_screen_filter` (`:320`) — a privacy filter for screen chunks only for `channel='mcp'`
     ([services-video-privacy.md](services-video-privacy.md)).
 - **categorize.py** — `suggest_category()`: k-NN over neighbour embeddings. *Min 2 labelled categories, dim must match (1024).*
+
+> **4.26.0:** `attach_comments` skips agent comments (`source='mcp'`) with no `confirmed_at`; they get no search weight until the owner confirms in the UI.

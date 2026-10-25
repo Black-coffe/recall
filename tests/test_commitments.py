@@ -1042,6 +1042,8 @@ def test_web_patch_goes_through_the_journal(db: str):
     app.register_blueprint(memory_bp)
     app.config.update(TESTING=True, DATABASE=db)
     client = app.test_client()
+    from app.core import auth
+    client.environ_base["HTTP_" + auth.UI_TOKEN_HEADER.upper().replace("-", "_")] = auth.ui_token()
     aid = _item(db)
     assert client.patch(f"/api/memory/action-items/{aid}", json={"status": "done"}).status_code == 200
     assert client.patch(f"/api/memory/action-items/{aid}", json={"status": "зроблено"}).status_code == 400

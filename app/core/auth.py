@@ -55,6 +55,8 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import secrets
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request
 
@@ -94,7 +96,55 @@ def _is_localhost(remote_addr: str | None) -> bool:
     return (remote_addr or "") in _LOCALHOST_ADDRS
 
 
-_PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-User-Login")
+_PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-User-Login", "Forwarded", "X-Real-IP")
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+UI_TOKEN_HEADER = "X-Recall-UI"
+
+# Per-boot token the shell hands to the SPA. It identifies "the UI of this boot", not a user;
+# nothing enforces it yet (spec 3). Regenerated on every process start.
+_UI_TOKEN = secrets.token_urlsafe(32)
+
+
+def ui_token() -> str:
+    return _UI_TOKEN
+
+
+def classify_request() -> tuple[str, str | None]:
+    """("ui", "ui_token") for the exact per-boot token; anything else (X-Recall-Actor included)
+    is ("unknown", None). The actor header is never trusted."""
+    presented = request.headers.get(UI_TOKEN_HEADER) or ""
+    if presented and hmac.compare_digest(presented, _UI_TOKEN):
+        return ("ui", "ui_token")
+    return ("unknown", None)
+
+
+def host_name(host: str) -> str:
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        return host.split("]")[0] + "]"
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def host_ok() -> bool:
+    return host_name(request.host or "") in _LOOPBACK_HOSTS
+
+
+def is_direct_loopback() -> bool:
+    """Loopback peer with no proxy header: a browser or tool on this very machine."""
+    return _is_localhost(request.remote_addr) and _proxied_client() is None
+
+
+def origin_ok() -> bool:
+    """Origin of a state-changing request: absent (MCP, listener, curl), same-origin, or an
+    opaque `null` that Fetch Metadata vouches for."""
+    origin = request.headers.get("Origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        return request.headers.get("Sec-Fetch-Site") in ("same-origin", "none")
+    return urlsplit(origin).netloc.lower() == (request.host or "").lower()
 
 
 def _proxied_client() -> str | None:
@@ -136,14 +186,20 @@ def _is_exempt(path: str, method: str) -> bool:
     return False
 
 
+def is_local_trusted() -> bool:
+    """No-key trust: a direct loopback request with a loopback Host, or a proxied one from an
+    allowed IP. A foreign Host on a direct request (DNS rebinding) earns no trust."""
+    if not (_local_trusted_enabled() and _is_localhost(request.remote_addr)):
+        return False
+    client = _proxied_client()
+    if client is None:
+        return host_ok()
+    return bool(client) and client in _proxy_allowed_ips()
+
+
 def _is_authorized() -> bool:
-    if _local_trusted_enabled() and _is_localhost(request.remote_addr):
-        client = _proxied_client()
-        if client is None:
-            return True
-        if client and client in _proxy_allowed_ips():
-            return True
-        # Proxied and not in the list — from here on only with a key.
+    if is_local_trusted():
+        return True
 
     configured = _configured_api_key()
     if not configured:
@@ -171,6 +227,9 @@ def register(app: Flask) -> None:
     def _recall_auth_gate():  # noqa: ANN202 — Flask hook, no return annotation
         if _is_exempt(request.path, request.method):
             return None
+        if request.method != "GET" and is_direct_loopback() and not origin_ok():
+            logger.warning("Auth gate: 403 foreign Origin %s %s", request.method, request.path)
+            return jsonify({"success": False, "error": "origin rejected", "code": "ORIGIN_REJECTED"}), 403
         if _is_authorized():
             return None
         logger.warning(

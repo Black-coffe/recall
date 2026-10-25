@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="recall-ui-token" content="{{ ui_token|default('') }}">
     <title data-i18n="core.shell.title">Recall — архів памʼяті</title>
     <meta name="description" data-i18n-content="core.shell.description" content="Recall — особистий архів памʼяті: дзвінки, файли, документи, Telegram. Семантичний пошук і звʼязки.">
 
@@ -131,6 +132,7 @@
     <script src="{{ url_for('static', filename='js/recall/api.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/ui.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/research_export.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/compare.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/comments.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/views/library.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/views/audio.js') }}"></script>

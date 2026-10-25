@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
 # these values would stay empty → e.g. TELEGRAM_ENABLED=False despite keys in .env.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parent / '.env')
 except ImportError:
     pass
 
@@ -274,8 +274,8 @@ class Config:
     # localhost control API of the listener (Flask proxies list-dialogs/status/backfill here).
     TELEGRAM_CONTROL_HOST = settings.env('TELEGRAM_CONTROL_HOST')
     TELEGRAM_CONTROL_PORT = settings.env_int('TELEGRAM_CONTROL_PORT')
-    # Transcription of voice/audio/video from TG. large-v3-turbo is multilingual, ~4x
-    # faster than large-v3, comparable accuracy; a better default than medium on an RTX 3090.
+    # Transcription of voice/audio/video from TG. large-v3 had the best accuracy in the
+    # whisper-best-default measurement (uk WER 8.2 %, turbo 8.7 % at ~2.4x the speed).
     # Voice messages are usually short. Language: 'uk' by default, for UA/RU chats one can use
     # 'auto' (autodetect) or a specific language.
     TELEGRAM_WHISPER_MODEL = settings.env('TELEGRAM_WHISPER_MODEL')
@@ -412,24 +412,19 @@ def _network_exposed() -> bool:
 
 
 def _persist_secret_key(key: str) -> bool:
-    """Best-effort: append SECRET_KEY to the .env next to config.py.
+    """Best-effort: save SECRET_KEY to the repo-root .env through the locked writer.
 
-    Not critical if it fails (read-only FS / no .env / a line already
-    SECRET_KEY=): the key still works in the memory of this process.
+    Not critical if it fails (read-only FS / a line already SECRET_KEY=): the key
+    still works in the memory of this process. An existing SECRET_KEY line (e.g. a
+    placeholder) is never rewritten.
     """
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    from app.core import env_file
     try:
-        if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            if 'SECRET_KEY=' in content:
-                return False  # the line already exists (e.g. a placeholder) — do not rewrite someone else's .env
-            sep = '' if content == '' or content.endswith('\n') else '\n'
-            with open(env_path, 'a', encoding='utf-8') as f:
-                f.write(f'{sep}SECRET_KEY={key}\n')
-        else:
-            with open(env_path, 'w', encoding='utf-8') as f:
-                f.write(f'SECRET_KEY={key}\n')
+        if env_file.ENV_PATH.exists():
+            with open(env_file.ENV_PATH, 'r', encoding='utf-8') as f:
+                if 'SECRET_KEY=' in f.read():
+                    return False
+        env_file.set_env_var('SECRET_KEY', key)
         return True
     except OSError:
         return False

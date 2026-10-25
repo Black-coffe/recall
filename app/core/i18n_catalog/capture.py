@@ -3,6 +3,7 @@ MESSAGES: dict = {
     # --- youtube ---
     "capture.yt.err.no_url": {"uk": "URL не вказано", "en": "URL not provided"},
     "capture.yt.err.bad_url": {"uk": "Невірний YouTube URL", "en": "Invalid YouTube URL"},
+    "capture.yt.err.json_object": {"uk": "Очікується JSON-обʼєкт", "en": "A JSON object is expected"},
     "capture.yt.err.info": {
         "uk": "Помилка отримання інформації про відео",
         "en": "Failed to get video information",
@@ -68,6 +69,10 @@ MESSAGES: dict = {
     },
     "capture.rec.err.prompt_gone": {"uk": "Підказки вже немає", "en": "The prompt is gone"},
     "capture.rec.err.session_not_found": {"uk": "Сесія не знайдена", "en": "Session not found"},
+    "capture.rec.err.kept": {
+        "uk": "Запис уже збережено й транскрибовано — скасувати його не можна. Видалити можна в Бібліотеці.",
+        "en": "The recording is already saved and transcribed, so it cannot be cancelled. Delete it in the Library.",
+    },
     "capture.rec.err.crashed": {
         "uk": "Сесія крашнулась — фінальний файл недоступний",
         "en": "The session crashed — the final file is unavailable",
@@ -96,6 +101,31 @@ MESSAGES: dict = {
     "capture.rec.live.finished": {
         "uk": "сесія завершена — повний текст доступний через транскрипт запису",
         "en": "the session has ended — the full text is available through the recording transcript",
+    },
+    "capture.live_video.err.not_found": {"uk": "Сесія запису не знайдена", "en": "Recording session not found"},
+    "capture.live_video.err.no_video": {
+        "uk": "Ця сесія не записує відео екрана",
+        "en": "This session records no screen video",
+    },
+    "capture.live_video.err.invalid_argument": {
+        "uk": "Невірний параметр запиту кадрів",
+        "en": "Invalid frame request parameter",
+    },
+    "capture.live_video.err.past_edge": {
+        "uk": "Цей момент ще не записано на диск: дивіться readable_until",
+        "en": "This moment is not on disk yet: see readable_until",
+    },
+    "capture.live_video.err.not_recorded": {
+        "uk": "У цей момент відео не записувалося (пауза): дивіться readable_ranges",
+        "en": "No video was recorded at this moment (a pause): see readable_ranges",
+    },
+    "capture.live_video.finished": {
+        "uk": "сесія завершена — кадри доступні через get_frame / get_visual_timeline за транскрипцією запису",
+        "en": "the session has ended — frames are available through get_frame / get_visual_timeline on the recording's transcription",
+    },
+    "capture.live_video.not_active": {
+        "uk": "сесія не записується зараз — живі кадри недоступні",
+        "en": "the session is not recording now — live frames are not available",
     },
     "capture.rec.live.no_preview": {
         "uk": "live-прев'ю для цієї сесії недоступне",

@@ -212,4 +212,36 @@ MESSAGES: dict = {
         "uk": 'Немає що відновлювати',
         "en": 'Nothing to restore',
     },
+    "knowledge.memory.err.not_mcp_event": {
+        "uk": "Цю подію створив не агент, її не можна скасувати",
+        "en": "This event was not made by an agent and cannot be undone",
+    },
+    "knowledge.memory.err.undo_not_last": {
+        "uk": "Скасувати можна лише останню подію задачі",
+        "en": "Only the last event of an item can be undone",
+    },
+    "knowledge.memory.err.bulk_limit": {
+        "uk": "Забагато елементів за раз: дозволено лише id, не більше 5",
+        "en": "Too many items at once: only ids, at most 5 are allowed",
+    },
+    "knowledge.comments.err.owner_authored": {
+        "uk": "Коментар написав власник, агент його не змінює",
+        "en": "The comment was written by the owner; an agent cannot change it",
+    },
+    "knowledge.memory.err.category_name_long": {
+        "uk": "Назва напряму довша за {max} символів",
+        "en": "Direction name is longer than {max} characters",
+    },
+    "knowledge.memory.err.private_category_change": {
+        "uk": "Запис не можна вивести з приватного напряму: це робить лише власник в інтерфейсі",
+        "en": "A record cannot be moved out of a private direction: only the owner does that in the UI",
+    },
+    "knowledge.memory.err.tag_unknown": {
+        "uk": "Тег «{name}» не існує: агент призначає лише наявні теги",
+        "en": "Tag \"{name}\" does not exist: an agent assigns existing tags only",
+    },
+    "knowledge.memory.err.postpone_days_bad": {
+        "uk": "days: очікую 1, 7 або 30",
+        "en": "days: expected 1, 7 or 30",
+    },
 }

@@ -13,6 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from app.core import auth
+
+_UI_HEADERS = {auth.UI_TOKEN_HEADER: auth.ui_token()}
+
 from app.services.diarization_service import (
     DEFAULT_MATCH_THRESHOLD,
     EMBEDDING_DTYPE_TAG,
@@ -294,6 +298,7 @@ class TestVoiceFingerprintingFlow:
         # The user names "Андрій"
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'Андрій'}},
         )
         assert r.status_code == 200
@@ -317,11 +322,13 @@ class TestVoiceFingerprintingFlow:
         # First call
         tid1 = self._create_transcription_with_embedding(client, embedding=emb_v1)
         client.patch(f'/api/transcriptions/{tid1}/speakers',
+                     headers=_UI_HEADERS,
                      json={'mapping': {'SPEAKER_00': 'X'}})
 
         # Second call with a different embedding for the same name
         tid2 = self._create_transcription_with_embedding(client, embedding=emb_v2)
         client.patch(f'/api/transcriptions/{tid2}/speakers',
+                     headers=_UI_HEADERS,
                      json={'mapping': {'SPEAKER_00': 'X'}})
 
         from app.db.connection import get_db_connection
@@ -341,6 +348,7 @@ class TestVoiceFingerprintingFlow:
         tid = self._create_transcription_with_embedding(client, embedding=None)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'NoEmbName'}},
         )
         assert r.status_code == 200

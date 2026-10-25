@@ -181,6 +181,23 @@ filter (spec `mcp-visual-privacy`, `app/services/privacy.py`, without a model):
 The Recall UI and local scripts are not affected by the filter: everything is visible in the interface itself. The same
 stop-list is used by the K4 bot.
 
+## During the recording
+
+While a recording is still running, `get_live_video` / `get_live_frames` (MCP) read the screen video
+that is already on disk, through the app.py routes `/api/recording/<sid>/live-video|live-frame|live-frames`.
+
+- **Edge.** `readable_until` is the end of the last complete fragment of the growing file, in
+  recording-timeline seconds (the axis of the live transcript); every frame carries `t` and `video_t`.
+- **Lag.** A fragment closes on a keyframe, every 2 s for recordings started with the 2-second GOP;
+  a recording that was already running keeps the encoder's longer GOP and lags more.
+- **Cursor.** One `t`, or a range in `step` or `changes` mode, at most 12 frames per call; the rest
+  is paged by passing `next_t` back as `cursor`. There is no time-based polling parameter.
+- **Refused.** A time past the edge is `PAST_LIVE_EDGE` (with `readable_until`); `RECALL_MCP_VISUAL=off`
+  refuses both tools, `text` returns text only; a frame with a stop word or without OCR text is not served
+  (`private_hidden`). Direction privacy does not apply yet: a running session has no direction. After
+  finalize the tools answer `available: false` and point to `get_frame` / `get_visual_timeline`.
+- Everything is computed on request: nothing is stored and nothing runs in the background.
+
 ## Images are not stored
 
 The DB holds only timecodes, OCR, word boxes, descriptions. A frame is cut from the video on request

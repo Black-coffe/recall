@@ -21,7 +21,14 @@
         { v: 'uk', l: 'capture.lang.uk' }, { v: 'en', l: 'capture.lang.en' },
         { v: 'ru', l: 'capture.lang.ru' }, { v: 'auto', l: 'capture.lang.auto' },
     ];
-    const DEFAULT_MODEL = 'large-v3-turbo';
+    const DEFAULT_MODEL = 'large-v3';
+    // recording-autosave: the server deadline is the truth (state.autosave.at); until it is known
+    // the tab counts from the moment it saw the stop. The tab saves a little before the server does.
+    const AUTOSAVE_FALLBACK_SEC = 60;
+    const AUTOSAVE_LEAD_MS = 3000;
+    const HOLD_DEBOUNCE_MS = 1500;   // the hold carries the typed fields: send them once typing settles
+    const EDIT_IDLE_MS = 15000;      // the countdown resumes this long after the last edit
+    const RESUME_MIN_SEC = 15;
 
     // Co-pilot (Phase 19): mega-settings at call start.
     const CP_MODES = [{ v: 'light', l: 'capture.rec.cp.mode.light' }, { v: 'medium', l: 'capture.rec.cp.mode.medium' }, { v: 'hard', l: 'capture.rec.cp.mode.hard' }];
@@ -46,7 +53,7 @@
 
     function newS(sid) {
         const letter = String.fromCharCode(65 + (_letter++ % 26));
-        return { sessionId: sid, letter, name: '', stage: 'active', status: 'recording', elapsedSec: 0, videoTracks: {}, audioBytes: {}, streamErr: {}, diskFree: null, diskTotal: null, abort: null, tick: null, copilotSessionId: null, copilotConfig: null, copilotActive: false, cpOffer: null, topics: [], curTopic: null, insights: [], cpStatus: 'analyzing', cpUnseen: 0, cpUsage: null, sseState: 'ok', systemSource: null, hasSystem: false, segs: [], stopInfo: null, restore: [] };
+        return { sessionId: sid, letter, name: '', stage: 'active', status: 'recording', elapsedSec: 0, videoTracks: {}, audioBytes: {}, streamErr: {}, diskFree: null, diskTotal: null, abort: null, tick: null, copilotSessionId: null, copilotConfig: null, copilotActive: false, cpOffer: null, topics: [], curTopic: null, insights: [], cpStatus: 'analyzing', cpUnseen: 0, cpUsage: null, sseState: 'ok', systemSource: null, hasSystem: false, segs: [], stopInfo: null, restore: [], stoppedAt: 0, autosaveAt: null, autoPaused: false, lastEdit: 0, lastHold: 0, leftAtPause: 0, localTarget: 0, holdTimer: null, lastPoll: 0, saving: false };
     }
     function haltS(S) {
         if (!S) return;
@@ -152,10 +159,35 @@
             attachSession(e, snap || {});
         }
         if (!ctx.isCurrent()) return;
+        // recording-autosave: the notification's «stop» lands here with ?stopped=<sid>.
+        const stoppedSid = /^rec_\w{1,64}$/.test(String((ctx.query && ctx.query.stopped) || '')) ? ctx.query.stopped : '';
+        if (stoppedSid && !sessions.has(stoppedSid)) await attachStopped(ctx, stoppedSid);
+        if (!ctx.isCurrent()) return;
         const first = sessions.keys().next();
-        for (const S of sessions.values()) { connectSSE(ctx, S); startTick(ctx, S); }
+        for (const S of sessions.values()) if (S.stage === 'active') { connectSSE(ctx, S); startTick(ctx, S); }
+        if (stoppedSid && sessions.has(stoppedSid)) { select(ctx, stoppedSid); return; }
         // With a call preselection we open the new-recording form, not a live tab.
         select(ctx, (!first.done && !G.preset) ? first.value : null);
+    }
+
+    // A stopped recording nobody saved yet gets its save screen; one the server already took
+    // (or the user saved/discarded) just says so.
+    async function attachStopped(ctx, sid) {
+        let snap = null;
+        try { const r = await R.api.get('/api/recording/' + sid + '/state'); snap = (r && r.state) || null; }
+        catch (_) { snap = null; }
+        if (!snap || snap.is_active !== false || snap.status === 'discarded') {
+            if (!snap) UI.toast(R.t('capture.rec.notFoundStopped'), 'info');
+            return;
+        }
+        const auto = snap.autosave || {};
+        if (auto.status === 'running' || auto.status === 'done') { UI.toast(R.t('capture.rec.auto.done'), 'info'); return; }
+        if (auto.status === 'cancelled') { UI.toast(R.t('capture.rec.notFoundStopped'), 'info'); return; }
+        const S = newS(sid);
+        S.elapsedSec = snap.duration_sec || 0;
+        S.name = snap.name || snap.auto_name || '';
+        sessions.set(sid, S);
+        await enterStopName(ctx, S, { snap, paint: false });
     }
 
     function attachSession(e, snap) {
@@ -246,7 +278,7 @@
             return `<option value="${U.esc(m.name)}"${m.name === DEFAULT_MODEL ? ' selected' : ''}>${U.esc(m.name)}${hint ? ' — ' + U.esc(hint) : ''}</option>`;
         }).join('');
     }
-    function langOpts() { return LANGS.map(l => `<option value="${l.v}"${l.v === 'uk' ? ' selected' : ''}>${R.t(l.l)}</option>`).join(''); }
+    function langOpts(sel) { sel = sel || 'uk'; return LANGS.map(l => `<option value="${l.v}"${l.v === sel ? ' selected' : ''}>${R.t(l.l)}</option>`).join(''); }
     // Category tree: <optgroup «Напрямок»> + «— Проєкт» inside. Under the
     // select there is a live path line (`catPathLine`) — a closed select shows
     // only «— Проєкт», without the parent category.
@@ -286,9 +318,10 @@
         // the category + a simple "local only" switch + an explanation of the current
         // default (medium/medium), and not 3 selects and a numeric budget field at once.
         return `
+            <label class="rc-check"><input type="checkbox" id="rcCpOn"> <span>${R.t('capture.rec.cp.enable')}</span></label>
             <details class="rc-rec-copilot" id="rcCopilot">
                 <summary style="cursor:pointer;font-weight:600"><i class="fa-solid fa-wand-magic-sparkles"></i> ${R.t('capture.rec.cp.summary')} <span style="margin-left:8px;font-weight:400">${status}</span></summary>
-                <div style="margin-top:12px">
+                <fieldset id="rcCpFields" disabled style="border:0;padding:0;margin:12px 0 0;min-width:0">
                     <div class="rc-field"><label class="rc-field__label" for="rcCpVector">${R.t('capture.rec.cp.vector')}</label><select class="rc-select rc-catsel" id="rcCpVector" data-cat-first="none">${catOpts()}</select></div>
                     <div class="rc-field" style="margin-top:10px"><label class="rc-field__label" for="rcCpScope">${R.t('capture.rec.cp.scopeLabel')}</label><input class="rc-input" id="rcCpScope" type="text" placeholder="${R.t('capture.rec.cp.scopePh')}"><div class="rc-rec-hint rc-mono" style="margin-top:4px">${R.t('capture.rec.cp.scopeHint')}</div></div>
                     <label class="rc-check" style="margin-top:10px"><input type="checkbox" id="rcCpLocalOnly"> <span>${R.t('capture.rec.cp.localOnly')}</span></label>
@@ -303,7 +336,7 @@
                             <div class="rc-field" style="max-width:220px;margin-top:10px"><label class="rc-field__label" for="rcCpBudget">${R.t('capture.rec.cp.budget')}</label><input class="rc-input" id="rcCpBudget" type="number" min="0" step="0.5" placeholder="${R.t('capture.rec.cp.budgetPh')}"></div>
                         </div>
                     </details>
-                </div>
+                </fieldset>
             </details>`;
     }
     function cpHintText(ctx) {
@@ -322,11 +355,14 @@
         const localOnly = ctx.mount.querySelector('#rcCpLocalOnly');
         const budget = ctx.mount.querySelector('#rcCpBudget');
         const hint = ctx.mount.querySelector('#rcCpHint');
+        const on = ctx.mount.querySelector('#rcCpOn');
+        const fields = ctx.mount.querySelector('#rcCpFields');
         const sync = () => {
+            if (fields) fields.disabled = !(on && on.checked);
             if (budget) budget.disabled = !!(localOnly && localOnly.checked);
             if (hint) hint.textContent = cpHintText(ctx);
         };
-        ['#rcCpMode', '#rcCpImportance', '#rcCpLocalOnly'].forEach(id => {
+        ['#rcCpOn', '#rcCpMode', '#rcCpImportance', '#rcCpLocalOnly'].forEach(id => {
             const el = ctx.mount.querySelector(id);
             if (el) el.addEventListener('change', sync);
         });
@@ -334,6 +370,8 @@
     }
     function collectCopilot(ctx) {
         if (!_cpAvail || !_cpAvail.enabled) return null;
+        // Opt-in per call: without the checkbox the start payload carries no `copilot`, so none starts.
+        if (!(ctx.mount.querySelector('#rcCpOn') || {}).checked) return null;
         const get = id => (ctx.mount.querySelector(id) || {}).value;
         const localOnly = !!(ctx.mount.querySelector('#rcCpLocalOnly') || {}).checked;
         const cp = { mode: get('#rcCpMode') || 'medium', importance: get('#rcCpImportance') || 'medium' };
@@ -1373,7 +1411,12 @@
                 st.status = data.status;
                 paintTab(S);
                 if (data.status === 'paused' || data.status === 'recording') applyPauseUi();
-                else if (data.status === 'finalized' || data.status === 'crashed') { /* external finalize */ }
+                else if ((data.status === 'stopping' || data.status === 'finalized' || data.status === 'crashed') && S.stage === 'active') {
+                    // Stopped elsewhere (the Windows notification, MCP, autostop, another tab):
+                    // this tab must not freeze on a dead timer, it becomes the save screen.
+                    UI.toast(R.t('capture.rec.stoppedElsewhere'), 'info');
+                    if (currentCtx) enterStopName(currentCtx, S);
+                }
             } else if (event === 'live_segment') {
                 appendSegments(data.segments || []);
             } else if (event === 'copilot_topic') {
@@ -1840,22 +1883,125 @@
             if (ctx.isCurrent() && sessions.get(sid) === S && errCode(err) !== 'NOT_FOUND') { connectSSE(ctx, S); startTick(ctx, S); }
             return;
         }
+        await enterStopName(ctx, S);
+    }
+
+    // The save screen, whoever stopped the recording. `opts.snap` — a state snapshot already
+    // fetched; `opts.paint: false` — the caller selects the tab itself.
+    async function enterStopName(ctx, S, opts) {
+        opts = opts || {};
+        haltS(S);
+        const sid = S.sessionId;
         S.stage = 'stopname';
+        S.status = 'stopping';
         S.copilotSessionId = null; S.copilotActive = false;   // stopping the recording ends its co-pilot (backend)
         // Ask 3: neighbours whose system sound was narrowed — we offer to restore all of it
         // (default "yes": without an answer it is applied on save/cancel).
         S.restore = liveSessions().filter(o => o !== S && o.systemSource && o.systemSource.mode && o.systemSource.mode !== 'all')
             .map(o => o.sessionId);
         _limitHit = false;
+        S.stoppedAt = Date.now();
+        S.autosaveAt = null; S.autoPaused = false; S.saving = false; S.lastPoll = Date.now();
+        S.localTarget = 0; S.leftAtPause = 0;
 
         // pull auto-name + segments count for the summary
-        let autoName = '', segs = 1;
-        try { const s = await R.api.get('/api/recording/' + sid + '/state'); if (s.success) { autoName = (s.state && s.state.auto_name) || ''; segs = (s.state && s.state.segments_count) || 1; } }
-        catch (_) {}
-        S.stopInfo = { autoName, segs };
-        if (!ctx.isCurrent()) return;
+        let snap = opts.snap || null;
+        if (!snap) {
+            try { const s = await R.api.get('/api/recording/' + sid + '/state'); if (s.success) snap = s.state || null; }
+            catch (_) {}
+        }
+        applyAutosave(S, snap && snap.autosave);
+        S.stopInfo = { autoName: (snap && snap.auto_name) || '', segs: (snap && snap.segments_count) || 1 };
+        startCountdown(ctx, S);
+        if (!ctx.isCurrent() || opts.paint === false) return;
         if (selSid === sid) select(ctx, sid);
         else renderTabs(ctx);
+    }
+
+    function applyAutosave(S, auto) {
+        if (auto && typeof auto.at === 'number') S.autosaveAt = auto.at * 1000;
+    }
+    // The tab counts 60 s from the moment it saw the stop, but never past the server deadline
+    // (minus a lead, so the tab's own save with the typed fields lands first). After an edit
+    // the server is held and the tab runs on its own resumed target.
+    function secondsLeft(S) {
+        let target = S.localTarget;
+        if (!target) {
+            target = S.stoppedAt + AUTOSAVE_FALLBACK_SEC * 1000;
+            if (S.autosaveAt) target = Math.min(target, S.autosaveAt - AUTOSAVE_LEAD_MS);
+        }
+        return Math.max(0, Math.ceil((target - Date.now()) / 1000));
+    }
+    function startCountdown(ctx, S) {
+        if (S.tick) clearInterval(S.tick);
+        S.tick = setInterval(() => countdownTick(ctx, S), 1000);
+    }
+    function countdownTick(ctx, S) {
+        if (!ctx.isCurrent() || sessions.get(S.sessionId) !== S || S.stage !== 'stopname') {
+            clearInterval(S.tick); S.tick = null; return;
+        }
+        const now = Date.now();
+        if (now - S.lastPoll >= (S.autosaveAt ? 15000 : 2000)) { S.lastPoll = now; pollStopped(ctx, S); }
+        if (S.autoPaused && !S.saving && !S.saveFailed && now - S.lastEdit >= EDIT_IDLE_MS) {
+            // Editing stopped: the countdown goes on from where it paused.
+            S.autoPaused = false;
+            S.localTarget = now + Math.max(S.leftAtPause, RESUME_MIN_SEC) * 1000;
+        }
+        const left = secondsLeft(S);
+        withS(S, () => paintCountdown(left));
+        if (!S.autoPaused && left <= 0 && S.sessionId === selSid && !S.saving) save(ctx);
+    }
+    function paintCountdown(left) {
+        const el = $id('rcRecAuto');
+        if (!el) return;
+        el.innerHTML = st.autoPaused
+            ? `<i class="fa-solid fa-pause"></i> ${U.esc(R.t('capture.rec.auto.paused'))}`
+            : `<i class="fa-solid fa-hourglass-half"></i> ${U.esc(R.t('capture.rec.auto.in', { time: fmt(left) }))}`;
+    }
+    // The server may have taken the recording (the deadline passed while the screen sat paused).
+    async function pollStopped(ctx, S) {
+        let snap = null;
+        try { const r = await R.api.get('/api/recording/' + S.sessionId + '/state'); snap = (r && r.state) || null; }
+        catch (err) { if (err && err.status === 404) snap = { status: 'discarded' }; }
+        if (!snap || sessions.get(S.sessionId) !== S || S.stage !== 'stopname' || S.saving) return;
+        const auto = snap.autosave || {};
+        if (auto.status === 'running' || auto.status === 'done' || snap.status === 'discarded') {
+            if (snap.status !== 'discarded') UI.toast(R.t('capture.rec.auto.done'), 'success');
+            dropSession(S);
+            if (ctx.isCurrent()) afterDrop(ctx, () => { reset(); R.router.navigate('/audio'); });
+            return;
+        }
+        applyAutosave(S, auto);
+    }
+    // Any edit on the save screen pauses the countdown and holds the server deadline. The hold
+    // carries what was typed, so a server autosave after a closed tab still uses it.
+    function pauseAutosave(S) {
+        if (!S || S.stage !== 'stopname' || S.saving) return;
+        if (!S.autoPaused) S.leftAtPause = secondsLeft(S);
+        S.autoPaused = true;
+        S.lastEdit = Date.now();
+        withS(S, () => paintCountdown(0));
+        const send = () => {
+            if (sessions.get(S.sessionId) !== S || S.stage !== 'stopname') return;
+            S.lastHold = Date.now();
+            R.api.post('/api/recording/' + S.sessionId + '/autosave/hold', withS(S, typedFields))
+                .then(r => applyAutosave(S, r && r.autosave))
+                .catch(() => { /* best-effort: without the hold the server autosaves at its deadline */ });
+        };
+        // The first edit holds the server at once (it may be seconds from its deadline);
+        // the typed fields then follow once typing settles.
+        if (Date.now() - (S.lastHold || 0) > EDIT_IDLE_MS) send();
+        if (S.holdTimer) clearTimeout(S.holdTimer);
+        S.holdTimer = setTimeout(() => { S.holdTimer = null; send(); }, HOLD_DEBOUNCE_MS);
+    }
+    // All three keys always go: an empty value clears what an earlier hold kept.
+    function typedFields() {
+        const v = (id) => (($id(id) || {}).value || '').trim();
+        return {
+            name: v('rcRecName'),
+            description: v('rcRecDesc'),
+            category_id: /^\d+$/.test(v('rcRecCat')) ? Number(v('rcRecCat')) : null,
+        };
     }
 
     function restoreHTML() {
@@ -1915,10 +2061,11 @@
                 <div class="rc-rec-tropts" id="rcRecTrOpts">
                     <div class="rc-yt__settings">
                         <div class="rc-field"><label class="rc-field__label" for="rcRecModel">${R.t('capture.rec.model')}</label><select class="rc-select" id="rcRecModel">${modelOpts()}</select></div>
-                        <div class="rc-field"><label class="rc-field__label" for="rcRecTrLang">${R.t('capture.common.language')}</label><select class="rc-select" id="rcRecTrLang">${langOpts()}</select></div>
+                        <div class="rc-field"><label class="rc-field__label" for="rcRecTrLang">${R.t('capture.common.language')}</label><select class="rc-select" id="rcRecTrLang">${langOpts('auto')}</select></div>
                         <div class="rc-field"><label class="rc-field__label" for="rcRecCat">${R.t('capture.common.category')}</label><select class="rc-select rc-catsel" id="rcRecCat" data-cat-first="none">${catOpts()}</select></div>
                     </div>
                 </div>
+                <div class="rc-run__hint rc-mono" id="rcRecAuto" style="margin-top:16px"></div>
                 <div class="rc-yt__actions" style="margin-top:20px">
                     <button class="rc-btn" id="rcRecCancel"><i class="fa-solid fa-trash"></i> ${R.t('capture.rec.cancelRecording')}</button>
                     <div class="rc-yt__spacer"></div>
@@ -1929,8 +2076,14 @@
         const want = body.querySelector('#rcRecWantTr');
         const opts = body.querySelector('#rcRecTrOpts');
         const lbl = body.querySelector('#rcRecSaveLbl');
-        const syncWant = () => { opts.hidden = !want.checked; lbl.textContent = want.checked ? R.t('capture.rec.saveTr') : R.t('capture.rec.saveOnly'); };
+        const syncWant = () => { opts.hidden = !want.checked; lbl.textContent = want.checked ? R.t('capture.rec.saveNow') : R.t('capture.rec.saveOnly'); };
         want.addEventListener('change', syncWant); syncWant();
+        const S = st;
+        body.querySelectorAll('#rcRecName, #rcRecDesc, #rcRecWantTr, #rcRecModel, #rcRecTrLang, #rcRecCat').forEach(el => {
+            el.addEventListener('input', () => pauseAutosave(S));
+            el.addEventListener('change', () => pauseAutosave(S));
+        });
+        paintCountdown(secondsLeft(S));
         bindCatPath(body.querySelector('#rcRecCat'));
         wireRestore(ctx, body);
         body.querySelector('#rcRecName').focus();
@@ -1946,8 +2099,12 @@
         const description = ((ctx.mount.querySelector('#rcRecDesc') || {}).value || '').trim();
         const want = !!(ctx.mount.querySelector('#rcRecWantTr') || {}).checked;
         const model = (ctx.mount.querySelector('#rcRecModel') || {}).value || DEFAULT_MODEL;
-        const lang = (ctx.mount.querySelector('#rcRecTrLang') || {}).value || 'uk';
+        // Auto-detect, like the server autosave: calls are often spoken in another language
+        // than the live preview was set to (4.23.0: previewed uk, spoken ru).
+        const lang = (ctx.mount.querySelector('#rcRecTrLang') || {}).value || 'auto';
         const cat = (ctx.mount.querySelector('#rcRecCat') || {}).value;
+        if (S.saving) return;
+        S.saving = true;
         const btn = ctx.mount.querySelector('#rcRecSave');
         if (btn) btn.disabled = true;
         const run = ctx.mount.querySelector('#rcRecSaveRun');
@@ -1971,6 +2128,9 @@
             UI.toast(R.t('capture.rec.errorWith', { error: (err && err.message) || '' }), 'error');
             if (btn) btn.disabled = false;
             if (run) run.innerHTML = '';
+            S.saving = false;
+            S.autoPaused = true; S.saveFailed = true;   // a failed save waits for the button, no auto retry
+            withS(S, () => paintCountdown(0));
             return;
         }
 
@@ -1981,7 +2141,9 @@
         // "transcribing…". We do NOT wait for the request: postForm without an abort signal
         // survives navigation, and the server finishes even if the client left. The user
         // sees the recording in the Audio library with a status right away — nothing "disappears".
-        if (want && sb.download_id) {
+        // Another save screen of the same recording (the notification opened a second tab) already
+        // saved it and started the transcription: do not start a second one.
+        if (want && sb.download_id && !sb.already_saved) {
             const fd = new FormData();
             fd.append('source_type', 'library');
             fd.append('audio_download_id', String(sb.download_id));
@@ -2001,12 +2163,23 @@
     async function discard(ctx) {
         const S = st;
         if (!S || !S.sessionId) { renderSetup(ctx); return; }
+        if (S.stage === 'stopname') pauseAutosave(S);   // the countdown must not save under the dialog
         const ok = await UI.confirmModal({ title: R.t('capture.rec.discardTitle'), message: R.t('capture.rec.discardMsg'), confirmLabel: R.t('capture.rec.cancelRecording') });
         if (!ok) return;
         const sid = S.sessionId;
         haltS(S);
         if (S.stage === 'stopname') applyPendingRestore(ctx, S);
-        try { await R.api.post('/api/recording/' + sid + '/discard'); } catch (_) {}
+        try { await R.api.post('/api/recording/' + sid + '/discard'); }
+        catch (err) {
+            if (errCode(err) === 'RECORDING_KEPT') {
+                // Already transcribed (e.g. by the server autosave): deleting the files would
+                // orphan the transcript. Nothing to cancel any more, show it in the Library.
+                errToast(err);
+                dropSession(S);
+                if (ctx.isCurrent()) afterDrop(ctx, () => { reset(); R.router.navigate('/audio'); });
+                return;
+            }
+        }
         UI.toast(R.t('capture.rec.discarded'), 'info');
         dropSession(S);
         if (!ctx.isCurrent()) return;

@@ -6,6 +6,12 @@ last-verified: 2026-10-15 (english-i18n 4.16.0: errors/statuses — `tr()` with 
 `/ask/stream` and `/research/summary` go through `localize_sse` (`memory.py:858`, `research.py:141`), see `blueprints.md`
 § i18n; line numbers below are from before 4.16.0, check against the code)
 
+Gated (4.22.0, `approval_gate._D_ROUTES`, runs before the view): `memory.delete_category`, `merge_category`, `delete_tag_route`,
+`merge_tags_route`, `start_backfill` (enrichment backfill), `telegram.tg_backfill`. `telegram.tg_deleted` (listener stream) is exempt. See `services-infra.md`.
+
+last-verified: 2026-10-20 (mcp-archive-org 4.26.0, memory.py re-read)
+4.26.0 agent rules in memory.py (`_is_ui` :45): category create stamps `categories.created_source='mcp'`, agent name <=60 (`AGENT_CATEGORY_NAME_MAX`); `bulk-category` for an agent: `ids` only, <=5 (`BULK_LIMIT`), private-direction exit -> 403 `PRIVATE_CATEGORY_CHANGE`/503 `PRIVACY_CHECK_FAILED`; `PUT /<tid>/tags` for an agent adds existing tags only (`source='mcp'`); action-items PATCH/`POST /action-items/<id>/postpone {days 1|7|30}` and `POST /action-events/<id>/undo` (agent: only `source='mcp'` events, `NOT_MCP_EVENT`/`UNDO_NOT_LAST`; agent repeats dedupe via `commitments.apply_action(dedupe=True)` -> `created:false`). The line below "Postponing a deadline from the web is not exposed" is stale.
+
 ## memory.py (~1260) — `/api/memory/*` (memory graph, RAG, categories, tags)
 Depends on: enrichment, retrieval, rag, embeddings, categories, commitments.
 - Categories: `GET /categories` (:198, `categories.list_tree`, a node carries `path`), `POST` (:269), `PATCH/DELETE

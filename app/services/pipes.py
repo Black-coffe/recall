@@ -632,7 +632,8 @@ def _cli(argv: list[str]) -> int:
     from config import Config
     try:
         from dotenv import load_dotenv
-        load_dotenv()
+        from app.core.env_file import ENV_PATH
+        load_dotenv(ENV_PATH)
     except ImportError:
         pass
     ap = argparse.ArgumentParser(prog="python -m app.services.pipes")

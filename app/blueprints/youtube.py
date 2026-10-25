@@ -25,7 +25,10 @@ youtube_bp = Blueprint('youtube', __name__)
 @youtube_bp.route('/api/youtube/info', methods=['POST'])
 def get_youtube_info():
     """Get YouTube video metadata."""
-    data = request.json
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error_code": "INVALID_ARGUMENT",
+                        "error": tr('capture.yt.err.json_object')}), 400
     url = data.get('url')
     if not url:
         return jsonify({"success": False, "error": tr('capture.yt.err.no_url')}), 400

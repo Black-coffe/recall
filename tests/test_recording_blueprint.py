@@ -836,3 +836,185 @@ def test_autoprompt_dismiss(client):
     assert client.post(f'/api/recording/autoprompt/{pid}/dismiss').status_code == 200
     assert client.post(f'/api/recording/autoprompt/{pid}/dismiss').status_code == 404
     assert client.get('/api/recording/autoprompt').get_json()['prompts'] == []
+
+
+# ---------------------------------------------------------------- /live-video, /live-frame(s)
+
+class _FakeLiveFrames:
+    """Stands in for app.services.live_frames: records calls, returns canned answers."""
+
+    def __init__(self):
+        from app.services import live_frames as real
+        self.LiveFramesError = real.LiveFramesError
+        self.MAX_FRAMES_PER_CALL = real.MAX_FRAMES_PER_CALL
+        self.calls = []
+        self.raise_error = None
+        self.status_body = {'session_id': 'rec_test123', 'available': True, 'reason': None,
+                            'is_active': True, 'status': 'recording', 'elapsed_seconds': 50.0,
+                            'tracks': [{'track_id': 'video_mon0', 'fps': 30.0,
+                                        'readable_until': 41.9}]}
+        self.frame = {'t': 12.5, 'video_t': 12.5, 'track_id': 'video_mon0', 'segment': 0,
+                      'width': 640, 'height': 360, 'jpeg': b'\xff\xd8JPEG', 'text': 'masked',
+                      'ocr': True}
+        self.range_body = None
+
+    def _maybe_raise(self):
+        if self.raise_error is not None:
+            raise self.raise_error
+
+    def status(self, sid, **kw):
+        self.calls.append(('status', sid, kw))
+        self._maybe_raise()
+        return self.status_body
+
+    def frame_at(self, sid, t, **kw):
+        self.calls.append(('frame_at', sid, t, kw))
+        self._maybe_raise()
+        return self.frame
+
+    def frames_range(self, sid, start, end=None, **kw):
+        self.calls.append(('frames_range', sid, start, end, kw))
+        self._maybe_raise()
+        if self.range_body is not None:
+            return self.range_body
+        return {'session_id': sid, 'available': True, 'track_id': 'video_mon0',
+                'mode': kw.get('mode'), 'start': start, 'end': end, 'end_clamped': False,
+                'readable_until': 41.9, 'frames': [dict(self.frame)], 'count': 1,
+                'next_t': 13.5, 'scanned_until': 12.5, 'truncated': True}
+
+
+@pytest.fixture
+def fake_live(monkeypatch):
+    import sys
+    import app.services as services_pkg
+    fake = _FakeLiveFrames()
+    monkeypatch.setitem(sys.modules, 'app.services.live_frames', fake)
+    monkeypatch.setattr(services_pkg, 'live_frames', fake, raising=False)
+    return fake
+
+
+def test_live_video_status_success(client, fake_live):
+    r = client.get('/api/recording/rec_test123/live-video')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['tracks'][0]['readable_until'] == 41.9
+    assert fake_live.calls[0][0] == 'status'
+
+
+def test_live_video_unknown_session_404(client, fake_live):
+    fake_live.raise_error = fake_live.LiveFramesError('NOT_FOUND', 'nope')
+    r = client.get('/api/recording/rec_unknown/live-video')
+    assert r.status_code == 404
+    body = r.get_json()
+    assert body['success'] is False
+    assert body['error_code'] == 'NOT_FOUND'
+    assert body['error']
+
+
+def test_live_video_no_video_404(client, fake_live):
+    fake_live.raise_error = fake_live.LiveFramesError('NO_VIDEO', 'no video')
+    r = client.get('/api/recording/rec_test123/live-video')
+    assert r.status_code == 404
+    assert r.get_json()['error_code'] == 'NO_VIDEO'
+
+
+def test_live_video_finalized_names_transcription_tools(client, fake_live):
+    fake_live.status_body = {'session_id': 'rec_test123', 'available': False,
+                             'reason': 'finalized', 'is_active': False, 'status': 'finalized',
+                             'elapsed_seconds': 0.0, 'tracks': []}
+    r = client.get('/api/recording/rec_test123/live-video', headers={'Accept-Language': 'en'})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['available'] is False
+    assert 'get_frame' in body['reason'] and 'get_visual_timeline' in body['reason']
+    assert body['reason_code'] == 'finalized'
+
+
+def test_live_frame_returns_jpeg_with_headers(client, fake_live):
+    r = client.get('/api/recording/rec_test123/live-frame?t=12.5')
+    assert r.status_code == 200
+    assert r.mimetype == 'image/jpeg'
+    assert r.data == b'\xff\xd8JPEG'
+    assert r.headers['X-Recall-Frame-T'] == '12.5'
+    assert r.headers['X-Recall-Frame-Video-T'] == '12.5'
+    assert fake_live.calls[0][2] == 12.5
+
+
+def test_live_frame_error_is_json(client, fake_live):
+    fake_live.raise_error = fake_live.LiveFramesError('PAST_LIVE_EDGE', 'late',
+                                                      readable_until=41.9)
+    r = client.get('/api/recording/rec_test123/live-frame?t=99')
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body['success'] is False
+    assert body['error_code'] == 'PAST_LIVE_EDGE'
+    assert body['error']
+
+
+def test_live_frames_single_t_returns_one_frame(client, fake_live):
+    import base64
+    r = client.get('/api/recording/rec_test123/live-frames?t=12.5')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['count'] == 1
+    frame = body['frames'][0]
+    assert base64.b64decode(frame['image_b64']) == b'\xff\xd8JPEG'
+    assert frame['text'] == 'masked'
+    assert 'jpeg' not in frame
+    assert fake_live.calls[0][0] == 'frame_at'
+
+
+def test_live_frames_range_forwards_query_and_cursor(client, fake_live):
+    r = client.get('/api/recording/rec_test123/live-frames?start=10&end=40&mode=changes'
+                   '&min_res=0.5&limit=12&cursor=13.5&track=video_mon0&size=full')
+    assert r.status_code == 200
+    body = r.get_json()
+    for key in ('frames', 'next_t', 'readable_until', 'scanned_until', 'truncated'):
+        assert key in body
+    assert body['frames'][0]['image_b64']
+    assert body['frames'][0]['text'] == 'masked'
+    name, _sid, start, end, kw = fake_live.calls[0]
+    assert (name, start, end) == ('frames_range', 10.0, 40.0)
+    assert kw['cursor'] == 13.5
+    assert kw['mode'] == 'changes' and kw['min_res'] == 0.5 and kw['limit'] == 12
+    assert kw['track'] == 'video_mon0' and kw['size'] == 'full'
+
+
+def test_live_frames_past_edge_returns_409_with_readable_until(client, fake_live):
+    fake_live.raise_error = fake_live.LiveFramesError('PAST_LIVE_EDGE', 'late',
+                                                      readable_until=41.9)
+    r = client.get('/api/recording/rec_test123/live-frames?start=50&end=60')
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body['success'] is False
+    assert body['error_code'] == 'PAST_LIVE_EDGE'
+    assert body['readable_until'] == 41.9
+
+
+def test_live_frames_finalized_available_false(client, fake_live):
+    fake_live.range_body = {'session_id': 'rec_test123', 'available': False,
+                            'reason': 'finalized', 'frames': [], 'count': 0}
+    r = client.get('/api/recording/rec_test123/live-frames?start=0')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['success'] is True and body['available'] is False
+    assert body['frames'] == []
+
+
+@pytest.mark.parametrize('query', [
+    'start=0&limit=50', 'start=0&mode=foo', 'start=0&step=0', 't=abc', 'start=20&end=10',
+], ids=['limit-too-big', 'bad-mode', 'zero-step', 'non-numeric-t', 'start-after-end'])
+def test_live_frames_bad_query_400_before_service(client, fake_live, query):
+    r = client.get(f'/api/recording/rec_test123/live-frames?{query}')
+    assert r.status_code == 400
+    assert r.get_json()['error_code'] == 'INVALID_ARGUMENT'
+    assert fake_live.calls == []
+
+
+def test_live_frame_non_numeric_t_400(client, fake_live):
+    r = client.get('/api/recording/rec_test123/live-frame?t=abc')
+    assert r.status_code == 400
+    assert r.get_json()['error_code'] == 'INVALID_ARGUMENT'
+    assert fake_live.calls == []

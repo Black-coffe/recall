@@ -30,3 +30,5 @@ Part of `app/services/*`; hub — [services.md](services.md). Tier 4 `directions
 - Consumers: `research._parse_axes` (blueprints), `commitments._scope_clauses`, `scope.py`, `embeddings._load_prefix_meta`,
   `reembed.schedule_records_reembed`. Chat scope and auto-labelling — [services-enrichment.md](services-enrichment.md).
 - `record_meta.py` (record title/description) — [services-media.md](services-media.md).
+
+> **4.26.0:** `categories.created_source` (v55) records who created a direction/tag; agents cannot create, rename or move into private directions.

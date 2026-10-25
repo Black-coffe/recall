@@ -181,3 +181,36 @@ class TestSavedSearches:
         searches = c.get('/api/saved-searches').get_json()['searches']
         assert searches[0]['name'] == 'B'  # higher use_count first
         assert searches[1]['name'] == 'A'
+
+
+class TestAgentBounds:
+    def test_agent_note_over_2000_rejected(self, client_and_tx):
+        c, tx_id = client_and_tx
+        r = c.post(f'/api/transcription/{tx_id}/bookmarks',
+                   json={'segment_index': 0, 'note': 'я' * 2001})
+        assert r.status_code == 400
+        assert r.get_json()['error_code'] == 'INVALID_ARGUMENT'
+        assert c.get(f'/api/transcription/{tx_id}/bookmarks').get_json()['bookmarks'] == []
+        c.post(f'/api/transcription/{tx_id}/bookmarks', json={'segment_index': 0})
+        items = c.get(f'/api/transcription/{tx_id}/bookmarks').get_json()['bookmarks']
+        r = c.patch(f"/api/bookmarks/{items[0]['id']}", json={'note': 'я' * 2001})
+        assert r.status_code == 400
+
+    def test_ui_note_unbounded(self, client_and_tx):
+        from app.core import auth
+        c, tx_id = client_and_tx
+        r = c.post(f'/api/transcription/{tx_id}/bookmarks',
+                   json={'segment_index': 0, 'note': 'я' * 2001},
+                   headers={auth.UI_TOKEN_HEADER: auth.ui_token()})
+        assert r.status_code == 201
+
+    def test_delete_returns_snapshot(self, client_and_tx):
+        c, tx_id = client_and_tx
+        c.post(f'/api/transcription/{tx_id}/bookmarks',
+               json={'segment_index': 1, 'note': 'Повернутися до бюджету'})
+        items = c.get(f'/api/transcription/{tx_id}/bookmarks').get_json()['bookmarks']
+        bid = items[0]['id']
+        snap = c.delete(f'/api/bookmarks/{bid}').get_json()['deleted_snapshot']
+        assert snap['id'] == bid and snap['transcription_id'] == tx_id
+        assert snap['segment_index'] == 1 and snap['note'] == 'Повернутися до бюджету'
+        assert snap['created_at']

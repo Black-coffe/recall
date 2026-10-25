@@ -156,11 +156,21 @@ def grab_frame(video_path: str, t: float, *, max_width: Optional[int] = None,
 
 def thumbs_pass(video_path: str, duration: float, *, fps: float = 1.0,
                 ffmpeg: Optional[str] = None,
-                progress: Optional[Callable[[float], None]] = None) -> np.ndarray:
-    """One decoding pass: thumbnails (N, THUMB_H, THUMB_W) uint8, thumbnail i = moment i/fps."""
+                progress: Optional[Callable[[float], None]] = None,
+                start: Optional[float] = None,
+                window: Optional[float] = None) -> np.ndarray:
+    """One decoding pass: thumbnails (N, THUMB_H, THUMB_W) uint8, thumbnail i = moment i/fps.
+
+    ``start``/``window`` bound the pass to ``[start, start + window]`` of the video (live frames
+    read a growing file in slices); thumbnail i is then the moment ``start + i/fps``."""
     ff = _ffmpeg(ffmpeg)
     frame_bytes = THUMB_W * THUMB_H
-    cmd = [ff, '-v', 'error', '-i', video_path,
+    bound: list = []
+    if start is not None:
+        bound += ['-ss', f'{max(start, 0):.3f}']
+    if window is not None:
+        bound += ['-t', f'{max(window, 0):.3f}']
+    cmd = [ff, '-v', 'error', *bound, '-i', video_path,
            '-vf', f'fps={fps},scale={THUMB_W}:{THUMB_H}:flags=area,format=gray',
            '-f', 'rawvideo', '-']
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

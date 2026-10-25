@@ -235,7 +235,7 @@ def _watermark(uids: list, failed) -> int:
 
 
 def _sync_label(db_path: str, imap, account_id: int, label: dict, months: Optional[int],
-                today: date) -> int:
+                today: date, first_months_cap: Optional[int] = None) -> int:
     info = imap.examine(label["folder"])
     uv = info["uidvalidity"]
     synced_since = label.get("synced_since")
@@ -246,6 +246,8 @@ def _sync_label(db_path: str, imap, account_id: int, label: dict, months: Option
 
     if first:
         n = months if months is not None else settings.env_int("MAIL_BACKFILL_MONTHS")
+        if first_months_cap is not None:
+            n = min(n, first_months_cap)
         since = _months_ago(today, n)
         uids = imap.search_since(since)
         got, failed = _fetch_store(db_path, imap, account_id, label, uids)
@@ -279,7 +281,7 @@ def _sync_label(db_path: str, imap, account_id: int, label: dict, months: Option
 
 
 def sync_account(db_path: str, account_id: int, months: Optional[int] = None,
-                 today: Optional[date] = None) -> dict:
+                 today: Optional[date] = None, first_months_cap: Optional[int] = None) -> dict:
     """Sync every enabled label of one account. Failures become ``last_error_code``."""
     today = today or date.today()
     labels = mail_accounts.enabled_labels(db_path, account_id)
@@ -302,7 +304,8 @@ def sync_account(db_path: str, account_id: int, months: Optional[int] = None,
     try:
         for label in labels:
             try:
-                result["new"] += _sync_label(db_path, imap, account_id, label, months, today)
+                result["new"] += _sync_label(db_path, imap, account_id, label, months, today,
+                                                   first_months_cap)
                 result["labels"] += 1
             except mail_imap.MailError as exc:
                 logger.warning("[mail] label %s failed: %s", label["id"], exc.code)
@@ -319,12 +322,14 @@ def sync_account(db_path: str, account_id: int, months: Optional[int] = None,
     return result
 
 
-def sync_all(db_path: str, months: Optional[int] = None, today: Optional[date] = None) -> list:
+def sync_all(db_path: str, months: Optional[int] = None, today: Optional[date] = None,
+             first_months_cap: Optional[int] = None) -> list:
     ids = sorted({lb["account_id"] for lb in mail_accounts.enabled_labels(db_path)})
     out = []
     for aid in ids:
         try:
-            out.append(sync_account(db_path, aid, months=months, today=today))
+            out.append(sync_account(db_path, aid, months=months, today=today,
+                                    first_months_cap=first_months_cap))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mail] account %s sync crashed: %s", aid, type(exc).__name__)
     return out
@@ -364,9 +369,10 @@ class MailPoller:
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
-    def trigger(self, account_id: Optional[int] = None, months: Optional[int] = None) -> None:
+    def trigger(self, account_id: Optional[int] = None, months: Optional[int] = None,
+                first_months_cap: Optional[int] = None) -> None:
         with self._lock:
-            self._requests.append((account_id, months))
+            self._requests.append((account_id, months, first_months_cap))
         self._wake.set()
 
     def run_once(self) -> None:
@@ -375,11 +381,12 @@ class MailPoller:
             reqs, self._requests = self._requests, []
         try:
             if reqs:
-                for account_id, months in reqs:
+                for account_id, months, cap in reqs:
                     if account_id is None:
-                        sync_all(self.db_path, months=months)
+                        sync_all(self.db_path, months=months, first_months_cap=cap)
                     else:
-                        sync_account(self.db_path, account_id, months=months)
+                        sync_account(self.db_path, account_id, months=months,
+                                     first_months_cap=cap)
             elif settings.env_bool("MAIL_POLL_ENABLED"):
                 sync_all(self.db_path)
         except Exception as exc:  # noqa: BLE001

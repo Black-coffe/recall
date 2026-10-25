@@ -2177,5 +2177,72 @@ def init_database(db_path: str):
                   "(52, 'Gmail ingest: mail_accounts, mail_labels, mail_attachments, transcriptions.mail_*')")
         logger.info("Migration v52: gmail ingest")
 
+    # === v53: mcp_actions - audit of every mutating /api request (mcp-foundations-b) ===
+    # One row per non-GET /api call: who (classified + claimed labels), what, the gate's
+    # decision, the outcome. No body, no query string, no secret. Purged after 90 days.
+    if current_version < 53:
+        c.execute('''CREATE TABLE IF NOT EXISTS mcp_actions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        at TEXT NOT NULL,
+                        request_id TEXT,
+                        actor TEXT NOT NULL,
+                        claimed_actor TEXT,
+                        claimed_tool TEXT,
+                        method TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        endpoint TEXT,
+                        action TEXT,
+                        object_ref TEXT,
+                        summary TEXT,
+                        decision TEXT,
+                        http_status INTEGER,
+                        error_code TEXT,
+                        duration_ms INTEGER)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_mcp_actions_at ON mcp_actions(at)')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(53, 'mcp_actions: audit of mutating API requests')")
+        logger.info("Migration v53: mcp_actions")
+
+    # === v54: transcript_versions - side store of re-transcribed versions (ADR-044) ===
+    # The canonical transcriptions columns stay the only thing readers use; NULL pointer =
+    # one implicit version. The original row is created lazily by the version service.
+    if current_version < 54:
+        c.execute('''CREATE TABLE IF NOT EXISTS transcript_versions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        transcription_id INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        is_original INTEGER NOT NULL DEFAULT 0,
+                        model_used TEXT,
+                        language TEXT,
+                        processing_time REAL,
+                        transcript_text TEXT,
+                        segments TEXT,
+                        polished_text TEXT,
+                        polished_at TEXT,
+                        polished_model TEXT,
+                        speaker_map_json TEXT)''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_transcript_versions_tx '
+                  'ON transcript_versions(transcription_id, created_at)')
+        c.execute("PRAGMA table_info(transcriptions)")
+        tx_cols = [r[1] for r in c.fetchall()]
+        if tx_cols and 'active_version_id' not in tx_cols:
+            c.execute('ALTER TABLE transcriptions ADD COLUMN active_version_id INTEGER')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(54, 'transcript_versions + transcriptions.active_version_id')")
+        logger.info("Migration v54: transcript_versions")
+
+    # === v55: provenance columns for agent (MCP) writes; NULL = owner/UI, 'mcp' = agent ===
+    if current_version < 55:
+        for table, col in (('comments', 'confirmed_at'), ('transcription_speaker_map', 'source'),
+                           ('categories', 'created_source'), ('transcriptions', 'meta_source')):
+            c.execute(f"PRAGMA table_info({table})")
+            cols = [r[1] for r in c.fetchall()]
+            if cols and col not in cols:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN {col} TEXT')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(55, 'provenance columns: comments.confirmed_at, transcription_speaker_map.source, "
+                  "categories.created_source, transcriptions.meta_source')")
+        logger.info("Migration v55: provenance columns")
+
     conn.commit()
     conn.close()

@@ -379,3 +379,17 @@ def test_prose_basic_word_not_masked_original_kept(env):
     d = rows(env["db"], "SELECT * FROM transcriptions WHERE source_type='document'")[0]
     assert "Basic information about the project" in d["transcript_text"]
     assert d["file_path"] and os.path.exists(d["file_path"])
+
+
+def test_first_months_cap_limits_first_sync_only(env, monkeypatch):
+    monkeypatch.setenv("MAIL_BACKFILL_MONTHS", "24")
+    mail_accounts.update_label(env["db"], env["labels"]["INBOX"]["id"], enabled=True)
+    p = mail_sync.MailPoller(env["db"])
+    p.trigger(env["acc"], first_months_cap=12)
+    p.trigger(env["acc"], None, 12)
+    assert [r[2] for r in p._requests] == [12, 12]
+    p.run_once()
+    assert env["fake"].calls[0] == ("since", mail_sync._months_ago(date.today(), 12), None)
+    env["fake"].calls.clear()
+    mail_sync.sync_all(env["db"], today=TODAY, first_months_cap=12)
+    assert env["fake"].calls == [("after", 2)]

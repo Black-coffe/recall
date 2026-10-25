@@ -11,7 +11,9 @@ Brief, verbatim:
 > mail. "Read-only" is a promise of Recall's code (EXAMINE / BODY.PEEK, no STORE/EXPUNGE/APPEND/COPY/MOVE, no SMTP),
 > not a Google restriction.
 
+<!-- verbatim:start - owner quote, kept in the original language with the English translation -->
 Ask 2: "Recall только читает ящик: ничего не удаляет, не перемещает, не помечает прочитанным и не отправляет." (Recall only reads the mailbox: it deletes nothing, moves nothing, marks nothing as read and sends nothing.)
+<!-- verbatim:end -->
 
 ## Options
 None recorded - the brief states the chosen shape only (it follows from ADR-039: no scoped credential exists).

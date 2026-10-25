@@ -12,9 +12,11 @@ Brief, verbatim:
 > logs, API responses, the MCP surface or backups in clear text, and that the UI tells the user how to revoke it
 > (Google Account → Security → App passwords).
 
+<!-- verbatim:start - owner quote, kept in the original language with the English translation -->
 Owner's answer 1 chose "Хранилище системы": Windows Credential Manager (later macOS Keychain) via `keyring`; "Пароля нет
 ни в базе, ни в .env, ни в бэкапе restic: в базе только адрес ящика. После восстановления на другом компьютере пароль
 придётся ввести заново." (The password is in neither the database, nor .env, nor the restic backup: the database holds only the mailbox address. After a restore on another computer the password has to be entered again.)
+<!-- verbatim:end -->
 
 Plan A18, verbatim:
 

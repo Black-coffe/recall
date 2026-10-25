@@ -3,6 +3,11 @@
 - POST /api/documents/upload            - file → text → transcriptions
 - POST /api/documents/<id>/reparse      - re-parse the stored original (16E)
 - POST /api/documents/import-folder     - bulk import from a folder (background job, 16E)
+- POST /api/documents/ingest-paths      - up to five files by path (background job, mcp-pipeline)
+- POST /api/documents/<id>/reparse-job  - the re-parse as a background job (mcp-pipeline)
+
+Folder import and both re-parse routes are D actions: a non-UI caller runs them only after the
+Windows dialog (`app/core/approval_gate.py`); the UI token exempts the dialog.
 
 The document is stored as the ORIGINAL (file_path) + the parsed text in transcript_text
 with source_type='document'. Then the SAME background enrichment job is reused
@@ -28,11 +33,12 @@ from flask import Blueprint, current_app, jsonify, request
 from werkzeug.utils import secure_filename
 
 from app import state
+from app.core import auth
 from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
-from app.services import document_ingest, document_parser, record_meta
+from app.services import document_ingest, document_parser, import_roots, record_meta
 from app.utils.files import allowed_document_file
-from app.utils.paths import safe_path_within, safe_path_within_any
+from app.utils.paths import safe_path_within
 
 
 logger = logging.getLogger(__name__)
@@ -171,32 +177,52 @@ def upload_document():
 # Re-parse (16E)
 # ============================================================
 
-@documents_bp.route('/api/documents/<int:tid>/reparse', methods=['POST'])
-def reparse_document(tid: int):
-    """Re-parse the stored document original. Useful after installing
-    OCR/openpyxl/a Claude key or after a parser update. Forces re-embed."""
-    db_path = _db_path()
+class ReparseError(Exception):
+    """A re-parse refused before or during parsing: the view's status and body."""
+
+    def __init__(self, status: int, body: dict):
+        super().__init__(body.get("error"))
+        self.status = status
+        self.body = body
+
+
+def reparse_target(db_path: str, tid: int):
+    """The document row a re-parse would read, or ``None`` when the record is not a document.
+
+    Raises ``ReparseError`` (400) when the stored original is gone. Shared with the approval
+    summary, so the dialog never opens for a request the view would refuse."""
     with _conn(db_path) as conn:
         row = tx_repo.get_by_id(
             conn, tid,
-            columns=("id", "source_type", "file_path", "original_filename", "source_name"),
+            columns=("id", "source_type", "file_path", "original_filename", "source_name", "title"),
         )
     if not row or row["source_type"] != "document":
-        return jsonify({"success": False, "error": tr('library.doc.err.not_found')}), 404
+        return None
     filepath = row["file_path"]
     if not filepath or not os.path.exists(filepath):
-        return jsonify({"success": False,
-                        "error": tr('library.doc.err.no_original')}), 400
+        raise ReparseError(400, {"success": False, "error": tr('library.doc.err.no_original')})
+    return row
 
+
+def reparse(db_path: str, tid: int) -> dict:
+    """Re-parse the stored original of document ``tid`` and force its re-enrichment.
+
+    Returns the sync view's response body; raises ``ReparseError`` with the view's status and
+    body on a refusal (404 not a document, 400 no original, 422/500 parse failure)."""
+    row = reparse_target(db_path, tid)
+    if row is None:
+        raise ReparseError(404, {"success": False, "error": tr('library.doc.err.not_found'),
+                                 "error_code": "NOT_FOUND"})
+    filepath = row["file_path"]
     fname = row["original_filename"] or row["source_name"] or os.path.basename(filepath)
     t0 = time.time()
     try:
         parsed = document_parser.parse_document(filepath, filename=fname)
     except document_parser.DocumentParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 422
+        raise ReparseError(422, {"success": False, "error": str(e)}) from None
     except Exception as e:
         logger.error("Reparse '%s' error: %s", fname, e, exc_info=True)
-        return jsonify({"success": False, "error": tr('library.doc.err.parse_failed')}), 500
+        raise ReparseError(500, {"success": False, "error": tr('library.doc.err.parse_failed')}) from None
     parse_time = round(time.time() - t0, 3)
 
     _describe_tabular(parsed)
@@ -217,7 +243,7 @@ def reparse_document(tid: int):
     # the text changed → force full enrichment (re-embed + re-card)
     enrich_status = _submit_enrichment(tid, db_path, force=True)
     logger.info("Reparse tx=%d (%s, %d chars)", tid, parsed["doc_type"], parsed["char_count"])
-    return jsonify({
+    return {
         "success": True,
         "transcription_id": tid,
         "doc_type": parsed["doc_type"],
@@ -225,7 +251,46 @@ def reparse_document(tid: int):
         "char_count": parsed["char_count"],
         "needs_ocr": bool(parsed.get("meta", {}).get("needs_ocr")),
         "enrichment": {"status": enrich_status},
-    })
+    }
+
+
+@documents_bp.route('/api/documents/<int:tid>/reparse', methods=['POST'])
+def reparse_document(tid: int):
+    """Re-parse the stored document original. Useful after installing
+    OCR/openpyxl/a Claude key or after a parser update. Forces re-embed."""
+    try:
+        return jsonify(reparse(_db_path(), tid))
+    except ReparseError as e:
+        body = dict(e.body)
+        if e.status == 404:
+            body.pop("error_code", None)  # the sync route's 404 body stays as it was
+        return jsonify(body), e.status
+
+
+@documents_bp.route('/api/documents/<int:tid>/reparse-job', methods=['POST'])
+def reparse_job(tid: int):
+    """The re-parse as a background ``doc_import`` job (for agents). 202 ``{success, job_id}``;
+    404 ``NOT_FOUND`` for a record that is not a document; 400 when the original is gone."""
+    db_path = _db_path()
+    try:
+        row = reparse_target(db_path, tid)
+    except ReparseError as e:
+        return jsonify(e.body), e.status
+    if row is None:
+        return jsonify({"success": False, "error": tr('library.doc.err.not_found'),
+                        "error_code": "NOT_FOUND"}), 404
+    if state.job_queue is None:
+        return jsonify({"success": False, "error": tr('library.doc.err.queue_unavailable')}), 503
+
+    def _job(job, _db=db_path, _tid=tid):
+        try:
+            return reparse(_db, _tid)
+        except ReparseError as e:
+            raise RuntimeError(e.body.get("error") or "reparse failed") from None
+
+    job = state.job_queue.submit("doc_import", _job, meta={
+        "transcription_id": tid, "count": 1, "actor": auth.classify_request()[0]})
+    return jsonify({"success": True, "job_id": str(job.id)}), 202
 
 
 # ============================================================
@@ -260,9 +325,11 @@ def _copy_into_docs(src: str, docs_dir: str) -> str:
 
 def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_id) -> dict:
     """Worker (outside the request context): parses, dedups, saves, queues enrich
-    for each file. Progress goes to the 'doc_import' SSE channel."""
+    for each file. Progress goes to the 'doc_import' SSE channel. The returned dict (the job's
+    result) carries one ``items`` entry per file: ``{path, status, transcription_id}``."""
     imported = skipped = failed = 0
     total = len(files)
+    items: list[dict] = []
     for i, src in enumerate(files):
         fname = os.path.basename(src)
         try:
@@ -276,41 +343,80 @@ def _run_folder_import(files: list[str], db_path: str, docs_dir: str, category_i
                 skipped += 1
             else:
                 failed += 1
+            items.append({"path": src, "status": res["status"],
+                          "transcription_id": res.get("transcription_id")})
         except Exception as e:
             logger.error("[import] error '%s': %s", src, e)
             failed += 1
+            items.append({"path": src, "status": "error", "transcription_id": None})
         try:
             state.sse_broker.publish("doc_import", "progress", {
                 "processed": i + 1, "total": total,
                 "imported": imported, "skipped": skipped, "failed": failed,
             })
         except Exception:
-            pass
+            logger.debug("[import] progress event not published", exc_info=True)
 
     summary = {"total": total, "imported": imported, "skipped": skipped, "failed": failed}
     logger.info("[import] finished: %s", summary)
     try:
         state.sse_broker.publish("doc_import", "complete", {"status": "completed", **summary})
     except Exception:
-        pass
-    return summary
+        logger.debug("[import] complete event not published", exc_info=True)
+    return {**summary, "items": items}
 
 
 def _import_roots() -> list[str]:
-    """Allowed root directories for import-folder (T1.3, Wave 1).
+    """Allowed root directories for import (T1.3): ``app/services/import_roots.roots()``.
 
-    `RECALL_IMPORT_ROOTS` in `.env` - a list of absolute paths separated by `;`.
-    `;` was chosen rather than POSIX `:` because `:` conflicts with the drive letter (`C:\\...`)
-    on Windows. Empty/unset → the list is empty → import-folder
-    is forbidden everywhere (the default is "forbid until allowed" - safer
-    than "allow everything except a list")."""
-    raw = os.environ.get("RECALL_IMPORT_ROOTS", "")
-    roots: list[str] = []
-    for part in raw.split(";"):
-        part = part.strip().strip('"')
-        if part:
-            roots.append(os.path.abspath(part))
-    return roots
+    Empty/unset `RECALL_IMPORT_ROOTS` → the list is empty → import is forbidden everywhere."""
+    return import_roots.roots()
+
+
+def _category_from(raw):
+    return int(raw) if (raw is not None and str(raw).isdigit()) else None
+
+
+def import_folder_plan(data) -> dict:
+    """What ``import-folder`` would do for body ``data``: ``{folder, recursive, category_id,
+    files}``, or ``{"refusal": (status, body)}`` with the view's own answer.
+
+    Shared with the approval summary: a folder outside the roots, missing or empty is refused
+    before any dialog, with the same body the view gives."""
+    data = data if isinstance(data, dict) else {}
+    raw = data.get("path")
+    folder = raw.strip() if isinstance(raw, str) else ""
+    if not folder:
+        return {"refusal": (400, {"success": False, "error": tr('library.doc.err.no_path')})}
+    if not _import_roots():
+        return {"refusal": (403, {"success": False, "error_code": "PATH_NOT_ALLOWED",
+                                  "error": tr('library.doc.err.import_disabled')})}
+    try:
+        folder = import_roots.resolve_allowed(folder)
+    except import_roots.PathNotAllowed:
+        return {"refusal": (403, {"success": False, "error_code": "PATH_NOT_ALLOWED",
+                                  "error": tr('library.doc.err.import_forbidden')})}
+    if not os.path.isdir(folder):
+        return {"refusal": (400, {"success": False, "error": tr('library.doc.err.folder_missing')})}
+    recursive = bool(data.get("recursive"))
+    files = _collect_documents(folder, recursive)
+    if not files:
+        return {"refusal": (400, {"success": False, "error": tr('library.doc.err.folder_empty')})}
+    return {"folder": folder, "recursive": recursive,
+            "category_id": _category_from(data.get("category_id")), "files": files}
+
+
+def _submit_doc_import(files: list[str], category_id) -> str:
+    """Queue ``_run_folder_import`` over ``files`` as a ``doc_import`` job; returns its id."""
+    db_path = _db_path()
+    docs_dir = os.path.abspath(current_app.config.get('DOCUMENTS_FOLDER', 'documents'))
+
+    def _job(job, _files=files, _db=db_path, _docs=docs_dir, _cat=category_id):
+        return _run_folder_import(_files, _db, _docs, _cat)
+
+    job = state.job_queue.submit("doc_import", _job, meta={
+        "count": len(files), "actor": auth.classify_request()[0]})
+    return str(job.id)
 
 
 @documents_bp.route('/api/documents/import-folder', methods=['POST'])
@@ -322,50 +428,78 @@ def import_folder():
     `RECALL_IMPORT_ROOTS` (see `_import_roots`) - without it an arbitrary path
     combined with network access to the server gave the primitive "read
     any file the process can reach" (.env, SSH keys, etc.)."""
-    data = request.get_json(silent=True) or {}
-    folder = (data.get("path") or "").strip()
-    if not folder:
-        return jsonify({"success": False, "error": tr('library.doc.err.no_path')}), 400
-
-    roots = _import_roots()
-    if not roots:
-        return jsonify({
-            "success": False,
-            "error": tr('library.doc.err.import_disabled'),
-        }), 403
-
-    resolved = safe_path_within_any(roots, folder)
-    if resolved is None:
-        return jsonify({
-            "success": False,
-            "error": tr('library.doc.err.import_forbidden'),
-        }), 403
-    folder = resolved
-
-    if not os.path.isdir(folder):
-        return jsonify({"success": False, "error": tr('library.doc.err.folder_missing')}), 400
-
-    recursive = bool(data.get("recursive"))
-    _cat = data.get("category_id")
-    category_id = int(_cat) if (_cat is not None and str(_cat).isdigit()) else None
-
-    files = _collect_documents(folder, recursive)
-    if not files:
-        return jsonify({"success": False,
-                        "error": tr('library.doc.err.folder_empty')}), 400
+    plan = import_folder_plan(request.get_json(silent=True) or {})
+    if "refusal" in plan:
+        status, body = plan["refusal"]
+        return jsonify(body), status
+    files = plan["files"]
     if state.job_queue is None:
         return jsonify({"success": False, "error": tr('library.doc.err.queue_unavailable')}), 503
 
-    db_path = _db_path()
-    docs_dir = os.path.abspath(current_app.config.get('DOCUMENTS_FOLDER', 'documents'))
-
-    def _job(job, _files=files, _db=db_path, _docs=docs_dir, _cat=category_id):
-        return _run_folder_import(_files, _db, _docs, _cat)
-
-    state.job_queue.submit("doc_import", _job, meta={"count": len(files)})
-    logger.info("[import] started: %d files from %s (recursive=%s)", len(files), folder, recursive)
+    job_id = _submit_doc_import(files, plan["category_id"])
+    logger.info("[import] started: %d files from %s (recursive=%s)",
+                len(files), plan["folder"], plan["recursive"])
     return jsonify({"success": True, "started": True, "total": len(files),
-                    "channel": "doc_import"})
+                    "channel": "doc_import", "job_id": job_id})
+
+
+INGEST_PATHS_MAX = 5
+
+
+def _path_refusal(path, code: str, status: int, key: str, **kw):
+    return status, {"success": False, "error_code": code, "error": tr(key, **kw), "path": path}
+
+
+def _check_ingest_path(path) -> tuple[str | None, tuple | None]:
+    """``(real_path, None)`` for an importable document, else ``(None, (status, body))``."""
+    if not isinstance(path, str) or not path.strip():
+        return None, (400, {"success": False, "error_code": "INVALID_ARGUMENT",
+                            "error": tr('library.doc.err.bad_paths')})
+    try:
+        real = import_roots.resolve_allowed(path.strip())
+    except import_roots.PathNotAllowed:
+        return None, _path_refusal(path, "PATH_NOT_ALLOWED", 403, 'library.doc.err.path_not_allowed')
+    if not allowed_document_file(os.path.basename(real)):
+        supported = ", ".join(sorted(document_parser.ALLOWED_DOCUMENT_EXTENSIONS))
+        return None, _path_refusal(path, "UNSUPPORTED_EXTENSION", 400, 'library.doc.err.unsupported',
+                                   supported=supported)
+    if not os.path.isfile(real):
+        return None, _path_refusal(path, "NOT_FOUND", 404, 'library.doc.err.no_file')
+    limit = current_app.config.get('MAX_CONTENT_LENGTH')
+    if limit and os.path.getsize(real) > limit:
+        return None, _path_refusal(path, "FILE_TOO_LARGE", 413, 'library.doc.err.file_too_large')
+    return real, None
+
+
+@documents_bp.route('/api/documents/ingest-paths', methods=['POST'])
+def ingest_paths():
+    """Ingest up to five documents by local path as one ``doc_import`` job (for agents).
+
+    Body: ``{paths: [1..5], category_id?}``. Every path is checked first (inside
+    `RECALL_IMPORT_ROOTS`, a document extension, an existing file, `MAX_CONTENT_LENGTH`); one bad
+    path refuses the request with its code and nothing starts. → 202 ``{success, job_id, total}``;
+    the job result's ``items`` lists ``{path, status, transcription_id}`` per path."""
+    data = request.get_json(silent=True)
+    paths = data.get("paths") if isinstance(data, dict) else None
+    if not isinstance(paths, list) or not paths:
+        return jsonify({"success": False, "error_code": "INVALID_ARGUMENT",
+                        "error": tr('library.doc.err.bad_paths')}), 400
+    if len(paths) > INGEST_PATHS_MAX:
+        return jsonify({"success": False, "error_code": "BULK_LIMIT",
+                        "error": tr('library.doc.err.bulk_limit', max=INGEST_PATHS_MAX)}), 400
+    files: list[str] = []
+    for path in paths:
+        real, refusal = _check_ingest_path(path)
+        if refusal is not None:
+            status, body = refusal
+            return jsonify(body), status
+        files.append(real)
+    if state.job_queue is None:
+        return jsonify({"success": False, "error": tr('library.doc.err.queue_unavailable')}), 503
+
+    job_id = _submit_doc_import(files, _category_from(data.get("category_id")))
+    logger.info("[ingest-paths] started: %d files", len(files))
+    return jsonify({"success": True, "job_id": job_id, "total": len(files)}), 202
 
 
 # ============================================================

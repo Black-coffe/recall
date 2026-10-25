@@ -64,4 +64,30 @@ MESSAGES: dict = {
         "uk": "Не вдалося виконати операцію з поштою.",
         "en": "The mail operation failed.",
     },
+    "mail.err.privateCategory": {
+        "uk": "Перенос ярлика з приватного напрямку у відкритий через MCP заборонено.",
+        "en": "Moving a label out of a private direction into an open one is refused over MCP.",
+    },
+    "mail.err.privacyCheck": {
+        "uk": "Не вдалося перевірити приватність напрямку. Спробуйте пізніше.",
+        "en": "The direction privacy check failed. Try again later.",
+    },
+    "mail.err.enrichGated": {
+        "uk": "Увімкнення розбору Claude платне і потребує підтвердження у вікні Windows: {route}.",
+        "en": "Turning Claude enrichment on is paid and needs the Windows confirmation: {route}.",
+    },
+    "mail.err.backfillGated": {
+        "uk": "Синхронізація глибше ніж за 12 місяців потребує підтвердження у вікні Windows: {route}.",
+        "en": "A sync deeper than 12 months needs the Windows confirmation: {route}.",
+    },
+    "mail.err.badBackfillMonths": {
+        "uk": "Глибина догрузки — ціле число місяців від 13 до 120.",
+        "en": "The backfill depth is a whole number of months from 13 to 120.",
+    },
+    "mail.disconnect.recovery": {
+        "uk": "Пароль видалено, папки вимкнено. Після повторного підключення папки самі не ввімкнуться: "
+              "увімкніть ті, що в disabled_label_ids.",
+        "en": "Password removed, folders disabled. A reconnect does not turn the folders back on: "
+              "enable the ones in disabled_label_ids.",
+    },
 }

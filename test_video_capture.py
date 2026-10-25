@@ -1110,6 +1110,53 @@ class TestVideoSupervisorEdgeCases(unittest.TestCase):
 
             sup.stop(graceful=False)
 
+    def test_resume_keeps_earlier_segment_in_track_dict(self):
+        """start -> pause -> resume: as_dict()['segments'] keeps the pre-pause file
+        and adds the _seg1 file with its own offset; path is the current file."""
+        def factory(*args, **kwargs):
+            return FakePopen(returncode_after=None)
+
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            store = SessionStore(Path(td) / "sessions")
+            store.create("rec_testvideo01", 48000, 2, auto_name="SegTest")
+            sup = _make_supervisor(
+                td,
+                tracks_spec=[{"monitor_index": 0, "output_idx": 0,
+                               "monitor_label": "Mon0"}],
+                popen_factory=factory,
+                store=store,
+            )
+            sup.start()
+            track = sup._tracks[0]
+            first_path = track.path
+            segs = track.as_dict()["segments"]
+            self.assertEqual(len(segs), 1)
+            self.assertEqual(segs[0]["n"], 0)
+            self.assertEqual(segs[0]["path"], first_path)
+            self.assertTrue(first_path.endswith("video_mon0.mp4"))
+            self.assertIsInstance(segs[0]["start_offset_sec"], float)
+            first_seg = dict(segs[0])
+
+            time.sleep(0.01)
+            sup.pause()
+            sup.resume()
+
+            d = track.as_dict()
+            segs = d["segments"]
+            self.assertEqual(len(segs), 2)
+            self.assertEqual(segs[0], first_seg, "First segment must stay unchanged")
+            self.assertEqual(segs[1]["n"], 1)
+            self.assertTrue(segs[1]["path"].endswith("video_mon0_seg1.mp4"))
+            self.assertGreater(segs[1]["start_offset_sec"], first_seg["start_offset_sec"])
+            self.assertEqual(d["path"], segs[1]["path"], "path stays the current file")
+
+            # The manifest carries both segments while still recording.
+            mf_tracks = store.read("rec_testvideo01")["streams"]["video"]
+            self.assertEqual(len(mf_tracks[0]["segments"]), 2)
+
+            sup.stop(graceful=False)
+
     # ------------------------------------------------------------------
     # 7. Orphan recovery: existing file → finalized; missing → crashed
     # ------------------------------------------------------------------
@@ -1284,6 +1331,39 @@ class TestRegionCapture(unittest.TestCase):
         self.assertIsNotNone(filter_full)
         self.assertNotIn("crop=", filter_full,
                          f"Full-monitor must have no crop, got: {filter_full!r}")
+
+    def test_build_command_has_keyframe_every_two_seconds(self):
+        """-g <2*fps> sits after -c:v <codec> and before -movflags, for both encoders."""
+        import importlib.util
+        import unittest.mock as _m
+        from pathlib import Path
+        probe_path = (Path(__file__).resolve().parent
+                      / "app" / "services" / "recording" / "video_probe.py")
+        spec = importlib.util.spec_from_file_location("_real_video_probe_gop", str(probe_path))
+        real_probe = importlib.util.module_from_spec(spec)
+        with _m.patch("os.path.isfile", return_value=True):
+            spec.loader.exec_module(real_probe)
+
+        for codec in ("h264_nvenc", "hevc_nvenc"):
+            for fps, want in ((30, "60"), (15, "30")):
+                argv = real_probe.build_capture_command(
+                    output_idx=0, out_path="x.mp4", fps=fps, codec=codec,
+                    quality="p5", cq=23, ffmpeg=r"C:fmpeginfmpeg.exe",
+                    region=None,
+                )
+                self.assertIn("-g", argv, f"{codec}: no -g in argv")
+                gi = argv.index("-g")
+                self.assertEqual(argv[gi + 1], want, f"{codec} fps={fps}: -g {argv[gi + 1]!r}")
+                ci = argv.index("-c:v")
+                self.assertEqual(argv[ci + 1], codec)
+                mi = argv.index("-movflags")
+                self.assertLess(ci, gi)
+                self.assertLess(gi, mi)
+                self.assertEqual(argv[mi + 1], "+frag_keyframe+empty_moov+default_base_moof")
+                fi = argv.index("-flush_packets")
+                self.assertEqual(argv[fi + 1], "1", f"{codec}: fragments must be flushed")
+                self.assertLess(fi, argv.index("-f"))
+                self.assertEqual(argv[-1], "x.mp4")
 
     # ------------------------------------------------------------------
     # 2. Supervisor with region track spawns with crop in argv

@@ -7,6 +7,7 @@ Each Job has:
   - created_at, started_at, finished_at
   - error (optional)
   - meta (arbitrary dict for the UI: title, url, file_path, ...)
+  - result (the task's return value, JSON-safe, capped at RESULT_MAX_BYTES)
 
 Cancel is cooperative: the task function must check job.is_cancelled().
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -37,6 +39,46 @@ logger = logging.getLogger(__name__)
 
 JOB_STATES = ("queued", "running", "completed", "failed", "cancelled", "crashed")
 
+#: Long passes that must not hold the shared workers; they run one at a time on their own executor.
+#: Only kinds something actually submits: a video analysis and a download (up to a 3 h source) take
+#: minutes, the batch passes longer.
+SLOW_KINDS = frozenset({
+    "enrichment_backfill", "reembed_batch", "doc_import",
+    "video_analysis", "youtube_download", "audio_download", "retranscribe",
+    "model_download",
+})
+
+_ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_STATE_ERROR_CODES = {"failed": "JOB_FAILED", "crashed": "JOB_CRASHED"}
+FINISHED_STATES = ("completed", "failed", "cancelled", "crashed")
+
+#: Cap of a stored result (bytes of its JSON); a bigger one is kept as its cut JSON text.
+RESULT_MAX_BYTES = 16 * 1024
+#: Reserved keys the result rides under in ``jobs.meta_json`` (the table has no result column).
+_RESULT_KEY = "__result__"
+_RESULT_TRUNCATED_KEY = "__result_truncated__"
+_ERROR_CODE_KEY = "__error_code__"
+
+
+def _json_safe_result(value: Any):
+    """(json-safe value, truncated). A value json cannot encode is kept as its ``default=str``
+    form and flagged; one over RESULT_MAX_BYTES becomes its JSON text cut to the cap, flagged."""
+    truncated = False
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        value = json.loads(text)
+        truncated = True
+    if len(text.encode("utf-8")) > RESULT_MAX_BYTES:
+        return text.encode("utf-8")[:RESULT_MAX_BYTES].decode("utf-8", errors="ignore"), True
+    return value, truncated
+
+
+def _tr(key: str) -> str:
+    from app.core.i18n import tr
+    return tr(key)
+
 
 @dataclass
 class Job:
@@ -48,11 +90,25 @@ class Job:
     finished_at: Optional[float] = None
     error: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
+    error_code: Optional[str] = None
+    cancel_requested: bool = False
+    result: Any = None
+    result_truncated: bool = False
+    _cancel_seen: bool = field(default=False, repr=False, compare=False)
     _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _future: Optional[Future] = field(default=None, repr=False, compare=False)
 
     def is_cancelled(self) -> bool:
-        return self._cancel_event.is_set()
+        """Cancel-aware tasks call this; a True answer marks the cancel as observed."""
+        if self._cancel_event.is_set():
+            self._cancel_seen = True
+            return True
+        return False
+
+    @property
+    def cancel_ignored(self) -> bool:
+        """True when a cancel was requested but the job still ran to completion."""
+        return self.state == "completed" and self.cancel_requested
 
     def to_dict(self) -> Dict[str, Any]:
         # We do not use asdict() — it does a deepcopy, which fails on
@@ -65,7 +121,12 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "error": self.error,
+            "error_code": self.error_code or _STATE_ERROR_CODES.get(self.state),
+            "cancel_requested": self.cancel_requested,
+            "cancel_ignored": self.cancel_ignored,
             "meta": dict(self.meta) if self.meta else {},
+            "result": self.result,
+            "result_truncated": self.result_truncated,
         }
 
 
@@ -90,8 +151,13 @@ class JobQueue:
 
     def __init__(self, executor, max_history: int = 200, db_path: Optional[str] = None,
                  live_executor: Optional[Any] = None,
-                 live_kinds: Optional[frozenset] = None):
+                 live_kinds: Optional[frozenset] = None,
+                 slow_executor: Optional[Any] = None):
         self._executor = executor
+        if slow_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            slow_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="slow")
+        self._slow_executor = slow_executor
         self._live_executor = live_executor
         self._live_kinds = live_kinds or frozenset()
         self._lock = threading.Lock()
@@ -102,6 +168,8 @@ class JobQueue:
     def _executor_for_kind(self, kind: str):
         if self._live_executor is not None and kind in self._live_kinds:
             return self._live_executor
+        if kind in SLOW_KINDS:
+            return self._slow_executor
         return self._executor
 
     # -----------------------------------------------------
@@ -123,20 +191,26 @@ class JobQueue:
             job.state = "running"
             self._persist(job)
             try:
-                if job.is_cancelled():
+                if job._cancel_event.is_set():
                     job.state = "cancelled"
                     self._persist(job)
                     return None
                 result = fn(job, *args, **kwargs)
-                if job.is_cancelled():
+                if result is not None:
+                    job.result, job.result_truncated = _json_safe_result(result)
+                # A cancel the task never looked at (not cancel-aware) is ignored: the job completed.
+                if job._cancel_event.is_set() and job._cancel_seen:
                     job.state = "cancelled"
                 else:
                     job.state = "completed"
                 return result
             except Exception as e:
                 job.state = "failed"
-                job.error = str(e)
-                logger.error(f"[Job {jid}] failed: {e}", exc_info=True)
+                job.result, job.result_truncated = None, False
+                code = getattr(e, "error_code", None)
+                job.error_code = code if isinstance(code, str) and _ERROR_CODE_RE.match(code) else "JOB_FAILED"
+                job.error = _tr("svc_jobs.error.failed")
+                logger.exception("[Job %s] failed", jid)
                 raise
             finally:
                 job.finished_at = time.time()
@@ -146,8 +220,20 @@ class JobQueue:
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
+        """The job from the cache; a finished one evicted by a restart is read back from the DB."""
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+        if job is None and self._db_path:
+            job = self._load_finished(job_id)
+        return job
+
+    def find_active(self, kind: str, **meta_eq) -> Optional[Job]:
+        """The newest queued/running job of ``kind`` whose ``meta`` has every given key/value."""
+        for job in self.list(kind=kind, active_only=True):
+            meta = job.meta or {}
+            if all(meta.get(k) == v for k, v in meta_eq.items()):
+                return job
+        return None
 
     def list(self, kind: Optional[str] = None, active_only: bool = False) -> List[Job]:
         with self._lock:
@@ -165,9 +251,10 @@ class JobQueue:
             job = self._jobs.get(job_id)
         if not job:
             return False
-        if job.state in ("completed", "failed", "cancelled"):
-            return False
+        if job.state in FINISHED_STATES:
+            return False  # also "crashed": recovered after a restart, finished_at is set
         job._cancel_event.set()
+        job.cancel_requested = True
         # If the future has not started yet — Future.cancel() may return True.
         if job._future is not None:
             cancelled = job._future.cancel()
@@ -199,7 +286,14 @@ class JobQueue:
             return
         try:
             from app.db.connection import get_db_connection
-            meta_json = json.dumps(job.meta, ensure_ascii=False) if job.meta else None
+            stored = dict(job.meta) if job.meta else {}
+            if job.result is not None:
+                stored[_RESULT_KEY] = job.result
+                if job.result_truncated:
+                    stored[_RESULT_TRUNCATED_KEY] = True
+            if job.error_code:
+                stored[_ERROR_CODE_KEY] = job.error_code
+            meta_json = json.dumps(stored, ensure_ascii=False) if stored else None
             with get_db_connection(self._db_path) as conn:
                 conn.execute(
                     '''INSERT INTO jobs
@@ -241,7 +335,7 @@ class JobQueue:
         try:
             from app.db.connection import get_db_connection
             now = time.time()
-            error_msg = "Перервано рестартом застосунку"
+            error_msg = _tr("svc_jobs.error.crashed")
             with get_db_connection(self._db_path) as conn:
                 rows = conn.execute(
                     "SELECT id, kind, state, created_at, started_at, finished_at, "
@@ -254,10 +348,7 @@ class JobQueue:
                         "updated_at=? WHERE id=?",
                         (now, error_msg, now, jid),
                     )
-                    try:
-                        meta = json.loads(row['meta_json']) if row['meta_json'] else {}
-                    except (TypeError, ValueError):
-                        meta = {}
+                    meta = _split_stored_meta(row['meta_json'])[0]
                     job = Job(
                         id=jid,
                         kind=row['kind'],
@@ -266,6 +357,7 @@ class JobQueue:
                         started_at=row['started_at'],
                         finished_at=now,
                         error=error_msg,
+                        error_code="JOB_CRASHED",
                         meta=meta,
                     )
                     with self._lock:
@@ -275,6 +367,33 @@ class JobQueue:
         except Exception as e:
             logger.warning("JobQueue: recover_crashed failed: %s", e)
         return recovered
+
+    def _load_finished(self, job_id: str) -> Optional[Job]:
+        """A finished job (with its result) from the jobs table into the cache; None otherwise.
+        Queued/running rows are left to ``recover_crashed``."""
+        try:
+            from app.db.connection import get_db_connection
+            with get_db_connection(self._db_path) as conn:
+                row = conn.execute(
+                    "SELECT id, kind, state, created_at, started_at, finished_at, error, meta_json "
+                    "FROM jobs WHERE id = ?", (job_id,),
+                ).fetchone()
+        except Exception as e:
+            logger.warning("JobQueue: load job %s failed: %s", job_id, e)
+            return None
+        if row is None or row['state'] not in FINISHED_STATES:
+            return None
+        meta, result, truncated, error_code = _split_stored_meta(row['meta_json'])
+        job = Job(
+            id=row['id'], kind=row['kind'], state=row['state'],
+            created_at=row['created_at'] or time.time(), started_at=row['started_at'],
+            finished_at=row['finished_at'], error=row['error'], meta=meta,
+            error_code=error_code, result=result, result_truncated=truncated,
+        )
+        with self._lock:
+            job = self._jobs.setdefault(job_id, job)
+            self._cleanup_locked()
+        return job
 
     # -----------------------------------------------------
     # Internal
@@ -286,9 +405,40 @@ class JobQueue:
             return
         finished = [
             (jid, j) for jid, j in self._jobs.items()
-            if j.state in ("completed", "failed", "cancelled", "crashed")
+            if j.state in FINISHED_STATES
         ]
         finished.sort(key=lambda x: x[1].finished_at or x[1].created_at)
         to_remove = len(self._jobs) - self._max_history
         for jid, _ in finished[:to_remove]:
             del self._jobs[jid]
+
+
+def _split_stored_meta(meta_json: Optional[str]):
+    """(meta, result, result_truncated, error_code) from a ``jobs.meta_json`` value."""
+    try:
+        stored = json.loads(meta_json) if meta_json else {}
+    except (TypeError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    result = stored.pop(_RESULT_KEY, None)
+    truncated = bool(stored.pop(_RESULT_TRUNCATED_KEY, False))
+    code = stored.pop(_ERROR_CODE_KEY, None)
+    if not (isinstance(code, str) and _ERROR_CODE_RE.match(code)):
+        code = None
+    return stored, result, truncated, code
+
+
+def active_job_for_transcription(tid: int) -> Optional[str]:
+    """Id of a queued or running job (any kind) whose ``meta.transcription_id`` is ``tid``."""
+    from app import state
+    lister = getattr(getattr(state, "job_queue", None), "list", None)
+    if lister is None:
+        return None
+    for job in lister(active_only=True):
+        try:
+            if int((job.meta or {}).get("transcription_id")) == int(tid):
+                return job.id
+        except (TypeError, ValueError):
+            continue
+    return None

@@ -186,7 +186,8 @@ if __name__ == "__main__":
     import sys
     try:
         from dotenv import load_dotenv
-        load_dotenv()
+        from app.core.env_file import ENV_PATH
+        load_dotenv(ENV_PATH)
     except ImportError:
         pass
     raise SystemExit(_cli(sys.argv[1:]))

@@ -84,8 +84,12 @@ def display_name(row: Mapping[str, Any]) -> str:
     return _tr("svc_embed.meta.record_fallback", id=row_id)
 
 
-def update_meta(conn, transcription_id: int, *, title=UNSET, description=UNSET):
+def update_meta(conn, transcription_id: int, *, title=UNSET, description=UNSET,
+                meta_source=UNSET):
     """Update only the passed fields of a record. `None` if the record is missing or deleted.
+
+    ``meta_source`` (`'mcp'` for an agent, `None` for the owner) is written together with a
+    real change of the title/description, never on its own.
 
     Returns ``{"id", "title", "description", "source_name", "display_name",
     "changed"}``. ``changed`` is False if the new values match the old ones
@@ -116,10 +120,13 @@ def update_meta(conn, transcription_id: int, *, title=UNSET, description=UNSET):
 
     changed = any(current[field] != value for field, value in updates.items())
     if changed:
-        assignments = ", ".join(f"{field} = ?" for field in updates)
+        writes = dict(updates)
+        if not isinstance(meta_source, _Unset):
+            writes["meta_source"] = meta_source
+        assignments = ", ".join(f"{field} = ?" for field in writes)
         conn.execute(
             f"UPDATE transcriptions SET {assignments} WHERE id = ?",
-            [*updates.values(), transcription_id],
+            [*writes.values(), transcription_id],
         )
         conn.commit()
         current.update(updates)

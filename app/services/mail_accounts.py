@@ -102,6 +102,29 @@ def add_account(db_path: str, address: str, app_password: str) -> dict:
     return account
 
 
+def connect_account(db_path: str, address: str, password: str) -> dict:
+    """Connect sequence: IMAP LIST first, keyring and DB second.
+
+    Returns ``{account, labels}``. Nothing is stored when the login or LIST fails.
+    Raises ``ValueError("INVALID_ADDRESS")`` / ``ValueError("EMPTY_PASSWORD")``;
+    ``mail_imap.MailError`` propagates with its ``.code``.
+    """
+    from app.services import mail_imap
+    try:
+        addr = normalize_address(address)
+    except ValueError:
+        raise ValueError("INVALID_ADDRESS") from None
+    # Google shows app passwords in groups separated by spaces.
+    pwd = "".join(str(password or "").split())
+    if not pwd:
+        raise ValueError("EMPTY_PASSWORD")
+    with mail_imap.connect(addr, pwd) as client:
+        folders = client.list_folders()
+    account = add_account(db_path, addr, pwd)
+    labels = upsert_folders(db_path, account["id"], folders)
+    return {"account": account, "labels": labels}
+
+
 def delete_account(db_path: str, account_id: int) -> bool:
     """Remove the account row, its labels and the keyring entry. Archived records stay."""
     with _db(db_path) as conn:
@@ -116,6 +139,30 @@ def delete_account(db_path: str, account_id: int) -> bool:
     except keyring.errors.PasswordDeleteError:
         logger.debug("no keyring entry to delete for account id=%s", account_id)
     return True
+
+
+def disconnect_account(db_path: str, account_id: int) -> Optional[list[int]]:
+    """Soft disconnect: drop the keyring entry and disable every label of the account.
+
+    Cursors, directions and archived records stay, so a reconnect (``add_account`` reuses the
+    row by address) resumes where it stopped instead of loading the window again. Returns the
+    ids of the labels it disabled (a reconnect does not turn them back on; the caller names them
+    so the owner can), or None when the account does not exist.
+    """
+    with _db(db_path) as conn:
+        row = conn.execute("SELECT address FROM mail_accounts WHERE id = ?", (account_id,)).fetchone()
+        if row is None:
+            return None
+        addr = row["address"]
+        disabled = [r["id"] for r in conn.execute(
+            "SELECT id FROM mail_labels WHERE account_id = ? AND enabled = 1 ORDER BY id", (account_id,))]
+        conn.execute("UPDATE mail_labels SET enabled = 0 WHERE account_id = ?", (account_id,))
+    try:
+        keyring.delete_password(KEYRING_SERVICE, addr)
+    except keyring.errors.PasswordDeleteError:
+        logger.debug("no keyring entry to delete for account id=%s", account_id)
+    logger.info("Mail account disconnected: id=%s, labels disabled=%s", account_id, len(disabled))
+    return disabled
 
 
 def list_accounts(db_path: str) -> list[dict]:

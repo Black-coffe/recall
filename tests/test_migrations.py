@@ -957,7 +957,8 @@ def _rollback_to_v46(db: str) -> None:
     a global UNIQUE index on `name_norm` (v20), without the siblings index."""
     conn = sqlite3.connect(db)
     conn.execute("PRAGMA foreign_keys=OFF")
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(categories)")]
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(categories)")
+            if r[1] != 'created_source']        # added by v55, after this rollback point
     conn.execute("DROP INDEX IF EXISTS idx_categories_parent_name")
     conn.execute('''CREATE TABLE categories_old (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1179,5 +1180,60 @@ def test_v50_pipe_runs_is_additive_and_idempotent(tmp_path: Path):
                     'status', 'rendered_by', 'cost_usd', 'error', 'chars'):
             assert col in cols, col
         assert _schema_version(conn) >= 50
+    finally:
+        conn.close()
+
+
+def test_v53_mcp_actions_is_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # repeated run - no errors
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'mcp_actions')
+        for col in ('at', 'request_id', 'actor', 'claimed_actor', 'claimed_tool', 'method',
+                    'path', 'endpoint', 'action', 'object_ref', 'summary', 'decision',
+                    'http_status', 'error_code', 'duration_ms'):
+            assert col in cols, col
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                            "AND name='idx_mcp_actions_at'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 53"
+                            ).fetchone()[0] == 1
+        assert _schema_version(conn) >= 53
+    finally:
+        conn.close()
+
+
+def test_v54_transcript_versions_is_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # repeated run - no errors
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'transcript_versions')
+        for col in ('transcription_id', 'created_at', 'is_original', 'model_used', 'language',
+                    'processing_time', 'transcript_text', 'segments', 'polished_text',
+                    'polished_at', 'polished_model', 'speaker_map_json'):
+            assert col in cols, col
+        assert 'active_version_id' in _columns(conn, 'transcriptions')
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                            "AND name='idx_transcript_versions_tx'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 54"
+                            ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_v55_provenance_columns_are_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)
+    conn = sqlite3.connect(db)
+    try:
+        for table, col in (('comments', 'confirmed_at'), ('transcription_speaker_map', 'source'),
+                           ('categories', 'created_source'), ('transcriptions', 'meta_source')):
+            assert col in _columns(conn, table), (table, col)
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 55"
+                            ).fetchone()[0] == 1
     finally:
         conn.close()

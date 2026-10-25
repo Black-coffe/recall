@@ -1,6 +1,6 @@
 # services — enrichment, documents, commitments, scope
 
-last-verified: 2026-10-16
+last-verified: 2026-10-18 (mcp-foundations-a, 4.20.0)
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
@@ -48,7 +48,7 @@ Only stdlib + `app.db.connection` (imported from the stdio-MCP; no torch).
   `stale`) and `undo_action(db_path, event_id, *, source, actor)` (`:1445`; only the task's LAST event, not `undo`, otherwise
   `ValueError`; the cancellation is an event `action='undo'`, `undo_of`). The change + an `action_item_events` row (v51) — one
   transaction; unknown → `LookupError`. Callers: `brief_actions` (`source='bot'`), `PATCH /api/memory/action-items/<id>`
-  (`source='web'`). MCP is read-only.
+  (`source='web'`). MCP has no status-change tool yet (its 3 write tools are `video_analyze`, `mailbox`, `settings`; ADR-042).
 
 ## scope.py — two-layer archive scope
 - `apply_chat_categories(db_path, *, mapping_path=data/chat_categories.local.json, dry_run=False)` (`:227`; the map is outside git):
@@ -62,3 +62,5 @@ Only stdlib + `app.db.connection` (imported from the stdio-MCP; no torch).
   a text mention (FTS5+title) and a same-named direction (the graph exists only in the enriched ~16%); comparison by `name_norm`.
   `_expand_to_threads()` expands the slice to whole threads. `CategoryError('ambiguous')` is passed upward (the copilot sees a
   namesake, not an empty result).
+
+> **4.26.0:** the "3 write tools" above is stale; MCP now has 68 tools (47 R + 21 W/D), see root-processes.md.

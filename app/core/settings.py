@@ -119,8 +119,8 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("RECALL_PRELOAD_WHISPER", "1", "bool", "Transcription",
             "Warm up the whisper model in the background right after the application starts.",
             "0 → no warm-up, the first transcription request is cold."),
-    Setting("RECALL_PRELOAD_WHISPER_MODEL", "large-v3-turbo", "str", "Transcription",
-            "Which model to warm up.", "Mirrors TELEGRAM_WHISPER_MODEL by default."),
+    Setting("RECALL_PRELOAD_WHISPER_MODEL", "large-v3", "str", "Transcription",
+            "Which model to warm up.", "Mirrors the default transcription model (large-v3, whisper-best-default)."),
     Setting("RECALL_VOCAB_MODE", "hotwords", "str", "Transcription",
             "Vocabulary of \"hard\" names from the entity graph (app/services/vocabulary.py, K1): off | hotwords | initial_prompt. "
             "Default per the K1 measurement: names 15 % → 35 %, +11 % transcription time.",
@@ -194,6 +194,21 @@ REGISTRY: tuple[Setting, ...] = (
             "1 → in the app.py process (under __main__) it looks at audio sessions every second and sends a Windows notification; "
             "a recording never starts without a click. 0 → the thread does not start, GET /api/recording/autoprompt "
             "returns enabled:false.", profile="desktop"),
+    Setting("RECORDING_AUTOSAVE_SEC", "60", "int", "Recording",
+            "Seconds after a recording stops before the server saves it itself (recording-autosave).",
+            "If nobody saved, discarded or is editing the stopped recording by then, the server transcribes it, "
+            "titles it and files it when confident; the save screen counts down to the same moment. 0 → off.",
+            profile="desktop"),
+    Setting("RECORDING_AUTOSAVE_MODEL", "large-v3", "str", "Recording",
+            "Whisper model of the server autosave.", "Only the autosave path; the save screen keeps its own choice.",
+            profile="desktop"),
+    Setting("RECORDING_AUTOSAVE_LANGUAGE", "auto", "str", "Recording",
+            "Language of the server autosave transcription ('auto' = detect).",
+            "The live-preview language is not used: it is a preview choice, and calls are often spoken in another "
+            "language.", profile="desktop"),
+    Setting("RECORDING_AUTOSAVE_MIN_CONFIDENCE", "0.6", "float", "Recording",
+            "Minimum k-NN confidence for the autosave to set the direction itself.",
+            "Below it the direction stays empty and the Audio library asks the user.", profile="desktop"),
     Setting("RECORDING_AUTOPROMPT_APPS",
             "zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,whatsapp.exe,"
             "chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe", "str", "Recording",
@@ -296,9 +311,9 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("TELEGRAM_CONTROL_PORT", "5051", "int", "Telegram",
             "Port of the listener's localhost control API.", "Flask proxies list-dialogs/status/backfill here.",
             scope="config"),
-    Setting("TELEGRAM_WHISPER_MODEL", "large-v3-turbo", "str", "Telegram",
+    Setting("TELEGRAM_WHISPER_MODEL", "large-v3", "str", "Telegram",
             "Whisper model for voice/audio/video from TG.",
-            "large-v3-turbo — multilingual, ~4x faster than large-v3.", scope="config"),
+            "large-v3 — best measured accuracy; large-v3-turbo is ~2.4x faster at slightly lower accuracy.", scope="config"),
     Setting("TELEGRAM_WHISPER_LANG", "uk", "str", "Telegram",
             "Transcription language of TG media ('auto' — autodetect).",
             "Passed to the transcription of TG voice/audio in app/blueprints/telegram.py as the language parameter.",
@@ -651,8 +666,12 @@ REGISTRY: tuple[Setting, ...] = (
             "The base API_URL in mcp_server.py — where all proxied HTTP requests to app.py go."),
     Setting("RECALL_MCP_READONLY", "", "bool", "MCP server",
             "Emergency switch for all MCP writes (does not affect reading).",
-            "Off by default (empty) — a separate toggle from the architectural "
-            "read-first (32 read-only tools)."),
+            "Off by default (empty). On: no write tool (mailbox, settings, video_analyze) is "
+            "registered at all, whatever RECALL_MCP_PROFILE says."),
+    Setting("RECALL_MCP_PROFILE", "full", "str", "MCP server",
+            "Which MCP tools mcp_server.py registers: full | read.",
+            "full — every tool; read — the read tools plus video_analyze. "
+            "An unknown value = read (one warning on stderr). Read at mcp_server.py start."),
     Setting("RECALL_MCP_KEY", "", "secret", "MCP server",
             "Bearer key for the http transport of mcp_server.py.",
             "Needed ONLY for --transport http (listens on 127.0.0.1:5060); the default stdio needs no key.\n"

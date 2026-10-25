@@ -3,63 +3,53 @@
 Part of the HTTP layer; overview and the other blueprints — `blueprints.md`, memory/telegram/research — `blueprints-memory.md`.
 No `url_prefix`, errors `{success,error}` + code. Logic — `services.md`.
 
-last-verified: 2026-10-15 (english-i18n 4.16.0: all `error`/`message` in jsonify of these four files — `tr()`, keys
-`capture.*`/`transcript.*`/`library.*`, see `blueprints.md` § i18n; line numbers below are from before 4.16.0, check against the code)
+last-verified: 2026-10-25 (live-video routes, 4.30.0); 2026-10-21 (mcp-pipeline 4.27.0: transcription.py/audio_library.py/youtube.py re-read, ALL transcription.py line numbers re-swept after the extraction into `transcription_run.py`/`transcript_ai.py`); recording.py section content from 2026-10-20 (its line numbers were dropped, not re-swept); i18n keys `capture.*`/`transcript.*`/`library.*` (`blueprints.md` § i18n)
 
-## transcription.py (~2780 lines) — `/api/transcribe`, `/api/history/*`, `/api/transcription/<id>/*`, `/api/export/*`, `/api/video/search`
-- `POST /api/transcribe` (:236, multipart; file|youtube|recording) and `GET /transcribe/active` (:620). Optional
-  `title`/`description` (normalization by `record_meta`, longer than the ceiling → 400 BEFORE work; the form takes priority over
-  the copy from `audio_downloads`). K1: `decode_options=vocabulary.decode_options_for(kind, DATABASE)` (:327-333;
-  kind youtube|recording, the rest → `file`; youtube → `{}`).
-- History: `GET /api/history` (:634; `q` searches also by title/description via FTS5 `transcriptions_fts`; `category_id`/
-  `tags`/`since`/`until` via `categories`; an item carries `title/description/display_name`, `tags`, `suggested_tags`),
-  `GET/PATCH/DELETE /api/history/<id>` (:804/862/960), `POST <id>/suggest-meta` (:937), `POST <id>/restore` (:991),
-  `bulk_delete` (:1013), `bulk_export` (:1059).
-- `PATCH /api/history/<id>` JSON `{title?, description?}`: no keys / not a string / longer than `TITLE_MAX`/`DESCRIPTION_MAX`
-  → 400; no record → 404; 200 `{success, record{...,display_name}}`; then `record_meta.update_meta` →
-  `after_meta_update(..., db_path=DATABASE)` (targeted re-embed, `services/reembed.py`).
-- `/api/transcription/<id>/`: `audio` (:1298), `segments/merge` (:1352), `segments/split` (:1413), Claude:
-  `polish` (:1559), `summarize` (:1638), `sentiment` (:1723), `translate` (:1776), `topics` (:1879).
-- `POST /api/export/<format>` (:2024): txt, srt, md, docx, json, pdf. `bulk_export`: json, txt, docx, md.
-  Name/title — `display_name`; a payload without `title/source_name/id` → a neutral fallback, not "Record #None".
-- Video (`video-visual-timeline`, 4.10.0; :2443-2790): `POST <tid>/analyze-video` (:2443) JSON `{force, method
-  thumbs|bisect, step, min_res, threshold, settle, ignore_regions, max_frames, ocr=true, describe=false,
-  vision_backend local|claude}` → job `video_analysis` (`{job_id}` | `{ready:true}` | `already_running` | 200
-  `{success:false,error_code:NO_VIDEO}` :2480); `vision_backend` without `describe` = a description request; a bad method/backend → 400.
-  `GET <tid>/recording-info` (:2521), `video` (:2568, stream), `keyframes` (:2597), `keyframe/<kf_id>` (:2629, the frame
-  is cut on the fly), `frame?t&size=thumb|full` (:2691, JPEG `no-store`, secrets painted over, header
-  `X-Recall-Redacted-Boxes`), `frames` (:2703, ≤12, `include_camera`, base64 for MCP), `visual-timeline` (:2723),
-  `frames-for-text` (:2749), `GET /api/video/search` (:2767).
-  `TimelineError.code` → HTTP via `_TIMELINE_STATUS` (:2650): NOT_FOUND/NO_VIDEO 404, BAD_REQUEST 400, NOT_ANALYZED 409.
+Gated (`approval_gate._D_ROUTES`, runs before the view): `transcription.delete_transcription`, `bulk_delete_transcriptions`,
+`audio_library.delete_audio_download`. Conditional (non-UI only): `transcription.retranscribe_transcription` (would evict a version),
+`transcription.analyze_video_endpoint` (4.27.0, Claude description of frames, action `video_describe_claude`). `merge_segments` is exempt. See `services-infra.md`.
+
+## transcription.py (~2230 lines) — `/api/transcribe*`, `/api/history/*`, `/api/transcription/<id>/*`, `/api/export/*`, `/api/video/search`
+- `POST /api/transcribe` (:154, multipart; file|youtube|recording): since 4.27.0 a thin adapter (`resolve_*_source` :58-199 build `TranscribeParams`, then `transcription_run.resolve` + `run` inline);
+  same responses, no recording guard. Optional `title`/`description` (`record_meta`, too long -> 400 BEFORE work). K1 vocabulary lives in `transcription_run.py:358`.
+- `POST /api/transcribe/async` (:211, JSON `{source: library|recording|youtube|path, audio_download_id|recording_session_id|url|path (`_ASYNC_REF_FIELD`), model?, language?, diarize?, title?, description?, category_id?}`):
+  `transcription_run.submit` -> 202 `{success, job_id, created:true}`, 200 `created:false` for a live duplicate. Refusals via `TranscribeError.async_body()`: 409 `RECORDING_ACTIVE` (non-UI only)/`NOT_FINALIZED`
+  (+`session_id`)/`ALREADY_RUNNING`, 404 `NOT_FOUND`, 400 `INVALID_ARGUMENT`/`UNSUPPORTED_EXTENSION`/`MODEL_NOT_INSTALLED`, 403 `PATH_NOT_ALLOWED`, 413 `FILE_TOO_LARGE`, 503 `UNAVAILABLE`.
+  `GET /api/transcribe/active` (:265) also lists async library jobs (registry entry carries `job_id`).
+- History: `GET /api/history` (:279; `q` also by title/description via FTS5; `category_id`/`tags`/`since`/`until`; items carry `title/description/display_name`, `tags`, `has_media`),
+  `GET /api/history/<id>` (:454), `PATCH` (:607; `{title?, description?}`, 400 on bad/too long, 404; non-UI -> `JOB_ACTIVE` while a job runs on the record, stamps `meta_source='mcp'`; then `record_meta.after_meta_update`),
+  `POST <id>/suggest-meta` (:678), `DELETE` (:700, soft; rows go in `retention.purge_soft_deleted`), `POST <id>/restore` (:731), `bulk_delete` (:753, also deletes `transcript_versions`), `bulk_export` (:803).
+- Re-transcribe + versions (4.25.0, ADR-044): `POST <id>/retranscribe` (:523; `{model, language?, diarize?}` -> 202 `{job_id, transcription_id, model}`; errors 404 `NO_MEDIA`/`NOT_FOUND`,
+  400 `MODEL_NOT_INSTALLED`, 409 `RECORDING_ACTIVE`/`ALREADY_RUNNING`, 503 `UNAVAILABLE`; conditionally gated, else job fails `EVICTION_NOT_APPROVED`), `GET .../versions` (:555), `.../versions/<vid>` (:567), `POST .../versions/<vid>/activate` (:581; 409 `ALREADY_RUNNING` while a job runs).
+- `/api/transcription/<id>/`: `audio` (:1044), `segments/merge` (:1098), `segments/split` (:1159). Claude actions (4.27.0: thin wrappers, the bodies are `transcript_ai.run`, keeping `{force, model}` and `cached`):
+  `polish` :1298, `summarize` :1309, `sentiment` :1318, `translate` :1324, `topics` :1335.
+  `POST .../ai-job` (:1344; body only `{kind, target_lang?}`, extra field -> 400 via `_async_bad`; cache hit -> 200 `{success, cached:true, status:"done", result}` with no job; else 202 `{cached:false, job_id}` or 200 `created:false`;
+  `enrich` during a recording -> 409 `RECORDING_ACTIVE`; `transcript_ai.TranscriptAIError` -> `e.body()`/`e.status`).
+- `POST /api/export/<format>` (:1458): txt, srt, md, docx, json, pdf. Name/title — `display_name`.
+- Video (4.10.0): `POST <tid>/analyze-video` (:1876) JSON `{force, method thumbs|bisect, step, min_res, threshold, settle, ignore_regions, max_frames, ocr=true, describe=false, vision_backend local|claude}` -> job `video_analysis`
+  (`{job_id}` | `{ready:true}` | `already_running` | 200 `{success:false,error_code:NO_VIDEO}`); `vision_backend` without `describe` = a description request. 4.27.0: a non-UI request that would describe through Claude is gated.
+  Reads: `recording-info` :1954, `video` :2001, `keyframes` :2030, `keyframe/<kf_id>` :2062, `frame` :2124 (secrets painted over), `frames` :2136 (<=12), `visual-timeline` :2156, `frames-for-text` :2182, `GET /api/video/search` :2200.
 
 ## audio_library.py (~520) — `/api/audio/*`
-`POST /download` (:53), `GET /downloads` (:115), `DELETE /downloads/<id>` (:327), `PATCH` (:354), `POST
-/downloads/<id>/restore` (:427), `POST check-duplicate` (:446), `open-explorer/<id>` (:480), `play/<id>` (:509).
-- `GET /downloads`: filters `category_id`/`tags`/`since`/`until` (`categories`); category =
-  `COALESCE(transcript.category_id, audio_downloads.category_id)`; source_type youtube|recording|file; an item
-  carries the tags of the latest transcript and `description` (string|null; `audio.js` prefills the modal — without it PATCH would erase the description).
-- `PATCH /downloads/<id>` `{title?, description?|null}`: no keys → 400, empty `title` → 400 (no fallback,
-  unlike `transcriptions.title`), no record → 404, 200 `{success, item{id,title,description}}`.
+`POST /download` (:55), `GET /downloads` (:119), `DELETE /downloads/<id>` (:331), `PATCH` (:358), `POST /downloads/<id>/restore` (:431), `POST check-duplicate` (:450), `open-explorer/<id>` (:484), `play/<id>` (:513).
+- 4.27.0: `force` in the `/download` body counts only for a `ui` caller (`audio_library.py:82`); an agent's repeat answers `exists` for the stored row.
+- `GET /downloads`: filters `category_id`/`tags`/`since`/`until`; category = `COALESCE(transcript.category_id, audio_downloads.category_id)`; source_type youtube|recording|file; items carry latest-transcript tags and `description`.
+- `PATCH /downloads/<id>` `{title?, description?|null}`: no keys -> 400, empty `title` -> 400, no record -> 404, 200 `{success, item{id,title,description}}`.
 
 ## youtube.py (~130) — `/api/youtube/*`
-`POST /info` (:24), `POST /download` (:80, background, rate-limited), `GET /progress/<download_id>` (:125). Depends on: youtube_pytubefix.
+`POST /info` (:25; 4.27.0: `get_json(silent=True)`, a missing/non-object body -> 400 `INVALID_ARGUMENT`), `POST /download` (:84, background, rate-limited), `GET /progress/<download_id>` (:129). Depends on: youtube_pytubefix.
 
 ## recording.py (~1070) — `/api/recording/*`, `/api/recordings/*`
-Live mic/loopback recording + finalize + recovery; up to `RECORDING_MAX_ACTIVE` parallel sessions (4.7.0, ADR-026).
-- `GET /screens` (:137), `/screens/<monitor_index>/preview` (:168), `/devices` (:203, 5s cache), `POST /start` (:244 →
-  `_start_session` :265; device + `system_source {mode,apps}` + language + copilot), `<sid>/pause` (:446), `resume`
-  (:458), `stop` (:664), `save` (:696), `discard` (:811), `state` (:838), `live-transcript` (:858), `stream` (:1033, SSE 10 Hz).
-- `POST <sid>/system-source {mode,apps?,reason?: user|auto_restore}` (:473): 409 `NO_SYSTEM_STREAM`, 400
-  `RETARGET_FAILED`/`INVALID_REASON`. `GET /apps` (:518) never 500 → `available:false`.
-- `GET /api/recordings/recovered` (:959), `/recordings/active` (:993) → `{active,count,sessions[...],session_id,state}`;
-  `session_id`/`state` only when there is exactly one session.
-- `POST <sid>/save` JSON `{name, description?}`: `description` is normalized (`record_meta`) → session manifest →
-  `register_recording()` → `audio_downloads.description`.
-- Gotchas: over the limit → 409 `SESSION_LIMIT` (`active`,`limit`); a bad spec → 400 `UNSUPPORTED_SOURCE_SPEC` before
-  start; copilot busy → start 200 with `copilot.error_code='COPILOT_BUSY'`; finalize is async (>5 min), save deadline 5 min.
-- K2 autoprompt (4.9.0, :542-643; watcher = `current_app.extensions['call_watcher']`, only in the `__main__` process):
-  `GET /autoprompt` (:582) → `{enabled,prompts[]}`; `POST /autoprompt/<prompt_id>/dismiss` (:591, `record` only,
-  404 `NOT_FOUND`); `GET /autoprompt/<token>/<action>` (:600; record|sources|stop|keep) — Windows toast buttons,
-  the token is one-time (`watcher.consume`), the response is a redirect to `/record[?app=&mic=]` or an HTML error (404/409/500).
-  `record` = the same `_start_session` with `include:[exe]` + `_mic_for` (:561); `stop` → `stop_session` (:644,
-  module-level, the watcher takes the same one). Mutation via GET is deliberate; protection — an unpredictable token.
+Live mic/loopback recording + finalize + recovery; up to `RECORDING_MAX_ACTIVE` parallel sessions (4.7.0, ADR-026). Details and line numbers — `recording.md`.
+- `GET /screens`, `/devices` (5s cache), `POST /start` (-> `_start_session`; device + `system_source {mode,apps}` + language + copilot), `<sid>/pause|resume|stop|save|discard|state|live-transcript`, `stream` (SSE 10 Hz).
+- `POST <sid>/system-source {mode,apps?,reason?: user|auto_restore}`: 409 `NO_SYSTEM_STREAM`, 400 `RETARGET_FAILED`/`INVALID_REASON`. `GET /apps` never 500 -> `available:false`.
+- Live video (4.30.0, `recording.py:1080-1268`, GET, service `live_frames`): `<sid>/live-video` (monitors, fps, `readable_until`), `<sid>/live-frame?t=&track=&size=thumb|full`
+  (image/jpeg + `X-Recall-Frame-T|Video-T`, no-store), `<sid>/live-frames` (`t` alone = one frame, else `start|cursor,end,mode,step,min_res,limit 1..12`; JSON frames with `image_b64`+`text`).
+  Errors via `_live_video_error` + `error_codes.status_for`: 400 `INVALID_ARGUMENT`, 404 `NOT_FOUND|NO_VIDEO|NOT_RECORDED`, 409 `PAST_LIVE_EDGE`; not live -> 200 `available:false` + `reason_code`. i18n `capture.live_video.*`.
+  No private/stop-word filter here (the MCP tools apply it).
+- `GET /api/recordings/recovered`, `/recordings/active` -> `{active,count,sessions[...],session_id,state}` (`session_id`/`state` only with exactly one session).
+- Autosave (4.23.0): `POST <sid>/autosave/hold` (name/description/category_id; no scheduler -> `status:'off'`; unknown sid 404), `GET /api/recordings/uncategorized` (banner feed), `<sid>/state` carries `autosave`;
+  `save` marks `autosave.saved` and on the first save calls `sched.after_save`; `discard` -> 409 `RECORDING_KEPT` when a transcript exists or autosave is running/done.
+- `POST <sid>/save` JSON `{name, description?}` -> manifest -> `register_recording()` -> `audio_downloads.description`.
+- Gotchas: over the limit -> 409 `SESSION_LIMIT`; bad spec -> 400 `UNSUPPORTED_SOURCE_SPEC`; copilot busy -> start 200 with `copilot.error_code='COPILOT_BUSY'`; finalize is async (>5 min), save deadline 5 min.
+- K2 autoprompt (4.9.0; watcher = `current_app.extensions['call_watcher']`): `GET /autoprompt`, `POST /autoprompt/<prompt_id>/dismiss`, `GET /autoprompt/<token>/<action>` (record|sources|stop|keep; one-time token, mutation via GET is deliberate).

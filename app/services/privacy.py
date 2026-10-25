@@ -89,6 +89,21 @@ def private_category_ids(conn) -> set[int]:
     return out
 
 
+def category_change_exposes(db_path: str, old_category_id: Optional[int],
+                            new_category_id: Optional[int]) -> bool:
+    """True when a move takes something out of a private direction into an open one (or none).
+    DB failure -> PrivacyError."""
+    try:
+        with get_db_connection(db_path) as conn:
+            cats = private_category_ids(conn)
+    except Exception as e:  # noqa: BLE001 - any check failure = refuse
+        logger.warning("privacy: direction change not verified (%s)", e)
+        raise PrivacyError(str(e)) from e
+    if old_category_id not in cats:
+        return False
+    return new_category_id is None or new_category_id not in cats
+
+
 def private_tids(db_path: str, tids: Iterable[int]) -> set[int]:
     """Which of the records lie in a private direction. DB failure → PrivacyError."""
     tids = sorted({int(t) for t in tids if t is not None})

@@ -9,6 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+from app.core import auth
+
+_UI_HEADERS = {auth.UI_TOKEN_HEADER: auth.ui_token()}
 from flask import Flask
 
 from app.blueprints.speakers import speakers_bp
@@ -210,6 +214,7 @@ class TestPatchTranscriptionSpeakers:
         tid = self._create_transcription(client)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'Юля'}},
         )
         assert r.status_code == 200
@@ -227,6 +232,7 @@ class TestPatchTranscriptionSpeakers:
         # The mapping uses an existing name
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'адам'}},  # case insensitive
         )
 
@@ -241,11 +247,13 @@ class TestPatchTranscriptionSpeakers:
         # First bind
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'X'}},
         )
         # Now clear
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': None}},
         )
         speakers = {s['raw_label']: s for s in r.get_json()['speakers']}
@@ -255,10 +263,12 @@ class TestPatchTranscriptionSpeakers:
         tid = self._create_transcription(client)
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'X'}},
         )
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': '  '}},  # whitespace only
         )
         speakers = {s['raw_label']: s for s in r.get_json()['speakers']}
@@ -267,6 +277,7 @@ class TestPatchTranscriptionSpeakers:
     def test_404_on_missing_transcription(self, client):
         r = client.patch(
             '/api/transcriptions/9999/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'X'}},
         )
         assert r.status_code == 404
@@ -275,6 +286,7 @@ class TestPatchTranscriptionSpeakers:
         tid = self._create_transcription(client)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': 'not-an-object'},
         )
         assert r.status_code == 400
@@ -284,11 +296,13 @@ class TestPatchTranscriptionSpeakers:
         # First binding → "Спікер A"
         client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'Перший'}},
         )
         # Second → "Спікер B" (replacement)
         r = client.patch(
             f'/api/transcriptions/{tid}/speakers',
+            headers=_UI_HEADERS,
             json={'mapping': {'SPEAKER_00': 'Другий'}},
         )
         speakers = {s['raw_label']: s for s in r.get_json()['speakers']}

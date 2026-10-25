@@ -282,6 +282,23 @@ class TestPurgeSoftDeleted:
             row = conn.execute('SELECT id FROM transcriptions WHERE id = ?', (tid,)).fetchone()
         assert row is None
 
+    def test_purge_removes_version_rows_and_soft_delete_keeps_them(self, client, tmp_path):
+        c, db_path = client
+        tid = _add_transcript(db_path, text='Привіт, це версія')
+        with get_db_connection(db_path) as conn:
+            conn.execute("INSERT INTO transcript_versions (transcription_id, created_at, "
+                         "transcript_text) VALUES (?, '2026-01-01 10:00:00', 'Привіт')", (tid,))
+            conn.commit()
+        assert c.delete(f'/api/history/{tid}').status_code == 200
+        with get_db_connection(db_path) as conn:   # restorable: versions stay through soft delete
+            assert conn.execute('SELECT COUNT(*) FROM transcript_versions').fetchone()[0] == 1
+            conn.execute('UPDATE transcriptions SET deleted_at = ? WHERE id = ?',
+                         (time.time() - 999999, tid))
+            conn.commit()
+        retention.purge_soft_deleted(db_path, grace_days=7)
+        with get_db_connection(db_path) as conn:
+            assert conn.execute('SELECT COUNT(*) FROM transcript_versions').fetchone()[0] == 0
+
     def test_purge_keeps_fresh_soft_deleted(self, tmp_path):
         """Soft-deleted but still within grace - purge does NOT touch it."""
         db_path = str(tmp_path / 'purge2.db')

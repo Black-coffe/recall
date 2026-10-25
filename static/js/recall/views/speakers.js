@@ -111,13 +111,7 @@
         });
         const del = row.querySelector('[data-act="delete"]');
         if (del && !s.is_self) del.addEventListener('click', async () => {
-            const ok = await UI.confirmModal({
-                title: R.t('settings.sv.delQ'),
-                message: R.t('settings.sv.delMsg', { name: s.name }),
-                confirmLabel: R.t('settings.sv.delete'),
-            });
-            if (!ok) return;
-            try { await R.api.speakerDelete(s.id); UI.toast(R.t('settings.sv.deleted'), 'success'); state.selected.delete(s.id); load(ctx); }
+            try { const r = await UI.gated(del, () => R.api.speakerDelete(s.id).then(() => true)); if (!r) return; UI.toast(R.t('settings.sv.deleted'), 'success'); state.selected.delete(s.id); load(ctx); }
             catch (e) { UI.toast(e.message, 'error'); }
         });
     }
@@ -256,7 +250,8 @@
         });
         if (!ok) return;
         try {
-            const res = await R.api.speakersMerge({ keep_id: keepId, merge_ids: mergeIds });
+            const res = await UI.gated(ctx.mount.querySelector('#rcMergeGo'), () => R.api.speakersMerge({ keep_id: keepId, merge_ids: mergeIds }).then((x) => x || {}));
+            if (res === undefined) return;
             UI.toast(R.t('settings.sv.mergedInto', { name: keep.name }), 'success');
             state.selected.clear();
             load(ctx);

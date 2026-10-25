@@ -3,7 +3,8 @@
    enable / direction / Claude controls, refresh labels, "load deeper".
 
    Reads: GET /api/mail/status. Writes: POST /api/mail/accounts, DELETE /api/mail/accounts/<id>,
-   GET /api/mail/accounts/<id>/labels?refresh=1, PATCH /api/mail/labels/<id>, POST /api/mail/sync.
+   GET /api/mail/accounts/<id>/labels?refresh=1, PATCH /api/mail/labels/<id>, POST /api/mail/sync;
+   behind the Windows dialog: POST /api/mail/labels/<id>/enrich, POST /api/mail/backfill.
    The app password lives only in the form field: never stored, logged or prefilled. */
 (function () {
     'use strict';
@@ -161,14 +162,9 @@
             } catch (e) { UI.toast(e.message, 'error'); }
         });
         el.querySelector('[data-act="delete"]').addEventListener('click', async () => {
-            const ok = await UI.confirmModal({
-                title: R.t('mail.account.deleteTitle'),
-                message: R.t('mail.account.deleteMsg', { address: acc.address }),
-                confirmLabel: R.t('mail.account.delete'),
-            });
-            if (!ok) return;
             try {
-                await R.api.del('/api/mail/accounts/' + id);
+                const r = await UI.gated(el.querySelector('[data-act="delete"]'), () => R.api.del('/api/mail/accounts/' + id).then(() => true));
+                if (!r) return;
                 accounts = accounts.filter((x) => x.id !== id);
                 UI.toast(R.t('mail.account.deleted'), 'success');
                 paint(ctx);
@@ -177,7 +173,14 @@
         el.querySelector('[data-act="deeper"]').addEventListener('click', async () => {
             const months = Math.max(1, Math.min(120, Math.round(Number(el.querySelector('[data-months]').value) || 12)));
             try {
-                await R.api.post('/api/mail/sync', { account_id: id, months });
+                // Deeper than 12 months is a backfill: the server asks the Windows dialog first.
+                if (months > 12) {
+                    const ok = await UI.gated(el.querySelector('[data-act="deeper"]'),
+                        () => R.api.post('/api/mail/backfill', { account_id: id, months }).then(() => true));
+                    if (!ok) return;
+                } else {
+                    await R.api.post('/api/mail/sync', { account_id: id, months });
+                }
                 UI.toast(R.t('mail.deeper.queued'), 'success');
             } catch (e) { UI.toast(e.message, 'error'); }
         });
@@ -192,7 +195,11 @@
                 if (field === 'category_id') body[field] = inp.value === '' ? null : Number(inp.value);
                 else body[field] = inp.checked;
                 try {
-                    const r = await R.api.patch('/api/mail/labels/' + lid, body);
+                    // Turning paid Claude enrichment on goes through the Windows dialog.
+                    const r = (field === 'enrich' && inp.checked)
+                        ? await UI.gated(null, () => R.api.post('/api/mail/labels/' + lid + '/enrich', {}))
+                        : await R.api.patch('/api/mail/labels/' + lid, body);
+                    if (!r) { paint(ctx); return; }
                     const cur = (acc.labels || []).find((x) => x.id === lid);
                     if (cur && r.label) Object.assign(cur, r.label);
                     // Re-render only the account section that holds the row.

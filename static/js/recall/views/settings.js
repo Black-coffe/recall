@@ -5,7 +5,7 @@
 (function () {
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
-    const DEFAULT_MODEL = 'large-v3-turbo';
+    const DEFAULT_MODEL = 'large-v3';
 
     async function render(ctx) {
         ctx.mount.innerHTML = `
@@ -195,13 +195,7 @@
         });
         const clearBtn = box.querySelector('#rcAiKeyClear');
         if (clearBtn) clearBtn.addEventListener('click', async () => {
-            const ok = await UI.confirmModal({
-                title: R.t('settings.ai.clearQ'),
-                message: R.t('settings.ai.clearMsg'),
-                confirmLabel: R.t('settings.ai.clearBtn'),
-            });
-            if (!ok) return;
-            try { await R.api.del('/api/settings/anthropic-key'); UI.toast(R.t('settings.ai.cleared'), 'info'); loadAiKey(ctx); }
+            try { const r = await UI.gated(clearBtn, () => R.api.del('/api/settings/anthropic-key').then(() => true)); if (!r) return; UI.toast(R.t('settings.ai.cleared'), 'info'); loadAiKey(ctx); }
             catch (e) { UI.toast(e.message || R.t('settings.err.generic'), 'error'); }
         });
     }
@@ -288,14 +282,8 @@
                     reparentEl.innerHTML = reparentOptions(c); reparentEl.disabled = false;
                 }
             });
-            row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
-                const ok = await UI.confirmModal({
-                    title: R.t('settings.cats.delQ'),
-                    message: R.t('settings.cats.delMsg', { name: c.name, what: c.count ? R.t('settings.cats.delN', { n: c.count }) : R.t('settings.cats.delRecs') }),
-                    confirmLabel: R.t('settings.delete'),
-                });
-                if (!ok) return;
-                try { await R.api.categoryDelete(id); await UI.bustCategories(); UI.toast(R.t('settings.cats.deleted'), 'success'); loadCategories(ctx); }
+            row.querySelector('[data-act="delete"]').addEventListener('click', async (ev) => {
+                try { const r = await UI.gated(ev.currentTarget, () => R.api.categoryDelete(id).then(() => true)); if (!r) return; await UI.bustCategories(); UI.toast(R.t('settings.cats.deleted'), 'success'); loadCategories(ctx); }
                 catch (e) { UI.toast(apiErrMsg(e), 'error'); }
             });
             row.querySelector('[data-act="merge"]').addEventListener('click', () => mergeCategory(ctx, c));
@@ -337,7 +325,8 @@
             const del = ov.querySelector('#rcMergeDel').checked;
             const go = ov.querySelector('#rcMergeGo'); go.disabled = true;
             try {
-                const r = await R.api.categoryMerge(src.id, target_id, del);
+                const r = await UI.gated(go, () => R.api.categoryMerge(src.id, target_id, del));
+                if (r === undefined) { go.disabled = false; return; }
                 await UI.bustCategories(); close();
                 UI.toast(R.t('settings.cats.moved2', { n: r.moved }) + (del ? R.t('settings.cats.moved2Merged') : ''), 'success');
                 loadCategories(ctx);
@@ -398,14 +387,8 @@
                 try { await R.api.updateTag(id, { color: colorEl.value }); t.color = colorEl.value; await UI.bustTags(); UI.toast(R.t('settings.colorChanged'), 'success'); }
                 catch (e) { UI.toast(apiErrMsg(e), 'error'); }
             });
-            row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
-                const ok = await UI.confirmModal({
-                    title: R.t('settings.tags.delQ'),
-                    message: R.t('settings.tags.delMsg', { name: t.name, n: t.items || 0 }),
-                    confirmLabel: R.t('settings.delete'),
-                });
-                if (!ok) return;
-                try { await R.api.deleteTag(id); await UI.bustTags(); UI.toast(R.t('settings.tags.deleted'), 'success'); loadTags(ctx); }
+            row.querySelector('[data-act="delete"]').addEventListener('click', async (ev) => {
+                try { const r = await UI.gated(ev.currentTarget, () => R.api.deleteTag(id).then(() => true)); if (!r) return; await UI.bustTags(); UI.toast(R.t('settings.tags.deleted'), 'success'); loadTags(ctx); }
                 catch (e) { UI.toast(apiErrMsg(e), 'error'); }
             });
             row.querySelector('[data-act="merge"]').addEventListener('click', () => mergeTag(ctx, t));
@@ -445,7 +428,8 @@
             const keep_id = Number(ov.querySelector('#rcTagMergeTarget').value);
             const go = ov.querySelector('#rcTagMergeGo'); go.disabled = true;
             try {
-                await R.api.mergeTags(keep_id, src.id);
+                const r = await UI.gated(ov.querySelector('#rcTagMergeGo'), () => R.api.mergeTags(keep_id, src.id).then(() => true));
+                if (!r) { ov.querySelector('#rcTagMergeGo').disabled = false; return; }
                 await UI.bustTags(); close();
                 UI.toast(R.t('settings.tags.merged'), 'success');
                 loadTags(ctx);
@@ -664,14 +648,8 @@
                 try { await R.api.put('/api/speakers/' + id, { name: next }); UI.toast(R.t('settings.spk.renamed'), 'success'); loadSpeakers(ctx); }
                 catch (e) { UI.toast(e.message, 'error'); }
             });
-            row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
-                const ok = await UI.confirmModal({
-                    title: R.t('settings.spk.delQ'),
-                    message: R.t('settings.spk.delMsg', { name: nameEl.textContent }),
-                    confirmLabel: R.t('settings.delete'),
-                });
-                if (!ok) return;
-                try { await R.api.del('/api/speakers/' + id); UI.toast(R.t('settings.spk.deleted'), 'success'); loadSpeakers(ctx); }
+            row.querySelector('[data-act="delete"]').addEventListener('click', async (ev) => {
+                try { const r = await UI.gated(ev.currentTarget, () => R.api.del('/api/speakers/' + id).then(() => true)); if (!r) return; UI.toast(R.t('settings.spk.deleted'), 'success'); loadSpeakers(ctx); }
                 catch (e) { UI.toast(e.message, 'error'); }
             });
         });

@@ -436,7 +436,7 @@ def ingest():
         # pass them into the job explicitly: the job_queue worker runs in a background thread WITHOUT
         # an app context (like the enrichment job in documents.py).
         cfg = current_app.config
-        model = cfg.get('TELEGRAM_WHISPER_MODEL', 'large-v3-turbo')
+        model = cfg.get('TELEGRAM_WHISPER_MODEL', 'large-v3')
         language = cfg.get('TELEGRAM_WHISPER_LANG', 'uk')
 
         # We create the row NOW, as a stub: while it does not exist, the message is

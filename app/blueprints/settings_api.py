@@ -43,7 +43,9 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app.core import env_file
 from app.core.i18n import tr, ui_lang_setting
+from app.services import connect_links, settings_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -62,23 +64,27 @@ def _env_path() -> Path:
 
 
 def _set_env_var(name: str, value: str) -> None:
-    """Write ONE specific env variable to .env + update os.environ of the current
-    process. ``name`` always comes from a hard-pinned call below —
-    NEVER from the request body, so this helper does not turn into a generic
-    "write any env variable" primitive."""
-    from dotenv import set_key
-    path = _env_path()
-    path.touch(exist_ok=True)  # set_key requires an existing file
-    set_key(str(path), name, value, quote_mode='always')
-    os.environ[name] = value
+    """Write ONE specific env variable to .env + os.environ through the locked writer.
+    ``name`` always comes from a hard-pinned call below - NEVER from the request
+    body, so this helper does not turn into a generic "write any env variable" primitive."""
+    env_file.set_env_var(name, value, path=_env_path())
 
 
 def _unset_env_var(name: str) -> None:
-    from dotenv import unset_key
-    path = _env_path()
-    if path.exists():
-        unset_key(str(path), name)
-    os.environ.pop(name, None)
+    env_file.unset_env_var(name, path=_env_path())
+
+
+def _is_mcp() -> bool:
+    return request.headers.get('X-Recall-Actor', '').strip().lower() == 'mcp'
+
+
+@settings_bp.after_request
+def _log_mcp_request(response):
+    if _is_mcp():
+        tool = ''.join(ch for ch in request.headers.get('X-Recall-Tool', '')[:64]
+                       if ch.isalnum() or ch in '_-.')
+        logger.info("actor=mcp tool=%s route=%s status=%s", tool, request.endpoint, response.status_code)
+    return response
 
 
 # ---------------------------------------------------------------- T5.1: Anthropic API key
@@ -102,29 +108,25 @@ def save_anthropic_key():
     raw = data.get('api_key')
     if not isinstance(raw, str):
         return jsonify({'success': False, 'error': tr('core.settings.api_key_not_string')}), 400
-    key = raw.strip()
-    if not key:
-        return jsonify({'success': False, 'error': tr('core.settings.api_key_empty')}), 400
-    if not _KEY_RE.match(key):
-        return jsonify({
-            'success': False,
-            'error': tr('core.settings.api_key_format'),
-        }), 400
-
     try:
-        _set_env_var('ANTHROPIC_API_KEY', key)
-    except Exception as e:
-        logger.error("Failed to save ANTHROPIC_API_KEY to .env: %s", e)  # NB: the error, NOT the key itself
-        return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
+        payload = settings_secrets.save_anthropic_key(raw)
+    except ValueError as e:
+        key = str(e)
+        status = 500 if key == settings_secrets.ERR_ENV_WRITE else 400
+        return jsonify({'success': False, 'error': tr(key)}), status
+    return jsonify({'success': True, **payload})
 
-    # Reset the memoized anthropic client (if an old build with a different/
-    # missing key has already managed to get cached) — so the next polish/
-    # enrich call immediately builds a client with the fresh key, without a restart.
-    from app.services import text_polishing
-    text_polishing._client = None
 
-    logger.info("ANTHROPIC_API_KEY updated via Settings (length=%d, the key is not logged)", len(key))
-    return jsonify({'success': True, 'configured': True})
+@settings_bp.route('/api/settings/anthropic-key/connect-link', methods=['POST'])
+def anthropic_key_connect_link():
+    """Issue a one-time link to the local page where the key is typed."""
+    link = connect_links.issue('anthropic_key', requested_by='mcp' if _is_mcp() else 'unknown')
+    return jsonify({
+        'success': True,
+        'connect_url': connect_links.url_for('anthropic_key', link['token'], connect_links.port_from_host(request.host)),
+        'expires_in': connect_links.TTL_SECONDS,
+        'already_configured': settings_secrets.anthropic_key_configured(),
+    })
 
 
 @settings_bp.route('/api/settings/anthropic-key', methods=['DELETE'])

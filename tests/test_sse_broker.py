@@ -86,3 +86,62 @@ def test_concurrent_publish_thread_safe():
 
     # 100 publishes from two threads — the queue must hold 100 (no losses)
     assert q.qsize() == 2 * N
+
+
+# ---- event ring ----
+
+def test_ring_only_eligible_channels_and_events():
+    from app.services.sse_broker import RING_SIZE  # noqa: F401
+    b = SSEBroker()
+    b.publish("recording:s1", "status", {"a": 1})
+    b.publish("recording:s1", "level", {"rms": 0.1})
+    b.publish("recording:s1", "chunk_saved", {})
+    b.publish("proc-123", "progress", {})
+    assert [e["event"] for e in b.read_since("recording:s1", None)["events"]] == ["status"]
+    assert b.read_since("proc-123", None)["events"] == []
+
+
+def test_read_since_cursor_order_and_filter():
+    b = SSEBroker()
+    b.publish("recording:s1", "status", 1)
+    cur = b.cursor("recording:s1")
+    b.publish("recording:s1", "live_segment", 2)
+    b.publish("recording:s1", "error", 3)
+    res = b.read_since("recording:s1", cur)
+    assert [e["data"] for e in res["events"]] == [2, 3]
+    assert not res["gap"] and not res["reset"]
+    res2 = b.read_since("recording:s1", cur, {"error"})
+    assert [e["data"] for e in res2["events"]] == [3]
+    assert b.read_since("recording:s1", res["next"])["events"] == []
+
+
+def test_read_since_reset_on_other_boot_or_malformed():
+    b = SSEBroker()
+    b.publish("recording:s1", "status", 1)
+    for bad in ("deadbeef:0", "garbage", "x:y"):
+        res = b.read_since("recording:s1", bad)
+        assert res["reset"] is True
+        assert len(res["events"]) == 1
+
+
+def test_read_since_gap_when_ring_overflowed():
+    b = SSEBroker()
+    cur = b.cursor("recording:s1")
+    for i in range(520):
+        b.publish("recording:s1", "status", i)
+    res = b.read_since("recording:s1", cur)
+    assert res["gap"] is True
+    assert len(res["events"]) == 500
+
+
+def test_subscriber_payload_shape_unchanged_and_filtered():
+    b = SSEBroker()
+    q_all = b.subscribe("recording:s1")
+    q_err = b.subscribe("recording:s1", events=["error"])
+    b.publish("recording:s1", "status", {"x": 1})
+    b.publish("recording:s1", "error", {"y": 2})
+    first = q_all.get(timeout=1)
+    assert set(first) == {"event", "data", "ts"}
+    assert q_all.get(timeout=1)["event"] == "error"
+    assert q_err.get(timeout=1)["event"] == "error"
+    assert q_err.empty()

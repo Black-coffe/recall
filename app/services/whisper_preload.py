@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 # Default model for warm-up. There is no single backend config for the
 # "default" whisper model (config.py WHISPER_MODELS is only a catalog of
 # usage hints for the UI) — the actual default lives in the frontend
-# (static/js/recall/views/{upload,record,audio,settings}.js: `const
-# DEFAULT_MODEL = 'large-v3-turbo'`) and is repeated here in
-# `config.py TELEGRAM_WHISPER_MODEL`. We mirror the same value, with
-# the option to override via env if someone sets a different default.
-DEFAULT_PRELOAD_MODEL = 'large-v3-turbo'
+# (static/js/recall/views/{upload,youtube,record,audio,settings}.js: `const
+# DEFAULT_MODEL = 'large-v3'`) and is repeated in the settings registry
+# (TELEGRAM_WHISPER_MODEL, RECORDING_AUTOSAVE_MODEL). We mirror the same value,
+# with the option to override via env if someone sets a different default.
+DEFAULT_PRELOAD_MODEL = 'large-v3'
 
 
 def preload_enabled() -> bool:

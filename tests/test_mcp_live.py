@@ -22,6 +22,7 @@ import pytest
 from app.db.migrations import init_database
 
 import mcp_server as m
+from tests.test_mcp_registry import load_mcp_copy
 
 
 @pytest.fixture()
@@ -58,9 +59,10 @@ def _add_event(conn, copilot_session_id, *, kind, event_id_hint=None,
 # Registration and about()
 # --------------------------------------------------------------------------
 
-def test_three_new_tools_registered():
+def test_live_group_tools_registered():
     names = m._registered_tool_names()
-    assert {"get_live_transcript", "get_live_copilot", "ask_live"} <= set(names)
+    assert {"get_live_transcript", "get_live_copilot", "ask_live",
+            "get_live_video", "get_live_frames"} <= set(names)
 
 
 def test_get_live_copilot_is_direct_db():
@@ -68,16 +70,19 @@ def test_get_live_copilot_is_direct_db():
     assert "get_live_copilot" not in m._ABOUT_PROXY
 
 
-def test_get_live_transcript_and_ask_live_are_proxy():
-    assert {"get_live_transcript", "ask_live"} <= set(m._ABOUT_PROXY)
-    assert not ({"get_live_transcript", "ask_live"} & set(m._ABOUT_DIRECT_DB))
+def test_live_proxy_tools_are_proxy():
+    proxies = {"get_live_transcript", "ask_live", "get_live_video", "get_live_frames"}
+    assert proxies <= set(m._ABOUT_PROXY)
+    assert not (proxies & set(m._ABOUT_DIRECT_DB))
 
 
 def test_about_bucket_invariant_holds():
-    registered = set(m._registered_tool_names())
+    # The full profile: the developer's .env (RECALL_MCP_READONLY) must not shrink the registry.
+    full_names = load_mcp_copy()._registered_tool_names()
+    registered = set(full_names)
     bucketed = set(m._ABOUT_DIRECT_DB) | set(m._ABOUT_PROXY)
     assert registered == bucketed
-    assert len(m._ABOUT_DIRECT_DB) + len(m._ABOUT_PROXY) == len(m._registered_tool_names())
+    assert len(m._ABOUT_DIRECT_DB) + len(m._ABOUT_PROXY) == len(full_names)
 
 
 # --------------------------------------------------------------------------

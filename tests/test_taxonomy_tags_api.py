@@ -38,7 +38,10 @@ def client(db):
     app.register_blueprint(memory_bp)
     app.config["TESTING"] = True
     app.config["DATABASE"] = db
-    return app.test_client()
+    c = app.test_client()
+    from app.core import auth
+    c.environ_base["HTTP_" + auth.UI_TOKEN_HEADER.upper().replace("-", "_")] = auth.ui_token()
+    return c
 
 
 @pytest.fixture(autouse=True)

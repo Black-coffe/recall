@@ -339,13 +339,14 @@
         panel.querySelector('[data-bf-cancel]').addEventListener('click', () => { panel.style.display = 'none'; panel.innerHTML = ''; });
         panel.querySelector('[data-bf-start]').addEventListener('click', async () => {
             const limitInput = panel.querySelector('[data-bf-limit]');
-            const limit = Math.max(20, Math.min(2000, Number(limitInput.value) || 200));
+            const limit = Math.round(Math.max(20, Math.min(2000, Number(limitInput.value) || 200)));
             const startBtn = panel.querySelector('[data-bf-start]');
             const statusEl = panel.querySelector('[data-bf-status]');
             startBtn.disabled = true;
             statusEl.textContent = R.t('telegram.bf.starting');
             try {
-                await R.api.post('/api/telegram/backfill', { chat_id: d.id, limit });
+                const bfRes = await UI.gated(startBtn, () => R.api.post('/api/telegram/backfill', { chat_id: d.id, limit }).then((x) => x || {}));
+                if (bfRes === undefined) { startBtn.disabled = false; statusEl.textContent = ''; return; }
                 const libHref = `/library?source_type=telegram&tg_chat=${encodeURIComponent(d.title || '')}`;
                 panel.innerHTML = `<div style="padding:4px 0;line-height:1.6">
                     <i class="fa-solid fa-circle-check" style="color:var(--rc-ok)"></i>

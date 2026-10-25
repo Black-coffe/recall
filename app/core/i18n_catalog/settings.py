@@ -142,4 +142,16 @@ MESSAGES: dict = {
                "is set for {linked} of {senders} senders, "
                "the graph simply does not know the rest under this spelling"),
     },
+    "settings.speakers.err.use_ui": {
+        "uk": "Ця дія доступна лише в інтерфейсі",
+        "en": "This action is available only in the UI",
+    },
+    "settings.speakers.err.speaker_id_required": {
+        "uk": "Потрібен speaker_id",
+        "en": "speaker_id is required",
+    },
+    "settings.speakers.err.is_self": {
+        "uk": "Не можна перейменувати власника (себе)",
+        "en": "The owner (self) speaker cannot be renamed",
+    },
 }

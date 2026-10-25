@@ -10,7 +10,7 @@
     const R = window.Recall, U = R.util, UI = R.ui;
     const T = (k, v) => R.t(k, v);
     const PER_PAGE = 20;
-    const DEFAULT_MODEL = 'large-v3-turbo';
+    const DEFAULT_MODEL = 'large-v3';
 
     const SOURCES = [
         { k: '', label: T('library.aud.src.all'), c: 'all' },
@@ -48,6 +48,12 @@
     // (polling once per 2.5s). Gives an instant pill without delay and stops a repeated
     // click on the same row from starting a second transcription at the same moment.
     let pendingIds = new Set();
+    // Re-transcribe runs started here: audio download id -> model; stops of their job polls.
+    let rtRunning = new Map(), rtStops = [];
+    const RT_ERR = {
+        NO_MEDIA: 'library.rt.err.NO_MEDIA', MODEL_NOT_INSTALLED: 'library.rt.err.MODEL_NOT_INSTALLED',
+        RECORDING_ACTIVE: 'library.rt.err.RECORDING_ACTIVE', ALREADY_RUNNING: 'library.rt.err.ALREADY_RUNNING',
+    };
 
     async function loadModels() {
         if (_models) return _models;
@@ -95,6 +101,7 @@
                 <input type="date" class="rc-input rc-select--sm" id="rcAudSince" value="${U.esc(state.since)}" title="${U.esc(T('library.lib.sinceTitle'))}">
                 <input type="date" class="rc-input rc-select--sm" id="rcAudUntil" value="${U.esc(state.until)}" title="${U.esc(T('library.lib.untilTitle'))}">
             </div>
+            <div id="rcAudAsk"></div>
             <div id="rcAudHint"></div>
             <div class="rc-list" id="rcAudList"></div>
             <div id="rcAudPager"></div>`;
@@ -130,6 +137,39 @@
         search.addEventListener('input', U.debounce(() => { state.search = search.value.trim(); state.page = 1; sync(); load(ctx); }, 280));
 
         load(ctx);
+        loadAsk(ctx);
+    }
+
+    // recording-autosave: recordings the autosave could not file ask for a direction here,
+    // one click on a k-NN candidate or a pick from the full list.
+    async function loadAsk(ctx) {
+        const box = ctx.mount.querySelector('#rcAudAsk');
+        if (!box) return;
+        let items = [];
+        try { const r = await R.api.get('/api/recordings/uncategorized'); items = (r && r.items) || []; }
+        catch (_) { items = []; }
+        if (!ctx.isCurrent()) return;
+        box.innerHTML = items.map(it => `
+            <div class="rc-recwarn rc-recwarn--ask" data-ask="${it.transcription_id}">
+                <span><i class="fa-solid fa-folder-open"></i> ${U.esc(T('library.aud.ask.text', { title: it.title || '' }))}</span>
+                <span class="rc-yt__spacer"></span>
+                ${(it.candidates || []).map(c => `<button type="button" class="rc-chip" data-cat="${c.category_id}">${U.esc(c.name)}</button>`).join('')}
+                <select class="rc-select rc-select--sm" data-ask-sel aria-label="${U.esc(T('library.aud.ask.pick'))}"><option value="">${U.esc(T('library.aud.ask.pick'))}</option>${UI.catOptions(null, { first: 'hide', newOpt: false })}</select>
+            </div>`).join('');
+        box.querySelectorAll('[data-ask]').forEach(row => {
+            const tid = Number(row.dataset.ask);
+            const pick = async (cid) => {
+                if (!cid) return;
+                try { await R.api.setCategory(tid, Number(cid)); }
+                catch (err) { UI.toast((err && err.message) || T('library.aud.ask.failed'), 'error'); return; }
+                row.remove();
+                UI.toast(T('library.aud.ask.done'), 'success');
+                load(ctx);
+            };
+            row.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => pick(b.dataset.cat)));
+            const sel = row.querySelector('[data-ask-sel]');
+            sel.addEventListener('change', () => pick(sel.value));
+        });
     }
 
     function sync() {
@@ -292,7 +332,10 @@
         const tagsHTML = tags.length
             ? `<div class="rc-tags" style="margin-top:6px">${tags.map(tg => `<span class="rc-tag"${tg.color ? ` style="border-color:${U.esc(tg.color)}"` : ''}>${U.esc(tg.name)}</span>`).join('')}</div>`
             : '';
-        const tr = d.transcription_id
+        const rtModel = rtRunning.get(d.id);
+        const tr = rtModel
+            ? `<span class="rc-btn rc-btn--sm is-transcribing" data-act="rt-status"><i class="fa-solid fa-spinner fa-spin"></i> ${U.esc(T('library.rt.running', { model: rtModel }))}</span>`
+            : d.transcription_id
             ? `<button class="rc-btn rc-btn--sm" data-act="open-tr"><i class="fa-solid fa-file-lines"></i> ${T('library.aud.transcript')}</button>`
             : `<button class="rc-btn rc-btn--sm rc-btn--primary" data-act="transcribe"><i class="fa-solid fa-wand-magic-sparkles"></i> ${T('library.aud.transcribe')}</button>`;
         // A record without its own title but with a transcript — the local model proposes
@@ -309,7 +352,7 @@
                 <div class="rc-aud__run" hidden></div>
             </div>
             <div class="rc-aud__actions">
-                ${name}${tr}
+                ${name}${tr}${d.transcription_id && !rtModel ? `<button class="rc-btn rc-btn--sm" data-act="retranscribe"><i class="fa-solid fa-rotate"></i> ${T('library.rt.action')}</button>` : ''}
                 <button class="rc-iconbtn" data-act="play" title="${U.esc(T('library.aud.play'))}" aria-label="${U.esc(T('library.aud.playAria'))}"><i class="fa-solid fa-play"></i></button>
                 <button class="rc-iconbtn" data-act="explorer" title="${U.esc(T('library.aud.explorer'))}" aria-label="${U.esc(T('library.aud.explorer'))}"><i class="fa-solid fa-folder-open"></i></button>
                 <button class="rc-iconbtn" data-act="edit" title="${U.esc(T('library.lib.editMeta'))}" aria-label="${U.esc(T('library.lib.editMeta'))}"><i class="fa-solid fa-pen"></i></button>
@@ -326,6 +369,9 @@
         const openTr = act('open-tr');
         if (openTr) openTr.addEventListener('click', () => R.router.navigate('/transcript/' + U.slug(d.transcription_id, d.title)));
 
+        const rtBtn = act('retranscribe');
+        if (rtBtn) rtBtn.addEventListener('click', () => openTranscribePanel(ctx, row, d, true));
+
         const trBtn = act('transcribe');
         if (trBtn) trBtn.addEventListener('click', () => openTranscribePanel(ctx, row, d));
 
@@ -341,17 +387,17 @@
         const sugBtn = act('suggest');
         if (sugBtn) sugBtn.addEventListener('click', () => openAudioMeta(ctx, d, { autoSuggest: true }));
         act('delete').addEventListener('click', async () => {
-            const ok = await UI.confirmModal({
-                title: T('library.aud.del.title'),
-                message: T('library.aud.del.message', { title: d.title || ('#' + d.id) }),
-                confirmLabel: T('library.aud.del.confirm'),
-            });
-            if (!ok) return;
+            const delBtn = act('delete');
             row.style.opacity = '0.4';
             row.querySelectorAll('button').forEach(b => b.disabled = true);
             try {
                 // The backend now returns {success, id} (previously {status, message}) — soft-delete, the file is not erased.
-                const res = await R.api.audioDelete(d.id);
+                const res = await UI.gated(delBtn, () => R.api.audioDelete(d.id).then((x) => x || {}));
+                if (res === undefined) {
+                    row.style.opacity = '';
+                    row.querySelectorAll('button').forEach(b => b.disabled = false);
+                    return;
+                }
                 const delId = (res && res.id) || d.id;
                 row.remove();
                 UI.actionToast(T('library.aud.del.done'), T('library.aud.del.undo'), async () => {
@@ -432,27 +478,30 @@
         }
     }
 
-    function openTranscribePanel(ctx, row, d) {
-        if (activeIds.has(d.id) || pendingIds.has(d.id)) {
+    function openTranscribePanel(ctx, row, d, again) {
+        if (activeIds.has(d.id) || pendingIds.has(d.id) || rtRunning.has(d.id)) {
             UI.toast(T('library.aud.alreadyRunning'), 'info');
             return;
         }
         const run = row.querySelector('.rc-aud__run');
         if (!run) return;
         if (!run.hidden) { run.hidden = true; run.innerHTML = ''; return; }
-        const modelOpts = (_models && _models.length ? _models : [{ name: DEFAULT_MODEL, info: {} }]).map(m =>
-            `<option value="${U.esc(m.name)}"${m.name === DEFAULT_MODEL ? ' selected' : ''}>${U.esc(m.name)}</option>`).join('');
+        const installed = again ? (_models || []).filter(m => m.downloaded === true) : null;
+        if (again && !installed.length) { UI.toast(T('library.rt.noModels'), 'error'); return; }
+        const modelOpts = (again ? installed : (_models && _models.length ? _models : [{ name: DEFAULT_MODEL, info: {} }])).map(m =>
+            `<option value="${U.esc(m.name)}"${m.name === (again ? installed[0].name : DEFAULT_MODEL) ? ' selected' : ''}>${U.esc(m.name)}</option>`).join('');
         const langO = LANGS.map(l => `<option value="${l.v}"${l.v === 'auto' ? ' selected' : ''}>${l.l}</option>`).join('');
         run.hidden = false;
         run.innerHTML = `<div class="rc-aud__tr">
             <select class="rc-select rc-select--sm" data-tr="model">${modelOpts}</select>
-            <select class="rc-select rc-select--sm" data-tr="lang">${langO}</select>
-            <button class="rc-btn rc-btn--primary rc-btn--sm" data-tr="go">${T('library.aud.transcribe')}</button>
+            ${again ? '' : `<select class="rc-select rc-select--sm" data-tr="lang">${langO}</select>`}
+            <button class="rc-btn rc-btn--primary rc-btn--sm" data-tr="go">${again ? T('library.rt.action') : T('library.aud.transcribe')}</button>
             <button class="rc-btn rc-btn--sm" data-tr="cancel">${T('library.aud.cancel')}</button>
         </div>`;
         run.querySelector('[data-tr="cancel"]').addEventListener('click', () => { run.hidden = true; run.innerHTML = ''; });
         run.querySelector('[data-tr="go"]').addEventListener('click', () => {
             const model = run.querySelector('[data-tr="model"]').value || DEFAULT_MODEL;
+            if (again) { runRetranscribe(ctx, run, d, model); return; }
             const language = run.querySelector('[data-tr="lang"]').value || 'auto';
             runTranscribe(ctx, row, run, d, model, language);
         });
@@ -492,6 +541,28 @@
         });
     }
 
+    async function runRetranscribe(ctx, run, d, model) {
+        run.hidden = true; run.innerHTML = '';
+        let res;
+        try { res = await R.api.retranscribe(d.transcription_id, { model }); }
+        catch (err) {
+            const code = err && err.body && err.body.error_code;
+            UI.toast(RT_ERR[code] ? T(RT_ERR[code]) : T('library.rt.err.generic'), 'error');
+            return;
+        }
+        rtRunning.set(d.id, model);
+        UI.toast(T('library.rt.started', { model }), 'info');
+        if (ctx.isCurrent()) load(ctx);
+        rtStops.push(R.api.pollJob(res.job_id, (job) => {
+            if (job.state !== 'completed' && job.state !== 'failed') return false;
+            rtRunning.delete(d.id);
+            if (job.state === 'completed') UI.toast(T('library.rt.done'), 'success');
+            else UI.toast(job.error || T('library.rt.failed'), 'error');
+            if (ctx.isCurrent()) load(ctx);
+            return true;
+        }));
+    }
+
     function pagerHTML(d) {
         const total = d.total_pages || 1, page = d.page || 1;
         if (total <= 1) return `<div class="rc-pager"><span class="rc-pager__info">${T('library.aud.pager.total', { count: d.total || 0, num: R.i18n.num(d.total || 0) })}</span></div>`;
@@ -504,6 +575,7 @@
         render,
         destroy() {
             stopPolling();
+            rtStops.forEach(f => f()); rtStops = []; rtRunning = new Map();
             activeIds = new Set(); lastActive = [];
             listEl = null; state = null; cats = null;
         }

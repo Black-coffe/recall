@@ -1,6 +1,6 @@
 # services — video timeline, screen secrets, privacy
 
-last-verified: 2026-10-15
+last-verified: 2026-10-25 (live_frames.py, thumbs_pass start/window); 2026-10-18
 
 Part of `app/services/*`; hub — [services.md](services.md). Wiki: `docs/wiki/video-timeline-and-screen-secrets.md`;
 measurement and limits — `docs/video-timeline.md`. Video exists only in screen recordings.
@@ -29,6 +29,22 @@ measurement and limits — `docs/video-timeline.md`. Video exists only in screen
   `NOT_FOUND|NO_VIDEO|BAD_REQUEST|NOT_ANALYZED`. `_live_secret_boxes(video, t, ffmpeg)` (`:208`) → `(boxes, w, h, text)`,
   without OCR `text=None`.
 
+## live_frames.py (`live-video-frames`, 4.30.0)
+Frames of a recording still running; computed per request from the growing fMP4, nothing stored (no manifest/DB write, no thread).
+`store`, `service`, `ffmpeg` injected. Times are recording-timeline seconds (`video_t = t - segment.start_offset_sec`).
+- `readable_until(path)` — stdlib `struct` walk of top-level boxes, sums `trun` durations of each `moof` whose `mdat` is fully on disk;
+  never ffprobe `format=duration` (over-reports a partial file). `None` = no complete fragment.
+- Tracks come from `manifest.streams.video[]`; `_track_segments` uses `segments` (one per start/resume), a legacy track = one segment;
+  other `video_mon<N>[_segN].mp4` on disk are only counted (`segments_unmapped`). Pauses are gaps between segments.
+- API: `status(sid)` -> tracks + `readable_until` + per-segment ranges; `frame_at(sid, t, track, size)`; `frames_range(sid, start, end, mode
+  step|changes, step, min_res, limit<=12 (MAX_FRAMES_PER_CALL), cursor, track, size)` -> `next_t` (verbatim cursor, None = done), `end_clamped`,
+  `scanned_until`, `truncated`. `changes` scans <= `LIVE_SCAN_MAX_THUMBS`=300 thumbs per call via `thumbs_pass(start=, window=)`.
+  `step`/`min_res` must be >= 1/fps. Seek snaps to the frame index, a quarter frame early (`_seek_time`).
+- Masking: every frame goes through `video_timeline._live_secret_boxes` + `screen_secrets.redact`; `text` is the masked OCR text (`None` w/o OCR).
+- Not live (`finalized` / not active) -> `{available: False, reason}`, not an error. `LiveFramesError.code`: `NOT_FOUND|NO_VIDEO|INVALID_ARGUMENT|
+  PAST_LIVE_EDGE` (409, carries `readable_until`) `|NOT_RECORDED` (404, `readable_ranges`, t inside a pause).
+- `video_frames.thumbs_pass` gained `start`/`window` (bound the ffmpeg pass). HTTP/MCP — `blueprints-media.md`, `root-processes.md`.
+
 ## privacy.py (`mcp-visual-privacy`, 4.11.0)
 No torch/flask — imported from the stdio-MCP; K4 uses it too. What does not leave the archive.
 - `visual_mode()` (`RECALL_MCP_VISUAL` `images|text|off`, unknown → `off`).
@@ -38,5 +54,7 @@ No torch/flask — imported from the stdio-MCP; K4 uses it too. What does not le
   template `private.example.txt`), `has_stop_word` (`casefold` substring, no morphology).
 - `screen_chunk_allowed(chunk, private, words, mode)` (only `speaker='екран'`; `off`/private/stop word → no),
   `filter_screen_chunks(db, chunks)` → `(kept, hidden)`; `PrivacyError` → all screen chunks removed (fail closed).
+- `category_change_exposes(db, old_cid, new_cid)` (4.19.0) — True when a re-direction takes a label out of a private direction into
+  an open one or none (DB failure -> `PrivacyError`); consumer: `blueprints/mail.py` PATCH for `X-Recall-Actor: mcp`.
 - Consumers: `rag._mcp_screen_filter` (`rag.py:320`; only `channel='mcp'`, calls `:368,:526` before Claude),
   `mcp_server.py` (see root.md), `pipes_privacy.py`. The Recall UI is not affected by the filter.

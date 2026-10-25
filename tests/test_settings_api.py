@@ -197,3 +197,13 @@ class TestCopilotToggle:
         lines = [l for l in env_file.read_text(encoding="utf-8").splitlines() if l.strip()]
         assert len(lines) == 1
         assert lines[0].startswith("COPILOT_ENABLED=")
+
+
+def test_mcp_connect_link_is_logged_as_mcp(client, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    headers = {"X-Recall-Actor": "mcp", "X-Recall-Tool": "settings"}
+    r = client.post("/api/settings/anthropic-key/connect-link", json={}, headers=headers)
+    assert r.status_code == 200
+    lines = [x.getMessage() for x in caplog.records if "actor=mcp" in x.getMessage()]
+    assert lines == ["actor=mcp tool=settings route=settings_api.anthropic_key_connect_link status=200"]

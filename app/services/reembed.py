@@ -52,6 +52,7 @@ from typing import Optional
 
 from app.db.connection import get_db_connection
 from app.services import embeddings
+from app.services.recording.state import recording_active as _recording_active
 from app.services.enrichment import optimize_chunk_index
 
 logger = logging.getLogger(__name__)
@@ -214,20 +215,6 @@ _DEFER_SECONDS = 30.0
 #: then the description, and re-embedding is needed once, with both values.
 _pending_lock = threading.Lock()
 _pending_ids: set[int] = set()
-
-
-def _recording_active() -> bool:
-    """Whether at least one live recording is in progress right now. The flag is the recording service's
-    `active_session_ids()` (the same source as `GET /api/recordings/active`):
-    `active_session_id` returns None with two recordings and would let re-embedding through."""
-    try:
-        from app import state
-        service = getattr(state, "recording_service", None)
-        return bool(service is not None and service.active_session_ids())
-    except Exception:  # noqa: BLE001 - no service/state = no recording
-        logger.debug("[reembed] recording state unavailable; assuming no recording",
-                     exc_info=True)
-        return False
 
 
 def _record_reembed_job(job, transcription_id: int, db_path: str) -> dict:

@@ -82,6 +82,10 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
                     "DELETE FROM transcription_speaker_map WHERE transcription_id = ?",
                     (row["id"],),
                 )
+                conn.execute(
+                    "DELETE FROM transcript_versions WHERE transcription_id = ?",
+                    (row["id"],),
+                )
                 tx_repo.delete_by_id(conn, row["id"])
                 stats["transcriptions_purged"] += 1
 
@@ -114,3 +118,17 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
             stats["audio_purged"], stats["merges_purged"],
         )
     return stats
+
+
+def purge_mcp_actions(db_path: str, days: float = 90) -> int:
+    """Delete audit rows (``mcp_actions``) older than ``days``; returns the count."""
+    from app.repositories import mcp_actions
+
+    try:
+        removed = mcp_actions.purge_older_than(db_path, days)
+    except Exception as e:
+        logger.warning("[retention] purge_mcp_actions error: %s", e)
+        return 0
+    if removed:
+        logger.info("[retention] purged %d mcp_actions rows older than %s days", removed, days)
+    return removed

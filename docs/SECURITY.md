@@ -83,3 +83,31 @@ When assembling a diagnostic bundle (T8.1) / logs, transcripts, PII and keys are
 included (redaction). The processes' file logs (`whisper_ui.log`,
 `telegram_listener.log`, `mcp_server.log`) may contain operation metadata but not the
 full content of calls; review them before sending to the developer.
+
+## 5. Local boundary and the approval dialog
+
+Every destructive route (the D actions of ADR-042: deleting records, categories, tags, speakers, audio files, mail
+accounts and the stored Anthropic key, plus merges and backfills) needs a native Windows approval dialog raised by
+`app.py`, whoever sends the request: the UI, an MCP tool, a script or `curl`. No key, token, environment variable,
+profile or mode skips the dialog; any failure to show it is a denial.
+
+What this does and does not protect:
+
+- The dialog is a confirmation, not authentication. An agent that controls the desktop (screenshots, mouse, keyboard)
+  can press "Yes". Keep such an agent away from sessions where Recall runs, or accept that risk.
+- The `ui` actor class is a label, not proof, against a local process: the per-boot UI token is readable from the
+  shell page, so a process that can `GET /` can present itself as the UI and also skip the auto-refusal during a
+  recording. The dialog remains the only decision, and its `ui` line also asks you to press "No" if you did not just
+  do this.
+- A host without an interactive desktop (service session, no visible window station) cannot delete at all, the UI
+  included: the answer is `APPROVAL_UNAVAILABLE`.
+- A process running as the same OS user can read `whisper_history.db` and the media files directly and bypass Recall
+  entirely. Recall's boundary is the local user account, not a process sandbox.
+- Ceilings (10 changes per family per 10 minutes in each MCP process; 3 deletions per minute and 20 per day per actor
+  class in `app.py`) are loop guards against a runaway agent, not security controls.
+- Every changing request, the `/connect/*` key and mailbox saves included (token redacted from the path), is recorded
+  in the audit (`mcp_actions`, kept 90 days, no request bodies); read it with the MCP
+  tool `list_mcp_actions`. The `claimed` actor and tool labels are what the caller wrote about itself and are not
+  trusted.
+
+See [ADR-042](adr/042-mcp-full-control-supersedes-read-first.md) and the approval gate note `docs/wiki/approval-gate.md`.

@@ -83,6 +83,8 @@ class VideoTrack:
     start_offset_sec: float = 0.0
     error: Optional[str] = None
     last_stats: dict = field(default_factory=dict)  # {fps, dropped, bytes}
+    # Every capture file of this track (start + each resume): {n, path, start_offset_sec}
+    segments: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         """Return a JSON-serialisable snapshot (no Popen object)."""
@@ -103,6 +105,7 @@ class VideoTrack:
             "start_offset_sec": self.start_offset_sec,
             "error":           self.error,
             "last_stats":      dict(self.last_stats),
+            "segments":        [dict(seg) for seg in self.segments],
         }
 
 
@@ -298,6 +301,9 @@ class VideoCaptureSupervisor:
                 )
                 track.path = new_path
                 self._spawn_track(track, build_capture_command)
+                if self._store is not None:
+                    # Persist the segment list so the earlier file stays visible live.
+                    self._store.add_video_track(self._session_id, track.as_dict())
             except Exception as e:
                 logger.warning("resume: error re-spawning %s: %s", track.track_id, e)
 
@@ -371,6 +377,12 @@ class VideoCaptureSupervisor:
         now = time.time()
         track.start_wallclock = now
         track.start_offset_sec = now - self._audio_start_wallclock
+        seg = {"path": track.path, "start_offset_sec": track.start_offset_sec}
+        if track.segments and track.segments[-1]["path"] == track.path:
+            # Respawn into the same file (hevc fallback): refresh, do not duplicate.
+            track.segments[-1].update(seg)
+        else:
+            track.segments.append({"n": len(track.segments), **seg})
 
         stderr_q: queue.Queue = queue.Queue(maxsize=500)
         self._stderr_queues[track.track_id] = stderr_q

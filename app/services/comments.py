@@ -147,8 +147,15 @@ class CommentError(ValueError):
     """Invalid input (unknown target/kind, empty body, no such card)."""
 
 
-def kind_weight(kind: Optional[str], weight: Optional[float] = None) -> float:
-    """Effective comment weight: the manual override, otherwise by kind."""
+def kind_weight(kind: Optional[str], weight: Optional[float] = None,
+                source: Optional[str] = None,
+                confirmed_at: Optional[str] = None) -> float:
+    """Effective comment weight: the manual override, otherwise by kind.
+
+    An agent comment (`source='mcp'`) the owner has not confirmed gets the neutral
+    multiplier (0.0 boost): still findable, no owner boost."""
+    if source == "mcp" and not confirmed_at:
+        return 0.0
     if weight is not None:
         return max(0.0, min(1.0, float(weight)))
     return KIND_WEIGHTS.get((kind or DEFAULT_KIND), KIND_WEIGHTS[DEFAULT_KIND])
@@ -209,7 +216,7 @@ def target_exists(db_path: str, target_type: str, target_id: int) -> bool:
 _ROW_FIELDS = (
     "id, target_type, target_id, target_key, body, kind, weight, pinned, anchor_time, "
     "anchor_chunk_id, author, source, lang, parent_id, created_at, updated_at, "
-    "embedded_at, embedding_model, embedding_version, analyzed_at, analyzed_model"
+    "embedded_at, embedding_model, embedding_version, analyzed_at, analyzed_model, confirmed_at"
 )
 
 
@@ -220,7 +227,8 @@ def _to_dict(row) -> dict:
     # export) must not know which column holds the card's address.
     key = d.get("target_key")
     d["target_ref"] = key if key is not None else d.get("target_id")
-    d["effective_weight"] = kind_weight(d.get("kind"), d.get("weight"))
+    d["effective_weight"] = kind_weight(d.get("kind"), d.get("weight"),
+                                  d.get("source"), d.get("confirmed_at"))
     d["indexed"] = bool(d.get("embedded_at"))
     # The analysis is paid and started by a button, so the interface must tell apart
     # "not analyzed yet" from "analyzed, no tasks found", otherwise the owner
@@ -270,7 +278,8 @@ def get(db_path: str, comment_id: int) -> Optional[dict]:
 def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
            kind: Optional[str] = None, pinned: Optional[bool] = None,
            weight: Optional[float] = None,
-           anchor_time: Optional[float] = None) -> Optional[dict]:
+           anchor_time: Optional[float] = None,
+           clear_confirmed: bool = False) -> Optional[dict]:
     """Edit a comment. Changing the BODY resets `embedded_at`, otherwise the index
     would keep the vector of the old revision forever while the card showed the new one
     (a silent mismatch between what is visible and what is searched)."""
@@ -296,6 +305,8 @@ def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
         sets.append("anchor_time = ?"); params.append(anchor_time)
     if not sets:
         return cur
+    if clear_confirmed:
+        sets.append("confirmed_at = NULL")
     sets.append("updated_at = CURRENT_TIMESTAMP")
     if body_changed:
         sets.append("embedded_at = NULL")
@@ -309,6 +320,42 @@ def update(db_path: str, comment_id: int, *, body: Optional[str] = None,
             conn.execute("DELETE FROM comment_chunks WHERE comment_id = ?", (comment_id,))
         conn.commit()
     return get(db_path, comment_id)
+
+
+def source_of(db_path: str, comment_id: int) -> Optional[str]:
+    """`source` of a comment, deleted or not; None when there is no such row."""
+    with get_db_connection(db_path) as conn:
+        row = conn.execute("SELECT source FROM comments WHERE id = ?",
+                           (comment_id,)).fetchone()
+    return (row["source"] or "") if row else None
+
+
+def find_recent_duplicate(db_path: str, target_type: str, target_id, body: str,
+                          minutes: int = 10) -> Optional[dict]:
+    """A live agent comment with the same body on the same card created lately."""
+    where, params = _target_clause(target_type, target_id)
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(
+            f"SELECT {_ROW_FIELDS} FROM comments WHERE source = 'mcp' "
+            f"AND deleted_at IS NULL AND TRIM(body) = ?{where} "
+            f"AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 1",
+            [(body or "").strip()] + params + [f"-{int(minutes)} minutes"]).fetchone()
+    return _to_dict(row) if row else None
+
+
+def confirm(db_path: str, comment_id: int) -> Optional[dict]:
+    """Owner confirmation of an agent comment; idempotent, no-op on other rows."""
+    cur = get(db_path, comment_id)
+    if not cur:
+        return None
+    if cur["source"] == "mcp" and not cur["confirmed_at"]:
+        with get_db_connection(db_path) as conn:
+            conn.execute("UPDATE comments SET confirmed_at = CURRENT_TIMESTAMP "
+                         "WHERE id = ? AND source = 'mcp' AND confirmed_at IS NULL",
+                         (comment_id,))
+            conn.commit()
+        cur = get(db_path, comment_id)
+    return cur
 
 
 def delete(db_path: str, comment_id: int) -> bool:

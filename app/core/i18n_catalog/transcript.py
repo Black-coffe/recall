@@ -288,6 +288,34 @@ MESSAGES: dict = {
         "uk": "Транскрипт порожній",
         "en": "The transcript is empty",
     },
+    "transcript.err.no_media": {
+        "uk": "У цього запису немає медіафайлу для повторного транскрибування",
+        "en": "This record has no media file to transcribe again",
+    },
+    "transcript.err.model_not_installed": {
+        "uk": "Модель Whisper не встановлена локально",
+        "en": "The Whisper model is not installed locally",
+    },
+    "transcript.err.retranscribe_recording": {
+        "uk": "Іде запис — повторне транскрибування буде доступне після його завершення",
+        "en": "A recording is in progress — re-transcribing is available after it ends",
+    },
+    "transcript.err.retranscribe_running": {
+        "uk": "Для цього запису вже йде повторне транскрибування",
+        "en": "A re-transcription is already running for this record",
+    },
+    "transcript.err.queue_unavailable": {
+        "uk": "Черга завдань недоступна",
+        "en": "The job queue is unavailable",
+    },
+    "transcript.err.version_not_found": {
+        "uk": "Версію транскрипту не знайдено",
+        "en": "Transcript version not found",
+    },
+    "transcript.err.bad_language": {
+        "uk": "language має бути рядком",
+        "en": "language must be a string",
+    },
     "transcript.err.tx_not_found": {
         "uk": "Транскрибування не знайдено",
         "en": "Transcription not found",
@@ -315,5 +343,69 @@ MESSAGES: dict = {
     "transcript.msg.deleted_n": {
         "uk": "Видалено {n} транскрибувань",
         "en": "Deleted {n} transcriptions",
+    },
+    "transcript.err.job_active": {
+        "uk": "Для цього запису вже виконується задача",
+        "en": "A job is already active for this record",
+    },
+    "transcript.err.eviction_not_approved": {
+        "uk": "Видалення версії транскрипту не схвалено",
+        "en": "Dropping a transcript version was not approved",
+    },
+    "transcript.err.transcribe_recording": {
+        "uk": "Іде запис — фонове транскрибування буде доступне після його завершення",
+        "en": "A recording is in progress — background transcription is available after it ends",
+    },
+    "transcript.err.path_not_allowed": {
+        "uk": "Шлях поза дозволеними теками (RECALL_IMPORT_ROOTS)",
+        "en": "The path is outside the allowed folders (RECALL_IMPORT_ROOTS)",
+    },
+    "transcript.err.path_not_found": {
+        "uk": "Файл за цим шляхом не знайдено",
+        "en": "No file at this path",
+    },
+    "transcript.err.file_too_large": {
+        "uk": "Файл завеликий",
+        "en": "The file is too large",
+    },
+    "transcript.err.youtube_url_invalid": {
+        "uk": "Невірне посилання YouTube",
+        "en": "Invalid YouTube link",
+    },
+    "transcript.err.youtube_download_failed": {
+        "uk": "Не вдалося завантажити аудіо з YouTube",
+        "en": "Could not download the audio from YouTube",
+    },
+    "transcript.err.async_source_invalid": {
+        "uk": "source: library, recording, youtube або path",
+        "en": "source: library, recording, youtube or path",
+    },
+    "transcript.err.async_ref_required": {
+        "uk": "Для source={source} потрібне поле {field}",
+        "en": "source={source} needs the field {field}",
+    },
+    "transcript.err.category_id_invalid": {
+        "uk": "category_id мусить бути числом",
+        "en": "category_id must be a number",
+    },
+    "transcript.err.ai_kind_invalid": {
+        "uk": "kind: polish, summarize, sentiment, translate, topics або enrich",
+        "en": "kind: polish, summarize, sentiment, translate, topics or enrich",
+    },
+    "transcript.err.ai_target_lang_invalid": {
+        "uk": "target_lang: en, uk або ru",
+        "en": "target_lang: en, uk or ru",
+    },
+    "transcript.err.ai_unknown_field": {
+        "uk": "Дозволені лише поля kind і target_lang",
+        "en": "Only the fields kind and target_lang are allowed",
+    },
+    "transcript.err.ai_enrich_recording": {
+        "uk": "Іде запис — збагачення буде доступне після його завершення",
+        "en": "A recording is in progress — enrichment is available after it ends",
+    },
+    "transcript.bm.note_too_long": {
+        "uk": "note завдовгий (макс. {max} символів)",
+        "en": "note is too long (max {max} characters)",
     },
 }

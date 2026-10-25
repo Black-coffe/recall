@@ -33,15 +33,28 @@ comtypes+pycaw for process loopback). ADR-026 (+ amendments A1-A4). Wiki: `docs/
   `list_call_sessions(enumerate_sessions=, own_pid=)` (K2) → `{exe: {mic|out: {active, peak, endpoint}}}`
   over Active/Inactive sessions of both directions (own PID skipped); `None` when the enumeration itself failed.
 - **call_watch.py** (K2, 4.9.0) — `CallWatcher` (thread `call-watch`, 1 s tick, all dependencies injected →
-  `tick()` is testable). A call = an exe from the list whose mic AND out are Active for `prompt_seconds` in a row and each side is
-  > `SPEECH_PEAK=0.02` for ≥3 ticks → one toast «Record it?» (not if a live recording already captures the exe: `captures()`).
-  The end of a call (sessions inactive for 20 s or silence for 40 s) withdraws an unread prompt and asks «Stop recording?» about
-  every live unpaused recording that captures the exe; then `autostop_minutes` of silence on both tracks → `stop_fn`
-  (the Stop button path, the recording stays intact). `pending()/consume(token,action)/dismiss(id)`: the prompt id = a one-time token,
-  TTL 3 h. JSONL log of decisions (no PID/language, rotation 5 MB → `.1`). `enumerate → None` keeps the state. `ToastNotifier`.
-- **toast.py** (K2) — Windows toasts without a pip dependency: `powershell.exe -EncodedCommand` (WinRT
-  `ToastNotificationManager`, `NO_WINDOW`), AUMID `Recall.CallPrompt` in HKCU; `build_xml`, `show`, `remove`,
-  `ensure_registered`. Buttons — protocol activation (a URL in the browser). Returns `bool`, does not raise.
+  `tick()` is testable). Call = listed exe with mic AND out Active for `prompt_seconds` and `SPEECH_PEAK=0.02` on both sides →
+  toast «Record it?»; call end → «Stop recording?», then `autostop_minutes` of silence → `stop_fn` (Stop button path).
+  `pending()/consume(token,action)/dismiss(id)`: one-time token, TTL 3 h. JSONL decision log (rotation 5 MB). `enumerate → None` keeps state.
+- **toast.py** (K2) — Windows toasts via `powershell.exe -EncodedCommand` (WinRT), AUMID `Recall.CallPrompt`; `build_xml`, `show`,
+  `remove`, `ensure_registered`. Buttons = protocol activation (URL). Returns `bool`, never raises.
+- **state.py** (4.20.0) — the one definition of "a recording is in progress": `recording_active(*, default=False)` :23 (any of `state.recording_service.
+  active_session_ids()`; no service -> False; a failing probe -> `default`, 4.22.0: the approval gate passes `True` = fail closed, other callers keep False) and `RECORDING_BLOCKED` (frozenset of actions that must not run during a
+  recording: `transcribe`, `video_analyze:describe_local`, `transcript_suggest_meta`, `transcript_ai:enrich`, `settings:copilot_disable`).
+  The set is data only; nothing enforces it. Callers: `blueprints/transcription.py:931`, `services/reembed.py:238,417`.
+- **autosave.py** (4.23.0) — server safety net for a stopped recording. `AutosaveScheduler(store, delay_sec, run_fn, hold_sec=600,
+  clock, timer_factory, after_save_fn=None)`: one daemon `threading.Timer` per sid, truth = `manifest['autosave']` `{status, at, reason, fields, outcome}`;
+  status pending|held|running|done|failed|cancelled (`off` only in `info()` when disabled). `schedule(sid)` (finalize callback; a prior
+  `cancelled` wins, a prior `held` keeps the later deadline), `hold(sid, fields)` (deadline = max(at, now+600 s), keeps name/description/
+  category_id, refused once running/done/failed/cancelled), `cancel(sid, reason)` (`/save`, `/discard`; leaves running/done/failed alone),
+  `reschedule_pending()` (boot; re-arms pending/held/running at `now+delay`), `info(sid)`, `after_save(sid)` (4.23.3: after the TAB saved,
+  runs `after_save_fn` once on a daemon Timer(0); result -> `manifest['autosave']['direction']`; not persisted, a restart drops it; False when
+  disabled/no fn). `AutosaveJob.file_saved(sid)` is that fn: direction only, never transcribes; waits <=2 h (`WAIT_TRANSCRIPT_SEC`) for
+  the tab's transcript, else `no_transcript`; returns `saved_<tid>_<dir>`. Direction outcomes: `direction_given|ask_user|set|set_meanwhile|patch_<st>`. `AutosaveJob` runs over LOOPBACK HTTP
+  (`http_json`): `POST /api/transcribe` source_type=library -> title via `suggest-meta` (waits for summary <=900 s and for no live
+  recording <=4 h; 409 `RECORDING_ACTIVE` retried) + `PATCH /api/history/<id>` only when no name -> direction via `suggest-category`
+  (waits for embeddings) + `PATCH .../category` only at confidence >= `RECORDING_AUTOSAVE_MIN_CONFIDENCE`. Returns an outcome string
+  (`skipped_already_transcribed`, `transcribe_failed_<code>`, `transcribed_<tid>_<title>_<dir>`). `delay_sec<=0` = off.
 - **recorder.py** — `WasapiRecorder` (+ `drain_events()` → `[]`), `list_input_devices()`,
   `resolve_device_params()`, `LevelMeter`, `AudioFrame`.
 - **finalize.py** — `pcm_to_wav()`, `finalize_session()` (mic+system → overlay → final.mp3). Reads bytes only.
@@ -62,31 +75,39 @@ comtypes+pycaw for process loopback). ADR-026 (+ amendments A1-A4). Wiki: `docs/
   PIDs are not written to the manifest) + SSE `source_changed`.
 
 ## Video tracks → visual timeline (4.10.0)
-Screen video lives in `recording_video_tracks` (`start_offset_sec`), `audio_downloads.has_video=1` + `primary_video_path`.
-`video_analysis.resolve_recording_video()` reduces this to `{primary_video_path, session_dir, start_offset_sec}`; the frame time in the
-timeline = time in the video + `start_offset_sec`. Thumbnails are cached in `<session_dir>/frames_cache/thumbs.npz`; frame images
-are no longer written to disk. Pipeline, endpoints, secrets — `services.md` (video_*.py), `blueprints.md`, wiki `video-timeline-and-screen-secrets`.
+Tracks in `recording_video_tracks` (`start_offset_sec`); `video_analysis.resolve_recording_video()` -> `{primary_video_path, session_dir,
+start_offset_sec}`; thumbs cached in `<session_dir>/frames_cache/thumbs.npz`. Rest — `services.md`, wiki `video-timeline-and-screen-secrets`.
+**Live video (4.30.0):** `video.VideoTrack.segments` (`video.py:87`, serialized `:108`) = one `{n, path, start_offset_sec}` per capture file
+(start/resume); `_spawn_track` (`:380-385`) appends, an hevc-fallback respawn into the same path refreshes the last entry. `video_probe`
+capture argv: `-g int(fps)*2` (keyframe each 2 s) and `-flush_packets 1` (`video_probe.py:217,221`), so the growing fMP4 is readable ~2 s behind.
+Reader: `services/live_frames.py` (`services-video-privacy.md`).
 
 ## FSM (per session)
-```
-[recording] ──pause()──> [paused] ──resume()─┐
-     │                        │              │
-     └──── stop() ──> [stopping] ──finalize──> [finalized]
-                          └──crash──> [crashed]  (recover_orphaned / recover_unfinalized)
-```
+recording <-> paused (pause/resume); stop() -> stopping -> finalized; crash -> crashed (recover_orphaned / recover_unfinalized).
 
-## Registration in the Audio library (`library.py`)
-`register_recording()` — an idempotent upsert into `audio_downloads` (`youtube_id='recording_'+sid`),
-category from `copilot_sessions.category_id`. *finalize ≠ saving: the upsert is done by the finalize callback.*
+## Library (`library.py`)
+`register_recording()` — idempotent upsert into `audio_downloads` (`youtube_id='recording_'+sid`), done by the finalize callback.
 
 **Gotchas:** a client on a dead PID streams silence without an error — the watcher is the only death detector;
 the watcher truncates include >4 processes to 4 (open() raises in the same situation); the copilot is one per
-process (`CopilotBusyError`, `memory/map/copilot.md`); reembed is deferred while at least one recording is alive.
+process (`CopilotBusyError`, `memory/map/copilot.md`); reembed and `suggest-meta` (409 `RECORDING_ACTIVE`) are deferred while at least one recording is alive
+(`state.recording_active()`).
 **K2:** nothing starts without a click; autostop acts only after «Stop recording?» and not on pause; the watcher lives only
 under `__main__` (`app.extensions['call_watcher']`, `app.py:1189`); settings `RECORDING_AUTOPROMPT[_APPS|_SECONDS]`,
-`RECORDING_AUTOSTOP_SILENCE_MIN` (`app/core/settings.py:187-204`, `.env.example:120-129`); HTTP — `memory/map/blueprints.md`.
-**SSE** (`recording:{sid}`): level (10Hz), status, chunk_saved, error, source_changed.
+`RECORDING_AUTOSTOP_SILENCE_MIN` (`app/core/settings.py:191-226`); HTTP — `memory/map/blueprints.md`.
+**Autosave (4.23.0):** settings `RECORDING_AUTOSAVE_SEC` (60; 0 = off), `_MODEL` (large-v3), `_LANGUAGE` (auto), `_MIN_CONFIDENCE` (0.6)
+(`settings.py:197-211`); singleton `state.recording_autosave` (`app/state.py:65`). Built in `app.py:858-876` (`_rec_autosave_job` then
+`_rec_autosave` with `after_save_fn=_rec_autosave_job.file_saved`) BEFORE recovery; the finalize
+callback schedules (`app.py:727-745`, result goes into the callback payload as `autosave`); boot re-arm `app.py:925`. Gotcha: a restart
+re-arms with a fresh full delay, and a job interrupted while `running` is re-run (skipped if a transcript already exists).
+`discard` is refused 409 `RECORDING_KEPT` once a transcript exists or autosave is running/done (`_recording_kept`, `recording.py:894`).
+`/save` (4.23.3): cancels the deadline, then sets `autosave.saved` in one locked write; only the FIRST successful save (`saved` not yet
+set) calls `after_save` (`recording.py:826-845`), so a second tab does not file twice.
+**SSE** (`recording:{sid}`): level (10Hz), status, chunk_saved, error, source_changed. Since 4.20.0 every event except `level` and
+`chunk_saved` is also kept in the broker's per-channel ring (`services-infra.md`) and read by MCP `wait_for`.
 **Tests:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
-recording_service,recording_blueprint,session_store}.py`. Spike kit: `scripts/spikes/process_loopback/`.
+recording_service,recording_blueprint,session_store}.py`.
 
-last-verified: 2026-10-13 (the video tracks section); the rest 2026-10-08
+last-verified: 2026-10-25 (live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
+
+> **4.26.0:** autosave `http_json` sends the per-boot UI token (`autosave.py:221`), so its loopback calls count as `ui`, not as an agent (ADR-045).

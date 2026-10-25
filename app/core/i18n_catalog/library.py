@@ -31,6 +31,14 @@ MESSAGES: dict = {
     "library.doc.err.folder_empty": _m(
         "У папці немає підтримуваних документів", "The folder has no supported documents"),
     "library.doc.err.queue_unavailable": _m("Черга завдань недоступна", "The job queue is unavailable"),
+    "library.doc.err.bad_paths": _m(
+        "Очікується непорожній список шляхів до файлів", "A non-empty list of file paths is expected"),
+    "library.doc.err.bulk_limit": _m(
+        "Забагато файлів за раз: не більше {max}", "Too many files at once: at most {max}"),
+    "library.doc.err.path_not_allowed": _m(
+        "Файл поза дозволеними директоріями (RECALL_IMPORT_ROOTS)",
+        "The file is outside the allowed directories (RECALL_IMPORT_ROOTS)"),
+    "library.doc.err.file_too_large": _m("Файл завеликий", "The file is too large"),
     # audio_library.py
     "library.audio.err.no_url": _m("URL не вказано", "URL not provided"),
     "library.audio.err.bad_url": _m("Невірний YouTube URL", "Invalid YouTube URL"),

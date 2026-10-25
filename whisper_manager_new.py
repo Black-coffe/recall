@@ -55,11 +55,11 @@ FASTER_MODELS_META = {
     "distil-medium.en": {"size": "394 MB",  "params": "394M",  "speed": "~6x",  "memory": "~3 GB",  "multilingual": False, "distil": True},
     "large-v1":         {"size": "1550 MB", "params": "1550M", "speed": "~1x",  "memory": "~10 GB", "multilingual": True},
     "large-v2":         {"size": "1550 MB", "params": "1550M", "speed": "~1x",  "memory": "~10 GB", "multilingual": True},
-    "large-v3":         {"size": "1550 MB", "params": "1550M", "speed": "~1x",  "memory": "~10 GB", "multilingual": True},
+    "large-v3":         {"size": "1550 MB", "params": "1550M", "speed": "~1x",  "memory": "~10 GB", "multilingual": True,  "recommended": True},
     "distil-large-v2":  {"size": "756 MB",  "params": "756M",  "speed": "~6x",  "memory": "~6 GB",  "multilingual": False, "distil": True},
     "distil-large-v3":  {"size": "756 MB",  "params": "756M",  "speed": "~6x",  "memory": "~6 GB",  "multilingual": False, "distil": True},
     "distil-large-v3.5":{"size": "756 MB",  "params": "756M",  "speed": "~6x",  "memory": "~6 GB",  "multilingual": False, "distil": True},
-    "large-v3-turbo":   {"size": "809 MB",  "params": "809M",  "speed": "~4x",  "memory": "~6 GB",  "multilingual": True,  "recommended": True},
+    "large-v3-turbo":   {"size": "809 MB",  "params": "809M",  "speed": "~4x",  "memory": "~6 GB",  "multilingual": True},
 }
 # Bare aliases that duplicate a canonical model — hidden from the catalog.
 FASTER_MODEL_ALIASES = {"large", "turbo"}
@@ -80,6 +80,18 @@ def _hf_cache_base():
         return Path(HF_HUB_CACHE)
     except Exception:
         return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def faster_cache_dir() -> str:
+    """The HF hub cache the faster backend loads from: `WhisperModel` passes no download_root,
+    so faster_whisper.utils.download_model(cache_dir=None) lands in huggingface_hub's default."""
+    return str(_hf_cache_base())
+
+
+def faster_model_repo(name: str) -> Optional[str]:
+    """HF repo the faster backend loads for a model name (its short-name map applied)."""
+    fw_name = FasterWhisperBackend._MODEL_NAME_MAP.get(name, name)
+    return _hf_models_map().get(fw_name)
 
 
 def _repo_cached(repo: str) -> bool:

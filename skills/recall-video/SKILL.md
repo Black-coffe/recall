@@ -27,6 +27,13 @@ files and Telegram have no video — there it is `error_code: NO_VIDEO`.
    or a batch `get_frame(id, from_sec=…, to_sec=…, limit=6)`. `size="full"` — when
    you need to read small text, otherwise `thumb`.
 5. **Base the conclusion** on both the text and the frames, with `HH:MM:SS` timecodes.
+6. **During the call** (the recording is still running, no transcription yet). `get_live_video()`
+   → monitors, fps and `readable_until` (seconds of the recording, a few seconds behind real time).
+   Then `get_live_frames(t=…)` for one frame, or `get_live_frames(start=…, end=…, mode="changes")`
+   for what changed on the screen (`mode="step", step=…` for a fixed rhythm); at most 12 frames per
+   call — pass `next_t` back verbatim as `cursor` until it is `null`. Each frame carries its masked
+   on-screen text. Several monitors → `track`; several recordings → `session_id`. After the recording
+   is finalized it answers `available: false`: switch to steps 2–4 on its transcription.
 
 Other entry points:
 - «What was on the screen when X was said» → `get_frames_for_text(id, query="X")` →

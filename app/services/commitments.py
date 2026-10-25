@@ -1387,9 +1387,9 @@ def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int =
 # ============================================================
 # Changing a task's status with a journal (K5 k5-task-buttons)
 # ============================================================
-# The single write path for briefing buttons (source='bot') and /tasks (source='web'):
-# the change and the event in `action_item_events` — in one transaction, so the journal cannot
-# diverge from the state. MCP does not come here (read-only, `mcp-read-first-strategy`).
+# The single write path for briefing buttons (source='bot'), /tasks (source='web') and
+# agents over MCP (source='mcp'): the change and the event in `action_item_events` — in one
+# transaction, so the journal cannot diverge from the state.
 
 STATUS_ACTIONS = ("done", "cancelled", "open")
 POSTPONE_DAYS = {"postpone:1": 1, "postpone:7": 7, "postpone:30": 30}
@@ -1422,12 +1422,15 @@ def _write_event(conn, row, *, source: str, actor: Optional[str], action: str,
 
 
 def apply_action(db_path: str, item_id: int, action: str, *, source: str,
-                 actor: Optional[str] = None, today: Optional[date] = None) -> dict:
+                 actor: Optional[str] = None, today: Optional[date] = None,
+                 dedupe: bool = False) -> dict:
     """Change the status (`done|cancelled|open`) or postpone the deadline (`postpone:1|7|30`).
 
     Postponing: `due_date` = today + N days, `due_precision='day'`, status -> `open`
     (from `stale` too — the owner has just confirmed the task is alive). The raw `due` phrase
-    is not rewritten. -> `{event_id, item_id, status, due_date}`.
+    is not rewritten. -> `{event_id, item_id, status, due_date, created}`.
+    `dedupe=True` (agents): when the item is already in the requested state, nothing is
+    written and the item's last `event_id` (or None) comes back with `created=False`.
     Unknown task -> `LookupError`, unknown action -> `ValueError`; the DB is unchanged."""
     if action not in STATUS_ACTIONS and action not in POSTPONE_DAYS:
         from app.core.i18n import tr
@@ -1436,18 +1439,28 @@ def apply_action(db_path: str, item_id: int, action: str, *, source: str,
         row = _item_state(conn, item_id)
         if action in POSTPONE_DAYS:
             new_due = ((today or date.today()) + timedelta(days=POSTPONE_DAYS[action])).isoformat()
-            return _write_event(conn, row, source=source, actor=actor, action=action,
-                                status="open", due_date=new_due, due_precision=P_DAY)
-        return _write_event(conn, row, source=source, actor=actor, action=action,
-                            status=action, due_date=row["due_date"],
-                            due_precision=row["due_precision"])
+            status, due_date, due_precision = "open", new_due, P_DAY
+        else:
+            status, due_date, due_precision = action, row["due_date"], row["due_precision"]
+        if dedupe and (row["status"], row["due_date"], row["due_precision"]) == (
+                status, due_date, due_precision):
+            last = conn.execute("SELECT MAX(id) AS m FROM action_item_events WHERE item_id = ?",
+                                (row["id"],)).fetchone()["m"]
+            return {"event_id": last, "item_id": row["id"], "status": status,
+                    "due_date": due_date, "created": False}
+        res = _write_event(conn, row, source=source, actor=actor, action=action,
+                           status=status, due_date=due_date, due_precision=due_precision)
+        res["created"] = True
+        return res
 
 
 def undo_action(db_path: str, event_id: int, *, source: str,
-                actor: Optional[str] = None) -> dict:
+                actor: Optional[str] = None, only_source: Optional[str] = None) -> dict:
     """Undo an event: restore the task's status and deadline from before it.
 
     Only the task's LAST event (otherwise the rollback would wipe a later change) -> else `ValueError`.
+    `only_source` (agents): an event written by another source -> `PermissionError`, checked
+    before the last-event rule, nothing changes.
     Undoing is an event too (`action='undo'`, `undo_of`), so the journal stays complete."""
     with get_db_connection(db_path) as conn:
         ev = conn.execute("SELECT * FROM action_item_events WHERE id = ?",
@@ -1455,6 +1468,9 @@ def undo_action(db_path: str, event_id: int, *, source: str,
         if ev is None:
             from app.core.i18n import tr
             raise LookupError(tr("svc_tasks.err.eventNotFound", id=event_id))
+        if only_source is not None and ev["source"] != only_source:
+            from app.core.i18n import tr
+            raise PermissionError(tr("knowledge.memory.err.not_mcp_event"))
         last = conn.execute("SELECT MAX(id) AS m FROM action_item_events WHERE item_id = ?",
                             (ev["item_id"],)).fetchone()["m"]
         if last != event_id or ev["action"] == "undo":

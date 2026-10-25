@@ -30,7 +30,7 @@ from app.core.i18n import tr
 # Load .env as early as possible — before services read env vars
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 except ImportError:
     pass
 
@@ -77,6 +77,8 @@ from app.blueprints.copilot import copilot_bp as _copilot_bp
 from app.blueprints.settings_api import settings_bp as _settings_bp
 from app.blueprints.comments import comments_bp as _comments_bp
 from app.blueprints.mail import mail_bp as _mail_bp
+from app.blueprints.connect import connect_bp as _connect_bp
+from app.blueprints.automation import automation_bp as _automation_bp
 
 
 def get_db_connection():
@@ -674,6 +676,7 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
         )
         _rec_store = SessionStore(cfg.RECORDING_DIR)
         _rec_lib_db_path = app.config['DATABASE']
+        _rec_autosave = None   # AutosaveScheduler, set once the service exists (recording-autosave)
 
         def _recording_finalize_callback(sid: str) -> None:
             """Push finalize into the JobQueue. Does not block the caller.
@@ -717,9 +720,18 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
                             sid, _reg.get('download_id'),
                         )
                 except Exception as e:
+                    _reg = None
                     logger.warning(
                         "Auto-registration of recording %s in the library failed: %s", sid, e,
                     )
+                # recording-autosave: whoever stopped it, the recording gets a deadline
+                # after which the server transcribes, titles and files it itself.
+                _autosave_info = None
+                if _reg is not None and _rec_autosave is not None:
+                    try:
+                        _autosave_info = _rec_autosave.schedule(sid)
+                    except Exception as e:
+                        logger.warning("Autosave of recording %s not scheduled: %s", sid, e)
                 if sse_broker is not None:
                     sse_broker.publish(
                         f'recording:{sid}',
@@ -728,6 +740,7 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
                             'status': 'finalized',
                             'final_mp3_path': result.get('final_mp3_path'),
                             'total_duration_sec': result.get('total_duration_sec'),
+                            'autosave': _autosave_info,
                         },
                     )
                 # --- Phase 22 Story S5: video finalize (sibling step, NEVER breaks audio) ---
@@ -842,6 +855,26 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
             src.open()
             return src
 
+        # recording-autosave: built before recovery so a recording finalized by crash recovery
+        # also gets its deadline (is_recording binds recording_service at call time).
+        from app.services.recording.autosave import AutosaveJob, AutosaveScheduler
+        _rec_autosave_job = AutosaveJob(
+            base_url=f'http://127.0.0.1:{cfg.PORT}',
+            db_path=_rec_lib_db_path,
+            store=_rec_store,
+            model=_settings.env('RECORDING_AUTOSAVE_MODEL'),
+            language=_settings.env('RECORDING_AUTOSAVE_LANGUAGE'),
+            min_confidence=_settings.env_float('RECORDING_AUTOSAVE_MIN_CONFIDENCE'),
+            is_recording=lambda: bool(recording_service.active_session_ids()),
+            is_transcribing=lambda aid: aid in (_state.active_library_transcriptions or {}),
+        )
+        _rec_autosave = AutosaveScheduler(
+            _rec_store,
+            _settings.env_int('RECORDING_AUTOSAVE_SEC'),
+            _rec_autosave_job,
+            after_save_fn=_rec_autosave_job.file_saved,
+        )
+
         recording_service = RecordingService(
             store=_rec_store,
             sse_broker=sse_broker,
@@ -887,6 +920,13 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
                 reconcile_recordings(_db, _store)
             except Exception as _e:
                 logger.warning("Boot-time reconcile of recordings failed: %s", _e)
+            # recording-autosave: a restart dropped the in-memory timers.
+            try:
+                _resumed = _rec_autosave.reschedule_pending()
+                if _resumed:
+                    logger.info("Recording autosave re-armed after restart: %s", _resumed)
+            except Exception as _e:
+                logger.warning("Recording autosave re-arm failed: %s", _e)
         threading.Thread(
             target=_run_recording_reconcile,
             name='recording-reconcile',
@@ -896,9 +936,11 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
         logger.warning("Recording service failed to start: %s", e)
         recording_service = None
         recording_recovery_log = []
+        _rec_autosave = None
 else:
     recording_service = None
     recording_recovery_log = []
+    _rec_autosave = None
     if cfg.HEADLESS:
         # config-registry-profiles S2: cfg.RECORDING_ENABLED is already forced to False
         # in get_config() (config.py, Assumption 3) without trying to import pyaudiowpatch —
@@ -929,6 +971,7 @@ _state.робота['job_queue'] = {'bound': True, 'recovered': len(_crashed_job
 try:
     from app.services import retention as _retention
     _retention.purge_soft_deleted(app.config['DATABASE'])
+    _retention.purge_mcp_actions(app.config['DATABASE'])
 except Exception as e:
     logger.warning("Soft-delete purge not performed: %s", e)
 
@@ -942,10 +985,10 @@ if recording_service is not None:
         live_transcribe_worker = LiveTranscribeWorker(
             whisper_manager=whisper_manager,
             broker=sse_broker,
-            model_name='small',  # speed/quality trade-off
+            model_name='large-v3-turbo',  # as fast as small, ~2.4x fewer errors (whisper-best-default)
             interval=8.0,
         )
-        logger.info("LiveTranscribeWorker ready (model=small, interval=8s)")
+        logger.info("LiveTranscribeWorker ready (model=large-v3-turbo, interval=8s)")
     except Exception as e:
         logger.warning("LiveTranscribeWorker failed to start: %s", e)
         live_transcribe_worker = None
@@ -1011,6 +1054,7 @@ _state.init(
     add_log=add_process_log,
     recording_service=recording_service,
     recording_recovery_log=recording_recovery_log,
+    recording_autosave=_rec_autosave,
     live_transcribe_worker=live_transcribe_worker,
     copilot_service=copilot_service,
     copilot_worker=copilot_worker,
@@ -1077,6 +1121,8 @@ app.register_blueprint(_copilot_bp)
 app.register_blueprint(_settings_bp)
 app.register_blueprint(_comments_bp)
 app.register_blueprint(_mail_bp)
+app.register_blueprint(_connect_bp)
+app.register_blueprint(_automation_bp)
 
 # T1.2 (Wave 1): a single before_request authentication gate for all /api/*
 # (except /api/health). A centralized point instead of a decorator on each of
@@ -1084,6 +1130,12 @@ app.register_blueprint(_mail_bp)
 # (localhost+trusted / RECALL_API_KEY / fail-closed) — app/core/auth.py.
 from app.core import auth as _auth
 _auth.register(app)
+
+from app.core import approval_gate as _approval_gate
+_approval_gate.register(app)
+
+from app.core import audit_hooks as _audit_hooks
+_audit_hooks.register(app)
 
 # T7.4 (Wave 4): a single catch-all error handler for unhandled exceptions —
 # traceback to the log (with request_id via _RequestIdLogFilter above), the client gets

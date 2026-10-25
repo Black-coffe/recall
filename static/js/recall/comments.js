@@ -103,6 +103,8 @@
         return `<div class="${cls}" data-cid="${c.id}" data-pinned="${c.pinned ? '1' : '0'}" data-analyzed="${c.analyzed ? '1' : '0'}">
             <div class="rc-cm__head">
                 <span class="rc-cm__kind">${U.esc(label)}</span>
+                ${c.source === 'mcp' ? `<span class="rc-cm__agent">${T('knowledge.comments.badge.agent')}</span>` : ''}
+                ${c.source === 'mcp' && !c.confirmed_at ? `<button class="rc-btn rc-btn--xs rc-cm__confirm" data-cm="confirm">${T('knowledge.comments.confirm')}</button>` : ''}
                 ${c.pinned ? `<span class="rc-cm__pin" title="${T('knowledge.cmt.pinnedTitle')}"><i class="fa-solid fa-thumbtack"></i></span>` : ''}
                 ${c.anchor_time != null ? `<span class="rc-cm__at rc-mono">${U.fmtDuration ? U.fmtDuration(c.anchor_time) : ''}</span>` : ''}
                 <span class="rc-cm__when">${U.esc(fmtWhen(c.created_at))}</span>
@@ -293,6 +295,11 @@
                 }
             });
             if (el.dataset.analyzed === '1') loadDerived(el, cid);
+            const cf = el.querySelector('[data-cm="confirm"]');
+            if (cf) cf.addEventListener('click', async () => {
+                try { await R.api.confirmComment(cid); await reload(); }
+                catch (err) { UI.toast((err && err.message) || T('knowledge.cmt.fail'), 'error'); }
+            });
             act('del').addEventListener('click', async () => {
                 try {
                     await R.api.commentDelete(cid);

@@ -213,7 +213,12 @@ def build_capture_command(
         '-c:v', codec,
         '-preset', quality,
         '-cq', str(cq),
+        # Keyframe every 2 s: a growing fMP4 is readable up to ~2 s behind live.
+        '-g', str(int(fps) * 2),
         '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+        # Flush each fragment as it closes: without it the muxer's output buffer holds a
+        # static screen's tiny fragments back for ~20 s and the readable edge stalls.
+        '-flush_packets', '1',
         '-f', 'mp4',
         out_path,
     ]

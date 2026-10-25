@@ -59,11 +59,16 @@ def no_real_reembed(monkeypatch):
 
 @pytest.fixture
 def client(db):
+    """The owner's SPA: every request carries the per-boot UI token (an agent without it
+    meets the non-UI rules of `tests/test_archive_org_taxonomy.py`)."""
+    from app.core import auth
     app = Flask(__name__)
     app.register_blueprint(memory_bp)
     app.config["TESTING"] = True
     app.config["DATABASE"] = db
-    return app.test_client()
+    client = app.test_client()
+    client.environ_base["HTTP_" + auth.UI_TOKEN_HEADER.upper().replace("-", "_")] = auth.ui_token()
+    return client
 
 
 def _tree(conn):
@@ -1102,3 +1107,19 @@ def test_category_error_text_follows_ui_language(conn, monkeypatch):
     with pytest.raises(cats.CategoryError) as exc_uk:
         cats.ensure_tag(conn, "   ")
     assert str(exc_uk.value) == "Порожня назва тега"
+
+
+def test_create_category_created_source_defaults_to_null_and_takes_mcp(conn):
+    ui = cats.create_category(conn, "Інвестори")
+    agent = cats.create_category(conn, "Партнери", created_source="mcp")
+    rows = dict(conn.execute("SELECT id, created_source FROM categories WHERE id IN (?, ?)",
+                             (ui["id"], agent["id"])).fetchall())
+    assert rows[ui["id"]] is None and rows[agent["id"]] == "mcp"
+
+
+def test_set_tags_accepts_the_mcp_source_and_writes_it_on_the_link(conn):
+    tid = _add_tx(conn)
+    assert "mcp" in cats.TAG_SOURCES
+    assert cats.set_tags(conn, tid, add=["бюджет"], source="mcp") is True
+    assert conn.execute("SELECT source FROM record_tags WHERE transcription_id = ?",
+                        (tid,)).fetchone()[0] == "mcp"

@@ -4,38 +4,34 @@
 - /api/health
 - /api/models
 - /api/download_model
+- /api/models/download-job
+- /api/system/diagnostic-package (+ /file)
 - /api/system_info
 - /api/system_stats
 - /api/polish/availability
 - /api/metrics
 """
-import io
-import json
 import logging
 import os
 import pathlib
-import platform
-import re
 import sqlite3
-import subprocess
-import zipfile
-from datetime import datetime, timezone
+from datetime import datetime
 
 import torch
 from flask import Blueprint, Response, abort, current_app, jsonify, render_template, request
 
 from app import state
+from app.core import auth
 from app.core.i18n import tr, ui_lang_setting
 from app.services import text_polishing
 from app.services.models import get_default_model
-from app.utils.proc import NO_WINDOW
 
 
 logger = logging.getLogger(__name__)
 system_bp = Blueprint('system', __name__)
 
 # Shared with /api/health — one version for the whole blueprint (T8.1).
-APP_VERSION = "4.18.1"
+APP_VERSION = "4.30.0"
 
 
 @system_bp.route('/', defaults={'_path': ''}, methods=['GET'])
@@ -53,7 +49,10 @@ def app_shell(_path):
         abort(404)
     if current_app.config.get('HEADLESS'):
         return jsonify(error="headless", hint="API-only profile"), 404
-    return render_template('shell.html', ui_lang=ui_lang_setting())
+    if auth.is_direct_loopback() and not auth.host_ok():
+        return jsonify(success=False, error="host rejected", code="HOST_REJECTED"), 403
+    token = auth.ui_token() if auth.is_local_trusted() else ""
+    return render_template('shell.html', ui_lang=ui_lang_setting(), ui_token=token)
 
 
 @system_bp.route('/favicon.ico')
@@ -190,16 +189,50 @@ def get_models():
     return jsonify(state.whisper_manager.get_available_models())
 
 
+def _model_name_from_body():
+    data = request.get_json(silent=True)
+    name = data.get('model_name') if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
+
+
 @system_bp.route('/api/download_model', methods=['POST'])
 def download_model():
-    """Download a model."""
-    data = request.json
-    model_name = data.get('model_name')
+    """Download a model: submits (or joins) the lock-free model_download job and waits for it,
+    so loaded models keep serving; the answer keeps the synchronous shape."""
+    from app.services import model_download
+    model_name = _model_name_from_body()
     if not model_name:
         return jsonify({"success": False, "error": tr("core.system.model_missing")}), 400
-    if state.whisper_manager.download_model(model_name):
-        return jsonify({"success": True, "message": tr("core.system.model_downloaded", model=model_name)})
-    return jsonify({"success": False, "error": tr("core.system.model_download_failed")}), 500
+    try:
+        sub = model_download.submit(model_name, actor=auth.classify_request()[0])
+    except model_download.ModelDownloadError as e:
+        return jsonify({"success": False, "error": e.message, "error_code": e.code}), 400
+    job = state.job_queue.get(sub["job_id"])
+    if job is not None and job._future is not None:
+        try:
+            job._future.result()
+        except Exception as e:  # the job already logged it; the answer below says failed
+            logger.debug(f"Model download job {job.id} failed: {e}")
+    if job is not None and job.state == "completed":
+        return jsonify({"success": True, "message": tr("core.system.model_downloaded", model=model_name),
+                        "job_id": job.id})
+    return jsonify({"success": False, "error": tr("core.system.model_download_failed"),
+                    "job_id": sub["job_id"]}), 500
+
+
+@system_bp.route('/api/models/download-job', methods=['POST'])
+def models_download_job():
+    """Queue a Whisper model download in the background: 202 {success, job_id, created}."""
+    from app.services import model_download
+    model_name = _model_name_from_body()
+    if not model_name:
+        return jsonify({"success": False, "error": tr("core.system.model_missing"),
+                        "error_code": "INVALID_ARGUMENT"}), 400
+    try:
+        sub = model_download.submit(model_name, actor=auth.classify_request()[0])
+    except model_download.ModelDownloadError as e:
+        return jsonify({"success": False, "error": e.message, "error_code": e.code}), 400
+    return jsonify({"success": True, **sub}), 202
 
 
 @system_bp.route('/api/models/update-status', methods=['GET'])
@@ -227,109 +260,32 @@ def system_info():
 
 
 # ---- T8.1 (Wave 4): diagnostic package ------------------------------
-# The simple variant from REMEDIATION_PLAN (no Sentry): one zip with the latest
-# lines of the file logs of three processes (app.py/telegram_listener.py/
-# mcp_server.py — see app/core/logger.py, telegram_listener.py:43-70,
-# mcp_server.py:41-74) + system_info + version/commit, for manual sending
-# with a complaint. NEVER includes transcripts/DB/.env — only a short
-# log tail, passed through the redaction below.
-DIAGNOSTIC_LOG_TAIL_LINES = 500
-
-# arcname in the zip -> path relative to the project root (current_app.root_path).
-# whisper_ui.log is configurable (config.LOG_FILE), the other two are fixed
-# names of separate processes (deliberately different files, to avoid WinError 32
-# on simultaneous rollover from several processes — see the comments there).
-_DIAGNOSTIC_LOG_SOURCES = (
-    ("whisper_ui.log", None),  # None -> read from current_app.config['LOG_FILE']
-    ("telegram_listener.log", "telegram_listener.log"),
-    ("mcp_server.log", "mcp_server.log"),
-)
-
-# Values that look like keys/tokens/hashes — masked before packing.
-# 1) "bare" Anthropic keys (sk-ant-...), even when they occur outside a
-#    name=value pair (e.g. in an SDK error text).
-_RE_BARE_ANTHROPIC_KEY = re.compile(r'sk-ant-[A-Za-z0-9_\-]{10,}')
-# 2) NAME=value / NAME: value pairs where NAME looks like a secret:
-#    *_KEY, *_TOKEN, *_HASH, *_SECRET, *_PASSWORD, as well as api_id/api_hash
-#    (TELEGRAM_API_ID, TELEGRAM_API_HASH, ANTHROPIC_API_KEY, SECRET_KEY, …).
-_RE_SECRET_ASSIGNMENT = re.compile(
-    r'(?i)\b([A-Za-z][\w.]*(?:api[_-]?key|api[_-]?hash|api[_-]?id|secret|token|'
-    r'password|passwd|_key|_hash)[\w.]*)\s*([:=])\s*(\S+)'
-)
-
-
-def _redact_secrets(line: str) -> str:
-    """Masks values that look like keys/tokens/hashes in a single log line."""
-    line = _RE_BARE_ANTHROPIC_KEY.sub('sk-ant-***REDACTED***', line)
-    line = _RE_SECRET_ASSIGNMENT.sub(r'\1\2***REDACTED***', line)
-    return line
-
-
-def _tail_redacted(path: str, max_lines: int) -> str:
-    """The last max_lines lines of a file, each passed through redaction."""
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        lines = f.readlines()
-    tail = lines[-max_lines:]
-    return ''.join(_redact_secrets(l) for l in tail)
-
-
-def _git_commit_short():
-    """Short git commit, if cheap to get (repo exists, git in PATH). None otherwise."""
-    try:
-        res = subprocess.run(
-            ['git', 'rev-parse', '--short', 'HEAD'],
-            cwd=current_app.root_path, capture_output=True, text=True, timeout=2,
-            creationflags=NO_WINDOW,
-        )
-        if res.returncode == 0:
-            return res.stdout.strip() or None
-    except Exception:
-        pass
-    return None
+# Built by app/services/diagnostics.py; the constant stays importable from here.
+from app.services.diagnostics import DIAGNOSTIC_LOG_TAIL_LINES  # noqa: E402,F401
 
 
 @system_bp.route('/api/system/diagnostic-package', methods=['GET'])
 def diagnostic_package():
     """Zip for manual sending with a complaint: log tails (redacted) +
     system_info + version/commit + manifest. A button in Settings (T8.1)."""
-    buf = io.BytesIO()
-    included_logs = []
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for arcname, relpath in _DIAGNOSTIC_LOG_SOURCES:
-            relpath = relpath or current_app.config.get('LOG_FILE', 'whisper_ui.log')
-            path = relpath if os.path.isabs(relpath) else os.path.join(current_app.root_path, relpath)
-            if not os.path.isfile(path):
-                continue
-            try:
-                content = _tail_redacted(path, DIAGNOSTIC_LOG_TAIL_LINES)
-            except OSError as e:
-                logger.warning(f"Failed to read log {path} for the diagnostic package: {e}")
-                continue
-            zf.writestr(f"logs/{arcname}", content)
-            included_logs.append(arcname)
-
-        try:
-            sys_info = state.whisper_manager.get_system_info() if state.whisper_manager else {}
-        except Exception as e:
-            sys_info = {"error": str(e)}
-        zf.writestr("system_info.json", json.dumps(sys_info, ensure_ascii=False, indent=2, default=str))
-
-        manifest = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "app_version": APP_VERSION,
-            "git_commit": _git_commit_short(),
-            "os": platform.platform(),
-            "python_version": platform.python_version(),
-            "included_logs": included_logs,
-            "log_tail_lines": DIAGNOSTIC_LOG_TAIL_LINES,
-        }
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-
-    buf.seek(0)
+    from app.services import diagnostics
     filename = f"recall-diagnostic-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-    resp = Response(buf.getvalue(), mimetype='application/zip')
+    resp = Response(diagnostics.build_package(), mimetype='application/zip')
     resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
     return resp
+
+
+@system_bp.route('/api/system/diagnostic-package/file', methods=['POST'])
+def diagnostic_package_file():
+    """Write the package to logs/diagnostics/<ts>.zip (newest five kept); answers its path and size."""
+    from app.services import diagnostics
+    try:
+        written = diagnostics.write_package()
+    except OSError as e:
+        logger.warning(f"Diagnostic package write failed: {e}")
+        return jsonify({"success": False, "error": tr("core.system.diagnostic_write_failed"),
+                        "error_code": "INTERNAL_ERROR"}), 500
+    return jsonify({"success": True, **written})
 
 
 @system_bp.route('/api/system_stats', methods=['GET'])

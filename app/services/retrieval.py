@@ -462,7 +462,7 @@ def _hydrate_comments(db_path: str, keys: list[int]) -> dict[int, dict]:
         rows = conn.execute(
             f"SELECT cc.id AS cc_id, cc.text, cc.chunk_index, "
             f"c.id AS comment_id, c.target_type, c.target_id, c.kind, c.weight, "
-            f"c.pinned, c.anchor_time, c.author, c.source AS comment_source, "
+            f"c.pinned, c.anchor_time, c.author, c.source AS comment_source, c.confirmed_at, "
             f"substr(c.created_at, 1, 10) AS comment_date, "
             f"t.source_name AS tx_name, t.source_type AS tx_source_type, "
             f"COALESCE(t.meeting_date, substr(t.created_at, 1, 10)) AS tx_date, "
@@ -498,7 +498,8 @@ def _comment_entry(key: int, row, meta: dict) -> dict:
         "comment_chunk_id": -key,
         "source_type": "comment",
         "comment_kind": row["kind"],
-        "comment_weight": comments_svc.kind_weight(row["kind"], row["weight"]),
+        "comment_weight": comments_svc.kind_weight(row["kind"], row["weight"],
+                                                      row["comment_source"], row["confirmed_at"]),
         "pinned": bool(row["pinned"]),
         "author": row["author"],
         "target_type": row["target_type"],
@@ -871,7 +872,8 @@ def search(db_path: str, query: str, top_k: int = 8,
                 meta["final"] = 0.0
                 continue
             from app.services import comments as comments_svc
-            kw = comments_svc.kind_weight(cr["kind"], cr["weight"])
+            kw = comments_svc.kind_weight(cr["kind"], cr["weight"],
+                                          cr["comment_source"], cr["confirmed_at"])
             rec = _recency_factor(cr["comment_date"], now)
             meta["recency"] = rec
             # The actual contribution of the comment multiplier -- _why_top needs it in order to
@@ -1014,7 +1016,9 @@ def attach_comments(db_path: str, chunks: list[dict],
     a match -- the mechanics mirror `attach_thread_context` for TG threads.
     ONLY the kinds in `comments.ATTACH_KINDS` are attached, plus those pinned
     manually: if everything were attached indiscriminately, every answer would pull all the notes
-    of the card and the layer would turn into noise.
+    of the card and the layer would turn into noise. An agent comment (`source='mcp'`) the owner
+    has not confirmed is never attached: rag labels attached comments as the owner's and ranks
+    them above the transcript.
 
     Returns a LIST of comments (does not mutate chunks) -- rag renders them as a separate
     priority block, not mixed in with the citations.
@@ -1035,13 +1039,15 @@ def attach_comments(db_path: str, chunks: list[dict],
         with get_db_connection(db_path) as conn:
             rows = conn.execute(
                 f"SELECT c.id, c.target_id, c.body, c.kind, c.weight, c.pinned, "
-                f"c.author, c.anchor_time, substr(c.created_at, 1, 10) AS comment_date, "
+                f"c.author, c.anchor_time, c.source, c.confirmed_at, "
+                f"substr(c.created_at, 1, 10) AS comment_date, "
                 f"t.source_name AS tx_name "
                 f"FROM comments c "
                 f"LEFT JOIN transcriptions t ON t.id = c.target_id "
                 f"WHERE c.deleted_at IS NULL AND c.target_type = 'transcription' "
                 f"AND c.target_id IN ({ph_t}) "
                 f"AND (c.pinned = 1 OR c.kind IN ({ph_k})) "
+                f"AND (c.source IS NOT 'mcp' OR c.confirmed_at IS NOT NULL) "
                 f"ORDER BY c.pinned DESC, c.created_at DESC",
                 list(tids) + kinds).fetchall()
     except sqlite3.OperationalError as exc:
@@ -1057,7 +1063,8 @@ def attach_comments(db_path: str, chunks: list[dict],
             "transcription_id": r["target_id"],
             "target_label": r["tx_name"] or tr("svc_retrieval.comment.target_record", id=r['target_id']),
             "kind": r["kind"],
-            "weight": comments_svc.kind_weight(r["kind"], r["weight"]),
+            "weight": comments_svc.kind_weight(r["kind"], r["weight"],
+                                              r["source"], r["confirmed_at"]),
             "pinned": bool(r["pinned"]),
             "author": r["author"],
             "anchor_time": r["anchor_time"],

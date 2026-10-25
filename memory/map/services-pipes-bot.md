@@ -1,8 +1,9 @@
 # services — scheduled pipes and the Telegram bot
 
-last-verified: 2026-10-16
+last-verified: 2026-10-18 (4.20.0: only the `.env` load path changed)
 
 Part of `app/services/*`; hub — [services.md](services.md). K4 4.13.0, K5 4.14.0/4.15.0.
+`pipes.py` (:636) and `tg_bot.py` (:190) call `load_dotenv(ENV_PATH)` with `app.core.env_file.ENV_PATH` (repo root), not a cwd search.
 **Language (english-i18n, 4.16.0):** the service strings of the brief and the buttons take their language from the setting, not from the request:
 `tr(..., lang=server_lang())` (`en` only with an explicit `RECALL_UI_LANG=en`, `auto` → uk; `app/core/i18n.py:37`). Keys —
 `telegram.brief.*` (`pipes.py:336-553`, `pipes_cards.py:43`, plural `tr_n("telegram.brief.hidden")` :350) and

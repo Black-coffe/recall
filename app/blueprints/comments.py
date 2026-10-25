@@ -22,6 +22,7 @@ import logging
 from flask import Blueprint, current_app, jsonify, request
 
 from app import state
+from app.core import auth
 from app.core.i18n import request_lang, tr
 from app.db.connection import get_db_connection
 from app.services import comments as svc
@@ -33,6 +34,24 @@ comments_bp = Blueprint('comments', __name__)
 
 def _db() -> str:
     return current_app.config['DATABASE']
+
+
+def _is_ui() -> bool:
+    return auth.classify_request()[0] == 'ui'
+
+
+def _coded_error(code: str, key: str, status: int = 403):
+    return jsonify({'success': False, 'error_code': code, 'error': tr(key)}), status
+
+
+def _owner_guard(comment_id: int):
+    """Non-UI callers may only touch their own (`mcp`) rows; the UI is unrestricted."""
+    if _is_ui():
+        return None
+    src = svc.source_of(_db(), comment_id)
+    if src is not None and src != 'mcp':
+        return _coded_error('OWNER_AUTHORED', 'knowledge.comments.err.owner_authored')
+    return None
 
 
 def _link_graph(comment_id: int, db_path: str) -> None:
@@ -147,6 +166,19 @@ def counts():
 @comments_bp.route('/api/comments', methods=['POST'])
 def create():
     data = request.get_json(silent=True) or {}
+    ui = _is_ui()
+    if not ui:
+        # An agent cannot claim owner provenance, boost, pin, authorship or threading.
+        data = {k: v for k, v in data.items()
+                if k not in ('weight', 'pinned', 'author', 'parent_id', 'source')}
+        try:
+            dup = svc.find_recent_duplicate(
+                _db(), (data.get('target_type') or '').strip(),
+                data.get('target_id'), data.get('body') or '')
+        except (svc.CommentError, TypeError, ValueError):
+            dup = None
+        if dup:
+            return jsonify({'success': True, 'comment': dup, 'created': False})
     try:
         c = svc.create(
             _db(),
@@ -161,7 +193,7 @@ def create():
             anchor_time=data.get('anchor_time'),
             anchor_chunk_id=data.get('anchor_chunk_id'),
             author=data.get('author'),
-            source=(data.get('source') or 'ui'),
+            source=((data.get('source') or 'ui') if ui else 'mcp'),
             parent_id=data.get('parent_id'),
         )
     except svc.CommentError as e:
@@ -175,6 +207,10 @@ def create():
 @comments_bp.route('/api/comments/<int:comment_id>', methods=['PATCH'])
 def update(comment_id):
     data = request.get_json(silent=True) or {}
+    denied = _owner_guard(comment_id)
+    if denied:
+        return denied
+    ui = _is_ui()
     try:
         c = svc.update(
             _db(), comment_id,
@@ -183,6 +219,7 @@ def update(comment_id):
             pinned=data.get('pinned'),
             weight=data.get('weight'),
             anchor_time=data.get('anchor_time'),
+            clear_confirmed=not ui,
         )
     except svc.CommentError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -195,6 +232,9 @@ def update(comment_id):
 
 @comments_bp.route('/api/comments/<int:comment_id>', methods=['DELETE'])
 def delete(comment_id):
+    denied = _owner_guard(comment_id)
+    if denied:
+        return denied
     if not svc.delete(_db(), comment_id):
         return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
     return jsonify({'success': True, 'id': comment_id})
@@ -251,8 +291,22 @@ def derived(comment_id):
                     'action_items': tasks})
 
 
+@comments_bp.route('/api/comments/<int:comment_id>/confirm', methods=['POST'])
+def confirm(comment_id):
+    """Owner confirmation of an agent comment: gives it the normal search weight."""
+    if not _is_ui():
+        return _coded_error('USE_UI', 'settings.speakers.err.use_ui')
+    c = svc.confirm(_db(), comment_id)
+    if not c:
+        return jsonify({'success': False, 'error': tr('knowledge.comments.err.not_found')}), 404
+    return jsonify({'success': True, 'comment': c})
+
+
 @comments_bp.route('/api/comments/<int:comment_id>/restore', methods=['POST'])
 def restore(comment_id):
+    denied = _owner_guard(comment_id)
+    if denied:
+        return denied
     if not svc.restore(_db(), comment_id):
         return jsonify({'success': False, 'error': tr('knowledge.comments.err.nothing_to_restore')}), 404
     # A restored comment must return to search too, not only to the card.

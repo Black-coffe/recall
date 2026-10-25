@@ -8,6 +8,228 @@ versioning: [SemVer](https://semver.org/).
 ### Fixed
 - VULYK tooling (`/vulyk-evolve` 2026-10-16): `scripts/scope-check.sh` no longer counts its own `memory/stats/scope.jsonl` as a story's out-of-scope edit (false `scope_breach` on every rerun in the same tree); registered as override 2 in `scripts/recall-vulyk-overrides.sh`.
 
+## [4.30.0] — 2026-10-25
+
+### Added
+- Live screen frames during a recording: MCP `get_live_video` (tracks per monitor, fps, the second the video is
+  readable until) and `get_live_frames` (the frame at any second, or a range by step down to one frame or "screen
+  changes only", at most 12 frames per call with a `next_t` cursor). Every frame comes with OCR text; screen secrets
+  are masked on the image and in the text. HTTP: `GET /api/recording/<sid>/live-video|live-frame|live-frames`.
+  Computed on request only; MCP 80 → 82 tools (51 read-only).
+
+### Changed
+- Screen capture writes a keyframe every 2 s (`-g 2×fps`) and flushes each fragment to disk (`-flush_packets 1`), so
+  the readable live edge lags ≤ ~2–2.5 s (was ~8 s, up to ~20 s on a still screen). Applies to recordings started
+  after a restart of Recall.
+- The manifest keeps every capture file of a video track (`segments`), so video recorded before a pause stays
+  reachable during the call.
+
+## [4.29.0] — 2026-10-21
+
+### Changed
+- The live call co-pilot is opt-in per call: `/record` shows "Turn on the co-pilot for this call", unchecked on every
+  render; without it the recording starts with no co-pilot (no Ollama load during the call). MCP live listening —
+  `get_live_transcript`, `ask_live` — works either way; `get_live_copilot` answers "not started" for such a call.
+
+## [4.28.0] — 2026-10-21
+
+### Changed
+- Default Whisper model is `large-v3` everywhere a model is not chosen explicitly: every SPA select
+  (upload, YouTube, audio library, record, settings), the onboarding hint, `POST /api/transcribe` and
+  `/api/transcribe/async` (and so MCP `transcribe`, previously `base`), Telegram media, recording
+  autosave and the boot warm-up. The catalog's "recommended" star moved from `large-v3-turbo` to `large-v3`.
+  Chosen by a measurement of all 8 installed multilingual models on FLEURS (uk WER: large-v3 8.2 %,
+  large-v3-turbo 8.7 %, medium 12.8 %, small 20.8 %, base 44.4 %) — `docs/specs/whisper-best-default/measurement.md`.
+- Live call transcription runs `large-v3-turbo` instead of `small` (same speed, ~2.4x fewer errors).
+- An API/MCP transcribe call without `model` on a machine without `large-v3` downloaded now answers
+  `MODEL_NOT_INSTALLED` instead of silently running `base`.
+
+## [4.27.0] — 2026-10-21
+
+### Added
+- MCP runs the pipeline: `transcribe` (library, recording, YouTube link or a local path under
+  `RECALL_IMPORT_ROOTS`) as a background job over the new `POST /api/transcribe/async`, refused while
+  a recording runs; the UI's synchronous `POST /api/transcribe` keeps its contract (logic extracted
+  into `app/services/transcription_run.py`).
+- `document_ingest` (up to 5 paths), `get_youtube_info`, `list_audio_library`, `audio_download`,
+  `audio_item` (edit / restore), `transcript_ai` (polish, summarize, sentiment, translate, topics,
+  enrich; a cached result costs nothing, no forced regeneration), `models` (download / check updates),
+  `system_diagnostics` (package written to `logs/diagnostics/`, last 5 kept), `job_cancel`.
+- `get_job_status` lists jobs, waits up to 25 s and returns the job's stored result and log.
+- D tools behind the native Windows dialog: `document_import_folder`, `document_reparse`.
+  MCP: 80 tools (49 read-only + 31 write).
+
+### Changed
+- Whisper model download no longer holds the model load lock: other models stay usable while one
+  downloads (UI and MCP).
+- Import-folder returns its job id.
+
+### Fixed
+- `video_analyze` that would send frames to Claude for description (by argument or by the
+  `VIDEO_VISION_BACKEND` setting) now asks the Windows dialog when it comes from MCP.
+
+## [4.26.0] — 2026-10-20
+
+### Added
+- MCP organises the archive (migration v55, provenance columns): write tools `task` (done / reopen /
+  snooze / owner / due), `bookmark`, `comment` (agent comments carry an "agent" badge and get no
+  search weight until the owner presses Confirm in the UI), `taxonomy` (directions and tags;
+  private directions refused), `speaker` (rename, map a label to an existing speaker id) and
+  `transcript` (title / description / direction); read tool `transcript_suggest_meta`.
+- D tools behind the native Windows dialog: `taxonomy_delete`, `taxonomy_merge`, `speaker_merge`,
+  `speaker_delete`, `transcript_delete`, `enrich_backfill`. MCP: 68 tools (47 read-only + 21 write).
+- Read tools get filter parameters (report §9 G4).
+
+### Fixed
+- An MCP retranscribe that would evict a kept transcript version now asks the Windows dialog; without
+  approval the job fails with `EVICTION_NOT_APPROVED` (hole in 4.25.0).
+- `list_recent` no longer returns soft-deleted records.
+- Recording autosave sends the UI token, so its title is not treated as an agent edit.
+
+## [4.25.0] — 2026-10-20
+
+### Added
+- Re-transcribe any record that still has its media file with another locally installed Whisper model, from the Library and the Media library (a Re-transcribe action with a model picker) and over MCP (`list_whisper_models`, `retranscribe`).
+- Transcript versions (migration v54, `transcript_versions`, ADR-044): every run is kept with its model; at most 3 per record, the oldest is dropped automatically, never the main one. A new run becomes main; any kept version can be made main again (UI version bar, MCP `transcript_versions` / `activate_transcript_version`).
+- Two-column, time-aligned compare of two versions with word-level highlight and player seek on the transcript page.
+- Switching the main version re-indexes search and RAG; summary, tasks and entities are left as they are; polished text is kept per version. MCP: 55 tools (46 read-only + 9 write).
+
+## [4.24.0] — 2026-10-19
+
+### Added
+- MCP gets its first destructive tools, each run only after the owner presses «Yes» in the native
+  Windows dialog Recall raises: `mailbox_backfill` (mail 13–120 months back), `mailbox_label_enrich`
+  (paid Claude enrichment on for a mail folder; off needs no dialog), `mailbox_disconnect` (soft:
+  password removed, folders off, cursors and archive kept, the answer lists the disabled folders) and
+  `settings_remove_anthropic_key`.
+- `settings(set, key=ui_lang|copilot_enabled, value)` and `settings(test_anthropic_key)`; a new read
+  tool `system_status(section)` (health, ready, hardware, stats, polish, models, settings).
+  MCP: 51 tools (44 read-only + 7 write).
+- Gated routes `POST /api/mail/backfill`, `POST /api/mail/labels/<id>/enrich`,
+  `DELETE /api/mail/accounts/<id>/credentials`.
+
+### Changed
+- Enabling Claude enrichment for a mail folder and a mail sync deeper than 12 months now ask the
+  Windows dialog for every caller, the Recall UI included: the plain routes refuse them with
+  `USE_GATED_ROUTE` (before, only a request carrying the MCP header was refused, so a script without
+  it went through silently). The hard mailbox delete in the UI is shown in the dialog as a deletion
+  (`mailbox_delete`), not a disconnect.
+
+## [4.23.3] — 2026-10-19
+
+### Fixed
+- Direction after a tab save (spec `save-direction`): saving a stopped recording from its save screen cancelled the
+  server autosave, and with it the only step that files the direction, so a call the k-NN was sure about (live call,
+  confidence 1.0) still landed in the "no direction" banner. Now the first successful save starts a direction-only
+  follow-up: it waits up to 2 h for the tab's transcript, then files it when the suggestion reaches
+  `RECORDING_AUTOSAVE_MIN_CONFIDENCE`; a direction chosen in the tab is kept, and the server never transcribes.
+- Two concurrent saves of one recording no longer both report `already_saved: false` (the save screen sent two
+  transcription requests 70 ms apart): the `saved` mark is read and set in one locked manifest write.
+
+## [4.23.2] — 2026-10-19
+
+### Fixed
+- Save screen of a stopped recording: the Whisper model now defaults to `large-v3` instead of `large-v3-turbo`, the
+  same model as the server autosave (`RECORDING_AUTOSAVE_MODEL`), so the result no longer depends on which of the two
+  paths fires first.
+
+## [4.23.1] — 2026-10-19
+
+### Fixed
+- Save screen of a stopped recording: the transcription language now defaults to auto-detect instead of Ukrainian, so
+  the tab's countdown save matches the server autosave (a call previewed as uk and spoken in ru was forced to uk).
+  The live-preview language picker keeps its own default.
+
+## [4.23.0] — 2026-10-19
+
+### Added
+- **Recording autosave after any stop** (spec `recording-autosave`; stories 01-05).
+  - A recording stopped anywhere but its own Stop button (the Windows notification `«Закінчити дзвінок»`, MCP, the K2
+    autostop, another tab) no longer freezes the recording tab: it switches to the save screen. The notification's
+    stop button opens `/record?stopped=<sid>` on that recording's save screen instead of the empty setup form.
+  - The save screen counts down 60 s (`«Збережу й транскрибую через 1:00»`); editing pauses it and it resumes 15 s
+    after the last edit; at zero it saves and transcribes like `«Зберегти зараз»`.
+  - Server safety net (`app/services/recording/autosave.py`): finalize sets a deadline (`RECORDING_AUTOSAVE_SEC`,
+    default 60; 0 = off). If nobody saved, discarded or is editing by then, the server transcribes the recording over
+    the same HTTP path as the UI (`RECORDING_AUTOSAVE_MODEL` large-v3, `RECORDING_AUTOSAVE_LANGUAGE` auto), titles it
+    from the local model (not during a recording) and sets the direction when the k-NN confidence is at least
+    `RECORDING_AUTOSAVE_MIN_CONFIDENCE` (0.6). What the user typed on the save screen travels with the hold and wins.
+    Deadlines survive a restart. New routes `POST /api/recording/<sid>/autosave/hold`, `GET /api/recordings/uncategorized`.
+  - Audio library banner: recent recordings without a direction ask for one, with k-NN candidates in one click.
+
+### Changed
+- `POST /api/recording/<sid>/discard` refuses with 409 `RECORDING_KEPT` once the recording has a transcript or its
+  autosave ran: deleting `final.mp3` would orphan the transcript.
+
+## [4.22.0] — 2026-10-19
+
+### Added
+- **MCP foundations, part B** (spec `mcp-foundations-b`; stories 01-05). 46 MCP tools (43 read-only + 3 write).
+  - Approval dialog: every destructive route (the D actions of ADR-042) needs a native Windows dialog raised by
+    `app.py`; No or a timeout is `APPROVAL_DENIED`, no desktop is `APPROVAL_UNAVAILABLE`, a second request while one is
+    open is `APPROVAL_PENDING`; one dialog at a time, default button No, 45 s deadline.
+  - Audit: migration v53, table `mcp_actions`; every changing `/api/*` request is recorded (actor, decision, outcome; no
+    bodies) and purged after 90 days. New read tool `list_mcp_actions` with filters and an id cursor; the `claimed`
+    labels are marked `trusted: false`.
+  - Ceilings: the W tools are limited to 10 changes per family per 10 minutes in each MCP process (`RATE_CEILING` with
+    `retry_after_sec`); the D routes to 3 per minute and 20 per day per actor class.
+  - UI: the gated delete buttons drop their own confirm modal and wait for the dialog.
+  - Docs: `docs/SECURITY.md` "Local boundary and the approval dialog", `docs/wiki/approval-gate.md`; ADR-records
+    the MessageBox spike.
+
+## [4.21.0] — 2026-10-19
+
+### Added
+- **MCP token budget** (spec `mcp-token-budget`, council GREEN in round 2). Idea taken from XERJ's MCP token budgets.
+  - `get_transcript` fits `max_tokens` (default 40000, estimated as chars/3; `0` = no limit). Metadata, summary, the email
+    block and comments are always kept; then the text window, thread messages and segments. A cut response carries
+    `truncated: true` and a `budget` block (`next_offset`, `text_remaining_chars`, `segments_next`, omitted counts);
+    continue with `offset` / `segment_offset`. Pages end on a line or sentence end.
+  - `get_transcript` returns one text: `polished_text` when the record was polished (`text_source`), otherwise
+    `transcript_text`; `prefer_raw=True` returns the raw one. The `recall://transcript/{id}` resource still returns the
+    whole raw text.
+  - `search_archive` keeps chunks in rank order inside the same budget; the overflow comes back as text-free `locators`
+    with a shown / as-locators / dropped count. With a normal `top_k` the chunks are unchanged.
+  - `logs/mcp_calls.log`: every `OK` line carries the response size (`48.2k chars`).
+
+## [4.20.0] — 2026-10-18
+
+### Added
+- **MCP foundations, part A** (spec `mcp-foundations-a`; stories 01-05). 45 MCP tools (42 read-only + 3 write).
+  - Registry: every tool has one `_TOOL_CLASS` entry (R/W/D, provenance kind, open-world flag, declared limits); annotations
+    and `_meta` are derived from it. `RECALL_MCP_PROFILE=full|read`; `RECALL_MCP_READONLY=1` registers no write tool.
+    `video_analyze` is a write tool. New read tool `wait_for` over a per-channel event ring in `sse_broker`
+    (`/api/automation/events`). The secret guard's bare 16-letter rule runs only on write tools.
+  - Local boundary: a foreign `Host` or cross-site `Origin` is refused on direct requests; a per-boot UI token goes to the
+    SPA and `classify_request()` recognises it (not enforced yet). The proxied branch is unchanged.
+  - Infra hygiene: job errors store a code and a generic text, `cancel_ignored` for a late cancel, a third executor for slow
+    kinds, `recording/state.py`, one locked `.env` writer.
+  - One MCP error envelope `{ok, error_code, error, hint?, status_code?}` and the code table `app/core/error_codes.py`
+    with a test that every `error_code` literal is in it. A non-JSON error body is no longer passed through.
+  - ADR-042 draft: MCP full control supersedes read-first.
+
+## [4.19.0] — 2026-10-18
+
+### Added
+- **Mail and the Anthropic key connected through MCP** (spec `mcp-mail-connect`, council GREEN in round 2). The first MCP
+  write tools: `mailbox` (`connect`, `refresh_labels`, `label_set`, `sync`) and `settings` (`connect_anthropic_key`); 44 MCP
+  tools (42 read-only + 2 write). `connect` returns a one-time `http://127.0.0.1:5050/connect/<kind>/<token>` link (10 min,
+  dies on success, on the third failed attempt or at expiry); the secret is typed only on that page, never in a tool argument,
+  response or log. The pages answer direct localhost only (loopback `Host`, proxied requests refused) and the service worker
+  never caches them.
+- MCP writes carry `X-Recall-Actor: mcp` + `X-Recall-Tool` and leave one app.py log line (no body). For MCP writes app.py
+  refuses the label's Claude toggle, moving a label out of a private direction, and more than 12 months; a label's first
+  sync is capped at 12 months without re-scanning synced labels. `RECALL_MCP_READONLY=1` still refuses every write.
+- Secret-shape guard on every string argument of every MCP tool (`SECRET_IN_ARGUMENT`, checked before any log write):
+  grouped app passwords, any standalone 16-letter token, `sk-ant-` keys.
+
+### Changed
+- `POST /api/mail/accounts` and the Anthropic key save go through `mail_accounts.connect_account()` /
+  `settings_secrets.save_anthropic_key()`, shared with the connect pages.
+
+### Fixed
+- `test_docs_english` was red on `main` since gmail-ingest: owner quotes in ADR-039..041 are marked verbatim.
+
 ## [4.18.1] — 2026-10-16
 
 ### Fixed

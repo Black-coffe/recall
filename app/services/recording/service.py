@@ -1044,7 +1044,11 @@ class RecordingService:
         except Exception as e:
             logger.exception("Flush loop crashed for %s: %s", active.session_id, e)
             try:
-                self._publish(active, 'error', {'message': str(e)})
+                # Same rule as jobs: the raw exception text stays in the log.
+                self._publish(active, 'error', {
+                    'message': tr("svc_jobs.error.recording_failed"),
+                    'error_code': 'RECORDING_FAILED',
+                })
             except Exception as pe:
                 logger.debug("SSE publish of flush crash failed: %s", pe)
 
@@ -1124,10 +1128,13 @@ class RecordingService:
             err = ss.recorder.get_callback_error()
             if err is not None:
                 error_str = str(err)
+                logger.warning("Stream %s of %s failed: %s", ss.name, active.session_id, error_str)
                 self._store.set_stream_error(active.session_id, ss.name, error_str)
+                # Same rule as jobs: the raw callback text goes to the log and the manifest only.
                 self._publish(active, 'error', {
                     'stream': ss.name,
-                    'message': error_str,
+                    'message': tr("svc_jobs.error.stream_failed"),
+                    'error_code': 'RECORDING_STREAM_FAILED',
                 })
 
     def _publish(self, active: _ActiveSession, event: str, data: dict) -> None:

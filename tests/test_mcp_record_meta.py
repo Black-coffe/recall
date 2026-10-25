@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import mcp_server as m
+from tests.test_mcp_registry import load_mcp_copy
 from app.db.migrations import init_database
 from app.utils.proc import NO_WINDOW
 
@@ -144,7 +145,7 @@ def test_ask_archive_passes_through_display_name_in_sources(monkeypatch):
 # ============================================================
 
 def test_about_bucket_sum_still_matches_registered_count():
-    registered = m._registered_tool_names()
+    registered = load_mcp_copy()._registered_tool_names()  # full profile, not the developer's .env
     bucketed = list(m._ABOUT_DIRECT_DB) + list(m._ABOUT_PROXY)
     assert len(bucketed) == len(registered)
 

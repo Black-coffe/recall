@@ -13,7 +13,9 @@ The owner wants "simple ways for anyone to connect 1, 2 or more Gmail accounts t
 > 2-Step Verification (not available for org accounts that disallow them, Advanced Protection, security-key-only 2SV).
 > Rejected: Gmail API/OAuth (per-user Cloud project, weekly re-login). Connection is read-only.
 
+<!-- verbatim:start - owner quote, kept in the original language with the English translation -->
 Pre-grill answer: "IMAP + пароль приложения (Рекомендую)" (IMAP + app password (recommended)).
+<!-- verbatim:end -->
 
 ## Options
 1. Gmail API with OAuth (`gmail.readonly`): restricted scope, so publishing needs Google verification and a security
