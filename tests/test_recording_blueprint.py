@@ -244,31 +244,46 @@ def test_resume(client, fake_service):
 
 # ---------------------------------------------------------------- /stop
 
+def _stop_done(sid, timeout=2.0):
+    """POST /stop answers at once and runs the stop on rec-stop-<sid>: wait for that thread."""
+    import time
+    from app.services.recording import stop_control
+    deadline = time.time() + timeout
+    while stop_control.is_stopping(sid) and time.time() < deadline:
+        time.sleep(0.01)
+    assert not stop_control.is_stopping(sid)
+
+
 def test_stop_with_name(client, fake_service):
     r = client.post('/api/recording/rec_test/stop', json={'name': 'Зустріч'})
     assert r.status_code == 200
     body = r.get_json()
-    assert body['status'] == 'stopping'
+    assert body['status'] == 'stopping' and body['already'] is False
+    _stop_done('rec_test')
     fake_service.stop.assert_called_once_with('rec_test', name='Зустріч')
 
 
 def test_stop_without_name(client, fake_service):
     r = client.post('/api/recording/rec_test/stop', json={})
     assert r.status_code == 200
+    _stop_done('rec_test')
     fake_service.stop.assert_called_once_with('rec_test', name=None)
 
 
 def test_stop_strips_whitespace_name(client, fake_service):
     r = client.post('/api/recording/rec_test/stop', json={'name': '   '})
     assert r.status_code == 200
+    _stop_done('rec_test')
     fake_service.stop.assert_called_once_with('rec_test', name=None)
 
 
 def test_stop_404(client, fake_service):
-    from app.services.recording.service import SessionNotFoundError
-    fake_service.stop.side_effect = SessionNotFoundError("nope")
+    from app.services.recording.session_store import SessionStoreError
+    fake_service.is_active.return_value = False
+    fake_service.store.read.side_effect = SessionStoreError("nope")
     r = client.post('/api/recording/rec_unknown/stop')
     assert r.status_code == 404
+    fake_service.stop.assert_not_called()
 
 
 # ---------------------------------------------------------------- /discard

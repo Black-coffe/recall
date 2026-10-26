@@ -155,4 +155,37 @@ MESSAGES: dict = {
         "en": "The maximum number of recordings ({limit}) is already running. Nothing was stopped.",
     },
     "capture.rec.page.open": {"uk": "Відкрити запис у Recall", "en": "Open recording in Recall"},
+    "capture.rec.page.agent_refused": {
+        "uk": "Ця кнопка лише для власника",
+        "en": "This button is for the owner only",
+    },
+    "capture.rec.page.agent_refused_text": {
+        "uk": "Агент не може відповідати на підказку дзвінка. Запис запускайте й зупиняйте інструментами агента.",
+        "en": "An agent cannot answer a call prompt. Start and stop recordings with the agent tools.",
+    },
+    # --- mcp-recording-live: agent recordings ---
+    "capture.err.owner_session": {
+        "uk": "Це ваш запис: агент може лише зупинити його, не ставити на паузу й не міняти джерело.",
+        "en": "This is the owner's recording: an agent may only stop it, not pause it or change its source.",
+    },
+    "capture.err.notify_unavailable": {
+        "uk": "Не вдалося показати сповіщення про старт запису — запис агента не почато.",
+        "en": "The recording-start notification could not be shown, so the agent's recording was not started.",
+    },
+    "capture.err.cancel_window_closed": {
+        "uk": "Скасувати можна лише власний живий запис агента, молодший за 5 хвилин. Зупиніть його натомість.",
+        "en": "Only the agent's own live recording younger than 5 minutes can be cancelled. Stop it instead.",
+    },
+    "capture.rec.notice.title": {
+        "uk": "Recall: агент починає запис",
+        "en": "Recall: an agent starts a recording",
+    },
+    "capture.rec.notice.body": {
+        "uk": "Мікрофон: {mic}. Звук: {apps}. Мова: {language}. Назва: {name}. Називає себе {label}",
+        "en": "Microphone: {mic}. Sound: {apps}. Language: {language}. Name: {name}. Claims to be {label}",
+    },
+    "capture.rec.notice.all_system": {"uk": "увесь системний звук", "en": "all system audio"},
+    "capture.rec.notice.no_system": {"uk": "лише мікрофон", "en": "microphone only"},
+    "capture.rec.notice.with_screen": {"uk": "з екраном", "en": "with screen"},
+    "capture.rec.notice.no_name": {"uk": "без назви", "en": "no name"},
 }

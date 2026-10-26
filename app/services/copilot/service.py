@@ -22,6 +22,10 @@ from app.services.copilot import config as copilot_config
 
 logger = logging.getLogger(__name__)
 
+# Feedback statistics count the owner's actions only: an agent's thumbs would skew the
+# calibration numbers. Rows written before the actor stamp have no actor and are the owner's.
+_OWNER_FEEDBACK_SQL = "COALESCE(json_extract(payload_json, '$.actor'), 'ui') = 'ui'"
+
 
 class CopilotBusyError(Exception):
     """The copilot is already driving another live recording (C6: one owner per process)."""
@@ -173,7 +177,8 @@ class CopilotService:
             with get_db_connection(self._db_path) as conn:
                 for r in conn.execute(
                     "SELECT operator_action, COUNT(*) AS n FROM copilot_events "
-                    "WHERE kind = 'operator_action' GROUP BY operator_action"):
+                    f"WHERE kind = 'operator_action' AND {_OWNER_FEEDBACK_SQL} "
+                    "GROUP BY operator_action"):
                     if r["operator_action"] in out:
                         out[r["operator_action"]] = r["n"]
                 out["sessions"] = conn.execute(
@@ -220,7 +225,8 @@ class CopilotService:
                 }
                 rows = conn.execute(
                     "SELECT operator_action, payload_json FROM copilot_events "
-                    "WHERE kind = 'operator_action' AND operator_action IS NOT NULL"
+                    "WHERE kind = 'operator_action' AND operator_action IS NOT NULL "
+                    f"AND {_OWNER_FEEDBACK_SQL}"
                 ).fetchall()
         except Exception:
             return {"bucket_width": width, "buckets": [], "unlinked": 0}
@@ -280,9 +286,12 @@ class CopilotService:
         return [dict(r) for r in rows]
 
     def update_settings(self, copilot_session_id: int, *, mode: Optional[str] = None,
-                        importance: Optional[str] = None) -> Optional[dict]:
+                        importance: Optional[str] = None,
+                        clamp_spend: bool = False) -> Optional[dict]:
         """Re-resolve session settings on the fly (Step 6). A mode change keeps
         api/budget; an importance change applies its defaults (API tier/budget/model).
+        ``clamp_spend`` (a session bound to an agent-class recording) forces
+        ``api_enabled=False``/``budget_usd=0`` in the re-resolve, whatever the importance.
         Returns the new resolved config or None if the session is not found."""
         snap = self.get_state(copilot_session_id)
         if not snap:
@@ -296,6 +305,9 @@ class CopilotService:
         if importance is None:  # mode only → keep the explicit api/budget choice
             raw["api_enabled"] = cur.get("api_enabled")
             raw["budget_usd"] = cur.get("budget_usd")
+        if clamp_spend:  # resolved through the matrix so the API models drop out with the flag
+            raw["api_enabled"] = False
+            raw["budget_usd"] = 0
         cfg = copilot_config.resolve_settings(raw)
         with self._lock, get_db_connection(self._db_path) as conn:
             conn.execute(
@@ -465,6 +477,14 @@ class CopilotService:
         return self.log_event(copilot_session_id, "operator_action",
                               ts_offset_sec=ts_offset_sec, source="operator",
                               operator_action=action, payload=p or None)
+
+    def get_reingest(self, copilot_session_id: int) -> Optional[int]:
+        """The transcript a previous reingest of this session created, or None."""
+        with get_db_connection(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT reingest_transcription_id FROM copilot_sessions WHERE id = ?",
+                (copilot_session_id,)).fetchone()
+        return row["reingest_transcription_id"] if row else None
 
     def end(self, copilot_session_id: int,
             transcription_id: Optional[int] = None) -> bool:

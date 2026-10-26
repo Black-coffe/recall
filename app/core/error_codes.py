@@ -113,6 +113,10 @@ ERROR_CODES: dict[str, int] = {
     "PIPES_DISABLED": 409,
     "NOT_CONFIGURED": 503,
     "NOT_MONITORED": 404,
+    # mcp-recording-live: agent recordings, owner sessions, start notice, cancel window
+    "OWNER_SESSION": 403,
+    "NOTIFY_UNAVAILABLE": 503,
+    "CANCEL_WINDOW_CLOSED": 409,
 }
 
 _BY_STATUS = {

@@ -41,8 +41,10 @@ from urllib.parse import urlencode
 from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, stream_with_context
 
 from app import state
-from app.core.i18n import request_lang, tr
+from app.core import auth
+from app.core.i18n import request_lang, server_lang, tr
 from app.services import record_meta
+from app.services.recording import guards, start_notice, stop_control
 from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
 from app.services.recording.service import (
     NoSystemStreamError,
@@ -73,6 +75,15 @@ _devices_lock = threading.Lock()
 # (in the old code) the recording was not registered. Bumped to 5 min. Even if it still
 # does not make it, the finalize callback auto-registers the recording in the library.
 _SAVE_FINALIZE_DEADLINE_SEC = 300.0
+
+# mcp-recording-live: duration limit of a recording (minutes) and the agent default.
+_MAX_DURATION_MIN = 240
+_AGENT_DEFAULT_DURATION_MIN = 180
+# Copilot keys an agent may not send: they would turn on paid escalation.
+_AGENT_COPILOT_SPEND_KEYS = ('api_enabled', 'budget_usd', 'escalate')
+# POST /stop gives the background stop this long to finish before answering 'stopping'.
+_STOP_GRACE_SEC = 0.3
+_TOAST_ICON = Path(__file__).resolve().parents[2] / 'static' / 'icon-192.png'
 
 
 # ---------------------------------------------------------------- helpers
@@ -264,10 +275,43 @@ def start_recording():
     - 400 if the parameters are invalid
     - 409 if there is already an active session
     """
-    return _start_session(request.get_json(silent=True) or {})
+    # started_by comes from the server-side proof only; a body field is never read.
+    return _start_session(request.get_json(silent=True) or {}, started_by=_caller_started_by())
 
 
-def _start_session(data: dict):
+def _claimed_label() -> str | None:
+    """The sanitised ``X-Recall-Actor`` (as the approval gate cleans it, lowercased).
+    Never a proof: it only picks the label inside the agent class."""
+    raw = request.headers.get('X-Recall-Actor')
+    if not raw:
+        return None
+    return ''.join(ch for ch in raw if ch.isprintable() and ch not in '«»').strip()[:64].lower() or None
+
+
+def _caller_started_by() -> str:
+    return guards.started_by_for(auth.classify_request()[0], _claimed_label())
+
+
+def _owner_session_refusal(session_id: str):
+    """403 OWNER_SESSION when a non-UI caller drives an owner-class session; None to go on.
+    An unreadable manifest falls through to the route's own 404."""
+    if auth.classify_request()[0] == 'ui':
+        return None
+    try:
+        manifest = state.recording_service.store.read(session_id)
+    except SessionStoreError:
+        return None
+    if not guards.is_owner_session(manifest):
+        return None
+    return jsonify({
+        'success': False,
+        'error': tr('capture.err.owner_session'),
+        'error_code': 'OWNER_SESSION',
+        'started_by': manifest.get('started_by') or 'ui',
+    }), 403
+
+
+def _start_session(data: dict, *, started_by: str):
     """Start body — shared by ``POST /start`` and the «Record» button on the call
     prompt (K2): one copy of the logic, not two. Returns the same as the route."""
     err = _require_service()
@@ -296,6 +340,37 @@ def _start_session(data: dict):
             return _unsupported_spec_response(e)
         if sys_spec.mode == 'all':
             sys_spec = None
+            # 'all' with no device names the default loopback; none at all is refused, not dropped.
+            if sys_idx is None:
+                loop = _default_loopback()
+                if loop is None:
+                    return jsonify({
+                        'success': False,
+                        'error': 'system_mode "all" needs a system audio device and none was found',
+                        'error_code': 'NO_STREAMS',
+                    }), 400
+                sys_idx = loop['index']
+                data = {**data, 'system_device_name': data.get('system_device_name') or loop.get('name')}
+
+    # mcp-recording-live: an agent-class start is gated by a toast and clamped below.
+    agent = started_by not in guards.OWNER_CLASS
+    mic_name = data.get('mic_device_name')
+    # `mic: "default"` → the default microphone; `mic: null` → no microphone; any other value is
+    # refused rather than guessed. An agent body that names no audio source at all (e.g. only
+    # `video: {enabled: true}`) gets the server default: the default microphone, no system audio.
+    names_no_source = not any(k in data for k in (
+        'mic', 'mic_device_index', 'system_device_index', 'system_source'))
+    mic_choice = data.get('mic', 'default' if agent and names_no_source else None)
+    if mic_choice not in (None, 'default'):
+        return jsonify({
+            'success': False, 'error': 'mic must be "default" or null',
+            'error_code': 'INVALID_ARGUMENT',
+        }), 400
+    if mic_choice == 'default' and mic_idx is None:
+        mic = _mic_for(None)
+        if mic is not None:
+            mic_idx = mic['index']
+            mic_name = mic.get('name')
 
     if mic_idx is None and sys_idx is None and sys_spec is None:
         return jsonify({
@@ -312,6 +387,13 @@ def _start_session(data: dict):
     if video_spec and video_spec.get('enabled'):
         try:
             from app.services.recording import screens as screens_mod
+            if not video_spec.get('tracks'):
+                # No tracks named (the MCP `with_screen` flag): the primary monitor, full screen.
+                mons = screens_mod.enumerate_monitors()
+                primary = next((m for m in mons if m.get('is_primary')), mons[0] if mons else None)
+                if primary is not None:
+                    video_spec = {**video_spec,
+                                  'tracks': [{'monitor_index': primary['monitor_index'], 'mode': 'full'}]}
             ok, tracks, reason = screens_mod.preflight(video_spec, current_app.config)
             if ok and tracks:
                 video_spec = {'enabled': True, 'tracks': tracks}
@@ -339,14 +421,79 @@ def _start_session(data: dict):
     else:
         video_spec = None
 
+    # Duration limit: 1..240 min; an agent gets 180 when it sends none, the owner none.
+    raw_max = data.get('max_duration_min')
+    if raw_max is None:
+        max_min = _AGENT_DEFAULT_DURATION_MIN if agent else None
+    else:
+        max_min = _parse_duration_min(raw_max)
+        if max_min is None:
+            return jsonify({
+                'success': False,
+                'error': f'max_duration_min must be an integer from 1 to {_MAX_DURATION_MIN}',
+                'error_code': 'INVALID_ARGUMENT',
+            }), 400
+
+    # Copilot of an agent recording: local only, no paid escalation (spend keys are refused).
+    copilot_cfg = data.get('copilot')
+    if agent and copilot_cfg is not None:
+        if not isinstance(copilot_cfg, dict) or any(k in copilot_cfg for k in _AGENT_COPILOT_SPEND_KEYS):
+            return jsonify({
+                'success': False,
+                'error': 'an agent copilot takes mode and importance only; '
+                         'api_enabled, budget_usd and escalate are not allowed',
+                'error_code': 'INVALID_ARGUMENT',
+            }), 400
+        copilot_cfg = {**copilot_cfg, 'api_enabled': False, 'budget_usd': 0}
+
+    rec_name = data.get('name')
+    rec_name = (rec_name.strip()[:200] or None) if isinstance(rec_name, str) else None
+
+    if agent:
+        # Avoid a toast for a start that cannot happen; a race after the toast stays a 409 below.
+        limit = getattr(state.recording_service, '_max_active', None)
+        active_ids = list(state.recording_service.active_session_ids() or [])
+        if isinstance(limit, int) and len(active_ids) >= limit:
+            return jsonify({
+                'success': False,
+                'error': tr('svc_recording.err.limit', limit=limit, active=', '.join(active_ids)),
+                'error_code': 'SESSION_LIMIT',
+                'active': active_ids,
+                'limit': limit,
+            }), 409
+        if sys_spec is not None and sys_spec.mode == 'include':
+            system_apps, system_all = list(sys_spec.apps), False
+        else:
+            # 'exclude' still records everything else: the toast says all system audio.
+            system_apps, system_all = [], sys_idx is not None or sys_spec is not None
+        shown = start_notice.notify_start(
+            mic_name=mic_name if mic_idx is not None else None,
+            system_apps=system_apps,
+            system_all=system_all,
+            language=live_lang or 'auto',
+            name=rec_name,
+            # Says "with screen" only when a screen track will actually be captured.
+            with_screen=video_spec is not None,
+            claimed_label=_claimed_label() or 'unknown',
+            lang=server_lang(),
+            icon_path=str(_TOAST_ICON) if _TOAST_ICON.is_file() else None,
+        )
+        if not shown:
+            return jsonify({
+                'success': False,
+                'error': tr('capture.err.notify_unavailable'),
+                'error_code': 'NOTIFY_UNAVAILABLE',
+            }), 503
+
     try:
         sid = state.recording_service.start(
             mic_device_index=int(mic_idx) if mic_idx is not None else None,
             system_device_index=int(sys_idx) if sys_idx is not None else None,
-            mic_device_name=data.get('mic_device_name'),
+            mic_device_name=mic_name,
             system_device_name=data.get('system_device_name'),
             system_source=sys_spec,
             video_spec=video_spec,
+            started_by=started_by,
         )
     except SessionConflictError as e:
         return jsonify({
@@ -367,6 +514,9 @@ def _start_session(data: dict):
     except Exception as e:
         logger.exception("start_recording crashed: %s", e)
         return _internal_error_response('INTERNAL')
+
+    if max_min is not None or rec_name is not None:
+        _apply_start_limits(sid, max_min, rec_name)
 
     # Invalidate the device cache — the next GET will load fresh ones
     with _devices_lock:
@@ -406,7 +556,6 @@ def _start_session(data: dict):
     # already started, respond 200 with copilot.error_code='COPILOT_BUSY'.
     copilot_session_id = None
     copilot_summary: dict = {'started': False}
-    copilot_cfg = data.get('copilot')
     if copilot_cfg is not None and state.copilot_service is not None:
         from app.services.copilot.service import CopilotBusyError
         try:
@@ -446,6 +595,40 @@ def _start_session(data: dict):
     })
 
 
+def _parse_duration_min(raw) -> int | None:
+    """``max_duration_min`` as an int in 1.._MAX_DURATION_MIN, else None (a bool is not a number)."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        return None
+    return value if 1 <= value <= _MAX_DURATION_MIN else None
+
+
+def _apply_start_limits(sid: str, max_min: int | None, name: str | None) -> None:
+    """Write the duration limit (with ``expires_at``) and the name into the manifest, then arm
+    the wall-clock timer that stops the session if it is still live then."""
+    from datetime import datetime, timedelta, timezone
+
+    def _write(mf: dict) -> None:
+        if max_min is not None:
+            mf['max_duration_min'] = max_min
+            mf['expires_at'] = (datetime.now(tz=timezone.utc) + timedelta(minutes=max_min))                 .isoformat(timespec='seconds')
+        if name is not None:
+            mf['name'] = name
+
+    try:
+        state.recording_service.store.modify(sid, _write)
+    except SessionStoreError:
+        logger.warning("start: could not write limits into %s", sid, exc_info=True)
+    if max_min is not None:
+        stop_control.arm_timer(sid, max_min, stop_fn=stop_session,
+                               is_live=state.recording_service.is_active)
+
+
 # ---------------------------------------------------------------- pause/resume/stop/discard
 
 @recording_bp.route('/api/recording/<session_id>/pause', methods=['POST'])
@@ -453,6 +636,9 @@ def pause_recording(session_id: str):
     err = _require_service()
     if err:
         return err
+    refusal = _owner_session_refusal(session_id)
+    if refusal:
+        return refusal
     try:
         state.recording_service.pause(session_id)
     except SessionNotFoundError as e:
@@ -465,6 +651,9 @@ def resume_recording(session_id: str):
     err = _require_service()
     if err:
         return err
+    refusal = _owner_session_refusal(session_id)
+    if refusal:
+        return refusal
     try:
         state.recording_service.resume(session_id)
     except SessionNotFoundError as e:
@@ -484,6 +673,9 @@ def set_system_source(session_id: str):
     err = _require_service()
     if err:
         return err
+    refusal = _owner_session_refusal(session_id)
+    if refusal:
+        return refusal
     data = request.get_json(silent=True) or {}
     reason = data.get('reason') or 'user'
     if reason not in _RETARGET_REASONS:
@@ -563,6 +755,16 @@ def _autoprompt_page(title: str, text: str, code: int):
     return Response(body, status=code, mimetype='text/html')
 
 
+def _default_loopback() -> dict | None:
+    """The default system-audio (loopback) device, otherwise the first one; None when there is none."""
+    try:
+        loops = [d for d in state.recording_service.list_devices() if d.get('kind') == 'loopback']
+    except Exception as e:
+        logger.warning("loopback enumeration failed: %s", e, exc_info=True)
+        return None
+    return next((d for d in loops if d.get('is_default')), loops[0] if loops else None)
+
+
 def _mic_for(endpoint: str | None) -> dict | None:
     """The microphone the call itself captures from (the endpoint name of its session), otherwise the default one."""
     try:
@@ -590,7 +792,11 @@ def autoprompt_pending():
     watcher = _call_watcher()
     if watcher is None:
         return jsonify({'success': True, 'enabled': False, 'prompts': []})
-    return jsonify({'success': True, 'enabled': True, 'prompts': watcher.pending()})
+    prompts = watcher.pending()
+    if auth.classify_request()[0] != 'ui':
+        # The prompt id is the one-shot action token: only the owner's toast and UI hold it.
+        prompts = [{k: v for k, v in p.items() if k not in ('id', 'actions')} for p in prompts]
+    return jsonify({'success': True, 'enabled': True, 'prompts': prompts})
 
 
 @recording_bp.route('/api/recording/autoprompt/<prompt_id>/dismiss', methods=['POST'])
@@ -607,7 +813,13 @@ def autoprompt_action(token: str, action: str):
     """Windows notification buttons open this URL in the browser. Token = prompt id,
     one-shot and alive while its call or recording lives: without it nothing
     starts, so a foreign site cannot turn a recording on. ``record`` starts the microphone + sound
-    of this application only, with the same code as ``POST /start``."""
+    of this application only, with the same code as ``POST /start``.
+
+    A non-UI caller that names itself (``X-Recall-Actor``) is refused before the token is spent:
+    an owner-class start skips the toast and the 180-min clamp, and a stop skips the dialog."""
+    if auth.classify_request()[0] != 'ui' and request.headers.get('X-Recall-Actor') is not None:
+        return _autoprompt_page(tr('capture.rec.page.agent_refused'),
+                                tr('capture.rec.page.agent_refused_text'), 403)
     watcher = _call_watcher()
     info = watcher.consume(token, action) if watcher is not None else None
     if info is None:
@@ -636,7 +848,7 @@ def autoprompt_action(token: str, action: str):
     if mic is not None:
         body['mic_device_index'] = mic['index']
         body['mic_device_name'] = mic.get('name')
-    resp = _start_session(body)
+    resp = _start_session(body, started_by='call_prompt')
     resp, code = resp if isinstance(resp, tuple) else (resp, resp.status_code)
     payload = resp.get_json(silent=True) or {}
     if payload.get('success'):
@@ -670,6 +882,7 @@ def stop_session(session_id: str, name: str | None = None) -> None:
     ``POST /stop`` and the K2 autostop, which calls this from a background thread (without a request
     context). ``SessionNotFoundError`` and other errors of ``service.stop``
     are propagated to the caller."""
+    stop_control.cancel_timer(session_id)
     state.recording_service.stop(session_id, name=name)
 
     # Phase 12.26: Stop the live transcribe worker of THIS session (per-sid): we do not wait for the live workers
@@ -690,7 +903,10 @@ def stop_recording(session_id: str):
     """Stop the recording. The body may contain:
     - ``name`` (str|null) — the recording name, otherwise auto_name is used.
 
-    Finalize runs in the background (JobQueue) — the UI follows via polling /state
+    The stop runs on the ``rec-stop-<sid>`` thread (mcp-recording-live): the answer comes at
+    once with ``status: 'stopping'``, even mid-call while the live workers wind down. A repeat
+    while it runs, or after it finished, answers ``already: true`` (then with the manifest
+    status). Finalize runs in the background (JobQueue) — the UI follows via polling /state
     or an SSE subscription until status='finalized' arrives.
     """
     err = _require_service()
@@ -700,19 +916,46 @@ def stop_recording(session_id: str):
     name = data.get('name')
     if isinstance(name, str):
         name = name.strip() or None
+    else:
+        name = None
+
+    svc = state.recording_service
+    if svc.is_active(session_id) or stop_control.is_stopping(session_id):
+        done = threading.Event()
+
+        def _stop(sid: str, name: str | None = None) -> None:
+            try:
+                stop_session(sid, name=name)
+            except SessionNotFoundError:
+                raise   # stop_control logs it at debug: the session ended on its own
+            except Exception:
+                logger.exception("background stop of %s crashed", sid)
+            finally:
+                done.set()
+
+        result = stop_control.request_stop(session_id, name, stop_fn=_stop)
+        if result == 'started':
+            # A quick stop (the usual case) is complete when we answer; a slow one goes on.
+            done.wait(_STOP_GRACE_SEC)
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'status': 'stopping',
+            'already': result == 'already',
+            'message': tr('capture.rec.stop.message'),
+        })
 
     try:
-        stop_session(session_id, name=name)
-    except SessionNotFoundError as e:
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
-    except Exception as e:
-        logger.exception("stop_recording crashed: %s", e)
-        return _internal_error_response('INTERNAL')
-
+        manifest = svc.store.read(session_id)
+    except SessionStoreError:
+        return jsonify({
+            'success': False, 'error': tr('capture.rec.err.session_not_found'), 'error_code': 'NOT_FOUND',
+        }), 404
     return jsonify({
         'success': True,
         'session_id': session_id,
-        'status': 'stopping',
+        'status': manifest.get('status'),
+        'already': True,
         'message': tr('capture.rec.stop.message'),
     })
 
@@ -870,10 +1113,11 @@ def discard_recording(session_id: str):
     err = _require_service()
     if err:
         return err
-    if _recording_kept(session_id):
+    if _recording_kept(session_id):   # refused: the duration timer stays armed
         return jsonify({
             'success': False, 'error': tr('capture.rec.err.kept'), 'error_code': 'RECORDING_KEPT',
         }), 409
+    stop_control.cancel_timer(session_id)
     _autosave_cancel(session_id, 'discarded')
     try:
         state.recording_service.discard(session_id)
@@ -896,24 +1140,7 @@ def discard_recording(session_id: str):
 
 def _recording_kept(session_id: str) -> bool:
     """True when discarding would destroy something already saved (see discard_recording)."""
-    sched = _autosave()
-    if sched is not None and sched.info(session_id).get('status') in ('running', 'done'):
-        return True
-    from app.db.connection import get_db_connection
-    db_path = current_app.config.get('DATABASE')
-    if not db_path:
-        return False   # no archive configured: nothing a discard could orphan
-    try:
-        with get_db_connection(db_path) as conn:
-            row = conn.execute(
-                'SELECT 1 FROM audio_downloads a JOIN transcriptions t ON t.file_path = a.file_path '
-                'WHERE (a.recording_session_id = ? OR a.youtube_id = ?) AND t.deleted_at IS NULL LIMIT 1',
-                (session_id, f'recording_{session_id}'),
-            ).fetchone()
-    except Exception:
-        logger.warning("discard guard: transcript lookup for %s failed; refusing", session_id, exc_info=True)
-        return True
-    return row is not None
+    return guards.recording_kept(session_id, getattr(state.recording_service, 'store', None), _autosave(), current_app.config.get('DATABASE'))
 
 
 @recording_bp.route('/api/recording/<session_id>/autosave/hold', methods=['POST'])
@@ -1369,6 +1596,8 @@ def get_active_session():
                         for name in ('mic', 'system')},
             'system_source': snap.get('system_source'),
             'copilot_active': _copilot_active(sid),
+            'started_by': snap.get('started_by') or 'ui',
+            'expires_at': snap.get('expires_at'),
         })
     sole = sessions[0]['session_id'] if len(sessions) == 1 else None
     return jsonify({

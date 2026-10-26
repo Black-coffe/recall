@@ -37,6 +37,8 @@ _KIND_TABLE = {
     "audio": "audio_downloads",
     "folder": "folder", "folder_recursive": "folder",
 }
+# mcp-recording-live
+_KIND_TABLE["recording"] = "recording_sessions"
 
 
 class Unsummarisable(Exception):
@@ -529,6 +531,76 @@ def _video_describe_claude(conn, va, body):
                    str(row["id"]), 0, False)
 
 
+# mcp-recording-live: a recording's dialog reads the manifest and the live snapshot, never the
+# request (the agent's ``name`` reaches the dialog only as the quoted ``X-Recall-Note``).
+
+def _recording(va):
+    """``(service, sid, manifest, live, elapsed)`` or ``None`` (no service, no readable manifest:
+    the view answers its own 503/404)."""
+    from app import state
+    from app.services.recording.service import SessionNotFoundError
+    from app.services.recording.session_store import SessionStoreError
+    service = getattr(state, "recording_service", None)
+    sid = va.get("session_id")
+    if service is None or not sid:
+        return None
+    try:
+        manifest = service.store.read(sid)
+    except SessionStoreError:
+        return None
+    live = bool(service.is_active(sid))
+    elapsed = 0.0
+    if live:
+        try:
+            elapsed = float(service.get_state(sid).get("elapsed_seconds") or 0.0)
+        except SessionNotFoundError:
+            live = False  # it ended between the two reads
+    return service, sid, manifest, live, elapsed
+
+
+def _recording_summary(action: str, sid: str, manifest: dict, count: int) -> Summary:
+    from app.services.recording import guards
+    name = manifest.get("name") or manifest.get("auto_name") or sid
+    return Summary(action, "recording", _cut(name), str(sid), count, False,
+                   extra="owner" if guards.is_owner_session(manifest) else "agent")
+
+
+def _recording_stop(conn, va, body):
+    from app.services.recording import stop_control
+    found = _recording(va)
+    if found is None:
+        return None
+    _service, sid, manifest, live, elapsed = found
+    stopping = stop_control.is_stopping(sid)
+    if not live or stopping:
+        raise Precondition("already_stopping", 200, {
+            "success": True, "session_id": sid,
+            "status": "stopping" if stopping else manifest.get("status"), "already": True})
+    return _recording_summary("recording_stop", sid, manifest, int(elapsed // 60))
+
+
+def _recording_cancel_own(conn, va, body):
+    from app import state
+    from app.services.recording import guards
+    found = _recording(va)
+    if found is None:
+        return None
+    service, sid, manifest, live, elapsed = found
+    why = guards.cancel_own_check(manifest, live, elapsed)
+    if why == "owner":
+        raise Precondition("owner_session", 403, {
+            "success": False, "error": tr("capture.err.owner_session"), "error_code": "OWNER_SESSION",
+            "started_by": manifest.get("started_by") or "ui"})
+    if why is not None:
+        raise Precondition(f"cancel_window_closed:{why}", 409, {
+            "success": False, "error": tr("capture.err.cancel_window_closed"),
+            "error_code": "CANCEL_WINDOW_CLOSED"})
+    if guards.recording_kept(sid, service.store, getattr(state, "recording_autosave", None), _db_path(conn)):
+        raise Precondition("recording_kept", 409, {
+            "success": False, "error": tr("capture.rec.err.kept"), "error_code": "RECORDING_KEPT"})
+    return _recording_summary("recording_cancel_own", sid, manifest, int(elapsed))
+
+
 BUILDERS = {
     "transcription.delete_transcription": _transcript_delete,
     "transcription.bulk_delete_transcriptions": _transcript_bulk_delete,
@@ -553,6 +625,9 @@ BUILDERS = {
     "transcription.analyze_video_endpoint": _video_describe_claude,
     "telegram.tg_enable_chat": _telegram_enable_chat,
     "telegram.tg_repair": _telegram_repair,
+    # mcp-recording-live
+    "recording.stop_recording": _recording_stop,
+    "recording.discard_recording": _recording_cancel_own,
 }
 
 
@@ -654,6 +729,9 @@ def _extra_line(s: Summary, lang: str) -> str | None:
         return line
     if s.action == "settings_remove_anthropic_key":
         return tr("approvals.extra.key_present" if s.extra == "yes" else "approvals.extra.key_absent",
+                  lang=lang)
+    if s.action in ("recording_stop", "recording_cancel_own"):  # mcp-recording-live
+        return tr("approvals.extra.started_by_agent" if s.extra == "agent" else "approvals.extra.started_by_owner",
                   lang=lang)
     return None
 

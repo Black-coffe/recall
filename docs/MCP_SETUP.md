@@ -2,7 +2,7 @@
 
 A local MCP server (`mcp_server.py`) that gives Claude Code / Claude Desktop control of Recall.
 A separate process that reuses the `app.services.*` services and the existing HTTP endpoints,
-with no logic duplication. **89 MCP tools (54 read-only + 35 write)**: the write tools are
+with no logic duplication. **95 MCP tools (56 read-only + 39 write)**: the write tools are
 `mailbox`, `settings`, `video_analyze`, `retranscribe` and `activate_transcript_version`, plus four destructive ones that run only after the owner
 presses «Yes» in a native Windows dialog raised by Recall (`mailbox_backfill`, `mailbox_label_enrich`,
 `mailbox_disconnect`, `settings_remove_anthropic_key`); archive organisation adds six more writes (`task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`) and six destructive tools behind the same dialog (`taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`); everything an agent writes is marked `source: mcp`; `system_status` and `transcript_suggest_meta` are reads. The intake pipeline adds two reads (`get_youtube_info`, `list_audio_library`), eight writes (`transcribe`, `document_ingest`, `audio_download`, `audio_item`, `job_cancel`, `transcript_ai`, `models`, `system_diagnostics`) and two destructive tools (`document_import_folder`, `document_reparse`). Telegram and automation add three reads (`telegram_chats`, `telegram_repair_preview`, `automation_status`), two writes (`telegram`, `pipes`) and two destructive tools (`telegram_enable_chat`, `telegram_backfill`). The owner's decision to move MCP from read-first to
@@ -13,7 +13,7 @@ reports the live count and the write list of the running profile.
 
 | Env | Effect |
 |-----|--------|
-| `RECALL_MCP_PROFILE=full` (default) | registers every tool (89) |
+| `RECALL_MCP_PROFILE=full` (default) | registers every tool (95) |
 | `RECALL_MCP_PROFILE=read` | registers the read tools plus `video_analyze` (54 + 1 = 55 tools); an unknown value counts as `read` |
 | `RECALL_MCP_READONLY=1` | registers no write tool at all, whatever the profile |
 
@@ -130,6 +130,49 @@ Restart Desktop.
 claude mcp add --transport http recall http://127.0.0.1:5060/mcp --header "Authorization: Bearer <RECALL_MCP_KEY>"
 ```
 
+## Registrations
+
+The same `mcp_server.py` registered three times, each name with its own profile. Every one is a separate
+stdio process; the profile is fixed when it starts.
+
+| Name | `RECALL_MCP_PROFILE` | For |
+|------|---------------------|-----|
+| `recall` | `full` | everyday work in Claude Code and Desktop: every tool (95) |
+| `recall-ro` | `read` | loops that only watch, such as `/loop` over `wait_for` or a live call: no write tool can run |
+| `recall-scheduled` | `full` | Claude Desktop scheduled tasks (a brief, a digest, a transcription) |
+
+```bash
+claude mcp add recall -s user -- "E:\Projects\Recall\.venv\Scripts\python.exe" "E:\Projects\Recall\mcp_server.py"
+claude mcp add recall-ro -s user --env RECALL_MCP_PROFILE=read --transport stdio -- "E:\Projects\Recall\.venv\Scripts\python.exe" "E:\Projects\Recall\mcp_server.py"
+claude mcp add recall-scheduled -s user --env RECALL_MCP_PROFILE=full --transport stdio -- "E:\Projects\Recall\.venv\Scripts\python.exe" "E:\Projects\Recall\mcp_server.py"
+```
+
+`--env` takes several `KEY=value` pairs, so it goes after the server name and before `--`. In Claude Desktop the
+same goes into `claude_desktop_config.json` with an `"env": {"RECALL_MCP_PROFILE": "read"}` entry per server.
+
+**`recall-scheduled` has no way past the Windows dialog.** It is the full profile, nothing more: there is no
+unattended key (ADR-042 §11 forbids any key that skips the dialog). A scheduled run that reaches a destructive
+tool waits for the dialog; with nobody at the machine it is refused after 45 s (`APPROVAL_DENIED`). Desktop scheduled
+tasks also stall on every tool marked `requiresUserInteraction`. Give a scheduled task read and write work only
+(`pipes`, `transcribe`, the reads), and approve its write tools once with "always allow" from **Run now**.
+
+**Skills and the command.** The repository ships skills in `skills/`; copy each folder into
+`~/.claude/skills/`:
+
+| Skill | Does |
+|-------|------|
+| `recall` | reads: asking, searching, commitments, the live call, status; points to the four below for writes |
+| `recall-record` | `recording` start, pause, resume, retarget |
+| `recall-record-stop` | `recording_stop`, `recording_cancel_own`; only when you type `/recall-record-stop` (`disable-model-invocation`) |
+| `recall-transcribe` | `transcribe` a path, a YouTube link, a recording or a library item, then follow the job |
+| `recall-digest` | `pipes` run of a brief, then follow the job |
+| `recall-video` | what was on the screen of a recording |
+
+The MCP prompt `post_digest` appears in Claude Code as `/mcp__recall__post_digest [pipe]` (default
+`weekly-digest`): it asks the model to run that pipe through `pipes` and report. It is registered only where
+`pipes` is (the `full` profile). Hook recipes that start a recording or send the brief:
+[recipes/hooks.md](recipes/hooks.md).
+
 ## Environment variables
 
 | Env | Default | Purpose |
@@ -171,4 +214,5 @@ tunnel+OAuth) — then modeled on `telegram_listener`.
   public HTTPS host + autostart of the http server from `app.py`.
 
 ## Descoped
-- Delete (class D) tools and the D-gate dialog: none is registered today; they come with a later spec (ADR-042, items 5 and 11).
+- An unattended key that lets a scheduled run past the Windows dialog (`RECALL_MCP_UNATTENDED_ALLOW` in the
+  program report): dropped by ADR-042 §11, never built.

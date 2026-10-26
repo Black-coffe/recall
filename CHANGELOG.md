@@ -5,8 +5,42 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.33.0] — 2026-10-26
+
+### Added
+- Skills in `skills/`, installed by copying into `~/.claude/skills/`: `recall-record` (start, pause, resume, retarget a recording), `recall-record-stop` (stop or cancel; only when the owner types it, `disable-model-invocation`), `recall-transcribe`, `recall-digest`; `recall` rewritten from the registry (95 tools, archive reads vs reads that need Recall running).
+- MCP prompt `post_digest`: `/mcp__recall__post_digest [pipe]` (default `weekly-digest`) tells the model to run the pipe through `pipes`; registered only on the `full` profile, adds no tool.
+- `docs/recipes/hooks.md`: Claude Code hook recipes (start a recording, send the brief on `SessionEnd`, block a pasted secret, `ask` rule for `curl` to Recall); a hook is never a safety gate and D actions still raise the Windows dialog.
+- `docs/MCP_SETUP.md` "Registrations": `recall` (full), `recall-ro` (read), `recall-scheduled` (full, no dialog bypass).
+
+### Changed
+- ADR-042 accepted: the MCP full-control program (specs 1–9) is closed, with the shipped and dropped list.
+
 ### Fixed
+- VULYK `/vulyk-ship` step 4 (`/vulyk-evolve` 2026-10-25): commit names both files `--record` writes (`plan.md`, `memory/stats/ship.jsonl`); 3 ships left the ledger uncommitted and the next ship-check said NOT READY. Registered as override 2 in `scripts/recall-vulyk-overrides.sh`.
+- Tests (`/vulyk-evolve` 2026-10-25): the MCP tool total is pinned once, in `tests/test_tool_count_docs.py`; six feature tests no longer hardcode it (it was hand-bumped in ~10 specs and turned council rounds RED in gmail-ingest and live-video-frames).
 - VULYK tooling (`/vulyk-evolve` 2026-10-16): `scripts/scope-check.sh` no longer counts its own `memory/stats/scope.jsonl` as a story's out-of-scope edit (false `scope_breach` on every rerun in the same tree); registered as override 2 in `scripts/recall-vulyk-overrides.sh`.
+
+## [4.32.0] — 2026-10-26
+
+### Added
+- Recording and the live call through MCP: `recording` (start, pause, resume, change the system source; start always
+  shows a Recall toast first with mic, apps, language, name and "with screen", and refuses with `NOTIFY_UNAVAILABLE`
+  when no toast can be shown; default limit 180 min, max 240, then it stops by itself; the screen only with an
+  explicit `with_screen`), `recording_stop` (behind the native Windows dialog, answers `stopping` at once, a repeat
+  answers `already`), `recording_cancel_own` (an agent's own recording younger than 5 minutes, through the dialog),
+  `copilot` (mode, importance, cards, stop, reingest without duplicates), `recording_devices` (audio, screens, apps,
+  call prompts without their one-shot tokens), `get_copilot_timeline`; `get_active_recording` reports `started_by`.
+- `started_by` provenance on every recording session (`ui` | `call_prompt` = the owner, `mcp` | `hook` | `unknown` =
+  an agent); an agent may only stop the owner's recordings, never pause or retarget them.
+- An agent's copilot stays local-only for the whole session: the spend clamp holds on settings, `/api/copilot/start`
+  and `/api/copilot/move`; agent ratings stay out of the copilot statistics (migration v57).
+- MCP 89 → 95 tools (56 read-only).
+
+### Security
+- The call-prompt action token is no longer handed to non-UI readers of `/api/recording/autoprompt`, and a caller
+  that names itself as an agent is refused on the token routes, so a raw local caller cannot start an owner-class
+  recording without the toast or stop a session without the dialog.
 
 ## [4.31.0] — 2026-10-25
 

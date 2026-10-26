@@ -73,3 +73,35 @@ def approve_dialogs(monkeypatch):
     stub = _DialogRecorder(approvals.IDYES)
     monkeypatch.setattr(approvals, "_show_dialog", stub)
     return stub
+
+
+class _NoticeRecorder:
+    """Stands in for start_notice.notify_start: answers ``shown`` and records each call's kwargs."""
+
+    def __init__(self):
+        self.shown = True
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.shown
+
+
+@pytest.fixture(autouse=True)
+def notice_stub(monkeypatch, request):
+    """No test posts a real toast: an agent-class start sees the notice as shown. After each test
+    every duration timer is cancelled and the stopping registry is cleared. tests/test_start_notice.py
+    keeps the real notify_start (it stubs the posting layer itself), so the gate is tested, not the stub."""
+    from app.services.recording import start_notice, stop_control
+    stub = _NoticeRecorder()
+    if request.module.__name__.rpartition(".")[2] != "test_start_notice":
+        monkeypatch.setattr(start_notice, "notify_start", stub)
+    yield stub
+    stop_control.reset()
+
+
+@pytest.fixture
+def notice_down(notice_stub):
+    """Opt-in: the start toast cannot be shown (no visible desktop)."""
+    notice_stub.shown = False
+    return notice_stub

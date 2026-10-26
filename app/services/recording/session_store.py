@@ -109,8 +109,12 @@ class SessionStore:
         system_device_name: Optional[str] = None,
         auto_name: Optional[str] = None,
         system_source: Optional[dict] = None,
+        started_by: str = 'ui',
     ) -> dict:
         """Creates a new session. Returns the created manifest.
+
+        ``started_by`` (mcp-recording-live) records who started the session,
+        written once here from the server-side proof the blueprint derived.
 
         ``system_source`` (``SystemSpec.to_dict()``) is written to
         ``streams.system.source`` together with an empty ``source_events`` when the
@@ -169,6 +173,7 @@ class SessionStore:
             }],
             'name': None,
             'auto_name': auto_name or _default_auto_name(),
+            'started_by': started_by,
         }
         if system_source is not None:
             manifest['streams'][STREAM_SYSTEM]['source'] = dict(system_source)

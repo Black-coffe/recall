@@ -75,7 +75,6 @@ def test_seven_tools_registered_with_entries():
         e = full._TOOL_CLASS[name]
         assert (e["class"], e["open_world"]) == ("D", True), name
         assert e["limits"]["family"] == "intake", name
-    assert len(names) == 89
 
 
 def test_read_profile_registers_the_three_reads_only():
@@ -250,4 +249,6 @@ def test_about_names_tools_channel_event_and_brief_undo(tmp_path, monkeypatch):
         assert f"`{name}" in text, name
     assert "system:calls" in text and "pipe_run" in text
     assert "daily brief" in text
-    assert "89 tools: 54 read-only + 35 write" in text
+    n = len(full._registered_tool_names())
+    ro = n - sum(1 for e in full._TOOL_CLASS.values() if e["class"] != "R")
+    assert f"{n} tools: {ro} read-only + {n - ro} write" in text

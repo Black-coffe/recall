@@ -5,7 +5,8 @@ the native dialog (``app/services/approvals.py``). Order of checks (plan C4):
 
 1. the D ceiling for the actor class (``ui`` / ``unknown``) -> 429 ``RATE_CEILING``;
 2. a non-``ui`` request during a recording (probe failure counts as recording) -> 409
-   ``RECORDING_ACTIVE``, no dialog;
+   ``RECORDING_ACTIVE``, no dialog; ``RECORDING_ALLOWED_ACTIONS`` (``recording_stop``,
+   ``recording_cancel_own``) are the only exemption: they go on to the dialog mid-call;
 3. the summary from the DB: ``None`` (the path id names no object) -> no dialog, the view
    answers its own 404; a precondition the view would refuse (``Precondition``: a direction
    with projects, the self speaker) -> no dialog and the view never runs: the gate answers with
@@ -17,8 +18,10 @@ the native dialog (``app/services/approvals.py``). Order of checks (plan C4):
 
 A *conditional* D route (``_CONDITIONAL_D_ROUTES``) is gated only for a non-``ui`` caller and
 only when its predicate holds (re-transcribe that would drop a version, ask 9; a Claude
-description of video frames, ask 8); a predicate
-error gates the request (fail closed). Otherwise it is an ordinary call: no dialog, no slot.
+description of video frames, ask 8; every stop and discard of a recording, mcp-recording-live);
+a predicate error gates the request (fail closed). Otherwise it is an ordinary call: no dialog,
+no slot. A recording's dialog is built from its manifest and the live snapshot, never the
+request: the agent's ``name`` reaches the dialog only as the quoted ``X-Recall-Note``.
 An approval leaves the action on ``g.approved_action``.
 
 There is no key, header, env var or setting that skips the dialog or changes the numbers.
@@ -32,6 +35,7 @@ import math
 import threading
 import time
 from collections import deque
+from urllib.parse import unquote
 
 from flask import Flask, current_app, g, jsonify, request
 
@@ -48,7 +52,12 @@ D_ACTIONS = ("transcript_delete", "transcript_bulk_delete", "taxonomy_delete", "
              "settings_remove_anthropic_key", "mailbox_disconnect", "mailbox_delete", "mailbox_backfill",
              "mailbox_label_enrich", "audio_delete", "transcript_version_evict",
              "document_import_folder", "document_reparse", "video_describe_claude",
-             "telegram_enable_chat")
+             "telegram_enable_chat",
+             # mcp-recording-live
+             "recording_stop", "recording_cancel_own")
+# mcp-recording-live: the only D actions a non-``ui`` caller may run during a recording (still
+# through the dialog, the ceilings, the one-at-a-time rule and the audit).
+RECORDING_ALLOWED_ACTIONS = frozenset({"recording_stop", "recording_cancel_own"})
 
 # Flask endpoint name -> action. A new destructive route must join this table by hand;
 # tests/test_endpoints_smoke.py fails on a DELETE rule or a delete/merge/purge/backfill
@@ -110,12 +119,20 @@ def _telegram_real_repair(view_args: dict) -> bool:
     return not body.get("dry_run")
 
 
+def _always(view_args: dict) -> bool:
+    """mcp-recording-live: every non-``ui`` stop or discard of a recording is gated."""
+    return True
+
+
 # Flask endpoint name -> (action, predicate over the view args). Gated for non-``ui`` callers
 # when the predicate is true; the view reads ``g.evict_allowed`` / ``g.approved_action``.
 _CONDITIONAL_D_ROUTES: dict[str, tuple] = {
     "transcription.retranscribe_transcription": ("transcript_version_evict", _retranscribe_would_evict),
     "transcription.analyze_video_endpoint": ("video_describe_claude", _video_describes_with_claude),
     "telegram.tg_repair": ("telegram_backfill", _telegram_real_repair),
+    # mcp-recording-live: the owner's own Stop/Discard (``ui``) stay undialogued
+    "recording.stop_recording": ("recording_stop", _always),
+    "recording.discard_recording": ("recording_cancel_own", _always),
 }
 
 _D_EXEMPT: dict[str, str] = {
@@ -171,8 +188,11 @@ def _untake(actor: str) -> None:
 
 
 def _clean_note(raw: str | None) -> str | None:
+    """The quoted note: percent-decoded first (WSGI hands header values latin-1-decoded, so the
+    MCP side percent-encodes UTF-8), then cleaned and cut."""
     if not raw:
         return None
+    raw = unquote(raw, encoding="utf-8", errors="replace")
     text = "".join(ch for ch in raw if ch.isprintable() and ch not in "«»").strip()
     return text[:NOTE_MAX] or None
 
@@ -222,7 +242,7 @@ def _gate():
         return _refuse(429, audit, "rate_ceiling", error_code="RATE_CEILING",
                        error=tr("approvals.err.ceiling", seconds=wait), retry_after_sec=wait)
 
-    if actor != "ui" and recording_active(default=True):
+    if actor != "ui" and action not in RECORDING_ALLOWED_ACTIONS and recording_active(default=True):
         return _refuse(409, audit, "recording_active", error_code="RECORDING_ACTIVE",
                        error=tr("approvals.err.recording"))
 

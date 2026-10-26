@@ -1,6 +1,6 @@
 # ADR-051: Agent-started recordings: provenance, mid-call stop through the dialog, fail-closed start notice
 
-- Status: proposed
+- Status: accepted (owner, 2026-10-26; shipped in 4.32.0)
 - Date: 2026-10-25
 - Spec: docs/specs/mcp-recording-live (Tier 4; built after docs/specs/mcp-telegram-automation)
 

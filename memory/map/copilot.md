@@ -65,5 +65,8 @@ Gate `COPILOT_ENABLED`; everything degrades (no Ollama/key → whisper-only stay
 Claude verified 5.9% (and that AFTER showing), `operator_action` = NULL in all 9706 events with working
 👍/👎 buttons — nobody read the widget. Limits: light 3 / medium 5 / hard 8 cards.
 
+**Agent control (4.32.0, mcp-recording-live):** `blueprints/copilot.py` `_agent_session_or_403` (non-`ui` caller on a session NOT bound to an agent-class recording -> 403 `OWNER_SESSION`; `_is_agent_session` via `guards.is_owner_session`)
+guards `settings`, `action`, `stop`, `reingest`; `settings` on an agent session clamps spend (no API, budget 0, no escalate). `reingest` (:450) is idempotent: `copilot_sessions.reingest_transcription_id`/`reingest_by` (migration v57),
+claimed by a conditional UPDATE (a concurrent loser rolls back), repeat -> `created:false`; `CopilotService.get_reingest` :481. MCP: `copilot`, `get_copilot_timeline` (`root-processes.md`).
 **Offline tests:** `test_copilot_dispatcher.py` (root), `tests/test_copilot_quiet.py` (Track 3). **DB:** `copilot_sessions`/`topics`/`events` (migration v19).
 **SSE:** `copilot_topic`, `copilot_insight`. The session is linked to a transcript on transcribe → timeline on /transcript.

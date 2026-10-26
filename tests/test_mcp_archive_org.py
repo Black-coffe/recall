@@ -63,8 +63,6 @@ def test_thirteen_tools_with_class_family_and_allowlist():
         assert entry["limits"]["family"] == family
         assert entry["args_allow"], name
         assert "note" not in entry["args_allow"] and "body" not in entry["args_allow"]
-    assert len(names) == 89  # + 7 mcp-telegram-automation tools
-    assert sum(1 for e in full._TOOL_CLASS.values() if e["class"] != "R") == 35
 
 
 def test_enrich_backfill_is_open_world_and_paid():

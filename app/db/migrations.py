@@ -2265,5 +2265,16 @@ def init_database(db_path: str):
                   "(56, 'tg_chat_events: journal of chat direction and enabled changes')")
         logger.info("Migration v56: tg_chat_events")
 
+    # === v57: copilot reingest link (mcp-recording-live) - a repeat reingest returns the same row ===
+    if current_version < 57:
+        c.execute("PRAGMA table_info(copilot_sessions)")
+        cs_cols = [r[1] for r in c.fetchall()]
+        for col, typ in (('reingest_transcription_id', 'INTEGER'), ('reingest_by', 'TEXT')):
+            if cs_cols and col not in cs_cols:
+                c.execute(f'ALTER TABLE copilot_sessions ADD COLUMN {col} {typ}')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(57, 'copilot_sessions.reingest_transcription_id + reingest_by')")
+        logger.info("Migration v57: copilot reingest link")
+
     conn.commit()
     conn.close()

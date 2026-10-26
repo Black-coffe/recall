@@ -248,4 +248,22 @@ MESSAGES: dict = {
         "uk": "Немає відповіді у вікні Windows, дію відхилено.",
         "en": "No answer in the Windows window; the action is refused.",
     },
+    # mcp-recording-live: stop and cancel of a recording
+    "approvals.action.recording_stop": {
+        "uk": "Зупинити запис дзвінка.", "en": "Stop a call recording.",
+    },
+    "approvals.action.recording_cancel_own": {
+        "uk": "Скасувати запис дзвінка без збереження.", "en": "Cancel a call recording without saving it.",
+    },
+    "approvals.kind.recording": {"uk": "Запис дзвінка", "en": "Call recording"},
+    "approvals.impact.recording_stop": {
+        "uk": "Записано хвилин: {count}; запис завершиться.",
+        "en": "{count} min recorded so far; the capture ends.",
+    },
+    "approvals.impact.recording_cancel_own": {
+        "uk": "Буде видалено {count} с аудіо, відновити не можна.",
+        "en": "{count} s of audio deleted, no restore.",
+    },
+    "approvals.extra.started_by_owner": {"uk": "Запустив: власник.", "en": "Started by: owner."},
+    "approvals.extra.started_by_agent": {"uk": "Запустив: агент.", "en": "Started by: agent."},
 }

@@ -21,11 +21,13 @@ from typing import Any, Optional
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from app import state
+from app.core import auth
 from app.core.i18n import tr as _t
 from app.db.connection import get_db_connection
 from app.services import live_ask, local_llm
 from app.services.copilot import export as cp_export
 from app.services.copilot.service import CopilotBusyError
+from app.services.recording import guards
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,64 @@ def _busy_response(e: CopilotBusyError):
         'error_code': 'COPILOT_BUSY',
         'owner_session_id': e.owner_session_id,
     }), 409
+
+
+def _is_ui() -> bool:
+    return auth.classify_request()[0] == 'ui'
+
+
+def _actor() -> str:
+    """Server-stamped actor: ``'ui'`` for the UI token, else the sanitised agent label
+    (``mcp``/``hook``/``unknown``). The ``X-Recall-Actor`` header only picks the label."""
+    raw = request.headers.get('X-Recall-Actor') or ''
+    label = ''.join(ch for ch in raw if ch.isprintable() and ch not in '«»').strip()[:64].lower()
+    return guards.started_by_for(auth.classify_request()[0], label or None)
+
+
+def _bound_manifest(snap: Optional[dict]) -> Optional[dict]:
+    """Manifest of the recording the copilot session is bound to; None when there is no
+    binding, no recording service or the manifest is unreadable."""
+    rec_sid = (snap or {}).get('recording_session_id')
+    if not rec_sid or state.recording_service is None:
+        return None
+    try:
+        return state.recording_service.store.read(rec_sid)
+    except Exception:
+        logger.debug("copilot: manifest of %s unreadable, treated as owner class",
+                     rec_sid, exc_info=True)
+        return None
+
+
+def _is_agent_session(snap: Optional[dict]) -> bool:
+    """True when the session is bound to an agent-class recording (no manifest = owner)."""
+    return not guards.is_owner_session(_bound_manifest(snap))
+
+
+def _clamp_for_recording(settings: Any, recording_session_id: Optional[str]) -> Any:
+    """Settings for a copilot about to start on ``recording_session_id``: when that recording is
+    agent-class, spend is clamped (no API, budget 0, no escalate) for every caller, as
+    ``update_settings`` does; otherwise the settings pass through unchanged."""
+    if not recording_session_id or not _is_agent_session({'recording_session_id': recording_session_id}):
+        return settings
+    base = settings if isinstance(settings, dict) else {}
+    return {**{k: v for k, v in base.items() if k != 'escalate'},
+            'api_enabled': False, 'budget_usd': 0}
+
+
+def _agent_session_or_403(copilot_session_id: int):
+    """403 OWNER_SESSION when a non-UI caller drives a copilot session that is not bound to an
+    agent-class recording; None to go on. A UI caller is never refused; an unknown session
+    falls through to the route's own handling."""
+    if _is_ui():
+        return None
+    snap = state.copilot_service.get_state(copilot_session_id)
+    if snap is None or _is_agent_session(snap):
+        return None
+    return jsonify({
+        'success': False,
+        'error': _t('capture.err.owner_session'),
+        'error_code': 'OWNER_SESSION',
+    }), 403
 
 
 def end_for_recording(recording_session_id: str) -> Optional[str]:
@@ -244,12 +304,14 @@ def start():
     data = request.get_json(silent=True) or {}
     rec_sid = data.get('recording_session_id')
     try:
-        res = state.copilot_service.start(settings=data, recording_session_id=rec_sid)
+        res = state.copilot_service.start(settings=_clamp_for_recording(data, rec_sid),
+                                          recording_session_id=rec_sid)
     except CopilotBusyError as e:
         return _busy_response(e)
     except Exception as e:
         logger.exception("copilot start failed: %s", e)
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'INTERNAL'}), 500
+        return jsonify({'success': False, 'error': _t('core.error.internal'),
+                        'error_code': 'INTERNAL'}), 500
     return jsonify({'success': True, **res})
 
 
@@ -285,6 +347,7 @@ def move():
             settings = json.loads(prev.get('config_json') or '{}')
         except (ValueError, TypeError):
             settings = {}
+    settings = _clamp_for_recording(settings, to_sid)
     end_for_recording(from_sid)
     try:
         res = state.copilot_service.start(settings=settings, recording_session_id=to_sid)
@@ -388,10 +451,15 @@ def export_session(copilot_session_id: int):
 def reingest(copilot_session_id: int):
     """Save the co-pilot hints into the archive (Step 8): a new transcriptions record
     ``source_type='copilot'`` → enrich/embed through the same pipeline → searchable in RAG.
-    Response: ``{success, transcription_id, source_name}``."""
-    err = _require_service()
+    A repeat returns the first record (``created: false``), linked by
+    ``copilot_sessions.reingest_transcription_id``.
+    Response: ``{success, transcription_id, created, source_name?}``."""
+    err = _require_service() or _agent_session_or_403(copilot_session_id)
     if err:
         return err
+    prev_tid = state.copilot_service.get_reingest(copilot_session_id)
+    if prev_tid:
+        return jsonify({'success': True, 'transcription_id': prev_tid, 'created': False})
     tl = state.copilot_service.get_timeline(copilot_session_id)
     if tl is None:
         return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
@@ -403,6 +471,7 @@ def reingest(copilot_session_id: int):
         return jsonify({'success': False, 'error': _t('capture.cp.err.no_hints'),
                         'error_code': 'EMPTY'}), 400
     name = (tr or {}).get('source_name')
+    # source_name is data stored in `transcriptions`, not a response text (code-language exempt).
     src_name = f"Ко-пілот: {name}" if name else f"Ко-пілот сесії #{copilot_session_id}"
     db_path = current_app.config['DATABASE']
     with get_db_connection(db_path) as conn:
@@ -410,8 +479,16 @@ def reingest(copilot_session_id: int):
             "INSERT INTO transcriptions (source_type, source_name, transcript_text, "
             "language, category_id) VALUES ('copilot', ?, ?, 'uk', ?)",
             (src_name, digest, session.get('category_id')))
-        conn.commit()
         new_tid = cur.lastrowid
+        claimed = conn.execute(
+            "UPDATE copilot_sessions SET reingest_transcription_id = ?, reingest_by = ? "
+            "WHERE id = ? AND reingest_transcription_id IS NULL",
+            (new_tid, _actor(), copilot_session_id)).rowcount
+        if not claimed:   # a concurrent reingest linked its row first: drop ours
+            conn.rollback()
+            prev_tid = state.copilot_service.get_reingest(copilot_session_id)
+            return jsonify({'success': True, 'transcription_id': prev_tid, 'created': False})
+        conn.commit()
 
     # enrich/embed in the background — the same pipeline as for a regular transcription.
     try:
@@ -423,7 +500,8 @@ def reingest(copilot_session_id: int):
                 meta={"transcription_id": new_tid, "source": "copilot_reingest"})
     except Exception as e:
         logger.warning("copilot reingest enrich job failed: %s", e)
-    return jsonify({'success': True, 'transcription_id': new_tid, 'source_name': src_name})
+    return jsonify({'success': True, 'transcription_id': new_tid, 'created': True,
+                    'source_name': src_name})
 
 
 @copilot_bp.route('/api/copilot/by-transcription/<int:transcription_id>', methods=['GET'])
@@ -460,7 +538,9 @@ _IMPORTANCE = {'low', 'medium', 'high'}
 def update_settings(copilot_session_id: int):
     """Change the session mode/importance ON THE FLY during a call (Step 6). Body:
     ``mode`` (light|medium|hard) and/or ``importance`` (low|medium|high).
-    Re-resolves the matrix, updates the DB and the live worker. Response: ``{success, config}``."""
+    Re-resolves the matrix, updates the DB and the live worker. Response: ``{success, config}``.
+    A session bound to an agent-class recording stays local-only (no API, budget 0) for
+    every caller; a non-UI caller may change only such a session."""
     err = _require_service()
     if err:
         return err
@@ -470,8 +550,12 @@ def update_settings(copilot_session_id: int):
     if mode is None and importance is None:
         return jsonify({'success': False, 'error': _t('capture.cp.err.no_fields'),
                         'error_code': 'BAD_SETTINGS'}), 400
+    err = _agent_session_or_403(copilot_session_id)
+    if err:
+        return err
+    clamp = _is_agent_session(state.copilot_service.get_state(copilot_session_id))
     cfg = state.copilot_service.update_settings(copilot_session_id, mode=mode,
-                                                importance=importance)
+                                                importance=importance, clamp_spend=clamp)
     if cfg is None:
         return jsonify({'success': False, 'error': _t('capture.cp.err.session_not_found'),
                         'error_code': 'NOT_FOUND'}), 404
@@ -494,6 +578,7 @@ def action(copilot_session_id: int):
     """Operator action on an insight card (Step 4). Body:
     ``action`` (one of _OPERATOR_ACTIONS), ``event_id`` (the insight acted on),
     ``payload`` (opt.). escalate is only logged — the effect is in Step 5.
+    escalate is UI-only (it spends API money); ``payload.actor`` is stamped server-side.
 
     Response 200: ``{success, event_id}`` (id of the recorded action event).
     """
@@ -502,20 +587,25 @@ def action(copilot_session_id: int):
         return err
     data = request.get_json(silent=True) or {}
     act = data.get('action')
-    if act not in _OPERATOR_ACTIONS:
+    if act not in _OPERATOR_ACTIONS or (act == 'escalate' and not _is_ui()):
         return jsonify({'success': False, 'error': _t('capture.cp.err.unknown_action'),
                         'error_code': 'BAD_ACTION'}), 400
+    err = _agent_session_or_403(copilot_session_id)
+    if err:
+        return err
     ev = data.get('event_id')
     ev = int(ev) if (ev is not None and str(ev).isdigit()) else None
     ts = data.get('ts_offset_sec')
     ts = float(ts) if isinstance(ts, (int, float)) else None
+    payload = dict(data['payload']) if isinstance(data.get('payload'), dict) else {}
+    payload['actor'] = _actor()   # overwrites a client-sent actor
     try:
         eid = state.copilot_service.log_action(
-            copilot_session_id, act, ref_event_id=ev, ts_offset_sec=ts,
-            payload=data.get('payload') if isinstance(data.get('payload'), dict) else None)
+            copilot_session_id, act, ref_event_id=ev, ts_offset_sec=ts, payload=payload)
     except Exception as e:
         logger.exception("copilot action failed: %s", e)
-        return jsonify({'success': False, 'error': str(e), 'error_code': 'INTERNAL'}), 500
+        return jsonify({'success': False, 'error': _t('core.error.internal'),
+                        'error_code': 'INTERNAL'}), 500
 
     # "Dig deeper" → forced escalation of the card to Claude (Step 5).
     escalated = False
@@ -532,12 +622,24 @@ def action(copilot_session_id: int):
 
 @copilot_bp.route('/api/copilot/<int:copilot_session_id>/stop', methods=['POST'])
 def stop(copilot_session_id: int):
-    err = _require_service()
+    """End the session: stop the background worker of its recording first, then close the
+    row. Response: ``{success, copilot_session_id, ended, worker_stopped}``."""
+    err = _require_service() or _agent_session_or_403(copilot_session_id)
     if err:
         return err
     data = request.get_json(silent=True) or {}
     tid = data.get('transcription_id')
     tid = int(tid) if (tid is not None and str(tid).isdigit()) else None
+    snap = state.copilot_service.get_state(copilot_session_id)
+    rec_sid = (snap or {}).get('recording_session_id')
+    worker_stopped = False
+    if rec_sid and state.copilot_worker is not None:
+        try:
+            state.copilot_worker.stop(rec_sid, wait=False)
+            worker_stopped = True
+        except Exception:
+            logger.warning("copilot_worker.stop failed for %s (the session is still ended)",
+                           rec_sid, exc_info=True)
     ended = state.copilot_service.end(copilot_session_id, transcription_id=tid)
     return jsonify({'success': True, 'copilot_session_id': copilot_session_id,
-                    'ended': ended})
+                    'ended': ended, 'worker_stopped': worker_stopped})

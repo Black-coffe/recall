@@ -66,6 +66,19 @@ comtypes+pycaw for process loopback). ADR-026 (+ amendments A1-A4). Wiki: `docs/
   recording/paused/stopping/finalized/crashed/discarded. `create(..., system_source=)`,
   `set_stream_source(sid, stream, source, event)`, `stream_source(manifest, stream)` (no `source` → `all`).
 
+- **guards.py** (4.32.0, ADR-051) — pure who-may-drive rules: `OWNER_CLASS={ui,call_prompt,auto_call}`, `AGENT_LABELS={mcp,hook}`, `started_by_for(actor_class, claimed)` (`ui` or label or `unknown`;
+  the header is never a proof), `is_owner_session(manifest)` (missing field = owner), `cancel_own_check` (`owner|not_live|too_old`, `CANCEL_OWN_WINDOW_SEC=300`), `recording_kept` (moved here from the blueprint).
+- **start_notice.py** (4.32.0) — `notify_start(...)`: toast before an agent-started capture (`capture.rec.notice.*`); True only if shown; no visible desktop / any failure -> False (never raises).
+- **stop_control.py** (4.32.0) — `request_stop(sid, name, stop_fn=)` -> `started` (daemon thread `rec-stop-<sid>`) | `already`; `is_stopping`; `arm_timer(sid, minutes, stop_fn, is_live)` / `cancel_timer`
+  (wall-clock, in memory only: a restart does NOT re-arm); `reset()` for tests.
+
+## Agent-started sessions (4.32.0, mcp-recording-live)
+Manifest gets `started_by` (`session_store.create(started_by=)` :112; `service.start(started_by=)` :379; snapshot carries `started_by`, `max_duration_min`, `expires_at`, `service.py:339-341`).
+`recording.py`: `_start_session(data, started_by=)` shared by `/start` (`_caller_started_by` :291) and the call prompt (`'call_prompt'` :851). For an agent class: limit pre-check (409 `SESSION_LIMIT`, no toast),
+`start_notice.notify_start` (503 `NOTIFY_UNAVAILABLE` when not shown), copilot body limited to mode/importance and forced local (`_AGENT_COPILOT_SPEND_KEYS`), `max_duration_min` 1..`_MAX_DURATION_MIN`=240
+(`_parse_duration_min` :598; writes `expires_at`, arms `stop_control.arm_timer`, :612-628). `_owner_session_refusal` :295 (403 `OWNER_SESSION`) on pause/resume/system-source for a non-`ui` caller.
+`/stop` (:905) answers at once `status:'stopping'` (waits `_STOP_GRACE_SEC=0.3`), repeat/finished -> `already:true`; `/discard` refuses 409 `RECORDING_KEPT` and leaves the duration timer armed. Wiki `approval-gate.md`.
+
 ## System audio source
 - `all` at start → `recorder_factory` (`WasapiRecorder`, endpoint `device_index`) — byte-for-byte as before 4.7.0.
 - `include:[≤4 exe]` / `exclude:[exactly 1 exe]` → `app_source_factory`; in `app.py:835-841` the PID
@@ -103,7 +116,7 @@ under `__main__` (`app.extensions['call_watcher']`, `app.py:1189`); settings `RE
 `_rec_autosave` with `after_save_fn=_rec_autosave_job.file_saved`) BEFORE recovery; the finalize
 callback schedules (`app.py:727-745`, result goes into the callback payload as `autosave`); boot re-arm `app.py:925`. Gotcha: a restart
 re-arms with a fresh full delay, and a job interrupted while `running` is re-run (skipped if a transcript already exists).
-`discard` is refused 409 `RECORDING_KEPT` once a transcript exists or autosave is running/done (`_recording_kept`, `recording.py:894`).
+`discard` is refused 409 `RECORDING_KEPT` once a transcript exists or autosave is running/done (`guards.recording_kept` via `_recording_kept`, `recording.py:1143`).
 `/save` (4.23.3): cancels the deadline, then sets `autosave.saved` in one locked write; only the FIRST successful save (`saved` not yet
 set) calls `after_save` (`recording.py:826-845`), so a second tab does not file twice.
 **SSE** (`recording:{sid}`): level (10Hz), status, chunk_saved, error, source_changed. Since 4.20.0 every event except `level` and
@@ -111,6 +124,6 @@ set) calls `after_save` (`recording.py:826-845`), so a second tab does not file 
 **Tests:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
 recording_service,recording_blueprint,session_store}.py`.
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: call_watch publisher, prompt_withdrawn; live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
+last-verified: 2026-10-26 (mcp-recording-live 4.32.0: guards, start_notice, stop_control, agent-started sessions; `_recording_kept` is now `guards.recording_kept`, `recording.py:1143`); 2026-10-25 (mcp-telegram-automation 4.31.0: call_watch publisher, prompt_withdrawn; live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
 
 > **4.26.0:** autosave `http_json` sends the per-boot UI token (`autosave.py:221`), so its loopback calls count as `ui`, not as an agent (ADR-045).

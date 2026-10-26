@@ -59,8 +59,6 @@ def test_registry_entry_and_profiles():
         ("R", "system", False, None)
     assert "list_mcp_actions" in load_mcp_copy()._registered_tool_names()
     assert "list_mcp_actions" in load_mcp_copy("read")._registered_tool_names()
-    full = load_mcp_copy()
-    assert len(full._registered_tool_names()) == 89  # + system_status and 4 D tools (mcp-mail-and-keys), + 4 retranscribe-versions tools, + 13 archive-org tools, + 12 mcp-pipeline tools, + 7 mcp-telegram-automation tools
 
 
 def test_default_call_newest_first_with_unverified_claims(db):

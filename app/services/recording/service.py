@@ -310,6 +310,7 @@ class RecordingService:
                 'auto_name': manifest.get('auto_name'),
                 'video_tracks': manifest.get('streams', {}).get('video', []),
                 **self._source_info(manifest),
+                **self._provenance_info(manifest),
             }
 
         # Active — build the live snapshot
@@ -327,7 +328,17 @@ class RecordingService:
             'auto_name': manifest.get('auto_name'),
             'video_tracks': manifest.get('streams', {}).get('video', []),
             **self._source_info(manifest),
+            **self._provenance_info(manifest),
             **self._disk_info(),
+        }
+
+    @staticmethod
+    def _provenance_info(manifest: dict) -> dict:
+        """Who started the session and its duration limit (mcp-recording-live)."""
+        return {
+            'started_by': manifest.get('started_by') or 'ui',
+            'max_duration_min': manifest.get('max_duration_min'),
+            'expires_at': manifest.get('expires_at'),
         }
 
     @staticmethod
@@ -365,6 +376,7 @@ class RecordingService:
         system_device_name: Optional[str] = None,
         video_spec: Optional[dict] = None,
         system_source: Optional[SystemSpec] = None,
+        started_by: str = 'ui',
     ) -> str:
         """Start a new session. At least one of the streams must be
         specified (mic_device_index or a system stream).
@@ -405,6 +417,7 @@ class RecordingService:
                 mic_device_name=mic_device_name,
                 system_device_name=system_device_name,
                 system_source=sys_spec.to_dict() if sys_spec is not None else None,
+                started_by=started_by,
             )
 
             active = _ActiveSession(session_id=session_id)

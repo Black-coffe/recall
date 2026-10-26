@@ -1,8 +1,11 @@
 # ADR-042: MCP full control supersedes read-first
 
-- Status: Proposed
+- Status: Accepted (2026-10-26, spec 9 `mcp-triggers` closes the program; see "Final status")
 - Date: 2026-10-18 (decisions 5 and 11 amended 2026-10-19 for spec 3)
-- Spec: docs/specs/mcp-foundations-a (draft; spec 9 finalises it); decisions 5 and 11: docs/specs/mcp-foundations-b
+- Narrowed by ADR-051 (2026-10-26): the owner's own UI Stop/Discard runs without the dialog, and the agent's
+  `recording_stop` / `recording_cancel_own` are D actions allowed during a recording; decision 5 and the
+  "refused during a recording" invariant read with those exceptions.
+- Spec: docs/specs/mcp-foundations-a (draft); finalised by docs/specs/mcp-triggers; decisions 5 and 11: docs/specs/mcp-foundations-b
 
 ## Context
 The MCP surface was decided read-first on 02.07.2026: write tools were removed, and later only two narrow writes
@@ -162,3 +165,36 @@ A desktop-control agent is part of the owner's normal sessions; the owner hits t
 pass (raise the numbers, not the mechanism); the headless profile needs deletions; a second interactive session or OS
 user runs Recall; the `MessageBoxW` close path stops working after a Windows update (then the stale window stays and only the
 deadline rules, which is still fail-closed).
+
+## Final status (2026-10-26)
+The program in `docs/specs/mcp-full-control/report.md` §9 is closed: nine specs, 95 tools (56 read + 39 write, of
+which 16 are D), under the tool cap of 100 (ADR-052). The decisions above stand as written, read with the ADR-051
+exceptions.
+
+Shipped:
+
+| # | Spec | Version | What it added |
+|---|------|---------|---------------|
+| 1 | `mcp-mail-connect` | 4.19.0 | `mailbox`, `settings`; secrets only on a one-time local connect page |
+| 2 | `mcp-foundations-a` | 4.20.0 | `_TOOL_CLASS` registry, derived annotations, profiles, error envelope and codes, Host/Origin rule, `wait_for` |
+| 3 | `mcp-foundations-b` | 4.22.0 | the Windows dialog for every D route, `mcp_actions` audit, `list_mcp_actions`, family ceilings |
+| 4 | `mcp-mail-and-keys` | 4.24.0 | the first D tools: mail backfill, label enrich, disconnect, removing the Anthropic key; `system_status` |
+| 5 | `mcp-archive-org` | 4.26.0 | tasks, bookmarks, comments, taxonomy, speakers, transcripts, with their D tools |
+| 6 | `mcp-pipeline` | 4.27.0 | transcription, documents, audio, jobs, models, `transcript_ai`, diagnostics |
+| 7 | `mcp-telegram-automation` | 4.31.0 | Telegram chats and backfill, `automation_status`, `pipes` run |
+| 8 | `mcp-recording-live` | 4.32.0 | `recording`, `copilot`, `recording_stop`, `recording_cancel_own`, devices, copilot timeline |
+| 9 | `mcp-triggers` | this spec | skills in `skills/`, the MCP prompt `post_digest`, `docs/recipes/hooks.md`, the `recall` / `recall-ro` / `recall-scheduled` registrations |
+
+(The report numbers `mcp-recording-live` 7 and `mcp-telegram-automation` 8; they shipped in the order above.)
+`mcp-token-budget` (4.21.0) ran beside the program and set the read tools' page budget.
+
+Dropped:
+- The `client` gate mode and `RECALL_MCP_UNATTENDED_ALLOW`: decision 5 / §11 A1-A2, no key or mode skips the dialog.
+  A scheduled run that reaches a D tool is refused when nobody answers (`APPROVAL_DENIED` after 45 s).
+- `_HOOK_ROUTES` and the gate key for hooks: a hook is an unproven caller like any agent; it gets the toast before a
+  recording and the dialog before a D action. The recipes say so.
+- The Q1 merges of existing read tools: not needed under the cap of 100 (ADR-052) and declined in the grill of spec 9.
+- Auto-record on a detected call (`RECORDING_AUTOPROMPT_ACTION`): moved to a separate recording spec together with the
+  K2 measurement fixes (`docs/specs/k2-measure/report.md`).
+- The `transcribe_file` MCP prompt and every other path-taking prompt: Claude Code splits prompt arguments on
+  whitespace (report fact 3d); `post_digest` is the only prompt.

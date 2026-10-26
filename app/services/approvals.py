@@ -69,6 +69,19 @@ def _station_visible(user32) -> bool:
     return bool(ok) and bool(flags.dwFlags & WSF_VISIBLE)
 
 
+def station_visible() -> bool:
+    """Public no-desktop probe for other UI-less paths (the toast before an agent start).
+
+    False off Windows and when the probe itself fails: no visible desktop, no toast."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return _station_visible(_user32())
+    except Exception:  # noqa: BLE001 - a failing probe means no visible desktop
+        logger.debug("station_visible probe failed", exc_info=True)
+        return False
+
+
 def _show_dialog(title: str, text: str) -> int:
     """Show MessageBoxW on the calling thread and return IDYES / IDNO."""
     if sys.platform != "win32":

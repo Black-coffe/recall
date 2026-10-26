@@ -2,7 +2,7 @@
 domain: mcp-approval-gate
 tags: [mcp, security, approval, audit, adr-042]
 related: [adr/042-mcp-full-control-supersedes-read-first.md, SECURITY.md, MCP_SETUP.md]
-last-verified: 2026-10-21
+last-verified: 2026-10-26
 ---
 
 # Approval gate: a destructive action runs only after a native dialog said yes
@@ -30,7 +30,14 @@ read with the MCP tool `list_mcp_actions`. The invariants below are quoted from 
 - Family (W) ceilings are counted where the tool name is trustworthy, in the MCP process; D ceilings are counted in
   app.py per actor class. Both are loop guards, not security controls.
 - A conditional D route (`_CONDITIONAL_D_ROUTES`, re-transcribe that would evict a version) is gated only for a non-`ui` caller and only when its predicate holds; a predicate error gates (fail closed). 4.26.0: non-`ui` private-direction delete/merge and delete of a record with a live job are refused before any dialog (`PRIVATE_CATEGORY_CHANGE`, `JOB_ACTIVE`).
-- 4.27.0 D actions added: `document_import_folder` and `document_reparse` (routes `documents.import_folder`, `reparse_document`, `reparse_job`; gated for every caller, `ui` included: a `ui` request still gets the dialog, only the recording refusal and the conditional routes (`approval_gate.py:187,213`) look at the class) and the conditional `video_describe_claude` (`transcription.analyze_video_endpoint`, non-`ui` caller whose request would describe frames through Claude; local analysis stays ungated). Their summaries are built from the DB and body (folder quoted and cut, record `display_name`); a refusal the view itself would give (bad folder, no original, no video) skips the dialog. `D_ACTIONS` now lists 18.
+- 4.27.0 D actions added: `document_import_folder` and `document_reparse` (routes `documents.import_folder`, `reparse_document`, `reparse_job`; gated for every caller, `ui` included: a `ui` request still gets the dialog, only the recording refusal and the conditional routes (`approval_gate.py:187,213`) look at the class) and the conditional `video_describe_claude` (`transcription.analyze_video_endpoint`, non-`ui` caller whose request would describe frames through Claude; local analysis stays ungated). Their summaries are built from the DB and body (folder quoted and cut, record `display_name`); a refusal the view itself would give (bad folder, no original, no video) skips the dialog. `D_ACTIONS` listed 18 then; it lists 21 since 4.32.0 (`approval_gate.py:50-57`).
+- mcp-recording-live: `recording_stop` and `recording_cancel_own` (conditional routes `recording.stop_recording`,
+  `recording.discard_recording`, always gated for a non-`ui` caller; the owner's own Stop/Discard get no dialog) are
+  the only D actions exempt from the mid-recording refusal (`RECORDING_ALLOWED_ACTIONS`); they keep the ceilings, the
+  one-dialog rule and the audit row. Their dialog is built from the manifest and the live snapshot, never the request:
+  the agent's `name` reaches it only as the quoted `X-Recall-Note`. A stop on a session not live or already stopping
+  answers 200 `already: true` without a dialog; a cancel of an owner session (403 `OWNER_SESSION`), outside its
+  5-minute live window (409 `CANCEL_WINDOW_CLOSED`) or of a kept recording (409 `RECORDING_KEPT`) is refused before it.
 - The gate consumes `classify_request()`; a new origin proof is added there, never inferred in the gate.
 
 ## Boundary

@@ -48,6 +48,10 @@ Part of `app/services/*`; hub — [services.md](services.md).
     `_document_reparse` :442 (`documents.reparse_target`, `ReparseError`), `_video_describe_claude` :458 (no video -> 200 `NO_VIDEO` Precondition), `BUILDERS` :474, `_NON_UI_CHECKS` :533, `build` :540, `render` :605, `one_line` :625.
     `recording/state.py::RECORDING_BLOCKED` :16 declares `transcribe`, `video_analyze:describe_local`, `transcript_suggest_meta`, `transcript_ai:enrich`, `settings:copilot_disable`; `recording_active` :25.
     `job_queue.active_job_for_transcription` is now :432.
+  - 4.32.0 (mcp-recording-live): `D_ACTIONS` :50 now 21 (+`recording_stop`, `recording_cancel_own`; routes `recording.stop_recording`, `recording.discard_recording` :134-135, `_always`, so gated for non-`ui` only);
+    `RECORDING_ALLOWED_ACTIONS` :60 exempts exactly those two from the mid-recording `RECORDING_ACTIVE` refusal (check :245); `X-Recall-Note` (`_clean_note`, :282) = the agent's quoted name in the dialog;
+    `approval_summaries._recording_stop` :568 / `_recording_cancel_own` :582 (manifest + live snapshot, never the request). `error_codes.py` +`OWNER_SESSION` 403, `NOTIFY_UNAVAILABLE` 503, `CANCEL_WINDOW_CLOSED` 409 (:117-119).
+    Migration v57 (`migrations.py:2268`): `copilot_sessions.reingest_transcription_id` + `reingest_by`.
   - 4.31.0: `D_ACTIONS` :46 now 19 (+`telegram_enable_chat`), `_D_ROUTES` :56 = 20 (+`telegram.tg_enable_chat`); `approval_summaries._telegram_enable_chat` :351 (dialog text from DB). `error_codes.py` +`PRIVATE_CATEGORY_CHANGE` 403 (:76, was mail-only, now also chats),
     `LISTENER_OFFLINE` 503 (:111), `NOT_MONITORED` 404 (:115); `UNDO_NOT_LAST` 409 (:93) is also the chat-undo refusal. Texts `approvals.*`, `automation.*`, `telegram.*` catalogs gained the keys.
   - `app/services/approvals.py` (stdlib only): `ask(text, timeout_s)` :120 -> `Decision(status approved|denied|unavailable|pending)`;
