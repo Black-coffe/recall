@@ -1,6 +1,6 @@
 # services — media, transcription, dedup
 
-last-verified: 2026-10-21 (mcp-pipeline 4.27.0 section re-read); 2026-10-20 (retranscribe/transcript_versions section and the `retention.py:85-88` cascade); rest 2026-10-16
+last-verified: 2026-10-28 (wave2-recording-calls 4.36.0: transcription_run participants only); 2026-10-21 (mcp-pipeline 4.27.0 section re-read); 2026-10-20 (retranscribe/transcript_versions section and the `retention.py:85-88` cascade); rest 2026-10-16
 Part of `app/services/*`; hub — [services.md](services.md).
 
 ## Transcription / media
@@ -16,7 +16,7 @@ Part of `app/services/*`; hub — [services.md](services.md).
 
 ## Pipeline services (4.27.0, mcp-pipeline; no migration; plan `docs/specs/mcp-pipeline/plan.md`)
 - **transcription_run.py** — the pipeline both transcribe routes call. `TranscribeParams` (:75; `source` file|library|recording|youtube|path, `non_ui`, `actor`),
-  `resolve(params) -> (filepath, source_name, meta)` :251 (`_resolve_path` :225 = `import_roots.resolve_allowed` + extension + `max_bytes`; recording not finalized -> `NOT_FINALIZED`),
+  `resolve(params) -> (filepath, source_name, meta)` :251 (`_resolve_path` :225 = `import_roots.resolve_allowed` + extension + `max_bytes`; recording not finalized -> `NOT_FINALIZED`; 4.36.0: recording/library-recording meta carries manifest `participants` (+ recording `description`), `run` links them via `recording/participants.link_to_transcription`, source `owner`),
   `run(params, resolved, *, job=None)` :287 (the old sync body; with a job sets `meta.stage/progress`, checks `is_cancelled()` between stages),
   `submit(params)` :683 -> `{job_id, created}` (`ASYNC_SOURCES` = library|recording|youtube|path; order: non-ui + `recording_active()` -> `RECORDING_ACTIVE`; queue -> 503;
   model not downloaded -> `MODEL_NOT_INSTALLED`; `_inflight[(source, ref)]` dedupe -> `created:false`; busy library row -> `ALREADY_RUNNING`), job kind `transcription` (batch executor),

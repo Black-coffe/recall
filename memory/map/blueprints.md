@@ -6,18 +6,17 @@ shapes and they are NOT rewritten. Newer routes add `error_code`; every `error_c
 (`tests/test_error_codes.py`). MCP normalises the shape on its side (`root-processes.md`). The auth gate itself answers with `code`, not `error_code` (`auth.py:232`).
 Other slices: `blueprints-media.md` (transcription, audio_library, youtube, recording), `blueprints-memory.md` (memory, research, telegram).
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: automation.py status + pipe run; `APP_VERSION` in system.py:34 still reads "4.30.0"); 2026-10-21 (mcp-pipeline 4.27.0: system/events/documents/gate lines re-read); 2026-10-19 (mcp-mail-and-keys 4.24.0: mail gated routes, system.py APP_VERSION; 4.23.3 version bump; 4.23.2 version bump; recording-autosave, 4.23.0: new recording routes in `blueprints-media.md`; rest mcp-foundations-b 4.22.0)
+last-verified: 2026-10-28 (4.38.0 connect banner keys; 4.37.0: meeting-brief, live-missed, bookmark clip, sessions counts; older passes condensed, see git history)
 
-**Approval gate (4.22.0, 4.24.0, 4.27.0, 4.31.0 +`telegram.tg_enable_chat` = 20 entries):** 19 endpoints were destructive and answer only after a native dialog (`approval_gate._D_ROUTES` :55; 4.27.0 adds `documents.import_folder`, `documents.reparse_document`, `documents.reparse_job`; `transcription.analyze_video_endpoint` is conditional, see `services-infra.md`; table and
+**Approval gate (4.22.0, 4.24.0, 4.27.0, 4.31.0, 4.34.0 +`settings_api.disconnect_calendar` = 21 `_D_ROUTES` entries):** 19 endpoints were destructive and answer only after a native dialog (`approval_gate._D_ROUTES` :55; 4.27.0 adds `documents.import_folder`, `documents.reparse_document`, `documents.reparse_job`; `transcription.analyze_video_endpoint` is conditional, see `services-infra.md`; table and
 order of checks — `services-infra.md`): transcription delete/bulk-delete, memory delete/merge category and tag + `start_backfill`,
 speakers delete/merge, `telegram.tg_backfill`, `settings_api.clear_anthropic_key`, `audio_library.delete_audio_download`, and four mail
 routes (`mail_accounts_delete` = `mailbox_delete`, `mail_accounts_disconnect`, `mail_backfill`, `mail_label_enrich`). They may also answer 400 `BAD_REQUEST` (+`reason`), 403 `APPROVAL_DENIED`, 409 `APPROVAL_PENDING` /
 `RECORDING_ACTIVE`, 429 `RATE_CEILING`, 503 `APPROVAL_UNAVAILABLE` before the view runs. Every non-GET `/api/*` is audited (`mcp_actions`).
 
-**Agent writes (4.26.0, ADR-042):** routes tell the owner's SPA from an agent with `auth.classify_request()[0] == 'ui'` (per-boot UI token); a non-ui caller is stamped `source='mcp'`. comments.py: agent create strips `weight/pinned/author/parent_id/source`, identical body within 10 min -> `{created:false}`; PATCH/DELETE/restore on a non-`mcp` row -> 403 `OWNER_AUTHORED` (`_owner_guard`); agent PATCH clears `confirmed_at`; new `POST /api/comments/<id>/confirm` is ui-only (else 403 `USE_UI`). bookmarks.py: DELETE returns `deleted_snapshot`, agent note <=2000 (`INVALID_ARGUMENT`). speakers.py: agent rename of self -> `IS_SELF`; `PATCH /api/transcriptions/<id>/speakers` for an agent takes existing speaker ids only and writes `transcription_speaker_map.source='mcp'` without touching speaker embeddings (UI path resets source to NULL). Loopback calls from `recording/autosave.py::http_json` carry the UI token so they count as `ui`. system.py `APP_VERSION = "4.26.0"` (:39; `app/__init__.py:6`) — the 4.23.3 value below is stale.
-
+**Agent writes (4.26.0, ADR-042):** routes tell the owner's SPA from an agent with `auth.classify_request()[0] == 'ui'` (per-boot UI token); a non-ui caller is stamped `source='mcp'`. comments.py: agent create strips `weight/pinned/author/parent_id/source`, identical body within 10 min -> `{created:false}`; PATCH/DELETE/restore on a non-`mcp` row -> 403 `OWNER_AUTHORED` (`_owner_guard`); agent PATCH clears `confirmed_at`; new `POST /api/comments/<id>/confirm` is ui-only (else 403 `USE_UI`). bookmarks.py: DELETE returns `deleted_snapshot`, agent note <=2000 (`INVALID_ARGUMENT`). speakers.py: agent rename of self -> `IS_SELF`; `PATCH /api/transcriptions/<id>/speakers` for an agent takes existing speaker ids only and writes `transcription_speaker_map.source='mcp'` without touching speaker embeddings (UI path resets source to NULL). Loopback calls from `recording/autosave.py::http_json` carry the UI token so they count as `ui`.
 ## system.py (~400) — `/`, `/api/health|ready|models*|system_*|polish/*|metrics`
-- `APP_VERSION = "4.30.0"` (system.py:34; mirror `app/__init__.py:6`) — `version` in health/ready/system_info. The 4.26.0 line in the block above is stale.
+- `APP_VERSION = "4.38.0"` (system.py:34; mirror `app/__init__.py:6`) — `version` in health/ready/system_info.
 - 4.27.0: `POST /api/download_model` (:198) submits/joins the `model_download` job and blocks on its future, same `{success,message}` shape (+`job_id`); `POST /api/models/download-job`
   (:223, 202 `{success, job_id, created}`; unknown model 400 `UNKNOWN_MODEL`); `POST /api/system/diagnostic-package/file` (:278, `diagnostics.write_package()`, 500 `INTERNAL_ERROR` on OSError).
   `GET /diagnostic-package` (:267) streams `diagnostics.build_package()`.
@@ -38,9 +37,10 @@ finished -> 400 `{success:false, error, cancel_ignored:true}` (:82); a missing j
 
 ## automation.py (~225; 4.31.0 adds status + pipe run) — `GET /api/automation/events?channel=&events=&after=&timeout=` (blueprint `automation_bp`)
 4.31.0: `GET /api/automation/status[?sections=calls,pipes,pollers,telegram]` (:165; unknown section 400 `INVALID_ARGUMENT`): `calls` (watcher allowlist: kind/exe/label/age_sec/session_id, never ids or URLs),
-`pipes` (schedule, tools, budget, `last_run`, `cooldown_sec`), `pollers` (scheduler/brief_buttons/mail present), `telegram` (`listener_online`, monitored/enabled counts, `bot_configured`).
+`pipes` (schedule, tools, budget, `last_run`, `cooldown_sec`), `pollers` (scheduler/brief_buttons/mail/calendar present, `automation.py:152`), `telegram` (`listener_online`, monitored/enabled counts, `bot_configured`).
 `POST /api/pipes/<name>/run` (:192): unknown pipe 404 `NOT_FOUND`, no scheduler 409 `PIPES_DISABLED`, no bot 503 `NOT_CONFIGURED`, running/fresh `running` row 409 `ALREADY_RUNNING` (+`job_id`),
 cooldown 429 `COOLDOWN` (+`retry_after_sec`), else 202 `{job_id, created, poll}`; job kind `pipe_run`, delivers to the fixed bot recipient with `trigger='mcp'`.
+4.37.0: `GET /api/meeting-brief?event_id=|person=` (:226; exactly one else 400 `INVALID_ARGUMENT`, unknown event 404, `PrivacyError` 503 `UNAVAILABLE`; 200 `{success, brief}` after `filter_brief`) — logic `services-calendar.md`.
 Long poll over the `sse_broker` ring for MCP `wait_for`. Channel must start with `sse_broker.RING_PREFIXES` else 400 `INVALID_ARGUMENT`;
 `timeout` clamped 0..25 s; `recording:<sid>` with an unknown session (or no `recording_service`) -> 404 `NOT_FOUND`; the 5th concurrent
 waiter (`MAX_WAITERS=4`) -> 429 `TOO_MANY_WAITERS`. Default `events` on `recording:` = status, live_segment, copilot_insight, source_changed,
@@ -56,14 +56,21 @@ already_configured}`), `DELETE anthropic-key` (:132), `POST anthropic-key/test` 
 (:216) → `{success,value}`, `POST /ui-lang {value: auto|uk|en}` (:221; else 400 `tr('core.settings.ui_lang_invalid')`). Key/language go to
 `.env` through `env_file.set_env_var`/`unset_env_var` (`_set_env_var` :66, `_unset_env_var` :73; also set `os.environ`). An `after_request` logs `actor=mcp tool= route= status=` for `X-Recall-Actor: mcp`.
 
-## connect.py (~150, 4.19.0) — `GET|POST /connect/<kind>/<token>` (blueprint `connect_bp`; `kind` = `mail|anthropic_key`)
+## connect.py (~190, 4.19.0) — `GET|POST /connect/<kind>/<token>` (blueprint `connect_bp`; `kind` = `mail|anthropic_key|calendar`)
 The ONLY place a password or API key is typed. Not under `/api/`, so outside the auth gate; `_guard_ok` (:34) is its own gate: remote_addr
 `127.0.0.1|::1`, no proxy header (`auth._PROXY_HEADERS`, 4 names), `Host` loopback, and on POST `Origin` == `http://<host>` (`Origin: null` only
 with `Sec-Fetch-Site` same-origin/none, :47) else 403. Unknown kind 404; dead/expired/consumed token -> 410 page. Form field `secret`.
 Mail: `ma.connect_account` (test login + LIST first); key: `settings_secrets.save_anthropic_key`. Failure -> `connect_links.record_failure`
 (3rd failure kills the link; message + attempts left, status 400/500/502); success -> `connect_links.consume`, mail page lists labels. Responses
 carry `Cache-Control:no-store`, `Referrer-Policy:same-origin`, `X-Frame-Options:DENY`; the secret is never logged or rendered back (only
-`MailError.code`/exception type are logged). Template `templates/connect.html`; texts `i18n_catalog/connect.py` (`connect.*`).
+`MailError.code`/exception type are logged). Template `templates/connect.html`; texts `i18n_catalog/connect.py` (`connect.*`). 4.38.0: the banner is per kind, `tr('connect.warning.' + kind)` (`_form` :86) with keys `connect.warning.mail|anthropic_key|calendar` (a new kind needs its own key).
+
+## Calendars (4.34.0, k6-calendar-ics) — in `settings_api.py` :236-283 and `connect.py`
+`GET /api/settings/calendars` (sources with `configured`/`events`, `sync_running` = `calendar_poller` in extensions; never the address),
+`POST .../calendars/connect-link {label}` (`connect_links.issue('calendar', subject=label)` -> `{connect_url, expires_in, already_configured}`; empty label 400 `BAD_REQUEST`),
+`POST .../calendars/<id>/sync` (unknown 404 `NOT_FOUND`, no poller 503 `CALENDAR_POLLER_OFF`, else `poller.trigger(id)` 202 `{queued}`),
+`DELETE .../calendars/<id>` (GATED D `calendar_disconnect`, endpoint `settings_api.disconnect_calendar`; 404 `NOT_FOUND`). Connect page kind `calendar`:
+`_post_calendar` -> `calendar_ics.connect_source`; `_CALENDAR_ERRORS` maps `BAD_URL|HOST_NOT_ALLOWED` 400, `FETCH_FAILED` 502, `PARSE_FAILED` 400. `automation.py` status `pollers` now has `calendar`. Logic — `services-calendar.md`.
 
 ## i18n in the HTTP layer (english-i18n, 4.16.0)
 All error/status texts in `jsonify` — `tr('<area>.<key>', **vars)` / `tr_n` (`app/core/i18n.py`; language = `request_lang()`:
@@ -105,14 +112,14 @@ An `after_request` logs `actor=mcp tool= route= status=`. Logic — `services-ma
 ## copilot.py (~550) — `/api/copilot/*`
 `availability`, `live-ask`, `start`, `move`, `sessions`, `/<id>/timeline|export|reingest|state|settings|stop`, `by-transcription/<tid>`,
 `/<id>/action` (dismiss|pin|thumbs_up|thumbs_down|escalate).
+- 4.37.0: `POST /live-missed` (:298; Sonnet summary, per-call budget, 403 `AGENT_SESSION`, 429 `LIVE_BUDGET_EXHAUSTED` — `copilot.md`); `GET /sessions` (:410) rows gain `shown/suppressed/thumbs_up/thumbs_down`.
 - 503 when `state.copilot_service is None` (`_require_service`), EXCEPT `live-ask` (not a session step).
 - `POST /move {from_session_id,to_session_id,settings?}`: ends the copilot on A, starts on B, not atomic: a start failure → 200
   `COPILOT_MOVE_FAILED` with `ended_from:true`. `CopilotBusyError` → 409 `COPILOT_BUSY`; several live recordings without `session_id` →
   `AMBIGUOUS_SESSION`.
 
-## speakers.py (~1000) — `/api/speakers/*`, `/api/transcriptions/<id>/speakers`
-`GET/POST /speakers`, `PUT/DELETE /<id>`, `PATCH /api/transcriptions/<id>/speakers` (bulk map), `GET /stats`, `/<id>/timeline`,
-`POST /merge`, `POST /unmerge/<merge_id>`, `GET /<id>/samples`. Gotchas: casefold in Python (Cyrillic-safe); embeddings are averaged.
+## speakers.py — `/api/speakers/*`, `PATCH /api/transcriptions/<id>/speakers`; casefold in Python (Cyrillic-safe).
 
 ## bookmarks.py (~190) — `/api/transcription/<id>/bookmarks`, `/api/bookmarks/<id>`, `/api/saved-searches[/<id>[/use]]`
 UNIQUE (transcription_id, segment_index); the saved query is stored as JSON.
+4.37.0 `GET /api/bookmarks/<id>/clip?pad=0..60` (:143, default 5): zip `clip.mp3` + `clip.txt` built in memory by `services/bookmark_clip.py` (`resolve_audio` = audio-route roots check, `cut` = ffprobe + ffmpeg with `proc.NO_WINDOW`, clamped to the file). 400 `INVALID_ARGUMENT` (pad), 404 `NOT_FOUND`/`NO_MEDIA`, 403 `{success,error}` without `error_code` (path outside roots), 503 `UNAVAILABLE` (no ffmpeg/cut failed). No private-direction check in the route itself.

@@ -1,6 +1,6 @@
 # services — `app/services/*` (hub)
 
-last-verified: 2026-10-25 (4.31.0 index entries)
+last-verified: 2026-10-28 (4.35.0: task_proposals in services-enrichment; `task_proposals` pipe in services-pipes-bot)
 
 Business logic outside HTTP. The map is split into slices of ≤80 lines; this file is only an index.
 Language (4.17.0): service code, comments, docstrings and logs are English (`.claude/rules/code-language.md`, guard
@@ -22,11 +22,13 @@ Separate map files: [copilot.md](copilot.md), [recording.md](recording.md).
 - [services-retrieval.md](services-retrieval.md) — `retrieval` (RRF, rewrite, explain, thread context), `archive_grep`,
   `reranker`, `rag` (Ask Archive), `query_rewrite`, `categorize`.
 - [services-enrichment.md](services-enrichment.md) — `enrichment`, `document_parser`, `text_polishing`, `research`,
-  `commitments` (deadlines, digests, `apply_action`), `scope`.
+  `commitments` (deadlines, digests, `apply_action`, 4.35.0 proposal status machine), `task_proposals` (4.35.0), `scope`.
 - [services-telegram.md](services-telegram.md) — `tg_threads`, `tg_chat_context`, `tg_tasks`, `tg_questions`, `telegram_chats` (journaled chat direction/enable changes, undo; 4.31.0).
 - [services-mail.md](services-mail.md) — Gmail ingest (4.18.0): `mail_accounts` (keyring, `connect_account`), `mail_imap` (read-only),
   `mail_parse`, `mail_sync` (+`MailPoller`), `document_ingest` (shared `ingest_file`); 4.19.0: `connect_links`, `secret_shape`,
   `settings_secrets` (one-time local secret pages, MCP never sees a password/key).
+- [services-calendar.md](services-calendar.md) — 4.34.0 (k6): `calendar_ics` (secret ICS sources in the keyring, allowlisted fetch, recurrence expansion,
+  `CalendarPoller`), `calendar_bind` (recording<->event binding, attendee links `source='calendar'`, backfill CLI).
 - [services-entities.md](services-entities.md) — `entity_dedup`, `tg_entities` (+morphology), `comments.link_entities`,
   `evals/graph_links`.
 - [services-infra.md](services-infra.md) — `job_queue`, `sse_broker` (event ring), `env_file`, `error_codes`, approval gate, job `result`, monitoring, `local_llm`, `models`, `pricing`.

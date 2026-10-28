@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # NOT in retrieval.search() globally -- copilot/categorize/MCP search stay
 # without rerank and without a change in latency. We read the env directly (like
 # COPILOT_ENABLED/embeddings.py) so that the module stays standalone-testable.
-_RERANK_ENABLED = os.environ.get("RECALL_RERANK_ENABLED", "0").strip() in ("1", "true", "True")
+_RERANK_ENABLED = _settings.env_bool("RECALL_RERANK_ENABLED")
 
 # production-rag-wave-b-07: query rewriting (retrieval.py `rewrite=`,
 # app/services/query_rewrite.py) -- the same pattern as rerank above: default

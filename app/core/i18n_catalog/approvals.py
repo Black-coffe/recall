@@ -43,6 +43,10 @@ MESSAGES: dict = {
         "uk": "Відключити поштову скриньку (видалити пароль, вимкнути папки).",
         "en": "Disconnect a mailbox (remove the password, disable the folders).",
     },
+    "approvals.action.calendar_disconnect": {
+        "uk": "Відключити календар (видалити секретну адресу і його події).",
+        "en": "Disconnect a calendar (remove the secret address and its events).",
+    },
     "approvals.action.mailbox_delete": {
         "uk": "Видалити поштову скриньку з Recall.",
         "en": "Delete a mailbox from Recall.",
@@ -94,6 +98,7 @@ MESSAGES: dict = {
     "approvals.kind.chat": {"uk": "Чат", "en": "Chat"},
     "approvals.kind.setting": {"uk": "Параметр", "en": "Setting"},
     "approvals.kind.mailbox": {"uk": "Скринька", "en": "Mailbox"},
+    "approvals.kind.calendar": {"uk": "Календар", "en": "Calendar"},
     "approvals.kind.mailboxes": {"uk": "Усі скриньки", "en": "All mailboxes"},
     "approvals.kind.mail_label": {"uk": "Поштова папка", "en": "Mail folder"},
     "approvals.kind.audio": {"uk": "Аудіо", "en": "Audio"},
@@ -139,6 +144,10 @@ MESSAGES: dict = {
               "після повторного підключення папки треба ввімкнути вручну.",
         "en": "Enabled folders to disable: {count}. The archive and sync cursors stay; "
               "after a reconnect the folders must be enabled by hand.",
+    },
+    "approvals.impact.calendar_disconnect": {
+        "uk": "Подій буде видалено: {count}. Записи лишаться, але втратять привʼязку до цих подій.",
+        "en": "Events to remove: {count}. Recordings stay but lose their link to these events.",
     },
     "approvals.impact.mailbox_delete": {
         "uk": "Ярликів буде видалено: {count}. Архівні листи лишаться.",

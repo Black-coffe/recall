@@ -286,6 +286,9 @@
     A.entity = (id) => getJSON('/api/memory/entities/' + id);
     A.actionItems = (params) => getJSON('/api/memory/action-items' + qs(params));
     A.setActionStatus = (id, status) => A.patch('/api/memory/action-items/' + id, { status });
+    // ADR-056: a decision on a proposal ({action:'approve'|'reject'}) and the one-step undo.
+    A.taskDecide = (id, action) => A.patch('/api/memory/action-items/' + id, { action });
+    A.undoActionEvent = (eid) => A.post('/api/memory/action-events/' + eid + '/undo', {});
 
     // — Tag dictionary (07: contract C4, no live endpoint yet at the time of 09 —
     // built against the contract, Queen's check at stage 05) —

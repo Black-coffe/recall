@@ -90,6 +90,18 @@ MESSAGES: dict = {
         "en": "reason must be one of {reasons}",
     },
     "capture.rec.err.sse": {"uk": "SSE broker недоступний", "en": "SSE broker is unavailable"},
+    "capture.rec.err.access_denied_mic": {
+        "uk": "Windows заборонив доступ до мікрофона. Дозвольте його: Параметри → Конфіденційність → Мікрофон → «Дозволити класичним програмам».",
+        "en": "Windows denied access to the microphone. Allow it in Settings → Privacy → Microphone → \"Let desktop apps access your microphone\".",
+    },
+    "capture.rec.err.access_denied_system": {
+        "uk": "Windows заборонив доступ до системного звуку. Перевірте, що пристрій відтворення увімкнений і не зайнятий іншою програмою в монопольному режимі.",
+        "en": "Windows denied access to system audio. Check that the playback device is enabled and not held by another app in exclusive mode.",
+    },
+    "capture.rec.err.bad_gain": {
+        "uk": "Гучність задається в дБ від {low} до {high}",
+        "en": "Gain is set in dB from {low} to {high}",
+    },
     "capture.rec.stop.message": {
         "uk": 'Finalize пушено у JobQueue. Слідкуйте за status="finalized" через /state або SSE.',
         "en": 'Finalize was pushed to JobQueue. Watch for status="finalized" via /state or SSE.',

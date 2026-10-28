@@ -3,7 +3,7 @@
 **Idea:** during recording a local model (Qwen-14B/Ollama, $0) runs a topic state machine,
 dispatches RAG search, catches contradictions/questions/facts → operator cards. Claude
 (Sonnet/Opus, the «big brother») verifies only what is flagged as important — a **local-first cascade**.
-Gate `COPILOT_ENABLED`; everything degrades (no Ollama/key → whisper-only stays alive). Roadmap: `docs/COPILOT_ROADMAP.md`.
+Gate `COPILOT_ENABLED`; everything degrades (no Ollama/key → whisper-only stays alive). Open work: `docs/ROADMAP.md`.
 
 ## Modules
 - **config.py** — pure logic (no I/O): `resolve_settings()` folds the UI settings +
@@ -68,5 +68,9 @@ Claude verified 5.9% (and that AFTER showing), `operator_action` = NULL in all 9
 **Agent control (4.32.0, mcp-recording-live):** `blueprints/copilot.py` `_agent_session_or_403` (non-`ui` caller on a session NOT bound to an agent-class recording -> 403 `OWNER_SESSION`; `_is_agent_session` via `guards.is_owner_session`)
 guards `settings`, `action`, `stop`, `reingest`; `settings` on an agent session clamps spend (no API, budget 0, no escalate). `reingest` (:450) is idempotent: `copilot_sessions.reingest_transcription_id`/`reingest_by` (migration v57),
 claimed by a conditional UPDATE (a concurrent loser rolls back), repeat -> `created:false`; `CopilotService.get_reingest` :481. MCP: `copilot`, `get_copilot_timeline` (`root-processes.md`).
+**«What did I miss» (4.37.0):** `app/services/live_missed.py` — `summarize(session_id, window, segments=, now=)`; `WINDOWS` since_self|2m|5m|10m|whole (`whole` tail capped `MAX_CHARS`=30000, `truncated`). One Claude call (`escalate.DEFAULT_MODEL` via `claude_retry.call_with_retry`, 3-5 lines),
+never `local_llm` (`_GEN_LOCK` would silence the copilot). Cost estimated BEFORE the call (`pricing.estimate_cost`), reserved in an in-memory per-session total, over `LIVE_MISSED_BUDGET_USD` (0.10) -> `BudgetExceeded`; no key / API failure -> `Unavailable`. Nothing persisted.
+Route `POST /api/copilot/live-missed` (`blueprints/copilot.py:298`): 400 `INVALID_ARGUMENT`, 409 `AMBIGUOUS_SESSION`, 403 `AGENT_SESSION` (agent-class recording, every caller), 404 `NOT_FOUND` (not live), 429 `LIVE_BUDGET_EXHAUSTED` (+`spent_usd`,`budget_usd`), 503 `UNAVAILABLE`; texts `svc_live_missed.err.*`. MCP `live_missed`.
+**Review screen:** `GET /api/copilot/sessions` rows carry `shown` (payload.shown absent counts as shown), `suppressed` (`shown = 0`), `thumbs_up/down` (owner `operator_action` only) — `service.py:283-292`; SPA `/copilot` read-only (`frontend.md`).
 **Offline tests:** `test_copilot_dispatcher.py` (root), `tests/test_copilot_quiet.py` (Track 3). **DB:** `copilot_sessions`/`topics`/`events` (migration v19).
 **SSE:** `copilot_topic`, `copilot_insight`. The session is linked to a transcript on transcribe → timeline on /transcript.

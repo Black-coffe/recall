@@ -488,6 +488,8 @@ class TestApprovalGateCoverage:
         "documents.import_folder", "documents.reparse_document", "documents.reparse_job",
         # mcp-telegram-automation: enabling a chat (a new one is created from the listener's dialogs)
         "telegram.tg_enable_chat",
+        # k6-calendar-ics: disconnecting a calendar source
+        "settings_api.disconnect_calendar",
     }
     PLAN_A2_AND_EXTRAS = {
         "comments.delete", "bookmarks.delete_bookmark", "bookmarks.delete_saved_search",

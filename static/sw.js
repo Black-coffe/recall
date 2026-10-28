@@ -108,6 +108,13 @@
 // v88 — library and media library: "Re-transcribe" action with an installed-model picker and job polling.
 // v91 — default transcription model large-v3 in every select (whisper-best-default).
 // v92 — /record: the live co-pilot is opt-in per call (checkbox, unchecked by default).
+// v93 — Settings: Calendars row (k6-calendar-ics, connect via a one-time local page).
+// v94 — /tasks: proposal statuses, Yes / No with undo; transcript marks proposals (task-approval).
+// v95 — recording calls: REC badge + recovered banner + "Recording started" toast in the shell;
+//       /record gain sliders, honest interruption, pause/resume resync, participants picker.
+// v96 — bookmark clip button on the transcript page; /record consent line and "What did I miss";
+//       /copilot review screen (views/copilot.js, i18n/copilot.js, .rc-cpr* styles).
+// v97 — Settings → Calendars: step-by-step Google guide (.rc-calguide*, /static/img/calendar-guide/).
 //
 // CHECKLIST for a version bump (minimum manual work, no build step):
 //   1. An edit in JS/CSS under /static/ → just increase VERSION below + add a
@@ -119,7 +126,7 @@
 //   3. A new asset with NO tag in shell.html (an icon from
 //      manifest.webmanifest, another file that only JS references
 //      by a string) → add it by hand to FALLBACK_SHELL below.
-const VERSION = 'recall-v92';
+const VERSION = 'recall-v97';
 const STATIC_CACHE = `recall-static-${VERSION}`;
 const RUNTIME_CACHE = `recall-runtime-${VERSION}`;
 

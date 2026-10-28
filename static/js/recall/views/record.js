@@ -53,7 +53,7 @@
 
     function newS(sid) {
         const letter = String.fromCharCode(65 + (_letter++ % 26));
-        return { sessionId: sid, letter, name: '', stage: 'active', status: 'recording', elapsedSec: 0, videoTracks: {}, audioBytes: {}, streamErr: {}, diskFree: null, diskTotal: null, abort: null, tick: null, copilotSessionId: null, copilotConfig: null, copilotActive: false, cpOffer: null, topics: [], curTopic: null, insights: [], cpStatus: 'analyzing', cpUnseen: 0, cpUsage: null, sseState: 'ok', systemSource: null, hasSystem: false, segs: [], stopInfo: null, restore: [], stoppedAt: 0, autosaveAt: null, autoPaused: false, lastEdit: 0, lastHold: 0, leftAtPause: 0, localTarget: 0, holdTimer: null, lastPoll: 0, saving: false };
+        return { sessionId: sid, letter, name: '', stage: 'active', status: 'recording', elapsedSec: 0, videoTracks: {}, audioBytes: {}, streamErr: {}, diskFree: null, diskTotal: null, abort: null, tick: null, copilotSessionId: null, copilotConfig: null, copilotActive: false, cpOffer: null, topics: [], curTopic: null, insights: [], cpStatus: 'analyzing', cpUnseen: 0, cpUsage: null, sseState: 'ok', systemSource: null, hasSystem: false, segs: [], stopInfo: null, restore: [], stoppedAt: 0, autosaveAt: null, autoPaused: false, lastEdit: 0, lastHold: 0, leftAtPause: 0, localTarget: 0, holdTimer: null, lastPoll: 0, saving: false, gain: null, interrupted: false, resyncing: false, consent: false, consentHidden: false, startedBy: null, missedOff: false, missedWin: 'since_self', missedBusy: false, missedRes: null, missedErr: '' };
     }
     function haltS(S) {
         if (!S) return;
@@ -64,7 +64,7 @@
         for (const S of sessions.values()) haltS(S);
         sessions.clear();
         selSid = null; st = null; _letter = 0; _limitHit = false;
-        G = { devices: [], screens: [], videoAvailable: false, videoRegions: {}, exclude: null, includeFor: {}, preset: null };
+        G = { devices: [], screens: [], videoAvailable: false, videoRegions: {}, exclude: null, includeFor: {}, preset: null, participants: [] };
     }
     // K2: "Other sources" from a call prompt → /record?app=<exe>&mic=<microphone name>.
     // Only a preselection on the form; unknown values are silently ignored.
@@ -86,9 +86,17 @@
         NO_SYSTEM_STREAM: 'capture.rec.err.NO_SYSTEM_STREAM',
         COPILOT_BUSY: 'capture.rec.err.COPILOT_BUSY',
         AMBIGUOUS_SESSION: 'capture.rec.err.AMBIGUOUS_SESSION',
+        DEVICE_ACCESS_DENIED: 'capture.rec.err.DEVICE_ACCESS_DENIED',
     };
+    // Windows refused one stream: the text names which one and where to allow it.
+    const DENIED_TXT = { mic: 'capture.rec.err.DEVICE_ACCESS_DENIED_mic', system: 'capture.rec.err.DEVICE_ACCESS_DENIED_system' };
     function errToast(err, prefix) {
         const code = errCode(err);
+        if (code === 'DEVICE_ACCESS_DENIED') {
+            const key = DENIED_TXT[err.body && err.body.stream] || ERR_TXT.DEVICE_ACCESS_DENIED;
+            UI.toast((prefix ? prefix + ': ' : '') + R.t(key), 'error');
+            return;
+        }
         const txt = (code && ERR_TXT[code])
             ? R.t(ERR_TXT[code]) + ((err.body && err.body.error) ? ' (' + err.body.error + ')' : '')
             : ((err && err.message) || R.t('capture.rec.err.unknown'));
@@ -133,6 +141,12 @@
             G.screens = [];
         }
 
+        // participants: persons the calendar suggests for now become the prefilled chips (best-effort)
+        try {
+            const pp = await R.api.get('/api/recording/participants');
+            G.participants = ((pp && pp.suggested) || []).filter(p => p && p.id != null).map(p => ({ id: p.id, name: p.name || ('#' + p.id) }));
+        } catch (_) { G.participants = []; }
+
         // reattach to every active server-side session (C5: sessions[]; the old
         // single-session shape is still read so a half-upgraded backend works)
         let active = null;
@@ -156,7 +170,8 @@
                 if (snap && snap.is_active === false) continue;
             }
             if (!ctx.isCurrent()) return;
-            attachSession(e, snap || {});
+            const S = attachSession(e, snap || {});
+            if (!S.gain) loadGain(ctx, S);   // the /active snapshot carries no gain, /state does
         }
         if (!ctx.isCurrent()) return;
         // recording-autosave: the notification's «stop» lands here with ?stopped=<sid>.
@@ -208,6 +223,9 @@
         S.copilotActive = !!e.copilot_active;
         if (typeof snap.disk_free === 'number') S.diskFree = snap.disk_free;
         if (typeof snap.disk_total === 'number') S.diskTotal = snap.disk_total;
+        if (snap.gain && typeof snap.gain === 'object') S.gain = normGain(snap.gain);
+        if (e.started_by) S.startedBy = e.started_by;
+        applyStateFlags(S, snap);
         sessions.set(S.sessionId, S);
         // seed video tracks (incl. region) from the manifest so chips survive a reload mid-recording
         withS(S, () => applyStateVideoTracks(snap.video_tracks));
@@ -683,6 +701,137 @@
         if (wrap) updateRegionChip(wrap, region);
     }
 
+    // ---- gain sliders: mic / system, dB, applied to the final file only ----------
+    const GAIN_MIN = -20, GAIN_MAX = 20;
+    function clampDb(v) { const n = Math.round(Number(v) || 0); return Math.max(GAIN_MIN, Math.min(GAIN_MAX, n)); }
+    function normGain(g) { g = g || {}; return { mic_db: clampDb(g.mic_db), system_db: clampDb(g.system_db) }; }
+    function fmtDb(v) { return (v > 0 ? '+' : '') + v + ' dB'; }
+    function gainHTML(g) {
+        g = normGain(g);
+        const row = (id, lbl, v) => `
+                <label class="rc-recgain__row"><span class="rc-recgain__lbl rc-mono">${lbl}</span>
+                    <input type="range" class="rc-recgain__range" id="${id}" min="${GAIN_MIN}" max="${GAIN_MAX}" step="1" value="${v}">
+                    <span class="rc-recgain__val rc-mono" data-gain-val="${id}">${fmtDb(v)}</span></label>`;
+        return `
+            <div class="rc-recgain" id="rcRecGain">
+                <div class="rc-recgain__head"><i class="fa-solid fa-sliders"></i> ${R.t('capture.rec.gain.title')} <span class="rc-recgain__cap rc-mono">${R.t('capture.rec.gain.caption')}</span></div>
+                ${row('rcGainMic', 'MIC', g.mic_db)}
+                ${row('rcGainSys', 'SYS', g.system_db)}
+            </div>`;
+    }
+    function readGain(root) {
+        const v = id => clampDb((root.querySelector('#' + id) || {}).value);
+        return { mic_db: v('rcGainMic'), system_db: v('rcGainSys') };
+    }
+    function paintGainValues(root, g) {
+        g = normGain(g);
+        [['rcGainMic', g.mic_db], ['rcGainSys', g.system_db]].forEach(([id, v]) => {
+            const el = root.querySelector('#' + id);
+            if (el) el.value = String(v);
+            const lbl = root.querySelector('[data-gain-val="' + id + '"]');
+            if (lbl) lbl.textContent = fmtDb(v);
+        });
+    }
+    // `input` only moves the label; `onChange(gain)` runs on the committed value.
+    function wireGain(root, onChange) {
+        const box = root.querySelector('#rcRecGain');
+        if (!box) return;
+        box.querySelectorAll('.rc-recgain__range').forEach(el => {
+            el.addEventListener('input', () => {
+                const lbl = box.querySelector('[data-gain-val="' + el.id + '"]');
+                if (lbl) lbl.textContent = fmtDb(clampDb(el.value));
+            });
+            if (onChange) el.addEventListener('change', () => onChange(readGain(box)));
+        });
+    }
+    async function loadGain(ctx, S) {
+        try {
+            const r = await R.api.get('/api/recording/' + S.sessionId + '/state');
+            if (r && r.state && r.state.gain) S.gain = normGain(r.state.gain);
+            if (r && r.state) applyStateFlags(S, r.state);   // /active carries no consent_reminder, /state does
+        } catch (_) { return; }   // sliders stay at 0; a change still posts the full pair
+        if (!ctx.isCurrent() || sessions.get(S.sessionId) !== S) return;
+        withS(S, () => { paintConsent(); paintMissed(); });
+        const box = withS(S, () => $id('rcRecGain'));
+        if (box && S.gain) paintGainValues(box, S.gain);
+    }
+    async function postGain(S, gain) {
+        try {
+            const r = await R.api.post('/api/recording/' + S.sessionId + '/gain', gain);
+            S.gain = normGain((r && r.gain) || gain);
+        } catch (err) {
+            errToast(err, R.t('capture.rec.gain.failed'));
+            const box = withS(S, () => $id('rcRecGain'));
+            if (box) paintGainValues(box, S.gain || {});
+        }
+    }
+
+    // ---- participants: chips of picked persons + search over the archive's people --------
+    const PART_DEBOUNCE_MS = 250;
+    let _partTimer = null, _partSeq = 0;
+    function participantsHTML() {
+        return `
+            <div class="rc-field rc-recpart" id="rcRecPart">
+                <label class="rc-field__label" for="rcRecPartIn">${R.t('capture.rec.part.label')}</label>
+                <div class="rc-tagpick rc-recpart__pick">
+                    <div class="rc-tagpick__chips" id="rcRecPartChips"></div>
+                    <input class="rc-input rc-recpart__in" id="rcRecPartIn" type="text" autocomplete="off" placeholder="${R.t('capture.rec.part.placeholder')}">
+                </div>
+                <div class="rc-recpart__list" id="rcRecPartList" hidden></div>
+                <div class="rc-rec-hint rc-mono">${R.t('capture.rec.part.hint')}</div>
+            </div>`;
+    }
+    function paintParticipantChips(ctx) {
+        const box = ctx.mount.querySelector('#rcRecPartChips');
+        if (!box) return;
+        box.innerHTML = G.participants.map(p => `
+            <button type="button" class="rc-chip rc-tagpick__chip is-active" data-pid="${U.esc(String(p.id))}" title="${R.t('capture.rec.part.remove')}">${U.esc(p.name)} <i class="fa-solid fa-xmark"></i></button>`).join('');
+    }
+    function wireParticipants(ctx) {
+        const root = ctx.mount.querySelector('#rcRecPart');
+        if (!root) return;
+        const chips = root.querySelector('#rcRecPartChips');
+        const inp = root.querySelector('#rcRecPartIn');
+        const list = root.querySelector('#rcRecPartList');
+        paintParticipantChips(ctx);
+        chips.addEventListener('click', e => {
+            const b = e.target.closest('[data-pid]');
+            if (!b) return;
+            G.participants = G.participants.filter(p => String(p.id) !== b.dataset.pid);
+            paintParticipantChips(ctx);
+        });
+        const hideList = () => { list.hidden = true; list.innerHTML = ''; };
+        inp.addEventListener('input', () => {
+            if (_partTimer) clearTimeout(_partTimer);
+            const q = inp.value.trim();
+            if (q.length < 2) { _partSeq++; hideList(); return; }
+            _partTimer = setTimeout(async () => {
+                _partTimer = null;
+                const seq = ++_partSeq;
+                let d = null;
+                try { d = await R.api.get('/api/recording/participants?q=' + encodeURIComponent(q)); } catch (_) { d = null; }
+                if (seq !== _partSeq || !list.isConnected) return;
+                const picked = new Set(G.participants.map(p => String(p.id)));
+                const rows = ((d && d.matches) || []).filter(p => p && p.id != null && !picked.has(String(p.id)));
+                list.hidden = false;
+                list.innerHTML = rows.length
+                    ? rows.map(p => `<button type="button" class="rc-chip" data-add="${U.esc(String(p.id))}" data-name="${U.esc(p.name || '')}"><i class="fa-solid fa-plus"></i> ${U.esc(p.name || ('#' + p.id))}</button>`).join('')
+                    : `<span class="rc-rec-hint rc-mono">${R.t('capture.rec.part.none')}</span>`;
+            }, PART_DEBOUNCE_MS);
+        });
+        list.addEventListener('click', e => {
+            const b = e.target.closest('[data-add]');
+            if (!b) return;
+            const id = Number(b.dataset.add);
+            if (!G.participants.some(p => p.id === id)) G.participants.push({ id, name: b.dataset.name || ('#' + id) });
+            inp.value = '';
+            _partSeq++;
+            hideList();
+            paintParticipantChips(ctx);
+            inp.focus();
+        });
+    }
+
     // ---- stage: setup ------------------------------------------------------
     function renderSetup(ctx) {
         const mics = G.devices.filter(d => d.kind === 'mic');
@@ -707,13 +856,16 @@
                     <label class="rc-check"><input type="checkbox" id="rcRecMicEn" ${mics.length ? 'checked' : ''} ${mics.length ? '' : 'disabled'}>
                         <i class="fa-solid fa-microphone"></i> <span>${R.t('capture.rec.mic')}</span></label>
                     <select class="rc-select" id="rcRecMic" ${mics.length ? '' : 'disabled'}>${devOpts(mics, R.t('capture.rec.noMics'))}</select>
+                    ${mics.length ? '' : `<div class="rc-rec-hint rc-mono rc-rec-dev__hint" id="rcRecNoMicHint"><i class="fa-solid fa-circle-info"></i> ${R.t(G.devices.length ? 'capture.rec.dev.noMicHint' : 'capture.rec.dev.emptyHint')}</div>`}
                 </div>
                 <div class="rc-rec-dev">
                     <label class="rc-check"><input type="checkbox" id="rcRecSysEn" ${lbs.length ? 'checked' : ''} ${lbs.length ? '' : 'disabled'}>
                         <i class="fa-solid fa-volume-high"></i> <span>${R.t('capture.rec.sys')}</span></label>
                     <select class="rc-select" id="rcRecSys" ${lbs.length ? '' : 'disabled'}>${devOpts(lbs, R.t('capture.rec.noLoopback'))}</select>
                 </div>
+                ${gainHTML(null)}
                 ${presetBlock}
+                ${participantsHTML()}
                 ${videoSection()}
                 <div class="rc-field" style="max-width:260px">
                     <label class="rc-field__label" for="rcRecLang">${R.t('capture.rec.liveLang')}</label>
@@ -730,6 +882,8 @@
         body.querySelector('#rcRecStart').addEventListener('click', () => start(ctx));
         wireVideoToggle(ctx);
         wireCopilot(ctx);
+        wireGain(body, null);
+        wireParticipants(ctx);
         if (second) loadAppsPrompt(ctx);
     }
 
@@ -824,6 +978,12 @@
         const langSel = ctx.mount.querySelector('#rcRecLang');
         if (langSel && langSel.value) payload.language = langSel.value;
 
+        // gain only when a slider moved off 0; participants as person ids
+        const gainBox = ctx.mount.querySelector('#rcRecGain');
+        const gain = gainBox ? readGain(gainBox) : null;
+        if (gain && (gain.mic_db !== 0 || gain.system_db !== 0)) payload.gain = gain;
+        if (G.participants.length) payload.participants = G.participants.map(p => p.id);
+
         const cp = collectCopilot(ctx);
         if (cp) payload.copilot = cp;
         // Question about sounding applications (only when another recording is already going).
@@ -859,6 +1019,14 @@
             if (!r || !r.session_id) throw new Error((r && r.error) || R.t('capture.rec.startFailed'));
             if (!ctx.isCurrent()) return;
             const S = newS(r.session_id);
+            S.gain = normGain(payload.gain);
+            S.startedBy = 'ui';   // the SPA is the owner's own start
+            S.consent = !!r.consent_reminder;
+            G.participants = [];
+            // screen capture was asked for but the server could not start it: audio goes on, say why
+            if (payload.video && r.video && r.video.enabled === false) {
+                UI.toast(R.t('capture.rec.video.without_screen', { reason: r.video.reason || '' }), 'info');
+            }
             S.copilotConfig = cp || null;
             S.copilotSessionId = r.copilot_session_id || null;
             S.copilotActive = !!S.copilotSessionId;
@@ -1043,17 +1211,20 @@
                         <span class="rc-rec-pill${st.status === 'paused' ? ' is-paused' : ''}" id="rcRecPill"><span class="rc-rec-dot"></span><span id="rcRecStatusTxt">${st.status === 'paused' ? 'PAUSED' : 'REC'}</span></span>
                         <span class="rc-rec-timer" id="rcRecTimer">${fmt(st.elapsedSec)}</span>
                     </div>
+                    <div id="rcRecConsent"></div>
                     ${cpWhereHTML()}
                     <div class="rc-rec-vid-banner" id="rcRecSseBanner" hidden></div>
                     <div class="rc-rec-meta rc-mono" id="rcRecMeta"></div>
                     <div class="rc-rec-vid-banner" id="rcRecAudioBanner" hidden></div>
                     <div class="rc-vu" id="rcVuMic"><span class="rc-vu__lbl rc-mono">MIC</span><div class="rc-vu__bar"><div class="rc-vu__fill"></div><div class="rc-vu__peak"></div></div><span class="rc-vu__val rc-mono"></span></div>
                     <div class="rc-vu" id="rcVuSys"><span class="rc-vu__lbl rc-mono">SYS</span><div class="rc-vu__bar"><div class="rc-vu__fill"></div><div class="rc-vu__peak"></div></div><span class="rc-vu__val rc-mono"></span></div>
+                    ${gainHTML(st.gain)}
                     ${sourceHTML()}
                     <div class="rc-rec-vid" id="rcRecVid"></div>
                     <div class="rc-rec-vid-banner" id="rcRecVidBanner" hidden></div>
                     <div class="rc-rec-live" id="rcRecLive" hidden></div>
                     ${liveCommentHTML()}
+                    <div id="rcRecMissed"></div>
                     <div class="rc-yt__actions" style="margin-top:24px">
                         <button class="rc-btn" id="rcRecDiscard"><i class="fa-solid fa-trash"></i> ${R.t('capture.rec.discard')}</button>
                         <div class="rc-yt__spacer"></div>
@@ -1070,17 +1241,89 @@
         const nb = body.querySelector('#rcRecNew');
         if (nb) nb.addEventListener('click', () => select(ctx, null));
         wireLiveComment(ctx);
+        const gS = st;
+        wireGain(body, g => postGain(gS, g));
         if (cp) wireWidget();
         renderVideoChips();
         updateRecMeta();
         markStreamStatus();
         refreshAudioBanner();
         refreshPill();
-        if (st.sseState === 'reconnecting') showSseBanner('reconnecting');
+        if (st.interrupted) showSseBanner('interrupted');
+        else if (st.sseState === 'reconnecting') showSseBanner('reconnecting');
         else if (st.sseState === 'error') showSseBanner('failed');
         paintSegs(st.segs);
         paintSource();
         paintCpWhere();
+        paintConsent();
+        paintMissed();
+    }
+
+    // ---- consent reminder (wave4-client-calls-07): /start and /state carry consent_reminder;
+    // the x hides it for this session in memory only, a reattach shows it again. ----------
+    function applyStateFlags(S, snap) {
+        if (!snap || typeof snap !== 'object') return;
+        if (typeof snap.consent_reminder === 'boolean') S.consent = snap.consent_reminder;
+        if (snap.started_by) S.startedBy = snap.started_by;
+    }
+    function paintConsent() {
+        const el = $id('rcRecConsent');
+        if (!el) return;
+        if (!st.consent || st.consentHidden) { el.innerHTML = ''; return; }
+        el.innerHTML = `<div class="rc-updbar"><i class="fa-solid fa-user-shield"></i><span>${U.esc(R.t('capture.rec.consent'))}</span>
+            <button type="button" class="rc-updbar__x" aria-label="${U.esc(R.t('capture.rec.consentHide'))}">&times;</button></div>`;
+        const S = st;
+        el.querySelector('.rc-updbar__x').addEventListener('click', () => { S.consentHidden = true; withS(S, paintConsent); });
+    }
+
+    // ---- "What did I miss" (wave4-client-calls-07): one click = one POST /api/copilot/live-missed.
+    // Owner-class sessions only (started_by from /start or /state); 403 AGENT_SESSION hides it. ----
+    const OWNER_STARTERS = ['ui', 'call_prompt', 'auto_call'];
+    const MISSED_WINDOWS = [
+        { v: 'since_self', l: 'capture.rec.missed.win.since_self' }, { v: '2m', l: 'capture.rec.missed.win.2m' },
+        { v: '5m', l: 'capture.rec.missed.win.5m' }, { v: '10m', l: 'capture.rec.missed.win.10m' },
+        { v: 'whole', l: 'capture.rec.missed.win.whole' },
+    ];
+    function fmtUsd(v) { return '$' + (Number(v) || 0).toFixed(3); }
+    function paintMissed() {
+        const el = $id('rcRecMissed');
+        if (!el) return;
+        if (st.missedOff || OWNER_STARTERS.indexOf(st.startedBy) < 0) { el.innerHTML = ''; return; }
+        const res = st.missedRes;
+        let box = '';
+        if (st.missedErr) box = `<div class="rc-rec-hint rc-mono">${U.esc(st.missedErr)}</div>`;
+        else if (res) {
+            const lines = (Array.isArray(res.lines) && res.lines.length) ? res.lines : (res.text ? [res.text] : []);
+            box = `<ul>${lines.map(l => '<li>' + U.esc(l) + '</li>').join('')}</ul>
+                <div class="rc-rec-hint rc-mono">${U.esc(R.t('capture.rec.missed.spent', { spent: fmtUsd(res.spent_usd), budget: fmtUsd(res.budget_usd) }))}</div>`;
+        }
+        el.innerHTML = `<div class="rc-field" style="margin-top:var(--rc-3)">
+                <label class="rc-field__label" for="rcRecMissedWin">${R.t('capture.rec.missed.window')}</label>
+                <div style="display:flex;gap:var(--rc-2);align-items:center;flex-wrap:wrap">
+                    <select class="rc-select" id="rcRecMissedWin">${MISSED_WINDOWS.map(w => `<option value="${w.v}"${w.v === st.missedWin ? ' selected' : ''}>${R.t(w.l)}</option>`).join('')}</select>
+                    <button type="button" class="rc-btn rc-btn--sm" id="rcRecMissedBtn"${st.missedBusy ? ' disabled' : ''}><i class="fa-solid ${st.missedBusy ? 'fa-spinner fa-spin' : 'fa-clock-rotate-left'}"></i> ${R.t('capture.rec.missed.btn')}</button>
+                </div>
+                ${box}
+            </div>`;
+        const S = st;
+        el.querySelector('#rcRecMissedWin').addEventListener('change', e => { S.missedWin = e.target.value; });
+        el.querySelector('#rcRecMissedBtn').addEventListener('click', () => askMissed(S));
+    }
+    async function askMissed(S) {
+        if (S.missedBusy) return;
+        S.missedBusy = true; S.missedErr = '';
+        withS(S, paintMissed);
+        try {
+            S.missedRes = await R.api.post('/api/copilot/live-missed', { session_id: S.sessionId, window: S.missedWin });
+        } catch (err) {
+            const code = errCode(err), b = (err && err.body) || {};
+            S.missedRes = null;
+            if (err && err.status === 403 && code === 'AGENT_SESSION') S.missedOff = true;
+            else if (err && err.status === 429) S.missedErr = R.t('capture.rec.missed.cap', { spent: fmtUsd(b.spent_usd), budget: fmtUsd(b.budget_usd) });
+            else if (err && err.status === 503) S.missedErr = R.t('capture.rec.missed.unavailable');
+            else S.missedErr = R.t('capture.rec.missed.failed', { error: (err && err.message) || R.t('capture.rec.err.unknown') });
+        } finally { S.missedBusy = false; }
+        if (sessions.get(S.sessionId) === S) withS(S, paintMissed);
     }
 
     // ---- operator's live comment (Wave 4) --------------------------------
@@ -1216,9 +1459,11 @@
         b.hidden = false;
         b.innerHTML = '';
         const icon = document.createElement('i');
-        icon.className = 'fa-solid ' + (kind === 'failed' ? 'fa-triangle-exclamation' : 'fa-rotate fa-spin');
+        icon.className = 'fa-solid ' + (kind === 'interrupted' ? 'fa-plug-circle-xmark' : kind === 'failed' ? 'fa-triangle-exclamation' : 'fa-rotate fa-spin');
         b.appendChild(icon);
-        b.appendChild(document.createTextNode(kind === 'failed'
+        b.appendChild(document.createTextNode(kind === 'interrupted'
+            ? R.t('capture.rec.interrupted')
+            : kind === 'failed'
             ? R.t('capture.rec.sse.failed')
             : R.t('capture.rec.sse.retrying', { attempt: attempt ? R.t('capture.rec.sse.attempt', { n: attempt }) : '' })));
     }
@@ -1347,7 +1592,48 @@
             S.status = r.status || (action === 'pause' ? 'paused' : 'recording');
             withS(S, applyPauseUi);
             paintTab(S);
-        } catch (err) { errToast(err, R.t('capture.rec.error')); }
+        } catch (err) {
+            // The session is gone: say so. Otherwise the button may now lie, so the server decides.
+            if (err && err.status === 404) { markInterrupted(ctx, S); return; }
+            errToast(err, R.t('capture.rec.error'));
+            await resyncState(ctx, S);
+        }
+    }
+
+    // Read GET <sid>/state and act on what the server says: a missing, crashed or discarded
+    // session is interrupted (no more reconnects), a finalized one opens the save screen,
+    // a live one repaints the pause/resume controls from its real status.
+    async function resyncState(ctx, S) {
+        if (!S || S.interrupted || S.resyncing || S.stage !== 'active') return;
+        S.resyncing = true;
+        let snap = null;
+        try {
+            const r = await R.api.get('/api/recording/' + S.sessionId + '/state');
+            snap = (r && r.state) || null;
+        } catch (err) {
+            if (err && err.status === 404) snap = { status: 'gone' };
+        } finally { S.resyncing = false; }
+        if (!snap || !ctx.isCurrent() || sessions.get(S.sessionId) !== S || S.stage !== 'active') return;
+        const status = snap.status;
+        if (status === 'gone' || status === 'crashed' || status === 'discarded') { markInterrupted(ctx, S); return; }
+        if (status === 'finalized') { enterStopName(ctx, S, { snap }); return; }
+        if (status === 'paused' || status === 'recording') {
+            S.status = status;
+            applyStateFlags(S, snap);
+            withS(S, () => { applyPauseUi(); paintConsent(); paintMissed(); });
+            paintTab(S);
+        }
+    }
+    // The server lost the session (restart, crash): stop the reader and the timer for good,
+    // keep the tab (its name and notes stay readable) with one banner saying what happened.
+    function markInterrupted(ctx, S) {
+        if (S.interrupted) return;
+        S.interrupted = true;
+        haltS(S);
+        S.sseState = 'error';
+        if (!ctx.isCurrent()) return;
+        withS(S, () => { refreshPill(); showSseBanner('interrupted'); });
+        paintTab(S);
     }
 
     // ---- SSE (fetch-reader + AbortController, auto-reconnect — T4.8) -------
@@ -1365,6 +1651,7 @@
     // selected one (withS + $id), so switching tabs does not break any stream.
     function connectSSE(ctx, S) {
         haltSse(S);
+        if (S.interrupted) return;   // the server said the session is gone: no reconnect loop
         const ac = new AbortController();
         S.abort = ac;
         const sid = S.sessionId;
@@ -1379,6 +1666,7 @@
             onReconnecting: (attempt, delayMs) => {
                 if (!ctx.isCurrent() || sessions.get(sid) !== S) return;
                 withS(S, () => { S.sseState = 'reconnecting'; refreshPill(); showSseBanner('reconnecting', attempt); });
+                resyncState(ctx, S);   // reads /state: a gone session stops the loop here
             },
             onReconnected: () => {
                 if (!ctx.isCurrent() || sessions.get(sid) !== S) return;
@@ -1387,6 +1675,7 @@
             onPermanentFail: () => {
                 if (!ctx.isCurrent() || sessions.get(sid) !== S) return;
                 withS(S, () => { S.sseState = 'error'; refreshPill(); showSseBanner('failed'); });
+                resyncState(ctx, S);
             },
         });
     }

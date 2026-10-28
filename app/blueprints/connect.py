@@ -1,6 +1,6 @@
 """One-time local connect pages: ``GET/POST /connect/<kind>/<token>``.
 
-Secrets (the Gmail app password, the Anthropic key) are typed here, on this computer, and
+Secrets (the Gmail app password, the Anthropic key, a secret calendar ICS address) are typed here, on this computer, and
 never travel through chat. Direct loopback requests only. The submitted secret is never
 logged and never rendered back.
 """
@@ -14,7 +14,7 @@ from flask import Blueprint, current_app, make_response, render_template, reques
 from app.core import i18n
 from app.core.auth import _PROXY_HEADERS
 from app.core.i18n import tr
-from app.services import connect_links, mail_imap, settings_secrets
+from app.services import calendar_ics, connect_links, mail_imap, settings_secrets
 from app.services import mail_accounts as ma
 
 logger = logging.getLogger(__name__)
@@ -75,16 +75,20 @@ def _form(kind: str, link: dict, status: int = 200, error: str | None = None):
                        time=time.strftime('%H:%M', time.localtime(link['created_at'])))
     if kind == 'mail':
         configured = ma.has_password(link['subject'])
+    elif kind == 'calendar':
+        configured = calendar_ics.has_source(current_app.config['DATABASE'], link['subject'])
     else:
         configured = settings_secrets.anthropic_key_configured()
+    secret_label = {'mail': 'connect.label.mailSecret',
+                    'calendar': 'connect.label.calendarSecret'}.get(kind, 'connect.label.keySecret')
     return _page(
         status, kind=kind, error=error,
-        warning=tr('connect.warning'),
+        warning=tr('connect.warning.' + kind),
         requested_by_line=requested,
         configured_line=tr('connect.alreadyConfigured') if configured else None,
-        address=link.get('subject') if kind == 'mail' else None,
-        address_label=tr('connect.label.address'),
-        secret_label=tr('connect.label.mailSecret' if kind == 'mail' else 'connect.label.keySecret'),
+        address=link.get('subject') if kind in ('mail', 'calendar') else None,
+        address_label=tr('connect.label.calendarName' if kind == 'calendar' else 'connect.label.address'),
+        secret_label=tr(secret_label),
         submit=tr('connect.submit'))
 
 
@@ -110,6 +114,8 @@ def connect_page(kind: str, token: str):
     secret = request.form.get('secret', '')
     if kind == 'mail':
         return _post_mail(token, link, secret)
+    if kind == 'calendar':
+        return _post_calendar(token, link, secret)
     return _post_key(token, link, secret)
 
 
@@ -145,3 +151,31 @@ def _post_key(token: str, link: dict, secret: str):
     connect_links.consume(kind, token)
     return _page(200, kind=kind, done=tr('connect.done.anthropic_key'), labels=None,
                  close_hint=tr('connect.done.close'))
+
+
+_CALENDAR_ERRORS = {
+    calendar_ics.BAD_URL: (400, 'connect.err.calendarUrl'),
+    calendar_ics.HOST_NOT_ALLOWED: (400, 'connect.err.calendarHost'),
+    calendar_ics.FETCH_FAILED: (502, 'connect.err.unreachable'),
+    calendar_ics.PARSE_FAILED: (400, 'connect.err.calendarParse'),
+}
+
+
+def _post_calendar(token: str, link: dict, secret: str):
+    kind = 'calendar'
+    try:
+        result = calendar_ics.connect_source(current_app.config['DATABASE'], link['subject'], secret)
+    except ValueError:
+        return _attempt_failed(kind, token, link, 400, tr('connect.err.rejected'))
+    except calendar_ics.CalendarError as exc:
+        # Only the code is logged: the address is the secret.
+        logger.warning("Connect page: calendar connect failed: %s", exc.code)
+        status, key = _CALENDAR_ERRORS.get(exc.code, (500, 'connect.err.internal'))
+        return _attempt_failed(kind, token, link, status, tr(key))
+    except Exception as exc:
+        logger.warning("Connect page: calendar connect failed: %s", type(exc).__name__)
+        return _attempt_failed(kind, token, link, 500, tr('connect.err.internal'))
+    connect_links.consume(kind, token)
+    return _page(200, kind=kind, labels=None, close_hint=tr('connect.done.close'),
+                 done=tr('connect.done.calendar', events=result['events'],
+                         with_attendees=result['with_attendees']))

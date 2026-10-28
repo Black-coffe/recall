@@ -275,11 +275,28 @@ def mock_claude(monkeypatch):
     calls = []
     monkeypatch.setattr(enrichment, "is_available", lambda: True)
 
-    def _fake(text, comment_date=None, model=None, timeout=120.0, effort="low"):
+    def _fake(text, comment_date=None, model=None, timeout=120.0, effort="low",
+              owner_names=()):
         calls.append({"text": text, "date": comment_date, "effort": effort})
         return dict(_PARSED)
     monkeypatch.setattr(text_polishing, "extract_comment_items", _fake)
     return calls
+
+
+@pytest.fixture
+def mock_claude_per_comment(mock_claude, monkeypatch):
+    """Like mock_claude, but each comment yields its own task text: since ADR-056 a task
+    whose text already exists in the record is not proposed a second time."""
+    from app.services import text_polishing
+
+    def _fake(text, comment_date=None, model=None, timeout=120.0, effort="low",
+              owner_names=()):
+        parsed = dict(_PARSED)
+        parsed["action_items"] = [{**it, "task": f"{it['task']} ({text})"}
+                                  for it in _PARSED["action_items"]]
+        return parsed
+    monkeypatch.setattr(text_polishing, "extract_comment_items", _fake)
+    return mock_claude
 
 
 def test_analyze_writes_tasks_and_entities(db, mock_claude):
@@ -304,7 +321,7 @@ def test_analyze_links_found_entities_to_graph(db, mock_claude):
     assert len(_links(db, tid, comments.ENTITY_SOURCE)) == 2
 
 
-def test_analyze_is_idempotent_and_rewrites_only_own_tasks(db, mock_claude):
+def test_analyze_is_idempotent_and_rewrites_only_own_tasks(db, mock_claude_per_comment):
     """This is why comment_id appeared in v38: a repeated analysis must neither
     breed duplicates nor erase tasks of a NEIGHBOURING comment of the same recording."""
     tid = _add_tx(db)
@@ -401,7 +418,7 @@ def test_deleting_a_comment_takes_its_tasks_with_it(db, mock_claude):
     assert left == 0
 
 
-def test_delete_does_not_touch_other_comments_tasks(db, mock_claude):
+def test_delete_does_not_touch_other_comments_tasks(db, mock_claude_per_comment):
     tid = _add_tx(db)
     c1 = comments.create(db, "transcription", tid, "перший")
     c2 = comments.create(db, "transcription", tid, "другий")

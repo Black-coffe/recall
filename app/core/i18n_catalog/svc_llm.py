@@ -35,10 +35,8 @@ MESSAGES: dict = {
     },
     # --- text_polishing (Claude) ---
     "svc_llm.polish.no_key": {
-        "uk": "ANTHROPIC_API_KEY не встановлено. Створіть .env у корені проекту "
-              "з рядком ANTHROPIC_API_KEY=sk-ant-... та перезапустіть сервер.",
-        "en": "ANTHROPIC_API_KEY is not set. Create a .env in the project root "
-              "with the line ANTHROPIC_API_KEY=sk-ant-... and restart the server.",
+        "uk": "Ключ Claude API не задано. Додайте його в Налаштуваннях (розділ «API-ключ Claude»).",
+        "en": "The Claude API key is not set. Add it in Settings (the «Claude API key» section).",
     },
     "svc_llm.polish.bad_json": {
         "uk": "Claude повернув некоректний JSON. Спробуйте ще раз.",

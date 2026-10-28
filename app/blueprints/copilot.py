@@ -24,7 +24,7 @@ from app import state
 from app.core import auth
 from app.core.i18n import tr as _t
 from app.db.connection import get_db_connection
-from app.services import live_ask, local_llm
+from app.services import live_ask, live_missed, local_llm
 from app.services.copilot import export as cp_export
 from app.services.copilot.service import CopilotBusyError
 from app.services.recording import guards
@@ -288,6 +288,45 @@ def live_ask_endpoint():
     result = live_ask.ask_local(db_path, question, transcript_text=transcript_text,
                                 scope=scope, top_k=top_k, recording_active=recording_active)
     return jsonify({'success': True, 'session_id': session_id, **result})
+
+
+def _missed_error(key: str, code: str, status: int, **extra):
+    return jsonify({'success': False, 'error': _t(f'svc_live_missed.err.{key}'),
+                    'error_code': code, **extra}), status
+
+
+@copilot_bp.route('/api/copilot/live-missed', methods=['POST'])
+def live_missed_endpoint():
+    """"What did I miss" (wave4-client-calls-03): one Claude Sonnet summary of a window of the
+    live preview. Body: ``{session_id?, window?='since_self'}``. Nothing is persisted; the
+    local model is never called. An agent-class recording is refused for every caller."""
+    data = request.get_json(silent=True) or {}
+    window = data.get('window') or 'since_self'
+    if window not in live_missed.WINDOWS:
+        return _missed_error('window', 'INVALID_ARGUMENT', 400)
+
+    session_id = data.get('session_id') or None
+    if not session_id:
+        live_sids = _active_recording_ids()
+        if len(live_sids) > 1:
+            return _missed_error('ambiguous', 'AMBIGUOUS_SESSION', 409,
+                                 sessions=[{'session_id': s} for s in live_sids])
+        session_id = live_sids[0] if live_sids else None
+    if session_id and _is_agent_session({'recording_session_id': session_id}):
+        return _missed_error('agent_session', 'AGENT_SESSION', 403)
+    worker = state.live_transcribe_worker
+    if not session_id or worker is None or not worker.is_active(session_id):
+        return _missed_error('not_live', 'NOT_FOUND', 404)
+
+    try:
+        result = live_missed.summarize(session_id, window,
+                                       segments=worker.get_preview(session_id))
+    except live_missed.BudgetExceeded as e:
+        return _missed_error('budget', 'LIVE_BUDGET_EXHAUSTED', 429,
+                             spent_usd=e.spent_usd, budget_usd=e.budget_usd)
+    except live_missed.Unavailable:
+        return _missed_error('unavailable', 'UNAVAILABLE', 503)
+    return jsonify({'success': True, **result})
 
 
 @copilot_bp.route('/api/copilot/start', methods=['POST'])

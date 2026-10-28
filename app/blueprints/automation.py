@@ -149,7 +149,7 @@ def _pipes_section(db_path: str, now: datetime) -> dict:
 def _pollers_section() -> dict:
     ext = current_app.extensions
     return {'scheduler': 'pipe_scheduler' in ext, 'brief_buttons': 'brief_buttons' in ext,
-            'mail': 'mail_poller' in ext}
+            'mail': 'mail_poller' in ext, 'calendar': 'calendar_poller' in ext}
 
 
 def _telegram_section(db_path: str) -> dict:
@@ -221,3 +221,37 @@ def run_pipe_now(name: str):
         'pipe': name, 'actor': auth.classify_request()[0], 'trigger': 'mcp'})
     return jsonify({'success': True, 'job_id': str(job.id), 'created': True,
                     'poll': 'get_job_status'}), 202
+
+
+@automation_bp.route('/api/meeting-brief', methods=['GET'])
+def get_meeting_brief():
+    """Pre-meeting brief for ``event_id`` or ``person`` (exactly one), after the privacy filter."""
+    from app.db.connection import get_db_connection
+    from app.services import meeting_brief
+    from app.services.privacy import PrivacyError
+
+    raw_event = (request.args.get('event_id') or '').strip()
+    person = (request.args.get('person') or '').strip()
+    if bool(raw_event) == bool(person):
+        return _err('INVALID_ARGUMENT', 'automation.err.meetingBriefArgs', 400)
+    db_path = current_app.config['DATABASE']
+    if raw_event:
+        try:
+            event_id = int(raw_event)
+        except ValueError:
+            return _err('INVALID_ARGUMENT', 'automation.err.meetingBriefArgs', 400)
+        event = meeting_brief.get_event(db_path, event_id)
+        if event is None:
+            return jsonify({'success': False, 'error': tr('svc_tasks.err.eventNotFound', id=event_id),
+                            'error_code': 'NOT_FOUND'}), 404
+        with get_db_connection(db_path) as conn:
+            brief = meeting_brief.brief_for_event(conn, event)
+    else:
+        with get_db_connection(db_path) as conn:
+            brief = meeting_brief.brief_for_person(conn, person)
+    try:
+        brief = meeting_brief.filter_brief(brief, db_path=db_path)
+    except PrivacyError:
+        logger.warning("meeting brief: privacy check failed, nothing returned")
+        return _err('UNAVAILABLE', 'telegram.brief.blockedReason.privateTxt', 503)
+    return jsonify({'success': True, 'brief': brief})

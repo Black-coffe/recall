@@ -1,12 +1,12 @@
 ---
 name: recall
-description: Use whenever the user wants to work with Recall — their local RAG archive of calls, meetings, documents, mail and Telegram. Covers asking and searching the archive, reading transcripts, the entity graph, commitments and open questions, speakers, categories, bookmarks, comments, the live call, Telegram and automation status — all through the `recall` MCP server (95 tools, mcp__recall__*). For writes use the focused skills recall-record, recall-record-stop, recall-transcribe, recall-digest and recall-video. Triggers — RU: спроси архив, найди в звонках, что мы решили по, что мы упустили, транскрипт, архив звонков, созвоны; UK: спитай архів, запитай архів, знайди в дзвінках, що ми вирішили по, що ми упустили, архів дзвінків, транскрипти; EN: recall, ask the archive, search my calls, what did we decide, recall MCP, mcp__recall.
+description: Use whenever the user wants to work with Recall — their local RAG archive of calls, meetings, documents, mail and Telegram. Covers asking and searching the archive, reading transcripts, the entity graph, commitments and open questions, speakers, categories, bookmarks, comments, the live call, Telegram and automation status — all through the `recall` MCP server (96 tools, mcp__recall__*). For writes use the focused skills recall-record, recall-record-stop, recall-transcribe, recall-digest and recall-video. Triggers — RU: спроси архив, найди в звонках, что мы решили по, что мы упустили, транскрипт, архив звонков, созвоны; UK: спитай архів, запитай архів, знайди в дзвінках, що ми вирішили по, що ми упустили, архів дзвінків, транскрипти; EN: recall, ask the archive, search my calls, what did we decide, recall MCP, mcp__recall.
 ---
 
 # Recall: the archive through MCP
 
 **Recall** is a local RAG archive of calls, meetings, documents, mail and Telegram; the data stays
-on the user's machine. Access is the MCP server **`recall`**: 95 tools named `mcp__recall__*`
+on the user's machine. Access is the MCP server **`recall`**: 96 tools named `mcp__recall__*`
 (short names below). Each tool's own description says what it does; this skill says how to
 combine them.
 
@@ -42,6 +42,9 @@ the archive's contents.
   `get_speaker_timeline`.
 - **Commitments:** `weekly_digest`, `list_action_items`, `list_dropped_commitments`,
   `list_stale_topics`, `list_open_questions`.
+- **Calendar:** `list_calendar_events` (meetings in a window, attendees, the bound recording;
+  read-only, from the connected ICS calendars). `get_transcript` carries `calendar_event` for a
+  bound recording.
 - **Organisation:** `list_categories`, `suggest_category`, `transcript_suggest_meta`,
   `list_bookmarks`, `list_saved_searches`, `list_comments`, `list_audio_library`.
 - **Screen of a recording:** `get_visual_timeline`, `get_frame`, `get_frames_for_text`,
@@ -71,6 +74,15 @@ Always name the sources (id and title).
 
 **What did we drop.** `weekly_digest` for the week's overview, `list_dropped_commitments` and
 `list_stale_topics` for what went quiet, `list_open_questions` for questions nobody answered.
+
+**Work the task approval queue.** New tasks arrive as proposals the owner approves or rejects.
+`list_action_items(status='proposed')` lists the queue in batch order (10 by default, `limit`
+widens it); listing does not start a proposal's 3-day clock. Then, only on the owner's word:
+`task(action='approve', item_ids=[id])` or `task(action='reject', item_ids=[id])`, a fix with
+`task(action='edit', item_ids=[id], text=..., due='YYYY-MM-DD')`, and `task(action='undo',
+event_id=...)` to take your last change back (`last_event` on each row). Statuses: proposed, open,
+done, cancelled, stale, rejected, expired, legacy. Archived `legacy` tasks answer only when named:
+"what did I promise in September" is `status='legacy', window='all'` with `since`/`until`.
 
 **Research a name or a brand.** `research_preview(q)` (free) to see the mentions →
 `research_export(q)` (free, raw quotes with provenance) or `research_summary(q)` (PAID).

@@ -1,6 +1,6 @@
 # services — Gmail ingest (mail_*, document_ingest)
 
-last-verified: 2026-10-19 (gmail-ingest 4.18.0 + mcp-mail-connect 4.19.0 + mcp-mail-and-keys 4.24.0, schema v52)
+last-verified: 2026-10-26 (connect_links kind `calendar`, 4.34.0); 2026-10-19 (gmail-ingest 4.18.0, mcp-mail-connect 4.19.0, 4.24.0)
 
 Part of `app/services/*`; hub — [services.md](services.md). Sibling live channel of [services-telegram.md](services-telegram.md),
 but an **in-process thread** (imaplib needs no own loop), not a Popen child. HTTP — `blueprints.md` § mail.py; UI — `frontend.md`.
@@ -63,7 +63,7 @@ if `label.enrich`). Read-only toward Gmail; nothing is ever written back.
 (`created|duplicate|no_text|error`; never raises). `text_filter` runs before hashing; `store(path)` only for a new file. Callers: `documents.py`, `mail_sync`.
 
 ## Connect links and secret guards (mcp-mail-connect, 4.19.0; stdlib/in-memory, wiki `gmail-ingest-privacy.md`)
-- **connect_links.py** — in-memory one-time links, never persisted (a restart kills them). `KINDS=("mail","anthropic_key")`,
+- **connect_links.py** — in-memory one-time links, never persisted (a restart kills them). `KINDS=("mail","anthropic_key","calendar")` (4.34.0; subject = calendar label, `services-calendar.md`),
   `TTL_SECONDS=600`, `MAX_FAILURES=3`. `issue(kind, subject=, requested_by=)` (drops older links of the same kind+subject; token
   `secrets.token_urlsafe(32)`), `peek` (never consumes), `consume`, `record_failure` -> attempts left (0 = link deleted), `url_for`
   (`http://127.0.0.1:<port>/connect/<kind>/<token>`), `port_from_host`. Tests patch `_clock`.
@@ -81,4 +81,3 @@ if `label.enrich`). Read-only toward Gmail; nothing is ever written back.
 - `enrichment.enrich_transcription` returns `skipped`/`mail_enrich_off` when `mail_enrich == 0` and not `force`; backfill/list SQL use
   `mail_enrich IS NOT 0` (`enrichment.py:498, 594, 708`). Telegram's embed-only guard is separate.
 - Credential store does not protect the password from other processes of the same Windows account (accepted risk).
-- Tests: autouse in-memory keyring (`tests/conftest.py`); IMAP is a fake via `factory=` or a patched `mail_imap.connect`.

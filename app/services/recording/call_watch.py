@@ -7,8 +7,15 @@ A daemon thread ticks once a second over every audio session (``app_audio.list_c
   output sessions are both Active for ``RECORDING_AUTOPROMPT_SECONDS`` without a break, with each
   side above the speech peak on at least ``MIN_VOICED_TICKS`` ticks of that streak. Dictation apps
   are not on the list; YouTube and music hold no microphone — neither can become a call.
-- **One prompt per call.** «Записати?» is shown once, unless a live recording already captures the
-  app. «Записати» starts mic + this app's sound only; nothing starts without a click.
+- **One prompt per call, one repeat.** «Записати?» is shown once, unless a live recording already
+  captures the app. A call still live, unrecorded and not dismissed ``RECORDING_AUTOPROMPT_REPROMPT_MIN``
+  minutes after that prompt gets exactly one more (the old one is withdrawn), then silence.
+- **Auto-record (opt-in).** With ``RECORDING_AUTOPROMPT_ACTION=record`` the confirmed call starts a
+  recording through the injected ``auto_record_fn`` instead of asking, and a «started» prompt
+  (Stop / Keep) reports it; a failed start falls back to the normal prompt. The default ``prompt``
+  never starts anything without a click.
+- **Recorded call.** ``log_result`` (after a click) or a successful auto-record remembers the call's
+  session id; such a call counts as recorded whatever the session's system-source mode.
 - **Call end** — the app's sessions stopped being Active for ``END_INACTIVE_SEC``, or both sides
   went silent for ``END_SILENCE_SEC`` — withdraws an unanswered prompt and asks «Зупинити?» for
   every live, unpaused recording that captures the app.
@@ -37,7 +44,7 @@ from app.core.i18n import tr
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_APPS = ('zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,'
+DEFAULT_APPS = ('zoom.exe,ms-teams.exe,teams.exe,viber.exe,whatsapp.root.exe,'
                 'whatsapp.exe,chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe')
 
 #: Session peak (0..1) that counts as sound. K2 spike: an open microphone in a quiet room peaks
@@ -63,6 +70,8 @@ _LABELS = {
 
 RECORD_ACTIONS = ('record', 'sources')
 STOP_ACTIONS = ('stop', 'keep')
+#: ``RECORDING_AUTOPROMPT_ACTION`` values; anything else behaves as ``prompt``.
+ACTIONS = ('prompt', 'record')
 
 
 def parse_apps(raw: str) -> frozenset[str]:
@@ -100,17 +109,23 @@ class _Call:
     confirmed: bool = False
     prompt_id: str | None = None
     mic_endpoint: str | None = None
+    call_id: str = ''
+    first_prompt_at: float | None = None
+    reprompted: bool = False
+    dismissed: bool = False
+    session_id: str | None = None     # the recording known to cover this call
 
 
 @dataclass
 class _Prompt:
     id: str
-    kind: str              # 'record' | 'stop'
+    kind: str              # 'record' | 'stop' | 'started'
     exe: str
     created: float
     created_wall: float
     mic_endpoint: str | None = None
     session_id: str | None = None
+    consent_reminder: bool = False
 
 
 @dataclass
@@ -144,7 +159,8 @@ class CallWatcher:
     def __init__(self, *, apps: frozenset[str], prompt_seconds: float, autostop_minutes: float,
                  base_url: str, enumerate_calls, live_sessions, stop_fn, notifier,
                  clock=time.monotonic, wall=time.time, log_path: str | None = None,
-                 publisher=None):
+                 publisher=None, action: str = 'prompt', auto_record_fn=None,
+                 reprompt_minutes: float = 10):
         self.apps = frozenset(apps)
         self.prompt_seconds = float(prompt_seconds)
         self.autostop_sec = float(autostop_minutes) * 60.0
@@ -157,6 +173,9 @@ class CallWatcher:
         self._wall = wall
         self._log_path = log_path
         self._publisher = publisher
+        self.action = action if action in ACTIONS else 'prompt'
+        self._auto_record_fn = auto_record_fn
+        self.reprompt_sec = max(0.0, float(reprompt_minutes)) * 60.0
         self._lock = threading.Lock()
         self._calls: dict[str, _Call] = {}
         self._prompts: dict[str, _Prompt] = {}
@@ -214,7 +233,8 @@ class CallWatcher:
             call = self._calls.get(exe)
             if both:
                 if call is None:
-                    call = self._calls[exe] = _Call(exe, since=now, last_live=now, last_voice=now)
+                    call = self._calls[exe] = _Call(exe, since=now, last_live=now, last_voice=now,
+                                                    call_id=secrets.token_urlsafe(8))
                 call.last_live = now
                 mic_v = app['mic']['peak'] > SPEECH_PEAK
                 out_v = app['out']['peak'] > SPEECH_PEAK
@@ -236,6 +256,30 @@ class CallWatcher:
                 continue
             if now - call.last_live >= END_INACTIVE_SEC or now - call.last_voice >= END_SILENCE_SEC:
                 self._end_call(now, call, live, effects)
+            else:
+                self._maybe_reprompt(now, call, live, effects)
+
+    def _is_recorded(self, call: _Call, live) -> bool:
+        if call.session_id and any(s['sid'] == call.session_id for s in live):
+            return True
+        return any(captures(call.exe, s.get('system_source')) for s in live)
+
+    def _maybe_reprompt(self, now, call: _Call, live, effects) -> None:
+        """One repeat of the record prompt for a long call nobody recorded or dismissed."""
+        if (self.reprompt_sec <= 0 or call.reprompted or call.dismissed or call.first_prompt_at is None
+                or now - call.first_prompt_at < self.reprompt_sec):
+            return
+        call.reprompted = True
+        if self._is_recorded(call, live):
+            return
+        old = call.prompt_id
+        if old and old in self._prompts:
+            self._prompts.pop(old)
+            effects.append(lambda pid=old: self._notifier.remove(pid))
+            self._log('prompt_withdrawn', exe=call.exe, prompt=old, reason='reprompt')
+            self._emit(effects, 'prompt_withdrawn', kind='record', exe=call.exe, reason='reprompt')
+        p = self._record_prompt(now, call, effects)
+        self._log('reprompt', exe=call.exe, prompt_id=p.id)
 
     def _confirm(self, now, call: _Call, live, effects) -> None:
         call.confirmed = True
@@ -244,12 +288,21 @@ class CallWatcher:
         for w in list(self._watches.values()):        # the call resumed in a recording we asked about
             if w.exe == call.exe:
                 self._drop_watch(w.sid, 'call_resumed', effects)
-        recorded = [s['sid'] for s in live if captures(call.exe, s.get('system_source'))]
-        if recorded:
+        if self._is_recorded(call, live):
             self._log('prompt_skipped', exe=call.exe, reason='recorded')
             return
+        if self.action == 'record' and self._auto_record_fn is not None:
+            effects.append(lambda call=call: self._auto_record(call))
+            return
+        p = self._record_prompt(now, call, effects)
+        self._log('prompt', exe=call.exe, prompt=p.id)
+
+    def _record_prompt(self, now, call: _Call, effects) -> _Prompt:
+        """Create and show a record prompt for ``call`` (under the lock)."""
         p = self._new_prompt(now, 'record', call.exe, mic_endpoint=call.mic_endpoint)
         call.prompt_id = p.id
+        if call.first_prompt_at is None:
+            call.first_prompt_at = now
         label = app_label(call.exe)
         effects.append(lambda p=p, label=label: self._notifier.show(
             p.id, tr('svc_recording.call.prompt.title', label=label),
@@ -257,8 +310,44 @@ class CallWatcher:
             [(tr('svc_recording.call.prompt.record'), self._url(p.id, 'record')),
              (tr('svc_recording.call.prompt.sources'), self._url(p.id, 'sources'))],
             launch_url=self._url(p.id, 'sources'), reminder=True))
-        self._log('prompt', exe=call.exe, prompt=p.id)
         self._emit(effects, 'prompt', kind='record', exe=call.exe)
+        return p
+
+    def _auto_record(self, call: _Call) -> None:
+        """Opt-in auto-record (runs outside the lock): start and report it with a 'started' prompt,
+        or fall back to the normal record prompt when the start fails."""
+        try:
+            res = self._auto_record_fn(call.exe, call.call_id) or {}
+        except Exception as exc:
+            logger.warning('auto-record of %s failed: %s', call.exe, exc, exc_info=True)
+            res = {'ok': False, 'reason': type(exc).__name__}
+        effects: list = []
+        with self._lock:
+            now = self._clock()
+            sid = res.get('session_id')
+            if res.get('ok') and sid:
+                call.session_id = sid
+                self._log('record_started', prompt_id=None, exe=call.exe, session_id=sid, via='auto')
+                p = self._new_prompt(now, 'started', call.exe, session_id=sid)
+                label = app_label(call.exe)
+                body = tr('svc_recording.call.started.body', label=label)
+                if res.get('consent_reminder'):
+                    p.consent_reminder = True
+                    body = f"{body}\n{tr('svc_recording.consent.reminder')}"
+                effects.append(lambda p=p, body=body: self._notifier.show(
+                    p.id, tr('svc_recording.call.started.title'), body,
+                    [(tr('svc_recording.call.started.stop'), self._url(p.id, 'stop')),
+                     (tr('svc_recording.call.started.keep'), self._url(p.id, 'keep'))],
+                    reminder=True))
+                self._log('started_prompt', exe=call.exe, prompt=p.id)
+                self._emit(effects, 'prompt', kind='started', exe=call.exe, session_id=sid)
+            else:
+                self._log('record_failed', prompt_id=None, exe=call.exe,
+                          reason=res.get('reason') or res.get('error_code') or 'unknown', via='auto')
+                if self._calls.get(call.exe) is call:
+                    p = self._record_prompt(now, call, effects)
+                    self._log('prompt', exe=call.exe, prompt=p.id)
+        self._run_effects(effects)
 
     def _end_call(self, now, call: _Call, live, effects) -> None:
         del self._calls[call.exe]
@@ -270,9 +359,11 @@ class CallWatcher:
             effects.append(lambda pid=call.prompt_id: self._notifier.remove(pid))
             self._log('prompt_withdrawn', exe=call.exe, prompt=call.prompt_id)
             self._emit(effects, 'prompt_withdrawn', kind='record', exe=call.exe, reason='call_end')
+        known = call.session_id if any(s['sid'] == call.session_id for s in live) else None
         for s in live:
             sid = s['sid']
-            if s.get('is_paused') or sid in self._watches or not captures(call.exe, s.get('system_source')):
+            covers = sid == known if known else captures(call.exe, s.get('system_source'))
+            if s.get('is_paused') or sid in self._watches or not covers:
                 continue
             p = self._new_prompt(now, 'stop', call.exe, session_id=sid)
             self._watches[sid] = _Watch(sid, call.exe, p.id)
@@ -352,12 +443,15 @@ class CallWatcher:
             out = []
             for p in prompts:
                 acts = RECORD_ACTIONS if p.kind == 'record' else STOP_ACTIONS
-                out.append({
+                item = {
                     'id': p.id, 'kind': p.kind, 'exe': p.exe, 'label': app_label(p.exe),
                     'session_id': p.session_id, 'mic_endpoint': p.mic_endpoint,
                     'created_at': datetime.fromtimestamp(p.created_wall, timezone.utc).isoformat(),
                     'actions': {a: self._url(p.id, a) for a in acts},
-                })
+                }
+                if p.consent_reminder:
+                    item['consent_reminder'] = True
+                out.append(item)
             return out
 
     def consume(self, token: str, action: str) -> dict | None:
@@ -389,11 +483,27 @@ class CallWatcher:
             if p is None or p.kind != 'record':
                 return False
             self._prompts.pop(prompt_id)
+            for c in self._calls.values():
+                if c.prompt_id == prompt_id:
+                    c.dismissed = True
             effects.append(lambda: self._notifier.remove(prompt_id))
             self._log('dismiss', exe=p.exe, prompt=prompt_id)
             self._emit(effects, 'prompt_withdrawn', kind=p.kind, exe=p.exe, reason='dismissed')
         self._run_effects(effects)
         return True
+
+    def log_result(self, prompt_id: str, *, ok: bool, session_id: str | None = None,
+                   reason: str | None = None) -> None:
+        """Journal the outcome of a record click; a started session marks its call recorded."""
+        with self._lock:
+            call = next((c for c in self._calls.values() if c.prompt_id == prompt_id), None)
+            exe = call.exe if call else None
+            if ok:
+                if call is not None and session_id:
+                    call.session_id = session_id
+                self._log('record_started', prompt_id=prompt_id, exe=exe, session_id=session_id, via='click')
+            else:
+                self._log('record_failed', prompt_id=prompt_id, exe=exe, reason=reason, via='click')
 
     # ------------------------------------------------------------ helpers
 

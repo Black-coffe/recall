@@ -10,5 +10,5 @@ that accept an already open `sqlite3.Connection` (the same one that
 NOT to be confused with the removed (T7.3) `app/services/database.py` (`DatabaseService`) —
 that was dead code (no imports), this package is new, wired in
 on purpose. Queries are moved incrementally, the most duplicated first;
-see docs/REMEDIATION_PLAN.md, task T7.2.
+the remaining increments are item P20 in docs/ROADMAP.md.
 """

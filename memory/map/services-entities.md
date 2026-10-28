@@ -1,6 +1,6 @@
 # services — entity graph: dedup, TG links
 
-last-verified: 2026-10-15
+last-verified: 2026-10-26 (provenance `calendar`, 4.34.0)
 
 Part of `app/services/*`; hub — [services.md](services.md). Wave 4 (T6.7 + stories 01-04).
 
@@ -22,7 +22,8 @@ Part of `app/services/*`; hub — [services.md](services.md). Wave 4 (T6.7 + sto
   `link_threads()`, `stats()`; the `names_for()` cache (`TG_ENTITIES_NAMES_TTL`=300 s) remembers the state of the morphology flag. CLI
   `link --dry-run|--chat`, `stats`.
   - Provenance `meeting_entities.source`: `SOURCE="thread_match"` (exact), `SOURCE_MORPH="thread_morph"`; NULL = inherited
-    Claude links (more reliable, not overwritten).
+    Claude links (more reliable, not overwritten); 4.34.0 `calendar` = attendee of a bound calendar event (`calendar_bind.link_attendees`,
+    existing persons only, `INSERT OR IGNORE`); `enrichment` re-enrich keeps `source IN ('calendar','owner')` rows (`enrichment.py:347-349`) and upserts (:372). 4.36.0 `owner` = a person the owner picked at recording start (`recording/participants.link_to_transcription`, existing persons only, `INSERT OR IGNORE`, called from `transcription_run.py:498-501`); never interchangeable with `calendar`.
   - Evidence FROM THE PLACE OF USE: a mention counts only if it is written with a capital letter and not at the start of a sentence
     (`written_as_proper_noun`); an ALL-CAPS header is filtered out (`is_shouting`). The link is per MESSAGE, not per thread
     (expansion to the thread is done by `scope._expand_to_threads`).

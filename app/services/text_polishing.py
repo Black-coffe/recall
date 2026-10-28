@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Optional
+from typing import Optional, Sequence
 
 from app.core.i18n import tr
 from app.services.claude_retry import call_with_retry
@@ -322,6 +322,19 @@ def polish_transcript(
     return info
 
 
+def _owner_line(owner_names, lang: str = "uk") -> str:
+    """A user-message line naming the archive owner, so the model can set `for_whom`.
+
+    It goes into the user message, not the cached system prompt (the names are dynamic).
+    Empty when no names are given: the model then relies on the first person."""
+    names = [n.strip() for n in (owner_names or ()) if isinstance(n, str) and n.strip()]
+    if not names:
+        return ""
+    if lang == "ru":
+        return 'Владелец архива (для поля "for_whom"): ' + ", ".join(names) + ".\n\n"
+    return 'Власник архіву (для поля "for_whom"): ' + ", ".join(names) + ".\n\n"
+
+
 # ============================================================
 # Phase 12.5: Summary + Action Items
 # ============================================================
@@ -336,6 +349,11 @@ _SUMMARY_SYSTEM_PROMPT = """Ты — аналитик, который читае
    - "task": краткое описание задачи (одно предложение в инфинитиве: "Подготовить...", "Проверить...", "Связаться с...")
    - "owner": кто отвечает (имя из транскрипта, или null если не назначено)
    - "due": срок (если упоминается явно — например "до пятницы", "к концу месяца"; иначе null)
+   - "for_whom": для кого задача относительно ВЛАДЕЛЬЦА архива (его имена, если известны, даны в сообщении пользователя):
+     "owner" — делает сам владелец; "promised_to_owner" — кто-то обещал это владельцу или сделать для него;
+     "third_party" — договорённость между другими людьми, владелец не исполнитель и не получатель
+   - "confidence": число от 0 до 1 — насколько ты уверен, что это реальная договорённость, а не мысль вслух
+   - "importance": 1 | 2 | 3 — 3 важно/срочно, 2 обычная задача, 1 мелочь
 
 Важно:
 - Не выдумывай информацию. Если action items нет — верни пустой список.
@@ -349,8 +367,8 @@ _SUMMARY_SYSTEM_PROMPT = """Ты — аналитик, который читае
   "summary": "...",
   "key_points": ["...", "..."],
   "action_items": [
-    {"task": "...", "owner": "...", "due": "..."},
-    {"task": "...", "owner": null, "due": null}
+    {"task": "...", "owner": "...", "due": "...", "for_whom": "owner", "confidence": 0.9, "importance": 2},
+    {"task": "...", "owner": null, "due": null, "for_whom": "third_party", "confidence": 0.6, "importance": 1}
   ]
 }"""
 
@@ -360,6 +378,7 @@ def summarize_transcript(
     diarized_text: Optional[str] = None,
     model: Optional[str] = None,
     timeout: float = 300.0,
+    owner_names: Sequence[str] = (),
 ) -> dict:
     """Generate summary + key points + action items for a transcript.
 
@@ -367,6 +386,7 @@ def summarize_transcript(
         text: raw transcript (fallback if there is no diarized).
         diarized_text: text in the format 'Імʼя: репліка\\n\\nІмʼя: репліка' if available.
         model: model override.
+        owner_names: the archive owner's names (`task_proposals.owner_names`) for `for_whom`.
 
     Returns:
         {
@@ -393,6 +413,7 @@ def summarize_transcript(
 
     user_message = (
         "Проанализируй следующий транскрипт и верни JSON по схеме выше. "
+        f"{_owner_line(owner_names, 'ru')}"
         "Транскрипт в тегах <transcript>:\n\n"
         f"<transcript>\n{body}\n</transcript>"
     )
@@ -759,11 +780,16 @@ _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає тр
 1. "summary" — резюме розмови (3-7 речень): про що говорили, до чого дійшли, контекст.
 2. "key_points" — список ключових тез/рішень/важливих тверджень. Кожен — коротка фраза.
 3. "action_items" — задачі/наступні кроки/домовленості. Кожна — обʼєкт:
-   {"task": "опис в інфінітиві", "owner": "імʼя або null", "due": "термін як його сказали, або null", "due_date": "YYYY-MM-DD або null"}
+   {"task": "опис в інфінітиві", "owner": "імʼя або null", "due": "термін як його сказали, або null", "due_date": "YYYY-MM-DD або null", "for_whom": "owner"|"promised_to_owner"|"third_party", "confidence": 0..1, "importance": 1|2|3}
    - "due" — ДОСЛІВНО як прозвучало («завтра», «до кінця тижня», «Q3»).
    - "due_date" — та сама дата в абсолютному вигляді, порахована від дати зустрічі
      (її дано у повідомленні користувача). Якщо термін неточний («найближчим часом»,
      «до наступної зустрічі») — став null, НЕ вигадуй дату.
+   - "for_whom" — для кого задача відносно ВЛАСНИКА архіву (його імена, якщо відомі, дано в повідомленні
+     користувача): "owner" — робить сам власник; "promised_to_owner" — хтось пообіцяв це власнику або зробити
+     для нього; "third_party" — домовленість між іншими людьми, власник не виконавець і не отримувач.
+   - "confidence" — число від 0 до 1: наскільки ти впевнений, що це реальна домовленість, а не думка вголос.
+   - "importance" — 1 | 2 | 3: 3 важливо/терміново, 2 звичайна задача, 1 дрібниця.
 4. "people" — люди, що БРАЛИ УЧАСТЬ або ЗГАДУВАЛИСЬ. Кожен — обʼєкт:
    {"name": "канонічне імʼя", "role": "посада/роль або null", "aliases": ["варіанти написання/звертання"]}
 5. "projects" — проєкти/продукти/ініціативи. Кожен — обʼєкт:
@@ -787,7 +813,7 @@ _MEETING_CARD_SYSTEM_PROMPT = """Ти — аналітик, що читає тр
 {
   "summary": "...",
   "key_points": ["...", "..."],
-  "action_items": [{"task": "...", "owner": "...", "due": null, "due_date": null}],
+  "action_items": [{"task": "...", "owner": "...", "due": null, "due_date": null, "for_whom": "owner", "confidence": 0.9, "importance": 2}],
   "people": [{"name": "...", "role": null, "aliases": []}],
   "projects": [{"name": "...", "aliases": []}],
   "orgs": [{"name": "...", "aliases": []}],
@@ -845,6 +871,7 @@ def extract_meeting_card(
     effort: str = "medium",
     meeting_date: Optional[str] = None,
     tag_vocabulary: Optional[list[str]] = None,
+    owner_names: Sequence[str] = (),
 ) -> dict:
     """Combined meeting card extractor (Phase 13) — one Claude call.
 
@@ -862,6 +889,9 @@ def extract_meeting_card(
             none fits (story 06). The dynamic vocabulary goes into the
             user message, not the system prompt, so as not to break the
             prompt caching of the static system prompt.
+        owner_names: the archive owner's names (`task_proposals.owner_names`) so the
+            model can tell the owner's tasks from third-party ones (`for_whom`); also
+            in the user message, for the same caching reason.
 
     Returns:
         {
@@ -905,7 +935,7 @@ def extract_meeting_card(
     ) if tag_vocabulary else ""
     user_message = (
         "Побудуй картку мітингу (JSON за схемою вище) з наступного транскрипту. "
-        f"{date_line}{vocab_line}"
+        f"{date_line}{vocab_line}{_owner_line(owner_names)}"
         "Транскрипт у тегах <transcript>:\n\n"
         f"<transcript>\n{body}\n</transcript>"
     )
@@ -978,13 +1008,18 @@ _COMMENT_ITEMS_SYSTEM_PROMPT = """Ти розбираєш КОМЕНТАР, як
 Поверни ОДИН валідний JSON-обʼєкт:
 
 1. "action_items" — задачі/домовленості/наступні кроки, які В КОМЕНТАРІ реально поставлені. Кожна:
-   {"task": "опис в інфінітиві", "owner": "імʼя або null", "due": "термін як його написано, або null", "due_date": "YYYY-MM-DD або null"}
+   {"task": "опис в інфінітиві", "owner": "імʼя або null", "due": "термін як його написано, або null", "due_date": "YYYY-MM-DD або null", "for_whom": "owner"|"promised_to_owner"|"third_party", "confidence": 0..1, "importance": 1|2|3}
    - "due" — ДОСЛІВНО як написано («завтра», «до кінця тижня», «у Q3»).
    - "due_date" — та сама дата абсолютно, порахована від дати коментаря (її дано нижче).
      Неточний термін («найближчим часом») → null. НЕ вигадуй дату.
    - "owner" — якщо задача написана без виконавця («треба надіслати договір»,
      «не забути передзвонити»), виконавець — САМ АВТОР коментаря: став "власник".
      Якщо названо іншу людину — став її імʼя.
+   - "for_whom" — для кого задача відносно ВЛАСНИКА архіву, тобто автора коментаря (його імена, якщо
+     відомі, дано в повідомленні користувача): "owner" — робить сам власник; "promised_to_owner" — хтось пообіцяв це власнику або зробити
+     для нього; "third_party" — домовленість між іншими людьми, власник не виконавець і не отримувач.
+   - "confidence" — число від 0 до 1: наскільки ти впевнений, що це реальна домовленість, а не думка вголос.
+   - "importance" — 1 | 2 | 3: 3 важливо/терміново, 2 звичайна задача, 1 дрібниця.
 2. "people" — люди, названі в коментарі: {"name": "канонічне імʼя", "role": "роль або null", "aliases": ["варіанти написання"]}
 3. "projects" — проєкти/продукти: {"name": "канонічна назва", "aliases": [...]}
 4. "orgs" — організації/компанії: формат як projects.
@@ -1009,6 +1044,7 @@ def extract_comment_items(
     model: Optional[str] = None,
     timeout: float = 120.0,
     effort: str = "low",
+    owner_names: Sequence[str] = (),
 ) -> dict:
     """Extract tasks and named entities from a comment — one Claude call.
 
@@ -1035,7 +1071,7 @@ def extract_comment_items(
                  if comment_date else "")
     user_message = (
         "Розбери наступний коментар за схемою вище. "
-        f"{date_line}"
+        f"{date_line}{_owner_line(owner_names)}"
         "Коментар у тегах <comment>:\n\n"
         f"<comment>\n{body}\n</comment>"
     )
@@ -1210,7 +1246,10 @@ _CHAT_TASKS_SYSTEM_PROMPT = """Ти читаєш нитку робочої пе�
      "owner": "імʼя того, ХТО МАЄ ЗРОБИТИ, як воно написане в чаті, або null",
      "due": "строк дослівно як його назвали, або null",
      "due_date": "YYYY-MM-DD або null",
-     "msg": <номер повідомлення, в якому це прозвучало>}
+     "msg": <номер повідомлення, в якому це прозвучало>,
+     "for_whom": "owner" | "promised_to_owner" | "third_party",
+     "confidence": <число від 0 до 1>,
+     "importance": 1 | 2 | 3}
   ]
 }
 
@@ -1220,6 +1259,11 @@ _CHAT_TASKS_SYSTEM_PROMPT = """Ти читаєш нитку робочої пе�
 - "due" — дослівна фраза строку з переписки. Немає — null, не підставляй свою.
 - "due_date" — та сама дата абсолютно, порахована від дати ТОГО повідомлення, де строк прозвучав (дати дано біля кожного повідомлення). Строк неточний («найближчим часом», «як буде час») — null.
 - "msg" — номер того повідомлення, де зобовʼязання прозвучало (не сусіднього).
+- "for_whom" — для кого задача відносно ВЛАСНИКА архіву (його імена, якщо відомі, дано в повідомленні
+  користувача): "owner" — робить сам власник; "promised_to_owner" — хтось пообіцяв це власнику або зробити
+  для нього; "third_party" — домовленість між іншими людьми, власник не виконавець і не отримувач.
+- "confidence" — число від 0 до 1: наскільки ти впевнений, що це реальна домовленість, а не думка вголос.
+- "importance" — 1 | 2 | 3: 3 важливо/терміново, 2 звичайна задача, 1 дрібниця.
 - Мова опису — мова переписки.
 - Одна домовленість — один запис. Не дроби її на кроки і не зливай різні в одну.
 
@@ -1233,6 +1277,7 @@ def extract_chat_tasks(
     model: Optional[str] = None,
     timeout: float = 180.0,
     effort: str = "low",
+    owner_names: Sequence[str] = (),
 ) -> dict:
     """Extract commitments from a correspondence thread (Wave 5.1) — one Claude call.
 
@@ -1272,6 +1317,7 @@ def extract_chat_tasks(
 
     user_message = (
         f"Витягни зобовʼязання з наступної нитки переписки. {head}.\n\n"
+        f"{_owner_line(owner_names)}"
         "<thread>\n" + "\n".join(lines) + "\n</thread>"
     )
 

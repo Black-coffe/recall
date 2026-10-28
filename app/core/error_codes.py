@@ -38,6 +38,7 @@ ERROR_CODES: dict[str, int] = {
     # blueprint inventory
     "ALREADY_RUNNING": 409,
     "BAD_ACTION": 400,
+    "INVALID_TRANSITION": 409,
     "BAD_SETTINGS": 400,
     "COPILOT_BUSY": 409,
     "COPILOT_DISABLED": 503,
@@ -77,6 +78,7 @@ ERROR_CODES: dict[str, int] = {
     "BAD_ACCOUNT": 400,
     "BAD_MONTHS": 400,
     "MAIL_POLLER_OFF": 503,
+    "CALENDAR_POLLER_OFF": 503,  # k6-calendar-ics: sync now while the poller is not running
     "USE_GATED_ROUTE": 400,  # the D variant of a plain mail route lives on its own gated route
     # MailError codes (app/services/mail_imap.py), mapped by `_MAIL_ERRORS` in mail.py
     "AUTH_FAILED": 400,
@@ -117,6 +119,11 @@ ERROR_CODES: dict[str, int] = {
     "OWNER_SESSION": 403,
     "NOTIFY_UNAVAILABLE": 503,
     "CANCEL_WINDOW_CLOSED": 409,
+    # wave2-recording-calls: Windows refused a capture stream (privacy setting / E_ACCESSDENIED)
+    "DEVICE_ACCESS_DENIED": 403,
+    # wave4-client-calls: "what did I miss" live summary
+    "AGENT_SESSION": 403,
+    "LIVE_BUDGET_EXHAUSTED": 429,
 }
 
 _BY_STATUS = {

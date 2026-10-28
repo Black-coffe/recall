@@ -29,6 +29,7 @@
         { id: 'mail',       pattern: '/mail',             view: 'mail' },
         { id: 'settings',   pattern: '/settings',         view: 'settings' },
         { id: 'record',     pattern: '/record',           view: 'record' },
+        { id: 'copilot',    pattern: '/copilot',          view: 'copilot' },
     ];
     ROUTES.forEach(r => {
         const keys = [];

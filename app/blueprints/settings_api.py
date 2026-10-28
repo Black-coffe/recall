@@ -45,7 +45,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from app.core import env_file
 from app.core.i18n import tr, ui_lang_setting
-from app.services import connect_links, settings_secrets
+from app.services import calendar_ics, connect_links, settings_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -231,3 +231,53 @@ def set_ui_lang():
         logger.error("Failed to write RECALL_UI_LANG to .env: %s", e)
         return jsonify({'success': False, 'error': tr('core.settings.env_write_failed')}), 500
     return jsonify({'success': True, 'value': value})
+
+
+# ------------------------------------------------------------------ calendars (k6-calendar-ics)
+
+def _calendar_err(code: str, key: str, status: int):
+    return jsonify({'success': False, 'error': tr(key), 'error_code': code}), status
+
+
+@settings_bp.route('/api/settings/calendars', methods=['GET'])
+def list_calendars():
+    """Connected ICS sources: label, host, last sync and counters. Never the address."""
+    sources = calendar_ics.list_sources(current_app.config['DATABASE'])
+    return jsonify({'success': True, 'sources': sources,
+                    'sync_running': 'calendar_poller' in current_app.extensions})
+
+
+@settings_bp.route('/api/settings/calendars/connect-link', methods=['POST'])
+def calendar_connect_link():
+    """Issue a one-time link to the local page where the secret ICS address is typed."""
+    data = request.get_json(silent=True) or {}
+    label = calendar_ics.normalize_label(data.get('label') if isinstance(data.get('label'), str) else '')
+    if not label:
+        return _calendar_err('BAD_REQUEST', 'settings.calendar.err.label', 400)
+    link = connect_links.issue('calendar', subject=label, requested_by='mcp' if _is_mcp() else 'unknown')
+    return jsonify({
+        'success': True,
+        'connect_url': connect_links.url_for('calendar', link['token'], connect_links.port_from_host(request.host)),
+        'expires_in': connect_links.TTL_SECONDS,
+        'already_configured': calendar_ics.has_source(current_app.config['DATABASE'], label),
+    })
+
+
+@settings_bp.route('/api/settings/calendars/<int:source_id>/sync', methods=['POST'])
+def sync_calendar(source_id: int):
+    """Queue a sync of one source on the poller."""
+    if calendar_ics.get_source(current_app.config['DATABASE'], source_id) is None:
+        return _calendar_err('NOT_FOUND', 'settings.calendar.err.notFound', 404)
+    poller = current_app.extensions.get('calendar_poller')
+    if poller is None:
+        return _calendar_err('CALENDAR_POLLER_OFF', 'settings.calendar.err.pollerOff', 503)
+    poller.trigger(source_id)
+    return jsonify({'success': True, 'queued': True}), 202
+
+
+@settings_bp.route('/api/settings/calendars/<int:source_id>', methods=['DELETE'])
+def disconnect_calendar(source_id: int):
+    """Disconnect a source: its keyring entry, its events and recording bindings go (D route)."""
+    if not calendar_ics.disconnect_source(current_app.config['DATABASE'], source_id):
+        return _calendar_err('NOT_FOUND', 'settings.calendar.err.notFound', 404)
+    return jsonify({'success': True, 'disconnected': source_id})

@@ -1,6 +1,6 @@
 # services — scheduled pipes and the Telegram bot
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: `mcp_actions` tool/pipe, `m:` undo buttons, on-demand run); 2026-10-18 (4.20.0: `.env` load path)
+last-verified: 2026-10-28 (task-approval 4.35.0: proposals pipe, Yes/No buttons); 2026-10-25 (mcp-telegram-automation 4.31.0: `mcp_actions` tool/pipe, `m:` undo buttons, on-demand run); 2026-10-18 (4.20.0: `.env` load path)
 
 Part of `app/services/*`; hub — [services.md](services.md). K4 4.13.0, K5 4.14.0/4.15.0.
 `pipes.py` (:636) and `tg_bot.py` (:190) call `load_dotenv(ENV_PATH)` with `app.core.env_file.ENV_PATH` (repo root), not a cwd search.
@@ -19,6 +19,9 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
   4.31.0 `mcp_actions_summary(db, now=)` (`:181`): last 24 h (`MCP_WINDOW_H`) of `mcp_actions` with `actor != 'ui'` grouped by tool/action + `refused`
   (decision != approved) + `items` = undoable events only while LAST for their task / chat+kind: task actions (`action_item_events`, `source='mcp'`),
   chat direction changes and chat disables (`tg_chat_events`, `source='mcp'`; enable is not offered). Each item carries `category_id` + `undo {kind task|chat, ref}`.
+  4.35.0 `TOOLS` also has `task_proposals` -> `task_proposals_batch(db, now=)` (`:245`): expiry pass (`commitments.expire_proposals`) then `proposal_queue`;
+  rows the privacy layer hides are dropped BEFORE the `PROPOSAL_BATCH` cut; pipe `pipes/task-proposals.md` (daily 09:00, `budget_usd: 0`, code-built, no model).
+  `run_pipe(buttons=True)` collects `proposal_ids`; only after a delivered card `_after_deliver` (`:736`) marks them shown (the 3-day clock starts there).
   No table -> `reason`. Pipe file `pipes/mcp-actions.md` (daily 09:00, `tools: [mcp_actions]`, `budget_usd: 0`, `skip_if_empty`: code-built, no model).
   On demand: `POST /api/pipes/<name>/run` (`blueprints.md` § automation.py) runs `run_pipe(..., buttons=True, trigger='mcp')` as a `pipe_run` job.
   `parse_pipe`/`load_pipes` (an invalid one — skipped + warning). `run_pipe(pipe, db_path, deliver, …, buttons=False)` (`:414`)
@@ -38,7 +41,8 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
   today, base_url, headline, missing, hidden, words, buttons)` (`:297`) → `(html, leaked_words)`; a non-empty `leaked` = do not send.
   Tasks in blocks by ROOT direction (`_Dirs`, without a direction → `_t("noDir")` = `telegram.brief.noDir`), ≤`MAX_CARDS=5` per block, the rest →
   `ще N →` to `{base}/tasks?category_id=`. A card: what · who · due · source; link `/transcript/<tid>?task=<id>`.
-  Sections: 📌 tasks (`overdue|this_week|no_date`), 🕳 dropped, ❓ questions, 💤 topics, ✏️ corrections, coverage.
+  4.35.0 `_proposals` (`:264`) renders the proposal block (what · for whom · due · importance · source, keys `telegram.brief.proposals.*`), expired line and,
+  in the weekly digest, `_proposal_stats` (shown -> pressed). Sections: 📌 tasks (`overdue|this_week|no_date`), 🕳 dropped, ❓ questions, 💤 topics, ✏️ corrections, coverage.
   `_Guard` on EVERY field: mask (`pipes_privacy.mask`) → stop words → truncation → `html.escape`. `clean_headline` (≤2 lines).
   `link_base()` = `RECALL_PUBLIC_URL` → `RECALL_API_URL` → `127.0.0.1:5050`. Check — `scripts/check_brief_links.py`.
   With `buttons`, tasks and "dropped" are numbered `<b>N.</b>` (`_numbered`, ≤`brief_actions.MAX_ITEMS=33`), the `item_id`s are appended
@@ -50,8 +54,9 @@ the list/groups/links are assembled by code). History — `pipe_runs` (v50, `mig
   A stop word that survived assembly → `blocked` (the word is not written even to history). `hidden_line(n)`. `scrub_text` is defined but
   `run_pipe` does not call it.
 - **brief_actions.py** — the buttons "done / not relevant / postpone" under the brief. `keyboard(item_ids)` →
-  `{inline_keyboard}` (a row per task; `None` if empty). `callback_data` (≤64 B, stateless):
-  `a:<n>:<id>:<done|cancelled|postpone:1|7|30>`, `p|b:<n>:<id>` (deadline/back), `u:<n>:<event>` (undo), `x`; 4.31.0 `m:<n>:t|c:<ref>` (undo a task event via `commitments.undo_action` / a chat event via
+  `{inline_keyboard}` (a row per task; `None` if empty; 4.35.0 `proposal_ids=` → `proposal_row` Yes/No instead of the task row; an undo that returns a
+  row to `proposed` redraws Yes/No). `callback_data` (≤64 B, stateless):
+  `a:<n>:<id>:<done|cancelled|postpone:1|7|30|approve|reject>`, `p|b:<n>:<id>` (deadline/back), `u:<n>:<event>` (undo), `x`; 4.31.0 `m:<n>:t|c:<ref>` (undo a task event via `commitments.undo_action` / a chat event via
   `telegram_chats.undo_event`, `source='bot'`; `keyboard(item_ids, undo_items=)` appends one `undo_row` per MCP-summary item; refusals `undo.notLast|private|already|created|notFound`
   -> callback text). `pipes_cards._mcp` renders the block (`telegram.brief.mcp.*`), numbers continue after the task numbers.
   `handle(cq, *, db_path, transport)` (`:75`): chat ≠ `tg_bot._chat_id()` → `_t("noAccess", lang)` (`telegram.btn.noAccess`); the change ONLY via

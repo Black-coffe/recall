@@ -147,17 +147,11 @@ class Config:
     PROFILE = 'desktop'
     HEADLESS = False
 
-    # Limits
-    RATE_LIMIT_YOUTUBE = 10  # Maximum YouTube downloads per hour  # TODO: not yet implemented
-    RATE_LIMIT_TRANSCRIBE = 30  # Maximum transcriptions per hour  # TODO: not yet implemented
-
-    # Auto cleanup
-    AUTO_CLEANUP_DAYS = 7  # Delete temporary files older than N days  # TODO: not yet implemented
-    AUTO_CLEANUP_ENABLED = True  # TODO: not yet implemented
+    # Rate limits (RATE_LIMIT_*) and file auto-cleanup (AUTO_CLEANUP_*) are read from the
+    # settings registry in app.py, not from here.
 
     # GPU settings
     FORCE_CPU = settings.env_bool('FORCE_CPU')
-    GPU_BATCH_SIZE = 16  # Batch size for GPU  # TODO: not yet implemented
 
     # Whisper backend (Phase 1 v4.0 roadmap)
     # 'faster' — faster-whisper (CTranslate2), 3-5x faster on GPU. Default.
@@ -342,10 +336,6 @@ class ProductionConfig(Config):
     # SECRET_KEY is inherited from Config. An insecure default for DEBUG=False
     # (including ProductionConfig, always here) is caught by the SINGLE check below
     # in the module (T1.5) — do not duplicate it here with a separate property-RuntimeError.
-
-    # Stricter limits
-    RATE_LIMIT_YOUTUBE = 5  # TODO: not yet implemented
-    RATE_LIMIT_TRANSCRIBE = 20  # TODO: not yet implemented
 
     # Disable insecure options
     YOUTUBE_DL_OPTIONS = {

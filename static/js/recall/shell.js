@@ -46,6 +46,8 @@
         shell.checkModelUpdates();
         startConnWatch();
         startCallPrompts();
+        startRecBadge();
+        checkRecovered();
         initServiceWorker();
     };
 
@@ -236,14 +238,24 @@
         const wrap = document.getElementById('rcToasts');
         if (!wrap) return null;
         const isRec = p.kind === 'record';
+        const isStarted = p.kind === 'started';   // auto-record already running: Stop or Keep (hide, no request)
+        const hide = () => { t.remove(); callShown.set(p.id, null); };
         const t = document.createElement('div');
         t.className = 'rc-toast rc-toast--action rc-toast--call';
-        t.innerHTML = '<i class="rc-ico fa-solid ' + (isRec ? 'fa-phone' : 'fa-circle-stop') + '"></i><span></span>' +
+        t.innerHTML = '<i class="rc-ico fa-solid ' + (isRec ? 'fa-phone' : isStarted ? 'fa-circle-dot' : 'fa-circle-stop') + '"></i><span></span>' +
             '<div class="rc-toast__actions"></div>' +
             '<button type="button" class="rc-toast__x" aria-label="' + R.t('core.close') + '">&times;</button>';
         t.querySelector('span').textContent = isRec
             ? R.t('core.call.started', { label: p.label })
+            : isStarted ? R.t('core.call.recStarted')
             : R.t('core.call.ended', { label: p.label });
+        if (isStarted && p.consent_reminder === true) {
+            // wave4-client-calls-07: the consent line under "Recording started"; it blocks nothing.
+            const c = document.createElement('div');
+            c.style.cssText = 'margin-top:4px;font-size:var(--rc-t-xs)';
+            c.textContent = R.t('core.call.consent');
+            t.querySelector('span').appendChild(c);
+        }
         const acts = t.querySelector('.rc-toast__actions');
         const add = (label, fn) => {
             const b = document.createElement('button');
@@ -260,15 +272,81 @@
             add(R.t('core.call.record'), () => goAction(p.actions.record));
             add(R.t('core.call.sources'), () => goAction(p.actions.sources));
             add(R.t('core.call.dismiss'), dismiss);
+        } else if (isStarted) {
+            add(R.t('core.call.stop'), () => goAction(p.actions.stop));
+            add(R.t('core.call.keep'), hide);
         } else {
             add(R.t('core.call.stop'), () => goAction(p.actions.stop));
             add(R.t('core.call.keep'), () => goAction(p.actions.keep));
         }
         // × on "Record?" = "Not needed"; on "Stop?" it only hides the banner here
         // (auto-stop after silence stays — the server controls it).
-        t.querySelector('.rc-toast__x').addEventListener('click', isRec ? dismiss : () => { t.remove(); callShown.set(p.id, null); });
+        t.querySelector('.rc-toast__x').addEventListener('click', isRec ? dismiss : hide);
         wrap.appendChild(t);
         return t;
+    }
+
+    // ============================================================
+    // REC badge (topbar #rcRecBadge) + recovered-recordings banner.
+    // The badge polls GET /api/recordings/active like the call prompts (visible tab only).
+    // The banner reads /api/recordings/recovered with ack=0; the endpoint clears its log
+    // on read, so the ack=1 request is sent only after the banner is on screen.
+    // ============================================================
+    const REC_POLL_MS = 5000;
+    let recCount = 0;
+
+    function startRecBadge() {
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) pollRecBadge(); });
+        // The router swaps the route without a poll: re-check after any click (the router
+        // handles it first, the timeout runs after) and after back/forward.
+        document.addEventListener('click', () => setTimeout(applyRecBadge, 0));
+        window.addEventListener('popstate', applyRecBadge);
+        pollRecBadge();
+        setInterval(pollRecBadge, REC_POLL_MS);
+    }
+
+    async function pollRecBadge() {
+        if (document.hidden) return;
+        let d = null;
+        try { d = await R.api.get('/api/recordings/active', { retries: 0 }); }
+        catch (err) { console.debug('[shell] rec badge poll failed:', err && err.message); return; }
+        recCount = (d && Array.isArray(d.sessions)) ? d.sessions.length : 0;
+        applyRecBadge();
+    }
+
+    function applyRecBadge() {
+        const el = document.getElementById('rcRecBadge');
+        if (!el) return;
+        el.hidden = window.location.pathname === '/record' || recCount === 0;
+        const n = document.getElementById('rcRecCount');
+        if (n) n.textContent = recCount > 1 ? R.i18n.num(recCount) : '';
+    }
+
+    async function checkRecovered() {
+        let d = null;
+        try { d = await R.api.get('/api/recordings/recovered?ack=0', { retries: 0 }); }
+        catch (err) { console.debug('[shell] recovered check failed:', err && err.message); return; }
+        const n = (d && d.count) ? d.count : 0;
+        if (!n) return;
+        if (!renderRecoveredBanner(n)) return;
+        try { await R.api.get('/api/recordings/recovered?ack=1', { retries: 0 }); }
+        catch (err) { console.warn('[shell] recovered ack failed:', err && err.message); }
+    }
+
+    function renderRecoveredBanner(n) {
+        const main = document.querySelector('.rc-main');
+        const content = document.getElementById('rcContent');
+        if (!main || !content || document.getElementById('rcRecBanner')) return false;
+        const bar = document.createElement('div');
+        bar.id = 'rcRecBanner';
+        bar.className = 'rc-updbar';
+        bar.innerHTML = `<i class="fa-solid fa-circle-dot"></i>
+            <span>${R.t('core.rec.recovered', { count: n })}</span>
+            <a href="/audio" data-route="audio" class="rc-updbar__link">${R.t('core.rec.openAudio')}</a>
+            <button class="rc-updbar__x" aria-label="${R.t('core.shell.hide')}">&times;</button>`;
+        main.insertBefore(bar, content);
+        bar.querySelector('.rc-updbar__x').addEventListener('click', () => bar.remove());
+        return true;
     }
 
     // ============================================================

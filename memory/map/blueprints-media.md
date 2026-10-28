@@ -3,7 +3,7 @@
 Part of the HTTP layer; overview and the other blueprints — `blueprints.md`, memory/telegram/research — `blueprints-memory.md`.
 No `url_prefix`, errors `{success,error}` + code. Logic — `services.md`.
 
-last-verified: 2026-10-25 (live-video routes, 4.30.0); 2026-10-21 (mcp-pipeline 4.27.0: transcription.py/audio_library.py/youtube.py re-read, ALL transcription.py line numbers re-swept after the extraction into `transcription_run.py`/`transcript_ai.py`); recording.py section content from 2026-10-20 (its line numbers were dropped, not re-swept); i18n keys `capture.*`/`transcript.*`/`library.*` (`blueprints.md` § i18n)
+last-verified: 2026-10-28 (wave2-recording-calls 4.36.0: recording.py gain/participants/403 bullets only); 2026-10-25 (live-video routes, 4.30.0); 2026-10-21 (mcp-pipeline 4.27.0: transcription.py/audio_library.py/youtube.py re-read, ALL transcription.py line numbers re-swept after the extraction into `transcription_run.py`/`transcript_ai.py`); recording.py section content from 2026-10-20 (its line numbers were dropped, not re-swept); i18n keys `capture.*`/`transcript.*`/`library.*` (`blueprints.md` § i18n)
 
 Gated (`approval_gate._D_ROUTES`, runs before the view): `transcription.delete_transcription`, `bulk_delete_transcriptions`,
 `audio_library.delete_audio_download`. Conditional (non-UI only): `transcription.retranscribe_transcription` (would evict a version),
@@ -47,7 +47,9 @@ Live mic/loopback recording + finalize + recovery; up to `RECORDING_MAX_ACTIVE` 
   (image/jpeg + `X-Recall-Frame-T|Video-T`, no-store), `<sid>/live-frames` (`t` alone = one frame, else `start|cursor,end,mode,step,min_res,limit 1..12`; JSON frames with `image_b64`+`text`).
   Errors via `_live_video_error` + `error_codes.status_for`: 400 `INVALID_ARGUMENT`, 404 `NOT_FOUND|NO_VIDEO|NOT_RECORDED`, 409 `PAST_LIVE_EDGE`; not live -> 200 `available:false` + `reason_code`. i18n `capture.live_video.*`.
   No private/stop-word filter here (the MCP tools apply it).
-- `GET /api/recordings/recovered`, `/recordings/active` -> `{active,count,sessions[...],session_id,state}` (`session_id`/`state` only with exactly one session).
+- 4.36.0: `POST <sid>/gain {mic_db?, system_db?}` (+`/start` `gain`; out of +-20 or non-number 400 `INVALID_ARGUMENT`; `<sid>/state` carries `gain`), `GET /api/recording/participants[?q=]` -> `{suggested, matches}` (+`/start` `participants: [int]`),
+  `DeviceAccessDeniedError` -> 403 `DEVICE_ACCESS_DENIED` + `stream`. The call prompt `record` action runs `start_call_recording` (default mic + all system sound), not the app's own sound. Details — `recording.md`.
+- `GET /api/recordings/recovered[?ack=0|1]` (ack=0 reads without clearing; the shell acks after showing), `/recordings/active` -> `{active,count,sessions[...],session_id,state}` (`session_id`/`state` only with exactly one session).
 - Autosave (4.23.0): `POST <sid>/autosave/hold` (name/description/category_id; no scheduler -> `status:'off'`; unknown sid 404), `GET /api/recordings/uncategorized` (banner feed), `<sid>/state` carries `autosave`;
   `save` marks `autosave.saved` and on the first save calls `sched.after_save`; `discard` -> 409 `RECORDING_KEPT` when a transcript exists or autosave is running/done.
 - `POST <sid>/save` JSON `{name, description?}` -> manifest -> `register_recording()` -> `audio_downloads.description`.

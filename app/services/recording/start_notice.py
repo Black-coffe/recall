@@ -29,7 +29,8 @@ def _post(title: str, body: str, tag: str, icon_path: Optional[str]) -> bool:
 
 def notify_start(*, mic_name: Optional[str], system_apps: list[str], system_all: bool,
                  language: str, name: Optional[str], with_screen: bool, claimed_label: str,
-                 lang: str, icon_path: Optional[str] = None) -> bool:
+                 lang: str, icon_path: Optional[str] = None,
+                 consent_reminder: bool = False) -> bool:
     if not approvals.station_visible():
         logger.info("start notice skipped: no visible desktop")
         return False
@@ -45,6 +46,8 @@ def notify_start(*, mic_name: Optional[str], system_apps: list[str], system_all:
     body = tr('capture.rec.notice.body', lang=lang,
               mic=mic_name or '', apps=apps, language=language,
               name=name or tr('capture.rec.notice.no_name', lang=lang), label=claimed_label)
+    if consent_reminder:
+        body = f"{body}\n{tr('svc_recording.consent.reminder', lang=lang)}"
     tag = f'rec-start-{uuid.uuid4().hex[:8]}'
     try:
         return _post(title, body, tag, icon_path) is True

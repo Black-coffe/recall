@@ -194,7 +194,7 @@ recall/  (Recall)
 ├── docs/
 │   ├── map/                   # 🗺️ Code map
 │   ├── DESIGN_SYSTEM.md
-│   ├── COPILOT_ROADMAP.md
+│   ├── ROADMAP.md
 │   └── MCP_SETUP.md
 ├── uploads/  youtube_downloads/  transcripts/  documents/
 ├── telegram_media/  recordings/  models/  db_backups/

@@ -122,7 +122,9 @@ def svc(store):
     s.store = store
     s.start.return_value = 'rec_new'
     s.active_session_ids.return_value = []
-    s.list_devices.return_value = [{'index': 1, 'name': 'TestMic', 'kind': 'mic', 'is_default': True}]
+    s.list_devices.return_value = [{'index': 1, 'name': 'TestMic', 'kind': 'mic', 'is_default': True},
+                                   {'index': 2, 'name': 'TestSpeakers [Loopback]', 'kind': 'loopback',
+                                    'is_default': True}]
     s.retarget_system.return_value = {'source': {'mode': 'all'}, 'event': {}, 'applied_on_resume': False}
     s.get_state.return_value = {'session_id': 'rec_new', 'status': 'recording', 'is_active': True,
                                 'streams': {}, 'name': None, 'auto_name': 'x'}

@@ -141,6 +141,18 @@ def test_get_page_headers_and_text(client):
     assert cl.peek("mail", _token(path)) is not None
 
 
+def test_banner_names_its_own_kind(client):
+    cal = client.post("/api/settings/calendars/connect-link", json={"label": "Google"})
+    assert cal.status_code == 200
+    body = _get(client, _path(cal.get_json()["connect_url"])).get_data(as_text=True)
+    assert "connect this calendar" in body
+    assert "mailbox" not in body and "this key" not in body
+    mail = _get(client, _issue_mail(client)).get_data(as_text=True)
+    assert "connect this mailbox" in mail and "this key" not in mail
+    key = _get(client, _issue_key(client)).get_data(as_text=True)
+    assert "set this key" in key and "mailbox" not in key
+
+
 def test_already_configured_line(client):
     keyring.set_password(ma.KEYRING_SERVICE, ADDR, "old")
     body = _get(client, _issue_mail(client)).get_data(as_text=True)

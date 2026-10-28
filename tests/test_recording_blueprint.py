@@ -772,19 +772,23 @@ def test_autoprompt_pending_lists_prompt(client):
     assert p['kind'] == 'record' and p['exe'] == 'zoom.exe' and p['label'] == 'Zoom'
 
 
-def test_autoprompt_record_starts_app_only_with_call_mic(client, fake_service):
+def test_autoprompt_record_starts_default_sources_and_journals(client, fake_service):
+    """The record button takes the Windows default mic and all system audio, not the call's endpoint."""
     fake_service.list_devices.return_value = [
         {'index': 1, 'name': 'TestMic', 'kind': 'mic', 'is_default': True},
         {'index': 7, 'name': 'Мікрофон (FOX)', 'kind': 'mic', 'is_default': False},
+        {'index': 2, 'name': 'TestSpeakers [Loopback]', 'kind': 'loopback', 'is_default': True},
     ]
     w, _, _ = _watcher_with_prompt()
+    w.log_result = MagicMock()
     _install(client, w)
     token = w.pending()[0]['id']
     r = client.get(f'/api/recording/autoprompt/{token}/record')
     assert r.status_code == 302 and r.headers['Location'].endswith('/record')
     kw = fake_service.start.call_args.kwargs
-    assert kw['system_source'].mode == 'include' and kw['system_source'].apps == ('zoom.exe',)
-    assert kw['mic_device_index'] == 7 and kw['system_device_index'] is None
+    assert kw['system_source'] is None and kw['system_device_index'] == 2
+    assert kw['mic_device_index'] == 1 and kw['started_by'] == 'call_prompt'
+    w.log_result.assert_called_once_with(token, ok=True, session_id='rec_test123')
     # single use: the second click (or the other button) starts nothing
     fake_service.start.reset_mock()
     assert client.get(f'/api/recording/autoprompt/{token}/record').status_code == 404
@@ -792,11 +796,17 @@ def test_autoprompt_record_starts_app_only_with_call_mic(client, fake_service):
     fake_service.start.assert_not_called()
 
 
-def test_autoprompt_record_falls_back_to_default_mic(client, fake_service):
+def test_autoprompt_record_without_loopback_journals_no_system_device(client, fake_service):
+    fake_service.list_devices.return_value = [
+        {'index': 1, 'name': 'TestMic', 'kind': 'mic', 'is_default': True}]
     w, _, _ = _watcher_with_prompt()
+    w.log_result = MagicMock()
     _install(client, w)
-    client.get(f"/api/recording/autoprompt/{w.pending()[0]['id']}/record")
-    assert fake_service.start.call_args.kwargs['mic_device_index'] == 1
+    token = w.pending()[0]['id']
+    r = client.get(f'/api/recording/autoprompt/{token}/record')
+    assert r.status_code == 400
+    fake_service.start.assert_not_called()
+    w.log_result.assert_called_once_with(token, ok=False, reason='NO_SYSTEM_DEVICE')
 
 
 def test_autoprompt_unknown_token_starts_nothing(client, fake_service):
@@ -811,10 +821,13 @@ def test_autoprompt_record_session_limit_stops_nothing(client, fake_service):
     from app.services.recording.service import SessionConflictError
     fake_service.start.side_effect = SessionConflictError('limit', active=['a', 'b'], limit=2)
     w, _, _ = _watcher_with_prompt()
+    w.log_result = MagicMock()
     _install(client, w)
-    r = client.get(f"/api/recording/autoprompt/{w.pending()[0]['id']}/record")
+    token = w.pending()[0]['id']
+    r = client.get(f"/api/recording/autoprompt/{token}/record")
     assert r.status_code == 409 and 'Нічого не зупинено' in r.get_data(as_text=True)
     fake_service.stop.assert_not_called()
+    w.log_result.assert_called_once_with(token, ok=False, reason='SESSION_LIMIT')
 
 
 def test_autoprompt_sources_redirects_with_preselection(client, fake_service):
@@ -1033,3 +1046,142 @@ def test_live_frame_non_numeric_t_400(client, fake_live):
     assert r.status_code == 400
     assert r.get_json()['error_code'] == 'INVALID_ARGUMENT'
     assert fake_live.calls == []
+
+
+# ---------------------------------------------------------------- wave2-recording-calls story 04
+
+class _DictStore:
+    """A manifest store over a dict: read/modify like SessionStore."""
+
+    def __init__(self, manifests):
+        self.manifests = manifests
+
+    def read(self, sid):
+        from app.services.recording.session_store import SessionStoreError
+        if sid not in self.manifests:
+            raise SessionStoreError(sid)
+        return dict(self.manifests[sid])
+
+    def modify(self, sid, fn):
+        mf = self.read(sid)
+        fn(mf)
+        self.manifests[sid] = mf
+        return mf
+
+
+@pytest.fixture
+def dict_store(fake_service):
+    store = _DictStore({'rec_test123': {'session_id': 'rec_test123', 'started_by': 'ui'}})
+    fake_service.store = store
+    return store
+
+
+def test_start_call_recording_auto_call_without_request(client, fake_service, dict_store, monkeypatch):
+    from app.blueprints.recording import start_call_recording
+    from app.services.recording import start_notice
+    monkeypatch.setattr(start_notice, 'notify_start',
+                        MagicMock(side_effect=AssertionError('owner class shows no notice')))
+    arm = MagicMock()
+    monkeypatch.setattr(recording_module.stop_control, 'arm_timer', arm)
+    with client.application.app_context():
+        res = start_call_recording('zoom.exe', started_by='auto_call')
+    assert res == {'ok': True, 'session_id': 'rec_test123', 'consent_reminder': True}
+    kw = fake_service.start.call_args.kwargs
+    assert kw['started_by'] == 'auto_call'
+    assert kw['system_device_index'] == 2 and kw['mic_device_index'] == 1 and kw['system_source'] is None
+    arm.assert_not_called()
+    assert 'max_duration_min' not in dict_store.manifests['rec_test123']
+
+
+def test_start_call_recording_failure_returns_reason_and_raises_nothing(client, fake_service):
+    from app.blueprints.recording import start_call_recording
+    from app.services.recording.service import DeviceAccessDeniedError
+    fake_service.start.side_effect = DeviceAccessDeniedError('denied', stream='mic')
+    with client.application.app_context():
+        res = start_call_recording('zoom.exe', started_by='auto_call')
+    assert res['ok'] is False and res['reason'] == 'DEVICE_ACCESS_DENIED'
+    assert res['error_code'] == 'DEVICE_ACCESS_DENIED'
+    fake_service.start.side_effect = RuntimeError('boom')
+    with client.application.app_context():
+        res = start_call_recording('zoom.exe', started_by='auto_call')
+    assert res['ok'] is False and res['reason'] == 'RECORDING_START_FAILED'
+
+
+def test_start_stores_gain_and_gain_route_validates(client, fake_service, dict_store):
+    r = client.post('/api/recording/start', json={
+        'mic_device_index': 1, 'gain': {'mic_db': 6, 'system_db': -3}})
+    assert r.status_code == 200
+    assert dict_store.manifests['rec_test123']['gain'] == {'mic_db': 6.0, 'system_db': -3.0}
+
+    from app.core import auth
+    ui = {auth.UI_TOKEN_HEADER: auth.ui_token()}   # the owner's own session: only the UI may change it
+    r = client.post('/api/recording/rec_test123/gain', json={'mic_db': -20})
+    assert r.status_code == 403 and r.get_json()['error_code'] == 'OWNER_SESSION'
+    r = client.post('/api/recording/rec_test123/gain', json={'system_db': 21}, headers=ui)
+    assert r.status_code == 400 and r.get_json()['error_code'] == 'INVALID_ARGUMENT'
+    r = client.post('/api/recording/rec_test123/gain', json={'mic_db': -20}, headers=ui)
+    assert r.status_code == 200
+    state_body = client.get('/api/recording/rec_test123/state').get_json()
+    assert state_body['state']['gain'] == {'mic_db': -20.0, 'system_db': -3.0}
+
+
+def test_start_with_bad_gain_is_400_before_service(client, fake_service, dict_store):
+    r = client.post('/api/recording/start', json={'mic_device_index': 1, 'gain': {'mic_db': True}})
+    assert r.status_code == 400 and r.get_json()['error_code'] == 'INVALID_ARGUMENT'
+    fake_service.start.assert_not_called()
+
+
+def test_finalize_callback_passes_manifest_gain():
+    from app.blueprints.recording import manifest_gain
+    assert manifest_gain({'gain': {'mic_db': 6, 'system_db': -3}}) == (6.0, -3.0)
+    assert manifest_gain({}) == (0.0, 0.0)
+    assert manifest_gain({'gain': {'mic_db': 'loud'}}) == (0.0, 0.0)
+    src = (Path(__file__).resolve().parents[1] / 'app.py').read_text(encoding='utf-8')
+    assert 'manifest_gain(_rec_store.read(sid))' in src
+    assert 'mic_gain_db=_mic_gain' in src and 'system_gain_db=_sys_gain' in src
+
+
+@pytest.fixture
+def people_db(client, tmp_path):
+    from app.db.migrations import init_database
+    from app.services import enrichment
+    path = str(tmp_path / 'people.db')
+    init_database(path)
+    with get_db_connection(path) as conn:
+        olena = enrichment._upsert_entity(conn, 'person', 'Олена Коваль', aliases=['Olena Koval'])
+        project = enrichment._upsert_entity(conn, 'project', 'Робота', aliases=[])
+        conn.commit()
+    client.application.config['DATABASE'] = path
+    return {'olena': olena, 'project': project}
+
+
+def test_start_stores_only_known_participants(client, fake_service, dict_store, people_db):
+    r = client.post('/api/recording/start', json={
+        'mic_device_index': 1,
+        'participants': [people_db['olena'], people_db['project'], 999999, 'x']})
+    assert r.status_code == 200
+    assert dict_store.manifests['rec_test123']['participants'] == [people_db['olena']]
+
+
+def test_participants_route_suggested_and_matches(client, people_db, monkeypatch):
+    from app.services.recording import participants
+    monkeypatch.setattr(participants, 'suggest', lambda conn: [
+        {'id': people_db['olena'], 'name': 'Олена Коваль', 'source': 'calendar'}])
+    body = client.get('/api/recording/participants').get_json()
+    assert body['suggested'] == [{'id': people_db['olena'], 'name': 'Олена Коваль'}]
+    assert 'matches' not in body
+    body = client.get('/api/recording/participants?q=koval').get_json()
+    assert body['matches'] == [{'id': people_db['olena'], 'name': 'Олена Коваль'}]
+
+
+@pytest.mark.parametrize('stream', ['mic', 'system'])
+def test_start_access_denied_is_403(client, fake_service, stream):
+    from app.core.error_codes import status_for
+    from app.services.recording.service import DeviceAccessDeniedError
+    fake_service.start.side_effect = DeviceAccessDeniedError('denied', stream=stream)
+    r = client.post('/api/recording/start', json={'mic_device_index': 1})
+    assert r.status_code == 403
+    body = r.get_json()
+    assert body['error_code'] == 'DEVICE_ACCESS_DENIED' and body['stream'] == stream
+    assert body['error'] and body['error'] != 'denied'
+    assert status_for('DEVICE_ACCESS_DENIED') == 403

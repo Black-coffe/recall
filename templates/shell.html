@@ -77,6 +77,9 @@
                 <a class="rc-nav__item" href="/record" data-route="record">
                     <i class="rc-ico fa-solid fa-microphone"></i> <span data-i18n="core.nav.record">Запис</span>
                 </a>
+                <a class="rc-nav__item" href="/copilot" data-route="copilot">
+                    <i class="rc-ico fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="copilot.nav">Copilot</span>
+                </a>
             </nav>
 
             <div class="rc-sidebar__spacer"></div>
@@ -99,6 +102,11 @@
                 </button>
                 <div class="rc-topbar__spacer"></div>
                 <div class="rc-topbar__actions">
+                    <a class="rc-recbadge" id="rcRecBadge" href="/record" data-route="record" hidden data-i18n-title="core.rec.badge">
+                        <span class="rc-recbadge__dot"></span>
+                        <span>REC</span>
+                        <span class="rc-recbadge__n" id="rcRecCount"></span>
+                    </a>
                     <div class="rc-conn" id="rcConn" data-state="online" title="З’єднання із сервером у нормі" data-i18n-title="core.conn.onlineTitle">
                         <span class="rc-conn__dot"></span>
                         <span class="rc-conn__label" data-i18n="core.conn.online">Онлайн</span>
@@ -128,6 +136,7 @@
     <script src="{{ url_for('static', filename='js/recall/i18n/knowledge.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/i18n/telegram.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/i18n/mail.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/i18n/copilot.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/util.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/api.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/ui.js') }}"></script>
@@ -150,6 +159,7 @@
     <script src="{{ url_for('static', filename='js/recall/views/mail.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/views/settings.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/views/record.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recall/views/copilot.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/views/home.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/shell.js') }}"></script>
     <script src="{{ url_for('static', filename='js/recall/onboarding.js') }}"></script>

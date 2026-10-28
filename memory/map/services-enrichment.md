@@ -1,6 +1,6 @@
 # services — enrichment, documents, commitments, scope
 
-last-verified: 2026-10-18 (mcp-foundations-a, 4.20.0)
+last-verified: 2026-10-28 (task-approval 4.35.0: commitments status machine, task_proposals; other line numbers older, trust names)
 
 Part of `app/services/*`; hub — [services.md](services.md).
 
@@ -22,7 +22,8 @@ Part of `app/services/*`; hub — [services.md](services.md).
   (`ParserUnavailable`); `PARSER_VERSION` → re-parse. `_configure_tesseract()`: binary `OCR_TESSERACT_CMD` or
   `C:\Program Files\Tesseract-OCR`; languages `OCR_TESSDATA_DIR` or `%LOCALAPPDATA%\Recall\tessdata`.
 - **text_polishing.py** — Claude post-processor: `polish_text()`, `polish_diarized_text()` (stream), `extract_meeting_card()`,
-  `describe_sheets()`, `_strip_json_fence`. Lazy client; prompt caching; model `models.get_default_model()` (default
+  `describe_sheets()`, `extract_chat_tasks`, `_strip_json_fence`; 4.35.0 the card/summary/comment/chat prompts ask per task for
+  `for_whom|confidence|importance` and take `owner_names=` (`_owner_line` :325). Lazy client; prompt caching; model `models.get_default_model()` (default
   `claude-opus-5`, override `CLAUDE_MODEL`).
 - **archive_import.py** — bulk import of `meeting_archive/MM_YYYY/*.md`; idempotent by `source_url=abs-path`.
 - **research.py** — `find_mentions()`, `export_originals()` (0 tokens), `export_summary()` (map-reduce Haiku). FTS5+substring;
@@ -43,12 +44,24 @@ Only stdlib + `app.db.connection` (imported from the stdio-MCP; no torch).
   `link_owners` fallback by name — only a single-word entity; the `owner` filter also looks at the graph's ALIASES (after `entity_dedup merge`);
   sorting `meeting_date DESC`, then `id`; a task from a chat carries `chat`/`said_by` + a `chat_id`/`msg_id` pair (in
   legacy groups without `-100` the link does not exist, so `link` alone is not enough).
-- K5 (4.15.0): the single WRITE path for status — `apply_action(db_path, item_id, action, *, source, actor, today)` (`:1424`;
-  `done|cancelled|open|postpone:1|7|30`; postponing → `due_date`=today+N, `due_precision='day'`, status `open`, also from
-  `stale`) and `undo_action(db_path, event_id, *, source, actor)` (`:1445`; only the task's LAST event, not `undo`, otherwise
-  `ValueError`; the cancellation is an event `action='undo'`, `undo_of`). The change + an `action_item_events` row (v51) — one
-  transaction; unknown → `LookupError`. Callers: `brief_actions` (`source='bot'`), `PATCH /api/memory/action-items/<id>`
-  (`source='web'`). MCP has no status-change tool yet (its 3 write tools are `video_analyze`, `mailbox`, `settings`; ADR-042).
+- K5 (4.15.0): the single WRITE path for status — `apply_action(db_path, item_id, action, *, source, actor, today, dedupe, text, due)`
+  (`:1523`; `done|cancelled|open|approve|reject|edit|postpone:1|7|30`; postponing → `due_date`=today+N, `due_precision='day'`,
+  status `open`, also from `stale`) and `undo_action(db_path, event_id, *, source, actor, only_source)` (`:1595`; only the task's
+  LAST event, not `undo`, otherwise `ValueError`; the cancellation is an event `action='undo'`, `undo_of`; restores `task` and
+  `decided_at` from the event's `payload_json`). The change + an `action_item_events` row (v51) — one transaction; unknown →
+  `LookupError`. Callers: `brief_actions` (`source='bot'`), `PATCH /api/memory/action-items/<id>` (`web`/`mcp`), MCP `task`, daily pass (`system`).
+- Task approval (4.35.0, ADR-056, wiki `task-approval.md`): `STATUSES` (`:1464`) = proposed|open|done|cancelled|stale|rejected|expired|legacy.
+  `approve` (`proposed|expired|rejected|legacy` → `open`, sets `decided_at`) and `reject` (`proposed|expired` → `rejected`) are the only
+  ways to a live task: plain `open`/`postpone:*` on an undecided row → `ValueError` (409 `INVALID_TRANSITION`). `mark_shown` (`:1627`, sets
+  `first_shown_at` once + a `show` event), `expire_proposals` (`:1651`, 3 days from first show, `source='system'`), `proposal_queue`
+  (`:1676`, due date first, then importance; `PROPOSAL_BATCH=10`), `proposal_stats` (`:1401`, in `weekly_digest` as `proposals`),
+  `unlegacy` (`:1696`, CLI `unlegacy [--dry-run]`). `STUCK_DAYS=14`.
+- **task_proposals.py** (4.35.0, stdlib + `app.core.settings`) — what every task writer shares: `normalize_candidate` / `filter_candidates`
+  (`for_whom` owner|promised_to_owner|third_party|unknown; third_party dropped; `confidence < min` dropped, `None` kept; `importance` 1..3),
+  `text_key` (NFC, casefold, punctuation/apostrophes stripped, sha1) + `existing_keys(conn, tid)` (EXACT match in any status, legacy rows by
+  computing the key), `owner_names(db_path)` (prompt hint via `tg_questions.resolve_self` + graph aliases), `min_confidence()`
+  (`TASK_PROPOSAL_MIN_CONFIDENCE`, 0.6). Writers insert `status='proposed'` and delete only their own `proposed` rows on a re-run:
+  `enrichment.py:350-427`, `tg_tasks.py:329-369`, `comments.py:913-936`. Fuzzy/embedding matching is deliberately absent; `evals/task_rerun_measure.py` measures it.
 
 ## scope.py — two-layer archive scope
 - `apply_chat_categories(db_path, *, mapping_path=data/chat_categories.local.json, dry_run=False)` (`:227`; the map is outside git):

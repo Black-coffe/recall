@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional
 
-KINDS = ("mail", "anthropic_key")
+KINDS = ("mail", "anthropic_key", "calendar")
 TTL_SECONDS = 600
 MAX_FAILURES = 3
 

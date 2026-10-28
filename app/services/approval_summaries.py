@@ -39,6 +39,8 @@ _KIND_TABLE = {
 }
 # mcp-recording-live
 _KIND_TABLE["recording"] = "recording_sessions"
+# k6-calendar-ics
+_KIND_TABLE["calendar"] = "calendar_sources"
 
 
 class Unsummarisable(Exception):
@@ -400,6 +402,16 @@ def _mailbox(conn, va, body):
     return Summary("mailbox_delete", "mailbox", _cut(row["address"]), str(row["id"]), count, False)
 
 
+def _calendar_disconnect(conn, va, body):
+    row = conn.execute("SELECT id, label FROM calendar_sources WHERE id = ?",
+                       (va.get("source_id"),)).fetchone()
+    if row is None:
+        return None
+    count = conn.execute("SELECT COUNT(*) FROM calendar_events WHERE source_id = ? "
+                         "AND status != 'cancelled'", (row["id"],)).fetchone()[0]
+    return Summary("calendar_disconnect", "calendar", _cut(row["label"]), str(row["id"]), count, False)
+
+
 def _mailbox_disconnect(conn, va, body):
     row = conn.execute("SELECT id, address FROM mail_accounts WHERE id = ?",
                        (va.get("account_id"),)).fetchone()
@@ -625,6 +637,8 @@ BUILDERS = {
     "transcription.analyze_video_endpoint": _video_describe_claude,
     "telegram.tg_enable_chat": _telegram_enable_chat,
     "telegram.tg_repair": _telegram_repair,
+    # k6-calendar-ics
+    "settings_api.disconnect_calendar": _calendar_disconnect,
     # mcp-recording-live
     "recording.stop_recording": _recording_stop,
     "recording.discard_recording": _recording_cancel_own,

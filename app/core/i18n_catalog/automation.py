@@ -36,4 +36,8 @@ MESSAGES: dict = {
         "uk": "Труба щойно виконувалась, зачекайте паузу",
         "en": "This pipe ran recently, wait for the cooldown",
     },
+    "automation.err.meetingBriefArgs": {
+        "uk": "Вкажіть рівно один параметр: event_id (число) або person",
+        "en": "Pass exactly one parameter: event_id (a number) or person",
+    },
 }

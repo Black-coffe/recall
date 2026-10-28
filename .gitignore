@@ -223,3 +223,4 @@ docs/chronicle/*
 # something the repository already holds, which is the failure mode the framework
 # spends most of its checks preventing.
 *.vulyk-new
+.crossgrill/

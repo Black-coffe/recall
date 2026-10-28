@@ -176,6 +176,68 @@ class DeviceNotAvailableError(RecorderError):
     issues — a fallback to defaults is unsafe for it (WASAPI native SEGV)."""
 
 
+class DeviceAccessDeniedRecorderError(RecorderError):
+    """Windows refused the capture device (privacy setting or E_ACCESSDENIED)."""
+
+
+# E_ACCESSDENIED as a signed 32-bit HRESULT (0x80070005).
+E_ACCESSDENIED = -2147024891
+
+_CONSENT_PATH = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+
+
+def microphone_consent_denied() -> bool:
+    """True when the Windows privacy settings deny microphone access to desktop apps.
+
+    pyaudiowpatch exposes no host error code (no ``Pa_GetLastHostErrorInfo``):
+    a refused WASAPI open is a bare ``OSError(paErrorCode, text)`` shared with
+    other failures. The consent store is the distinguishing fact.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+    keys = (
+        (winreg.HKEY_LOCAL_MACHINE, _CONSENT_PATH),
+        (winreg.HKEY_CURRENT_USER, _CONSENT_PATH),
+        (winreg.HKEY_CURRENT_USER, _CONSENT_PATH + r"\NonPackaged"),
+    )
+    for hive, path in keys:
+        try:
+            with winreg.OpenKey(hive, path) as k:
+                value, _ = winreg.QueryValueEx(k, "Value")
+        except OSError:
+            continue
+        if str(value).lower() == "deny":
+            return True
+    return False
+
+
+def is_access_denied(exc: BaseException) -> bool:
+    """True when ``exc`` (or its cause chain) is a capture-device access denial.
+
+    Signatures: :class:`DeviceAccessDeniedRecorderError`; a comtypes ``COMError``
+    with ``hresult == E_ACCESSDENIED``; an ``OSError`` with
+    ``winerror == E_ACCESSDENIED`` (ctypes HRESULT failure); the process-loopback
+    activation ``OSError`` text ``hr=0x80070005``.
+    """
+    seen = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, DeviceAccessDeniedRecorderError):
+            return True
+        if getattr(cur, 'hresult', None) == E_ACCESSDENIED:
+            return True
+        if isinstance(cur, OSError):
+            if getattr(cur, 'winerror', None) == E_ACCESSDENIED:
+                return True
+            if 'hr=0x80070005' in str(cur):
+                return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def resolve_device_params(
     device_index: int,
     requested_sample_rate: int,
@@ -391,12 +453,29 @@ class WasapiRecorder:
                 start=False,
             )
         except OSError as e:
+            denied = self._input_consent_denied()
             self._pa.terminate()
             self._pa = None
+            if denied:
+                raise DeviceAccessDeniedRecorderError(
+                    f"Microphone access denied by Windows privacy settings "
+                    f"(device={self.device_index}): {e}"
+                ) from e
             raise RecorderError(
                 f"Failed to open the WASAPI stream (device={self.device_index}, "
                 f"rate={self.sample_rate}, channels={self.channels}): {e}"
             ) from e
+
+    def _input_consent_denied(self) -> bool:
+        """A failed open of a real (non-loopback) input while the privacy store denies it."""
+        try:
+            info = self._pa.get_device_info_by_index(self.device_index)
+            if info.get('isLoopbackDevice'):
+                return False  # loopback capture is not gated by microphone consent
+        except Exception as exc:
+            logger.debug("device info for denial check failed: %s", exc)
+            return False
+        return microphone_consent_denied()
 
     def start(self) -> None:
         """Start the actual reception of frames."""

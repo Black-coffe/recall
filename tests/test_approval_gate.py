@@ -332,6 +332,17 @@ def _case_enable_chat(conn, env):
                 present=lambda c: _alive(c, "tg_monitored_chats", "chat_id", -100778, "AND enabled = 0"))
 
 
+def _case_calendar(conn, env):
+    sid = conn.execute("INSERT INTO calendar_sources (label, host) "
+                       "VALUES ('Робочий календар', 'outlook.office365.com')").lastrowid
+    for n in range(2):
+        conn.execute("INSERT INTO calendar_events (source_id, uid, occurrence_key, start_utc, end_utc) "
+                     "VALUES (?, ?, 'k', '2026-10-26T09:00:00Z', '2026-10-26T10:00:00Z')", (sid, f"u{n}"))
+    conn.commit()
+    return dict(method="delete", path=f"/api/settings/calendars/{sid}", json=None, name="Робочий календар",
+                count=2, undo=False, present=lambda c: _alive(c, "calendar_sources", "id", sid))
+
+
 CASES = {
     "transcription.delete_transcription": ("transcript_delete", _case_history),
     "transcription.bulk_delete_transcriptions": ("transcript_bulk_delete", _case_bulk),
@@ -353,6 +364,7 @@ CASES = {
     "documents.reparse_document": ("document_reparse", _case_reparse),
     "documents.reparse_job": ("document_reparse", _case_reparse_job),
     "telegram.tg_enable_chat": ("telegram_enable_chat", _case_enable_chat),
+    "settings_api.disconnect_calendar": ("calendar_disconnect", _case_calendar),
 }
 
 

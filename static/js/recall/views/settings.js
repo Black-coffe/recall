@@ -32,6 +32,10 @@
                 <div id="rcSetAiKey">${UI.skeletonList(1)}</div>
             </section>
             <section class="rc-set">
+                <h2 class="rc-set__h">${R.t('settings.cal.title')}</h2>
+                <div id="rcSetCal">${UI.skeletonList(1)}</div>
+            </section>
+            <section class="rc-set">
                 <h2 class="rc-set__h">${R.t('settings.models.title')}</h2>
                 <div id="rcSetUpd" class="rc-updrow"></div>
                 <div id="rcSetModels">${UI.skeletonList(3)}</div>
@@ -76,6 +80,7 @@
         loadLang(ctx);
         loadSystem(ctx);
         loadAiKey(ctx);
+        loadCalendars(ctx);
         loadUpdateStatus(ctx);
         loadModels(ctx);
         loadCopilot(ctx);
@@ -198,6 +203,91 @@
             try { const r = await UI.gated(clearBtn, () => R.api.del('/api/settings/anthropic-key').then(() => true)); if (!r) return; UI.toast(R.t('settings.ai.cleared'), 'info'); loadAiKey(ctx); }
             catch (e) { UI.toast(e.message || R.t('settings.err.generic'), 'error'); }
         });
+    }
+
+    // ---- calendars (k6-calendar-ics) ------------------------------------------------
+    // The secret ICS address is typed only on the one-time local /connect/calendar/ page
+    // (opened in a new tab); this view sees labels, sync times and counters, never the address.
+    async function loadCalendars(ctx) {
+        const box = ctx.mount.querySelector('#rcSetCal');
+        if (!box) return;
+        let d;
+        try { d = await R.api.get('/api/settings/calendars'); }
+        catch (err) { box.innerHTML = UI.error(err && err.message); return; }
+        if (!ctx.isCurrent()) return;
+        renderCalendars(ctx, box, d.sources || [], !!d.sync_running);
+    }
+
+    // Step-by-step Google guide: English screenshots (cropped, personal data blurred), captions in the UI language.
+    function calendarGuideHTML() {
+        const steps = [
+            ['1-settings', R.t('settings.cal.guide.s1')],
+            ['2-integrate', R.t('settings.cal.guide.s2')],
+            ['3-recall-calendars', R.t('settings.cal.guide.s3')],
+            ['4-connect-page', R.t('settings.cal.guide.s4')],
+            ['5-connected', R.t('settings.cal.guide.s5')],
+            ['6-recall-connected', R.t('settings.cal.guide.s6')],
+        ].map(([img, cap]) => `
+            <li class="rc-calguide__step">
+                <p class="rc-calguide__cap">${cap}</p>
+                <img class="rc-calguide__img" src="/static/img/calendar-guide/${img}.png" alt="${U.esc(cap)}" loading="lazy">
+            </li>`).join('');
+        return `<details class="rc-hint rc-calguide">
+            <summary>${R.t('settings.cal.guide.title')}</summary>
+            <ol class="rc-calguide__list">${steps}</ol>
+            <p class="rc-calguide__note"><i class="fa-solid fa-triangle-exclamation"></i> ${R.t('settings.cal.guide.workspace')}</p>
+        </details>`;
+    }
+
+    function renderCalendars(ctx, box, sources, running) {
+        const dot = (ok) => `<i class="fa-solid fa-circle" style="font-size:8px;color:${ok ? 'var(--rc-ok)' : 'var(--rc-err)'}"></i>`;
+        const rows = sources.map((s) => `
+            <div class="rc-prov" style="margin-bottom:8px" data-cal="${s.id}">
+                <div class="rc-prov__cell"><div class="rc-prov__k">${U.esc(s.host)}</div>
+                    <div class="rc-prov__v">${dot(!s.last_error && s.configured)} ${U.esc(s.label)}</div></div>
+                <div class="rc-prov__cell"><div class="rc-prov__k">${R.t('settings.cal.lastSync')}</div>
+                    <div class="rc-prov__v">${s.last_sync_at ? U.esc(U.fmtDate(s.last_sync_at)) : '—'}${s.last_error ? ' · ' + U.esc(R.t('settings.cal.error')) + ' ' + U.esc(s.last_error) : ''}</div></div>
+                <div class="rc-prov__cell"><div class="rc-prov__k">${R.t('settings.cal.events')}</div>
+                    <div class="rc-prov__v">${U.esc(String(s.events_seen))} · ${R.t('settings.cal.withAttendees', { n: s.events_with_attendees })}</div></div>
+                <div class="rc-prov__cell">
+                    <button class="rc-btn rc-btn--sm" data-cal-sync="${s.id}"${running ? '' : ' disabled'} title="${running ? '' : R.t('settings.cal.notRunning')}"><i class="fa-solid fa-rotate"></i> ${R.t('settings.cal.sync')}</button>
+                    <button class="rc-btn rc-btn--sm" data-cal-del="${s.id}" title="${R.t('settings.cal.disconnect')}"><i class="fa-solid fa-link-slash"></i></button>
+                </div>
+            </div>`).join('');
+        box.innerHTML = `
+            <p class="rc-mono" style="color:var(--rc-ink-3);margin:0 0 10px;font-size:var(--rc-t-xs)">${R.t('settings.cal.lede')}</p>
+            ${calendarGuideHTML()}
+            ${rows || `<p class="rc-mono" style="margin:0 0 10px">${R.t('settings.cal.none')}</p>`}
+            <div class="rc-newcat">
+                <input class="rc-input" id="rcCalLabel" maxlength="60" placeholder="${R.t('settings.cal.labelPh')}" style="max-width:260px">
+                <button class="rc-btn rc-btn--primary rc-btn--sm" id="rcCalConnect"><i class="fa-solid fa-calendar-plus"></i> ${R.t('settings.cal.connect')}</button>
+            </div>`;
+        box.querySelector('#rcCalConnect').addEventListener('click', async (ev) => {
+            const btn = ev.currentTarget;
+            const label = box.querySelector('#rcCalLabel').value.trim();
+            if (!label) { UI.toast(R.t('settings.cal.enterLabel'), 'error'); return; }
+            btn.disabled = true;
+            try {
+                const r = await R.api.post('/api/settings/calendars/connect-link', { label });
+                window.open(r.connect_url, '_blank', 'noopener');
+                UI.toast(R.t('settings.cal.linkOpened'), 'info');
+            } catch (e) { UI.toast(e.message || R.t('settings.err.generic'), 'error'); }
+            finally { btn.disabled = false; }
+        });
+        box.querySelectorAll('[data-cal-sync]').forEach((btn) => btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try { await R.api.post('/api/settings/calendars/' + btn.dataset.calSync + '/sync', {}); UI.toast(R.t('settings.cal.syncQueued'), 'info'); }
+            catch (e) { UI.toast(e.message || R.t('settings.err.generic'), 'error'); }
+            finally { btn.disabled = false; }
+        }));
+        box.querySelectorAll('[data-cal-del]').forEach((btn) => btn.addEventListener('click', async () => {
+            try {
+                const r = await UI.gated(btn, () => R.api.del('/api/settings/calendars/' + btn.dataset.calDel).then(() => true));
+                if (!r) return;
+                UI.toast(R.t('settings.cal.disconnected'), 'info');
+                loadCalendars(ctx);
+            } catch (e) { UI.toast(e.message || R.t('settings.err.generic'), 'error'); }
+        }));
     }
 
     // ---- categories: management (tree, CRUD + reparent + move/merge) ----

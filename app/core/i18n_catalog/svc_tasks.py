@@ -16,4 +16,8 @@ MESSAGES: dict = {
         "uk": "скасувати можна лише останню дію над задачею",
         "en": "only the last action on a task can be undone",
     },
+    "svc_tasks.err.invalidTransition": {
+        "uk": "дію {action} не можна застосувати до задачі зі статусом {status}",
+        "en": "action {action} is not allowed for a task with status {status}",
+    },
 }

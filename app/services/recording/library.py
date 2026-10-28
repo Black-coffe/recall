@@ -63,6 +63,37 @@ def _find_existing(c, session_id: str, youtube_id: str):
     ).fetchone()
 
 
+def _bind_calendar(conn, download_id: int, session_id: str, manifest: dict,
+                   explicit: str, resolved_name: str) -> str:
+    """k6-calendar-ics: bind the row to its calendar event; returns the name the row now has.
+
+    Title order: the owner's name (explicit or ``manifest.name``) is never replaced; an
+    automatic name becomes the event title. Never fails a save: a calendar problem is logged.
+    """
+    from app.services import calendar_bind
+    try:
+        window = calendar_bind.recording_window(manifest.get('started_at'),
+                                                manifest.get('total_duration_sec'))
+        if window is None:
+            return resolved_name
+        ev = calendar_bind.bind_download(conn, download_id, *window)
+        title = ((ev['title'] if ev is not None else '') or '').strip()
+        owner_named = bool(explicit or (manifest.get('name') or '').strip())
+        if title and not owner_named:
+            row = conn.execute('SELECT title FROM audio_downloads WHERE id = ?', (download_id,)).fetchone()
+            auto = {manifest.get('auto_name'), f'Запис {session_id[:8]}'}
+            if row is not None and row['title'] in auto:
+                conn.execute('UPDATE audio_downloads SET title = ? WHERE id = ?', (title, download_id))
+                resolved_name = title
+            elif row is not None and row['title'] == title:
+                resolved_name = title          # an earlier save already applied the event title
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("register_recording: calendar binding skipped for %s: %s",
+                       session_id, type(exc).__name__)
+    return resolved_name
+
+
 def register_recording(
     db_path: str,
     session_id: str,
@@ -180,6 +211,8 @@ def register_recording(
                 existing = _find_existing(c, session_id, youtube_id)
             else:
                 download_id = c.lastrowid
+                resolved_name = _bind_calendar(conn, download_id, session_id, manifest,
+                                               explicit, resolved_name)
 
         if existing is not None:
             # Already registered. If an explicit name came and it differs —
@@ -209,6 +242,8 @@ def register_recording(
                 c.execute(f"UPDATE audio_downloads SET {', '.join(sets)} WHERE id = ?", vals)
                 conn.commit()
             existing_download_id = existing['id']
+            resolved_name = _bind_calendar(conn, existing_download_id, session_id, manifest,
+                                           explicit, resolved_name)
             for t in video_tracks:
                 region = t.get('region') or {}
                 rx, ry, rw, rh = region.get('x'), region.get('y'), region.get('w'), region.get('h')

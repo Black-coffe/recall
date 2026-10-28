@@ -1,6 +1,6 @@
 # root-processes — telegram_*, mcp_server.py
 
-last-verified: 2026-10-26 (4.33.0, mcp-triggers). `mcp_server.py` line numbers re-derived at 4953 lines; the telegram_* sections were not re-checked this pass.
+last-verified: 2026-10-28 (4.35.0 task-approval: `task`/`list_action_items` only); 2026-10-26 (4.34.0 k6-calendar-ics: tool count 96, list_calendar_events; other mcp_server.py line numbers shifted by ~+100 after :1890, trust names); 2026-10-26 (4.33.0, mcp-triggers). `mcp_server.py` line numbers re-derived at 4953 lines; the telegram_* sections were not re-checked this pass.
 
 ## telegram_listener.py
 **Purpose:** a standalone process. Telethon MTProto, listens to monitored chats, pulls media, POSTs to Flask `/api/telegram/ingest`;
@@ -23,7 +23,7 @@ Flask goes through HTTP only.
 **Purpose:** a separate MCP process (stdio by default), Claude Code/Desktop's bridge to Recall. Full control of the UI function under
 the R/W/D model (ADR-042, Accepted 2026-10-26; ADR-051 recording exceptions; ADR-052 cap 100). `mailbox`/`settings` never carry a secret
 (they ask app.py for a one-time connect link).
-**Count: 95 tools = 56 R + 39 write (23 W + 16 D).** 18 read SQLite directly (`_ABOUT_DIRECT_DB` :4750), 77 proxy app.py through `_api()` :232
+**Count: 98 tools = 59 R + 39 write (23 W + 16 D).** 19 read SQLite directly (`_ABOUT_DIRECT_DB`, 4.34.0 +`list_calendar_events`), 79 proxy (4.37.0 +`get_meeting_brief` :2038 -> `GET /api/meeting-brief`, `live_missed` :3398 -> `POST /api/copilot/live-missed`; both class R, `_fit_brief` trims people over `max_tokens`) app.py through `_api()` :232
 (`RECALL_API_URL`, default `http://127.0.0.1:5050`); a proxy without app.py answers `APP_UNREACHABLE`. `about()` :4787 and
 `recall://about` take the count and write list from the FastMCP registry (`_registered_tool_names()` :4779). The number is pinned once,
 against PRODUCT/CLAUDE/CLAUDE.vulyk/MCP_SETUP, in `tests/test_tool_count_docs.py`; feature tests no longer hardcode it.
@@ -32,7 +32,7 @@ transcripts `transcribe`, `retranscribe`, `transcript`, `activate_transcript_ver
 [`transcript_delete`, `enrich_backfill`]; intake `audio_download`, `mailbox`, `telegram` [`document_import_folder`, `document_reparse`,
 `mailbox_backfill`, `mailbox_label_enrich`, `mailbox_disconnect`, `telegram_enable_chat`, `telegram_backfill`]; paid `document_ingest`,
 `pipes`, `transcript_ai`; taxonomy `taxonomy` [`taxonomy_merge`, `taxonomy_delete`]; speakers `speaker` [`speaker_merge`, `speaker_delete`];
-tasks `task`; comments `comment`; system `settings`, `job_cancel` [`settings_remove_anthropic_key`]; models `models`; diagnostics
+tasks `task` (4.35.0 actions `done|cancelled|open|postpone|undo|approve|reject|edit`, `_TASK_ACTIONS` :3709, `task` :3758; approve/reject up to 5 `item_ids`; `list_action_items` status in `_LIST_TASK_STATUSES` :1726, default `open`, `proposed` = the queue in batch order and never marks shown, `legacy` only when named); comments `comment`; system `settings`, `job_cancel` [`settings_remove_anthropic_key`]; models `models`; diagnostics
 `system_diagnostics`. W action tools dispatch on `action` (`INVALID_ACTION` otherwise) via `_w_call` :3567; bulk ids <= 5 (`BULK_LIMIT`).
 **Registry:** `_TOOL_CLASS` :522, one entry per tool `{class R|W|D, provenance_kind, open_world, limits (None iff R), args_allow}`;
 `PROVENANCE_KINDS` :513; `_derive` :695 -> `ToolAnnotations` + `_meta` (`recall/class`, `recall/provenance_kind`; D adds
@@ -52,6 +52,10 @@ optional `_CallLogMiddleware` :393 (`RECALL_MCP_DEBUG_LOG=1` -> `logs/mcp_calls.
 **Prompt (4.33.0):** `post_digest(pipe="weekly-digest")` :4437, `mcp.prompt` only `if _registers("pipes")` (full profile). Not a tool, runs
 nothing: returns text telling the model to call `pipes(run)` then poll `get_job_status`; unknown name -> the configured list. Names from
 `app.services.pipes.load_pipes()` (lazy). Claude Code: `/mcp__recall__post_digest`. Guard `tests/test_mcp_prompts.py`.
+**Calendar (4.34.0):** `list_calendar_events(start, end, limit)` :1890 (R, provenance `metadata`, `_TOOL_CLASS` :552; direct DB via `calendar_ics.events_between` +
+`list_sources(check_keyring=False)`, never reads the secret; default window -24 h..+7 d, limit <=200; hides events whose bound record is private or whose title has a stop word -> `hidden`;
+privacy check failure hides all with `privacy_check_failed`; missing tables -> `UNAVAILABLE`). `_calendar_event_of(conn, tid)` :1964 adds `calendar_event` to `get_transcript` (:1243).
+Connecting is not a tool: the owner uses the Settings page or `POST /api/settings/calendars/connect-link` (`blueprints.md`).
 **Resources:** `recall://about`, `recall://transcript/{id}` :4914 (full raw text, no budget), `recall://entity/{id}`.
 **Token budget:** chars/3 estimate (no tokenizer: a model load hangs stdio), `DEFAULT_MAX_TOKENS=40000` :738, `max_tokens<=0` = no limit.
 `get_transcript` :1176 -> `_fit_transcript` :1276 (metadata always, one text `polished|raw`, then thread, then segments; page with

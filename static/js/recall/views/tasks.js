@@ -17,15 +17,44 @@
     const R = window.Recall, U = R.util, UI = R.ui;
     const T = (k, v) => R.t(k, v);
 
+    // Every status of `commitments.STATUSES` (ADR-056) + all. `legacy` is reachable only
+    // through its own chip: the backend leaves it out of `all`.
     const STATUSES = [
+        { k: 'proposed', label: T('knowledge.tasks.status.proposed') },
         { k: 'open', label: T('knowledge.tasks.status.open') },
         { k: 'done', label: T('knowledge.tasks.status.done') },
         // Track 1: sweep_stale moves long-overdue items to 'stale'. Without
         // this chip thousands of such tasks are unreachable from the UI altogether.
         { k: 'stale', label: T('knowledge.tasks.status.stale') },
         { k: 'cancelled', label: T('knowledge.tasks.status.cancelled') },
+        { k: 'expired', label: T('knowledge.tasks.status.expired') },
+        { k: 'rejected', label: T('knowledge.tasks.status.rejected') },
+        { k: 'legacy', label: T('knowledge.tasks.status.legacy') },
         { k: 'all', label: T('knowledge.tasks.status.all') },
     ];
+    // Statuses a decision may start from (mirrors commitments._DECISION_FROM).
+    const APPROVE_FROM = ['proposed', 'expired', 'rejected', 'legacy'];
+    const REJECT_FROM = ['proposed', 'expired'];
+    const FOR_WHOM = {
+        owner: T('knowledge.tasks.forWhom.owner'),
+        promised_to_owner: T('knowledge.tasks.forWhom.promisedToOwner'),
+        third_party: T('knowledge.tasks.forWhom.thirdParty'),
+    };
+    const IMPORTANCE = {
+        1: T('knowledge.tasks.importance.low'),
+        2: T('knowledge.tasks.importance.normal'),
+        3: T('knowledge.tasks.importance.high'),
+    };
+    // error_code -> dictionary key for the decision / undo toasts.
+    const ERR_KEY = {
+        INVALID_TRANSITION: 'knowledge.tasks.err.invalidTransition',
+        UNDO_NOT_LAST: 'knowledge.tasks.err.undoNotLast',
+        NOT_FOUND: 'knowledge.tasks.err.notFound',
+    };
+    function errText(err) {
+        const code = err && err.body && err.body.error_code;
+        return ERR_KEY[code] ? T(ERR_KEY[code]) : T('knowledge.tasks.err.generic');
+    }
     // Period — by the date of the source record. "all" = no time limit.
     const PERIODS = [
         { k: '24h', label: T('knowledge.tasks.period.24h') },
@@ -270,12 +299,19 @@
             a.status === 'stale' ? '<span class="rc-task__flag" data-s="stale">' + T('knowledge.tasks.flag.stale') + '</span>' : '',
             a.status === 'done' ? '<span class="rc-task__flag" data-s="done">' + T('knowledge.tasks.flag.done') + '</span>' : '',
             a.status === 'cancelled' ? '<span class="rc-task__flag" data-s="cancelled">' + T('knowledge.tasks.flag.cancelled') + '</span>' : '',
+            a.status === 'proposed' ? '<span class="rc-task__flag" data-s="proposed">' + T('knowledge.tasks.flag.proposed') + '</span>' : '',
+            a.status === 'expired' ? '<span class="rc-task__flag" data-s="expired">' + T('knowledge.tasks.flag.expired') + '</span>' : '',
+            a.status === 'rejected' ? '<span class="rc-task__flag" data-s="rejected">' + T('knowledge.tasks.flag.rejected') + '</span>' : '',
+            a.status === 'legacy' ? '<span class="rc-task__flag" data-s="legacy">' + T('knowledge.tasks.flag.legacy') + '</span>' : '',
             a.dup_of ? '<span class="rc-task__flag" data-s="dup">' + T('knowledge.tasks.flag.dup') + '</span>' : '',
         ].filter(Boolean).join('');
+        const decision = APPROVE_FROM.includes(a.status);
 
         // We label the meeting date explicitly: without a label it is in the same format
         // as the deadline in the rail on the left, and the row read as "two dates, both deadlines".
         const metaBits = [
+            decision && FOR_WHOM[a.for_whom] ? `<span class="rc-task__forwhom">${U.esc(FOR_WHOM[a.for_whom])}</span>` : '',
+            decision && IMPORTANCE[a.importance] ? `<span class="rc-task__imp" data-imp="${U.esc(a.importance)}">${U.esc(IMPORTANCE[a.importance])}</span>` : '',
             owner ? `<span class="rc-task__owner">${U.esc(owner)}</span>` : '',
             src,
             a.meeting_date ? `<span class="rc-mono">${T('knowledge.tasks.fromDate', { date: U.esc(U.fmtDueDate(a.meeting_date)) })}</span>` : '',
@@ -287,12 +323,48 @@
                 <div class="rc-task__text">${U.esc(a.task)}${flags}</div>
                 <div class="rc-rec__meta">${metaBits}</div>
             </div>
-            <div class="rc-task__acts">
+            <div class="rc-task__acts">${decision ? decisionActs(a) : statusActs(a)}</div>
+        </div>`;
+    }
+
+    // Yes / No on a proposal row; a press swaps them for a one-step undo.
+    function decisionActs(a) {
+        return `<button class="rc-btn rc-btn--sm rc-btn--primary" data-decide="approve">${T('knowledge.tasks.act.yes')}</button>`
+            + (REJECT_FROM.includes(a.status)
+                ? `<button class="rc-btn rc-btn--sm" data-decide="reject">${T('knowledge.tasks.act.no')}</button>` : '');
+    }
+
+    function statusActs(a) {
+        return `
                 ${a.status !== 'done' ? `<button class="rc-iconbtn" data-act="done" title="${T('knowledge.tasks.act.done')}" aria-label="${T('knowledge.tasks.act.doneAria')}"><i class="fa-solid fa-check"></i></button>` : ''}
                 ${a.status !== 'open' ? `<button class="rc-iconbtn" data-act="open" title="${T('knowledge.tasks.act.reopen')}" aria-label="${T('knowledge.tasks.act.reopen')}"><i class="fa-solid fa-rotate-left"></i></button>` : ''}
-                ${a.status !== 'cancelled' ? `<button class="rc-iconbtn" data-act="cancelled" title="${T('knowledge.tasks.act.cancel')}" aria-label="${T('knowledge.tasks.act.cancelAria')}"><i class="fa-solid fa-xmark"></i></button>` : ''}
-            </div>
-        </div>`;
+                ${a.status !== 'cancelled' ? `<button class="rc-iconbtn" data-act="cancelled" title="${T('knowledge.tasks.act.cancel')}" aria-label="${T('knowledge.tasks.act.cancelAria')}"><i class="fa-solid fa-xmark"></i></button>` : ''}`;
+    }
+
+    function wireDecision(row) {
+        const acts = row.querySelector('.rc-task__acts');
+        acts.addEventListener('click', async (e) => {
+            const btn = e.target.closest('[data-decide], [data-undo]'); if (!btn) return;
+            e.stopPropagation();
+            acts.querySelectorAll('button').forEach(b => { b.disabled = true; });
+            const id = row.dataset.id;
+            try {
+                if (btn.dataset.decide) {
+                    const res = await R.api.taskDecide(id, btn.dataset.decide);
+                    row.classList.add('is-decided');
+                    acts.innerHTML = `<span class="rc-task__decided rc-mono">${T(btn.dataset.decide === 'approve' ? 'knowledge.tasks.decided.approved' : 'knowledge.tasks.decided.rejected')}</span>`
+                        + `<button class="rc-btn rc-btn--sm" data-undo="${U.esc(res.event_id)}">${T('knowledge.tasks.act.undo')}</button>`;
+                } else {
+                    const res = await R.api.undoActionEvent(btn.dataset.undo);
+                    row.classList.remove('is-decided');
+                    acts.innerHTML = decisionActs({ status: res.status });
+                }
+                if (R.shell && R.shell.loadCounts) R.shell.loadCounts();
+            } catch (err) {
+                UI.toast(errText(err), 'error');
+                acts.querySelectorAll('button').forEach(b => { b.disabled = false; });
+            }
+        });
     }
 
     function wire(ctx) {
@@ -317,6 +389,7 @@
             });
         });
         listEl.querySelectorAll('.rc-task[data-id]').forEach(row => {
+            if (row.querySelector('[data-decide]')) wireDecision(row);
             row.querySelectorAll('[data-act]').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                     e.stopPropagation();

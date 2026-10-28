@@ -214,3 +214,33 @@ def test_remaining_chars_and_null_text(db):
     assert b["text_remaining_chars"] == len(LONG_TEXT) - b["next_offset"]
     _insert(db, 74, None)
     assert m.get_transcript(74)["transcript_text"] is None
+
+
+def _big_brief(people: int = 40, tasks: int = 5) -> dict:
+    """A calendar event with many attendees: `people` people, `tasks` open tasks each (service caps)."""
+    def task(i):
+        return {"id": i, "task": SENTENCE * 2, "due_date": "2026-11-01", "due": "до пʼятниці",
+                "meeting_date": "2026-10-27", "transcription_id": 1, "category_id": None,
+                "source": "transcript"}
+    return {"event": {"id": 7, "title": "Фонд", "start": "x", "end": "y", "attendees": []},
+            "people": [{"name": f"Людина {p}", "entity_id": p, "matched": True,
+                        "open_tasks": [task(i) for i in range(tasks)], "open_more": 0,
+                        "last_calls": []} for p in range(people)],
+            "hidden": 0, "generated_at": "2026-10-28T00:00:00Z"}
+
+
+def test_meeting_brief_40_people_fits_default_budget_unchanged(monkeypatch):
+    brief = _big_brief()
+    monkeypatch.setattr(m, "_api", lambda *a, **kw: {"success": True, "brief": brief})
+    d = m.get_meeting_brief(event_id=7)
+    assert "truncated" not in d and len(d["brief"]["people"]) == 40
+    assert _size(d) <= m.DEFAULT_MAX_TOKENS * 3
+
+
+def test_meeting_brief_over_budget_drops_people_from_the_end(monkeypatch):
+    monkeypatch.setattr(m, "_api", lambda *a, **kw: {"success": True, "brief": _big_brief()})
+    d = m.get_meeting_brief(event_id=7, max_tokens=2000)
+    assert d["truncated"] is True
+    assert d["people_total"] == 40 and d["people_shown"] == len(d["brief"]["people"]) < 40
+    assert _size(d) <= 2000 * 3
+    assert d["brief"]["people"][0]["name"] == "Людина 0"     # the head survives, the tail goes

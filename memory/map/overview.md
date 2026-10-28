@@ -1,6 +1,6 @@
 # overview — architecture and processes
 
-last-verified: 2026-10-19 (4.22.0, schema v53)
+last-verified: 2026-10-28 (4.37.0, schema v60 adds `meeting_brief_sent`; MCP tool count 98); 2026-10-26 (4.34.0, DB paragraph)
 
 ## Three processes
 
@@ -12,10 +12,11 @@ Recall is a **monolithic Flask server** + **2 separate child processes**:
    `app.py` via `subprocess.Popen` (if `TELEGRAM_ENABLED` + a `telegram.session` exists).
    Control API on localhost:5051; posts messages back to Flask `/api/telegram/ingest`.
 3. **`mcp_server.py`** — a separate MCP server: a bridge to Recall for Claude Code/Desktop, moving from read-first to full control
-   tool by tool (ADR-042). 55 tools = 46 read + 9 write/destructive (`video_analyze`, `mailbox`, `settings`, `retranscribe`, `activate_transcript_version` + 4 gated D; see `root-processes.md`); `RECALL_MCP_PROFILE` / `RECALL_MCP_READONLY` decide which are registered. The stdio connector (**default**) is spawned by the client itself
+   tool by tool (ADR-042). 98 tools = 59 R + 39 write (23 W + 16 D); see `root-processes.md`; `RECALL_MCP_PROFILE` / `RECALL_MCP_READONLY` decide which are registered. The stdio connector (**default**) is spawned by the client itself
    (`claude mcp add`, user-scope) — no need to start it separately; http+key is optional.
    Hybrid: reads SQLite directly, while live/AI actions and the write tools are proxied to the running `app.py`.
 
+Calendar sync (4.34.0) is likewise a thread: `CalendarPoller` (`_maybe_start_calendar`, secret ICS links in the keyring) — `services-calendar.md`.
 Gmail ingest (4.18.0) is NOT a fourth process: `MailPoller` is a daemon thread inside `app.py` (`_maybe_start_mail`, IMAP read-only,
 password in the OS keyring) — see `services-mail.md`. Secrets (mail password, Anthropic key) are typed only on the one-time loopback
 page `/connect/<kind>/<token>` (4.19.0, `blueprints.md` § connect.py), never in chat/MCP.
@@ -81,7 +82,7 @@ v45)/`entities`/`meeting_entities`/`action_items`/`entity_aliases` (memory graph
 (v42 — provenance of the thread digest), `chunks.context_prefix` (v43), `transcriptions.title`/
 `.description` (v44).
 Access — the `get_db_connection()` context manager. Migrations — `app/db/migrations.py`
-(current **v54**: v54 (`:2206`) `transcript_versions` table + `idx_transcript_versions_tx` + `transcriptions.active_version_id` (retranscribe-versions, 4.25.0, additive, ADR-044); v53 (`:2180`) `mcp_actions` audit table + `idx_mcp_actions_at` (mcp-foundations-b, 4.22.0, additive); v48-v51 — see `migrations.py` (v50 `pipe_runs`, v51 `action_item_events`); v52 (`:2130`) Gmail ingest — additive:
+(current **v58**: v58 (`:2279`) `calendar_sources` + `calendar_events` + `calendar_event_id` on `audio_downloads`/`transcriptions` (k6-calendar-ics, 4.34.0, additive); v55-v57 — see `migrations.py`; v54 (`:2206`) `transcript_versions` table + `idx_transcript_versions_tx` + `transcriptions.active_version_id` (retranscribe-versions, 4.25.0, additive, ADR-044); v53 (`:2180`) `mcp_actions` audit table + `idx_mcp_actions_at` (mcp-foundations-b, 4.22.0, additive); v48-v51 — see `migrations.py` (v50 `pipe_runs`, v51 `action_item_events`); v52 (`:2130`) Gmail ingest — additive:
 `mail_accounts`, `mail_labels`, `mail_attachments`, `transcriptions.mail_*` + unique partial index `idx_tx_mail_msg` (gmail-ingest, 4.18.0,
 16.10.2026); v40 `transcriptions.duplicate_of` — audio/YouTube duplicates; v41 `ask_log` —
 question/channel/scope/sources/tokens/cost/owner's rating (production-RAG Wave A,

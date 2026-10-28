@@ -2,10 +2,10 @@
 
 A local MCP server (`mcp_server.py`) that gives Claude Code / Claude Desktop control of Recall.
 A separate process that reuses the `app.services.*` services and the existing HTTP endpoints,
-with no logic duplication. **95 MCP tools (56 read-only + 39 write)**: the write tools are
+with no logic duplication. **98 MCP tools (59 read-only + 39 write)**: the write tools are
 `mailbox`, `settings`, `video_analyze`, `retranscribe` and `activate_transcript_version`, plus four destructive ones that run only after the owner
 presses «Yes» in a native Windows dialog raised by Recall (`mailbox_backfill`, `mailbox_label_enrich`,
-`mailbox_disconnect`, `settings_remove_anthropic_key`); archive organisation adds six more writes (`task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`) and six destructive tools behind the same dialog (`taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`); everything an agent writes is marked `source: mcp`; `system_status` and `transcript_suggest_meta` are reads. The intake pipeline adds two reads (`get_youtube_info`, `list_audio_library`), eight writes (`transcribe`, `document_ingest`, `audio_download`, `audio_item`, `job_cancel`, `transcript_ai`, `models`, `system_diagnostics`) and two destructive tools (`document_import_folder`, `document_reparse`). Telegram and automation add three reads (`telegram_chats`, `telegram_repair_preview`, `automation_status`), two writes (`telegram`, `pipes`) and two destructive tools (`telegram_enable_chat`, `telegram_backfill`). The owner's decision to move MCP from read-first to
+`mailbox_disconnect`, `settings_remove_anthropic_key`); archive organisation adds six more writes (`task`, `bookmark`, `comment`, `taxonomy`, `speaker`, `transcript`) and six destructive tools behind the same dialog (`taxonomy_delete`, `taxonomy_merge`, `speaker_merge`, `speaker_delete`, `transcript_delete`, `enrich_backfill`); everything an agent writes is marked `source: mcp`; `system_status` and `transcript_suggest_meta` are reads. The pre-meeting brief and the live catch-up add two reads (`get_meeting_brief`, `live_missed`); `live_missed` sends the window to Claude, so it is open-world. The intake pipeline adds two reads (`get_youtube_info`, `list_audio_library`), eight writes (`transcribe`, `document_ingest`, `audio_download`, `audio_item`, `job_cancel`, `transcript_ai`, `models`, `system_diagnostics`) and two destructive tools (`document_import_folder`, `document_reparse`). Telegram and automation add three reads (`telegram_chats`, `telegram_repair_preview`, `automation_status`), two writes (`telegram`, `pipes`) and two destructive tools (`telegram_enable_chat`, `telegram_backfill`). The owner's decision to move MCP from read-first to
 full control is [ADR-042](adr/042-mcp-full-control-supersedes-read-first.md); `recall://about`
 reports the live count and the write list of the running profile.
 
@@ -24,11 +24,12 @@ The profile is decided at import, so a change needs a restart of the MCP process
 18 tools read SQLite directly (autonomous); the other 71 are HTTP proxies to a running
 `app.py` (including the flagship `search_archive` and every write tool).
 
-**Direct-DB, autonomous: work WITHOUT a running `app.py` (18):**
+**Direct-DB, autonomous: work WITHOUT a running `app.py` (19):**
 `get_transcript`, `get_original_file`, `list_recent`, `list_categories`,
 `list_entities`, `get_entity`, `list_action_items`, `weekly_digest`,
 `list_dropped_commitments`, `list_stale_topics`, `research_export`, `list_open_questions`,
-`get_chat_context`, `list_comments`, `grep_archive`, `get_live_copilot`, `list_pipe_runs`, `list_mcp_actions`.
+`get_chat_context`, `list_comments`, `grep_archive`, `get_live_copilot`, `list_pipe_runs`, `list_mcp_actions`,
+`list_calendar_events`.
 These tools open SQLite directly via `get_db_connection`/`app.services.research`
 and make no HTTP calls. The MCP process never writes SQLite.
 
@@ -69,6 +70,13 @@ crashing; direct-DB tools work as usual.
   `job_id`; poll it with `get_job_status(job_id)` or `wait_for`. A re-run already in flight answers
   `{already_running: true, job_id}`; refusals keep the server `error_code` (`NO_MEDIA`, `MODEL_NOT_INSTALLED`,
   `RECORDING_ACTIVE`). The new run becomes the main transcript and is kept as a version (at most three).
+- Task approval queue: `list_action_items(status='proposed')` lists proposals in batch order
+  (10 by default, `limit` widens it) with `for_whom`, `confidence`, `importance`, `first_shown_at`,
+  `decided_at`; listing over MCP never marks them shown, so it does not start the 3-day clock.
+  `task(approve|reject, item_ids)` decides (a bad start status answers `INVALID_TRANSITION`),
+  `task(edit, item_ids=[id], text?, due?)` fixes the wording or the ISO due date, and
+  `task(undo, event_id)` takes back your own last change. Archived `legacy` tasks are listed only
+  when named (`status='legacy'`, `window='all'`, with owner and date filters).
 - `transcript_versions(transcription_id, version_id?)` reads the saved versions (a read);
   `activate_transcript_version(transcription_id, version_id)` makes one main again and rebuilds that
   record's search chunks locally.
@@ -191,27 +199,22 @@ works correctly when launched from any project.
 - DB reads go through `get_db_connection` (WAL, in parallel with Flask).
 - Reading original files (`get_original_file`) is restricted to a whitelist of folders
   (`documents/`, `uploads/`, `youtube_downloads/`, `telegram_media/`) — anti-traversal.
-- Writes go only through the three write tools, each through `app.py` with `X-Recall-Actor: mcp`;
-  `RECALL_MCP_READONLY=1` removes them.
+- Writes go only through the write tools (classes W/D in `_TOOL_CLASS`, ADR-042), each through
+  `app.py` with `X-Recall-Actor: mcp`; `RECALL_MCP_READONLY=1` removes them.
 - Do NOT commit `.env` with the key (it is in `.gitignore`).
 
 ## Why NOT autostart from app.py
 The stdio server is spawned **by the client itself** (Claude Code/Desktop) on demand and killed on
 exit — there is no need to keep a separate process alongside `app.py` (and it would create a redundant second
-server). Autostart makes sense only for http mode (future web access via
-tunnel+OAuth) — then modeled on `telegram_listener`.
+server).
 
 ## Performance / caveats
 - `mcp_server.py` itself does NOT import torch/e5 — the heavy ML initialization lives only in
   `app.py`; `search_archive`/`ask_archive` proxy the request to the already warm model
   there instead of loading it in the stdio process.
-- Proxy tools (28 of 46, see the lists above) need a running `app.py`
+- Proxy tools (see the lists above) need a running `app.py`
   (most conveniently via the **Recall** icon on the desktop: a terminal with logs + the server
-  on :5050). Direct-DB tools (18) work without it too.
-
-## Roadmap
-- **Web / claude.ai:** OAuth 2.1+PKCE (FastMCP `OAuthProxy`) + Cloudflare Tunnel for a
-  public HTTPS host + autostart of the http server from `app.py`.
+  on :5050). Direct-DB tools work without it too.
 
 ## Descoped
 - An unattended key that lets a scheduled run past the Windows dialog (`RECALL_MCP_UNATTENDED_ALLOW` in the

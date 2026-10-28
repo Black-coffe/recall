@@ -1,6 +1,6 @@
 # root — core: app.py boot, config, state, whisper
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: call watcher publisher only; other app.py line numbers :1000+ shifted, trust names); 2026-10-21 (mcp-pipeline 4.27.0: whisper_manager_new section only; app.py/config unchanged by it); 2026-10-19 (autosave wiring; app.py line numbers not re-swept except the autosave ones)
+last-verified: 2026-10-28 (wave2-recording-calls 4.36.0: settings registry +2, call watcher wiring, gain in finalize callback, comtypes quieting; other line numbers not re-swept); 2026-10-28 (task-approval 4.35.0: settings registry count only); 2026-10-26 (k6-calendar-ics 4.34.0: `_maybe_start_calendar`, Calendar settings; other app.py line numbers shifted, trust names); 2026-10-25 (mcp-telegram-automation 4.31.0: call watcher publisher only; other app.py line numbers :1000+ shifted, trust names); 2026-10-21 (mcp-pipeline 4.27.0: whisper_manager_new section only; app.py/config unchanged by it); 2026-10-19 (autosave wiring; app.py line numbers not re-swept except the autosave ones)
 Adjacent slice: `root-processes.md` (telegram_*, mcp_server.py).
 
 ## app.py
@@ -28,7 +28,9 @@ CSP `form-action 'self'` :1044.
   (:1346-1348; with debug — only in the reloader child `WERKZEUG_RUN_MAIN=true`), they do not start under pytest.
 - Mail (4.18.0): `MAIL_POLL_ENABLED=0` -> no thread; else `MailPoller(app.config['DATABASE'])` :1301 -> `app.extensions['mail_poller']`; a start failure only warns
   (`POST /api/mail/sync` then 503 `MAIL_POLLER_OFF`). Logic — `services-mail.md`.
-- Call watcher (K2): `_maybe_start_call_watcher` :1244 passes `publisher=lambda event, data: sse_broker.publish("system:calls", event, data)` (:1296, 4.31.0) -> ring channel read by MCP `wait_for`; `CallWatcher` -> `app.extensions['call_watcher']` (:1301, also read by `automation.py` status); not Windows / no pycaw / `RECORDING_AUTOPROMPT=0` / no `recording_service` -> log line and exit.
+- Calendar (4.34.0): `_maybe_start_calendar` :1358 (called under `__main__`, :1417); `CALENDAR_SYNC_ENABLED=0` -> log line, no thread; else `CalendarPoller(app.config['DATABASE'])`
+  -> `app.extensions['calendar_poller']`; a start failure pops the key and warns (`POST /api/settings/calendars/<id>/sync` then 503 `CALENDAR_POLLER_OFF`). Logic — `services-calendar.md`.
+- Call watcher (K2): `_maybe_start_call_watcher` :1244 passes `publisher=lambda event, data: sse_broker.publish("system:calls", event, data)` (:1314, 4.31.0) -> ring channel read by MCP `wait_for`; 4.36.0 also `action=RECORDING_AUTOPROMPT_ACTION`, `auto_record_fn=_auto_record` (:1295, only when action is `record`; wraps `recording.start_call_recording(exe, started_by='auto_call')` in `app.app_context()`) and `reprompt_minutes` (:1318); `CallWatcher` -> `app.extensions['call_watcher']` (:1323, also read by `automation.py` status). The finalize callback passes `manifest_gain(...)` as `mic_gain_db`/`system_gain_db` (:702-713). `comtypes` joins the logger-quieting loop (:291, WARNING); not Windows / no pycaw / `RECORDING_AUTOPROMPT=0` / no `recording_service` -> log line and exit.
 - Pipes (K4/K5): `PIPES_ENABLED=0` -> exit. `PipeScheduler(...)` :1272 -> `app.extensions['pipe_scheduler']`; with `tg_bot.is_configured()` `ButtonPoller` :1284 -> `app.extensions['brief_buttons']`. Logic — `services.md`.
 **Робота (`app.state.робота`, read by `GET /api/ready`, formula in `blueprints.md`):** keys
 `database/job_queue/whisper/embeddings/telegram/boot_finished` (no `migrations`, `app/state.py:45-49`); whisper —
@@ -49,12 +51,12 @@ CSP `form-action 'self'` :1044.
 - `.env` has ONE writer: `app/core/env_file.py` — `ENV_PATH`, `set_env_var(key, value, *, path=None)` (module lock, `set_key(quote_mode=
   "always")`, also sets `os.environ`), `unset_env_var`. Callers: `settings_api.py`, `settings_secrets.py`, `config.py`. Stdlib + python-dotenv.
 - `WHISPER_MAX_PARALLEL=1`: `WhisperModel.transcribe()` is not thread-safe on a shared handle (>1 → crash 0xC0000409).
-**Registry (`app/core/settings.py`):** the single source of 177 env flags (4.23.0: +4 `RECORDING_AUTOSAVE_{SEC,MODEL,LANGUAGE,MIN_CONFIDENCE}` :197-211) (4.20.0 adds `RECALL_MCP_PROFILE` :656) (+`RECALL_UI_LANG` `auto|uk|en`, :77; `tests/conftest.py:14`
+**Registry (`app/core/settings.py`):** the single source of 182 env flags (4.36.0: +`RECORDING_AUTOPROMPT_ACTION` prompt|record, +`RECORDING_AUTOPROMPT_REPROMPT_MIN`=10, `telegram.exe` dropped from the `RECORDING_AUTOPROMPT_APPS` default; 4.35.0: +`TASK_PROPOSAL_MIN_CONFIDENCE`=0.6, group "Task proposals", `settings.py:455`; 4.34.0: +`CALENDAR_SYNC_{ENABLED,MINUTES}`; was 177 at 4.23.0: +4 `RECORDING_AUTOSAVE_{SEC,MODEL,LANGUAGE,MIN_CONFIDENCE}` :197-211) (4.20.0 adds `RECALL_MCP_PROFILE` :656) (+`RECALL_UI_LANG` `auto|uk|en`, :77; `tests/conftest.py:14`
 forces `auto` in every test, because the owner's `.env` is loaded by `config.py`/`app.py`) (count by `^    Setting(`): `REGISTRY`, `by_name()`,
 `env/env_bool/env_int/env_float`, `profile()`, `render_env_example()` (CLI `python -m app.core.settings env-example`).
 Setting descriptions are English (4.17.0). No heavy dependencies (does not import `app.*`/`flask`/`torch`/`config`). Groups: `«Труби»` (`PIPES_ENABLED`=0, `PIPES_RETRY_MINUTES`,
 `PIPES_RETRY_MAX`, `PIPES_MODEL`, `TELEGRAM_BOT_TOKEN` secret, `TELEGRAM_BOT_CHAT_ID`); `RECALL_PUBLIC_URL`; `«Auth / доступ»`,
-`RECALL_PROXY_ALLOWED_IPS`; `Mail` (:328; `MAIL_POLL_ENABLED`=1, `MAIL_POLL_MINUTES`=5, `MAIL_BACKFILL_MONTHS`=12, `MAIL_ATTACH_MAX_MB`=25;
+`RECALL_PROXY_ALLOWED_IPS`; `Calendar` (:357; `CALENDAR_SYNC_ENABLED`=1, `CALENDAR_SYNC_MINUTES`=15); `Mail` (:328; `MAIL_POLL_ENABLED`=1, `MAIL_POLL_MINUTES`=5, `MAIL_BACKFILL_MONTHS`=12, `MAIL_ATTACH_MAX_MB`=25;
 no secret setting — the app password never goes through the registry; the Anthropic key is written to `.env` by `settings_secrets`, not a registry value).
 **Auth gate (`app/core/auth.py`):** one `before_request` on `/api/*` (exempt: OPTIONS, non-`/api/`, `/api/health`, `/api/ready`).
 `RECALL_LOCAL_TRUSTED` + localhost lets only a direct request through without a key. With `X-Forwarded-For`/`Tailscale-User-Login` —

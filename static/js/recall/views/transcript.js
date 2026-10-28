@@ -5,6 +5,8 @@
     'use strict';
     const R = window.Recall, U = R.util, UI = R.ui;
     const T = (k, v) => R.t(k, v);
+    // ADR-056 statuses the shared `U.taskStatus` does not name (literal keys, see i18n gotcha).
+    const PROPOSAL_STATUS = { proposed: 'knowledge.tasks.flag.proposed', expired: 'knowledge.tasks.flag.expired', rejected: 'knowledge.tasks.flag.rejected' };
     let cats = null, data = null, mode = 'text', audioReq = null, ppOpen = null, speakersOpen = false;
     let bookmarks = {}, bookmarksOpen = false;   // {segment_index: {id, note}}
     let _onTime = null;   // audio timeupdate handler (segment ↔ playback sync)
@@ -1036,12 +1038,13 @@
                 return `<div class="rc-bm" data-jump="${i}">
                     <span class="rc-bm__t rc-mono">${U.fmtDuration(s.start || 0)}</span>
                     <span class="rc-bm__note">${bm.note ? U.esc(bm.note) : '<span class="rc-bm__empty">' + T('transcript.bm.noNote') + '</span>'}</span>
+                    <a class="rc-iconbtn" data-clip="${i}" href="/api/bookmarks/${bm.id}/clip" download title="${T('transcript.bm.clip')}"><i class="fa-solid fa-file-zipper"></i> ${T('transcript.bm.clip')}</a>
                     <button class="rc-iconbtn" data-edit="${i}" title="${T('transcript.bm.note')}"><i class="fa-solid fa-pen"></i></button>
                     <button class="rc-iconbtn" data-del="${i}" title="${T('transcript.bm.delete')}"><i class="fa-solid fa-trash"></i></button>
                 </div>`;
             }).join('')}</div>`;
         panel.querySelectorAll('[data-jump]').forEach(el => el.addEventListener('click', (e) => {
-            if (e.target.closest('[data-edit],[data-del]')) return;
+            if (e.target.closest('[data-edit],[data-del],[data-clip]')) return;
             jumpToSegment(ctx, t, Number(el.dataset.jump));
         }));
         panel.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => editBookmarkNote(ctx, t, Number(b.dataset.edit))));
@@ -1180,7 +1183,9 @@
         const rel = ctx.mount.querySelector('#rcRel');
         const blocks = [];
         const ents = t.entities || [];
-        const tasks = t.action_items || [];
+        // ADR-056: archived `legacy` rows stay off this view; `proposed` ones are listed
+        // and marked, so a card link `?task=<proposal id>` lands on them. No show is recorded here.
+        const tasks = (t.action_items || []).filter(a => a.status !== 'legacy');
 
         if (ents.length) {
             blocks.push(`<div class="rc-rel__block">
@@ -1193,7 +1198,7 @@
             blocks.push(`<div class="rc-rel__block">
                 <div class="rc-rel__h">${T('transcript.rel.tasks')} <span class="rc-mono">${tasks.length}</span></div>
                 <div>${tasks.map(a =>
-                    `<div class="rc-task" data-id="${U.esc(a.id)}"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(U.taskStatus(a.status))}</span>
+                    `<div class="rc-task${a.status === 'proposed' ? ' is-proposal' : ''}" data-id="${U.esc(a.id)}"><span class="rc-task__status" data-s="${U.esc(a.status)}">${U.esc(PROPOSAL_STATUS[a.status] ? T(PROPOSAL_STATUS[a.status]) : U.taskStatus(a.status))}</span>
                     <div class="rc-task__body">${U.esc(a.task)}${a.owner_name ? ` <span class="rc-task__owner">· ${U.esc(a.owner_name)}</span>` : ''}</div></div>`
                 ).join('')}</div></div>`);
         }

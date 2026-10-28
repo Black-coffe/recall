@@ -343,7 +343,8 @@ def test_weekly_digest_shape(db: str):
     cm.backfill_due(db)
     dig = cm.weekly_digest(db, today=date(2026, 5, 14))
     assert set(dig) == {"generated_for", "this_week", "overdue", "no_date",
-                        "dropped", "stale_topics", "coverage", "corrections"}
+                        "stuck", "dropped", "stale_topics", "coverage", "corrections",
+                        "proposals"}
     assert dig["this_week"][0]["due_raw"] == "2026-05-14"
 
 

@@ -31,7 +31,8 @@ from typing import Callable, Optional
 
 from app.db.connection import get_db_connection
 from app.repositories import transcriptions as tx_repo
-from app.services import categories, commitments, embeddings, models, pricing, text_polishing
+from app.services import (categories, commitments, embeddings, models, pricing, task_proposals,
+                          text_polishing)
 
 
 logger = logging.getLogger(__name__)
@@ -288,8 +289,11 @@ def _filter_suggested_tags(raw_tags, existing_names: list[str]) -> list[str]:
 # ============================================================
 
 def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
-                  created_at: Optional[str], existing_meeting_date: Optional[str]) -> None:
-    """Write the extract_meeting_card result to the DB (within the caller's transaction)."""
+                  created_at: Optional[str], existing_meeting_date: Optional[str]) -> dict:
+    """Write the extract_meeting_card result to the DB (within the caller's transaction).
+
+    Returns the task proposal counts (ADR-056): `proposed`, `skipped_decided`,
+    `dropped_third_party`, `dropped_low_confidence`."""
     now = datetime.now().isoformat(timespec="seconds")
 
     # --- summary_json in the format of the existing summary endpoint ---
@@ -339,8 +343,13 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
     ).fetchall()
     affected = {r["entity_id"] for r in old_links}
 
-    c.execute("DELETE FROM meeting_entities WHERE transcription_id = ?", (transcription_id,))
-    c.execute("DELETE FROM action_items WHERE transcription_id = ?", (transcription_id,))
+    # k6-calendar-ics: a calendar attendee link is not this card's output; it survives a re-enrich.
+    # wave2-recording-calls-02: so does a participant the owner picked at start ('owner').
+    c.execute("DELETE FROM meeting_entities WHERE transcription_id = ? "
+              "AND COALESCE(source, '') NOT IN ('calendar', 'owner')", (transcription_id,))
+    # ADR-056: only this record's undecided proposals are replaced; a decided row survives.
+    c.execute("DELETE FROM action_items WHERE transcription_id = ? AND status = 'proposed'",
+              (transcription_id,))
 
     # person / project / org → entities + meeting_entities
     person_index: dict[str, int] = {}  # normalized canonical/alias -> entity_id (for owner resolve)
@@ -360,10 +369,12 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
                 continue
             affected.add(eid)
             mentions = _count_mentions(transcript_text, [name, *aliases]) or 1
+            # An upsert, not OR REPLACE: a kept calendar/owner row keeps its `source`.
             c.execute(
-                "INSERT OR REPLACE INTO meeting_entities "
+                "INSERT INTO meeting_entities "
                 "(transcription_id, entity_id, mention_count, role_in_meeting) "
-                "VALUES (?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?) ON CONFLICT(transcription_id, entity_id) DO UPDATE SET "
+                "mention_count = excluded.mention_count, role_in_meeting = excluded.role_in_meeting",
                 (transcription_id, eid, mentions, role),
             )
             if etype == "person":
@@ -377,13 +388,22 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
     # topics as entities too (for unified entity pages / faceted search)
     _ingest([{"name": t} for t in card.get("topics", [])], "topic")
 
-    # --- action_items -> normalized table, owner resolved to a person entity ---
-    for ai in card.get("action_items", []):
-        if not isinstance(ai, dict):
-            continue
+    # --- action_items -> proposals (ADR-056), owner resolved to a person entity ---
+    kept, dropped = task_proposals.filter_candidates(
+        card.get("action_items", []), min_confidence=task_proposals.min_confidence())
+    known_keys = task_proposals.existing_keys(c, transcription_id)
+    counts = {"proposed": 0, "skipped_decided": 0,
+              "dropped_third_party": dropped["third_party"],
+              "dropped_low_confidence": dropped["low_confidence"]}
+    for ai in kept:
         task = (ai.get("task") or "").strip()
         if not task:
             continue
+        key = task_proposals.text_key(task)
+        if key in known_keys:
+            counts["skipped_decided"] += 1
+            continue
+        known_keys.add(key)
         owner_name = ai.get("owner")
         owner_eid = person_index.get(_normalize(owner_name)) if owner_name else None
         if owner_name and owner_eid is None:
@@ -399,12 +419,16 @@ def _persist_card(c, transcription_id: int, card: dict, transcript_text: str,
             due_date, due_prec = model_due, (due_prec or commitments.P_DAY)
         c.execute(
             "INSERT INTO action_items (transcription_id, task, owner_name, "
-            "owner_entity_id, due, due_date, due_precision, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
-            (transcription_id, task, owner_name, owner_eid, raw_due, due_date, due_prec),
+            "owner_entity_id, due, due_date, due_precision, status, text_key, for_whom, "
+            "confidence, importance) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?)",
+            (transcription_id, task, owner_name, owner_eid, raw_due, due_date, due_prec,
+             key, ai["for_whom"], ai["confidence"], ai["importance"]),
         )
+        counts["proposed"] += 1
 
     _recompute_entity_aggregates(c, affected)
+    return counts
 
 
 # ============================================================
@@ -535,6 +559,7 @@ def _enrich_card(
             body_text, diarized_text=diarized, model=model, effort=effort,
             meeting_date=(existing_meeting_date or (str(created_at)[:10] if created_at else None)),
             tag_vocabulary=tag_vocabulary,
+            owner_names=task_proposals.owner_names(db_path),
         )
     except Exception as e:
         logger.warning("[enrich] tx=%s card phase failed (retry_needed): %s", transcription_id, e)
@@ -544,15 +569,19 @@ def _enrich_card(
     # --- WRITE ---
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
-        _persist_card(c, transcription_id, card, body_text, created_at, existing_meeting_date)
+        proposals = _persist_card(c, transcription_id, card, body_text, created_at,
+                                  existing_meeting_date)
         conn.commit()
 
     logger.info(
         "[enrich] tx=%s done: people=%d projects=%d orgs=%d topics=%d actions=%d "
+        "proposed=%d skipped_decided=%d dropped_third_party=%d dropped_low_confidence=%d "
         "(in=%d cache_read=%d out=%d)",
         transcription_id, len(card.get("people", [])), len(card.get("projects", [])),
         len(card.get("orgs", [])), len(card.get("topics", [])),
-        len(card.get("action_items", [])), card.get("input_tokens", 0),
+        len(card.get("action_items", [])), proposals["proposed"],
+        proposals["skipped_decided"], proposals["dropped_third_party"],
+        proposals["dropped_low_confidence"], card.get("input_tokens", 0),
         card.get("cache_read_tokens", 0), card.get("output_tokens", 0),
     )
     return {
@@ -569,6 +598,7 @@ def _enrich_card(
         "input_tokens": card.get("input_tokens", 0),
         "output_tokens": card.get("output_tokens", 0),
         "cache_read_tokens": card.get("cache_read_tokens", 0),
+        "proposals": proposals,
     }
 
 

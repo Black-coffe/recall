@@ -1,5 +1,17 @@
 """Catalog of server texts: the settings area (speakers.py)."""
 MESSAGES: dict = {
+    'settings.calendar.err.label': {
+        "uk": "Потрібна назва календаря (до 60 символів)",
+        "en": "A calendar name is required (up to 60 characters)",
+    },
+    'settings.calendar.err.notFound': {
+        "uk": "Календар не знайдено",
+        "en": "Calendar not found",
+    },
+    'settings.calendar.err.pollerOff': {
+        "uk": "Синхронізація календарів не запущена (CALENDAR_SYNC_ENABLED=0 або застосунок без фонових задач)",
+        "en": "Calendar sync is not running (CALENDAR_SYNC_ENABLED=0 or the app runs without background tasks)",
+    },
     'settings.speakers.err.name_taken': {
         "uk": 'Ім\'я "{name}" вже використовується',
         "en": 'Name "{name}" is already in use',

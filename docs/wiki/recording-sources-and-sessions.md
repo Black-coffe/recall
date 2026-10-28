@@ -2,7 +2,7 @@
 domain: recording
 tags: [recording, audio-source, process-loopback, multi-session, copilot]
 related: [rag-context-integrity]
-last-verified: 2026-10-19
+last-verified: 2026-10-28 (4.37.0)
 ---
 
 # Recording: audio sources, parallel sessions, single copilot
@@ -38,8 +38,12 @@ Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0; autosave 4.23.0 (`docs/s
 - **Copilot: one owner per process.** `CopilotService.start` raises `CopilotBusyError` when another
   live recording owns an active copilot row (enforced in the service, not the blueprint). Move is
   end-then-start, not atomic (`COPILOT_MOVE_FAILED`, `ended_from: true`).
-- **Call autoprompt never records on its own (K2, 4.9.0).** `call_watch.py` only asks: "Record?" starts
-  mic + that one app's sound (`include:[exe]`) solely on a click of a single-use token URL; "Stop?" after
+- **Call autoprompt never records on its own unless the owner opts in (K2, 4.9.0).** With the default
+  `RECORDING_AUTOPROMPT_ACTION=prompt` `call_watch.py` only asks; `record` is the single opt-in that starts a
+  confirmed call by itself and shows "Recording started" (Stop / Keep), a failed start falls back to the prompt.
+  An unrecorded, undismissed call gets one repeat after `RECORDING_AUTOPROMPT_REPROMPT_MIN`. "Record?" starts
+  the Windows default mic + `{mode:'all'}` on the default loopback (`start_call_recording` in
+  `app/blueprints/recording.py`; the call's exe is only logged) solely on a click of a single-use token URL; "Stop?" after
   the call ends, then `RECORDING_AUTOSTOP_SILENCE_MIN` of silence on both tracks stops that recording through
   the normal stop path (finalized whole). Only apps on the `RECORDING_AUTOPROMPT_APPS` allow-list can be a
   call; a failed session enumeration holds state rather than reading as «call ended».
@@ -52,6 +56,16 @@ Source: ADR-026 (+ amendments A1-A4), shipped in 4.7.0; autosave 4.23.0 (`docs/s
   stays empty and the Audio library asks. The title waits while any recording is live (the local model is blocked then). Deadlines
   survive a restart (re-armed with a fresh delay). **Invariant:** once a transcript exists or autosave is running/done, discard is
   refused (409 `RECORDING_KEPT`), because deleting `final.mp3` would orphan the transcript.
+- **Participants are owner-picked, existing persons only (4.36.0, spec `wave2-recording-calls`).** The start form's picker
+  (prefilled from calendar events overlapping now +- 10 min) stores person ids in the manifest `participants`;
+  transcription links them in `meeting_entities` with `source='owner'`, which re-enrich keeps like `calendar`
+  (`app/services/recording/participants.py`). No entity is created. A transcript with an empty description inherits the
+  recording's. Gain (+-20 dB per stream) is stored in the manifest and applied once at finalize.
+- **Denied device is a 403, not a 400.** Windows refusing the mic (consent store) or a loopback activation
+  (`E_ACCESSDENIED`) raises `DeviceAccessDeniedError` -> 403 `DEVICE_ACCESS_DENIED` with `stream`; a stream with no
+  distinguishable signature keeps 400 `RECORDING_START_FAILED`.
+- **Consent reminder is display only (4.37.0).** Every start path (UI `/start`, call prompt, auto-record, agent `start_notice`) carries the "warn the other party" line while `RECORDING_CONSENT_REMINDER` is on; the manifest keeps `consent_reminder: true` so an attach shows it. Recording never waits on it and nothing else is stored.
+- **"What did I miss" never uses the local model and never an agent recording (4.37.0).** `live_missed` calls Claude only (the local LLM shares `_GEN_LOCK` with the copilot ticks); an agent-class session is refused for every caller (403 `AGENT_SESSION`); spend is capped per call by `LIVE_MISSED_BUDGET_USD`, kept in memory, nothing persisted.
 - **No guessing the session.** `/api/recordings/active` fills `session_id`/`state` only when exactly
   one session is live; MCP live tools and `/api/copilot/live-ask` without `session_id` answer
   `AMBIGUOUS_SESSION` when more than one is live.

@@ -284,9 +284,11 @@ logger = logging.getLogger(__name__)
 # and torchaudio/torio during diarization throws tracebacks "FFmpeg extension is not
 # available" (non-fatal — there is a fallback). werkzeug logs EVERY HTTP request at INFO
 # (per-request access spam + sometimes a traceback when emitting the access line) — at WARNING
-# only real warnings/errors remain. Our app.* loggers are not touched.
+# only real warnings/errors remain. comtypes (pycaw's COM layer, logger name from the package's
+# getLogger(__name__)) logs every interface release at DEBUG from the call watcher's 1 s tick.
+# Our app.* loggers are not touched.
 for _noisy in ('anthropic', 'httpx', 'httpcore', 'urllib3', 'huggingface_hub',
-               'filelock', 'matplotlib', 'werkzeug'):
+               'filelock', 'matplotlib', 'werkzeug', 'comtypes'):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 for _quiet in ('torio', 'torchaudio'):
     logging.getLogger(_quiet).setLevel(logging.CRITICAL)
@@ -393,7 +395,7 @@ def request_entity_too_large(error):
 
 
 # Initialize the Whisper manager
-whisper_manager = ModernWhisperManager()
+whisper_manager = ModernWhisperManager(force_cpu=bool(getattr(cfg, 'FORCE_CPU', False)))
 
 # Thread-safe stores for progress
 MAX_DOWNLOAD_HISTORY = 100
@@ -694,12 +696,21 @@ if getattr(cfg, 'RECORDING_ENABLED', False):
             callback too → auto-healing. Idempotent (youtube_id=recording_<sid>).
             """
             def _runner(_job, *_a, **_kw):
+                # The owner's mic/system gain (dB) set on the recording screen; 0 when absent.
+                from app.blueprints.recording import manifest_gain
+                try:
+                    _mic_gain, _sys_gain = manifest_gain(_rec_store.read(sid))
+                except Exception as e:
+                    logger.warning("Finalize %s: gain unreadable, using 0 dB: %s", sid, e)
+                    _mic_gain, _sys_gain = 0.0, 0.0
                 result = finalize_session(
                     session_id=sid,
                     store=_rec_store,
                     bitrate=cfg.RECORDING_MP3_BITRATE,
                     keep_pcm=cfg.RECORDING_KEEP_PCM,
                     keep_wav=cfg.RECORDING_KEEP_WAV,
+                    mic_gain_db=_mic_gain,
+                    system_gain_db=_sys_gain,
                 )
                 # Auto-registration in the library (idempotent). Softly: an error here
                 # does not fail finalize and SSE — the recording stays on disk and can still
@@ -972,6 +983,7 @@ try:
     from app.services import retention as _retention
     _retention.purge_soft_deleted(app.config['DATABASE'])
     _retention.purge_mcp_actions(app.config['DATABASE'])
+    _retention.purge_finished_jobs(app.config['DATABASE'])
 except Exception as e:
     logger.warning("Soft-delete purge not performed: %s", e)
 
@@ -1255,7 +1267,7 @@ def _maybe_start_call_watcher():
         return
     try:
         import pycaw  # noqa: F401 — presence check, the enumeration itself is lazy
-        from app.blueprints.recording import stop_session
+        from app.blueprints.recording import start_call_recording, stop_session
         from app.services.recording.app_audio import list_call_sessions
         from app.services.recording.call_watch import CallWatcher, ToastNotifier, parse_apps
         from app.services.recording.service import SessionNotFoundError
@@ -1280,6 +1292,12 @@ def _maybe_start_call_watcher():
             })
         return out
 
+    def _auto_record(exe, _call_id):
+        # Opt-in auto-record: runs on the watcher thread, so it needs its own app context.
+        with app.app_context():
+            return start_call_recording(exe, started_by='auto_call')
+
+    _action = _settings.env('RECORDING_AUTOPROMPT_ACTION').strip().lower()
     _root = os.path.dirname(os.path.abspath(__file__))
     try:
         os.makedirs(os.path.join(_root, 'logs'), exist_ok=True)
@@ -1294,6 +1312,10 @@ def _maybe_start_call_watcher():
             notifier=ToastNotifier(icon_path=os.path.join(_root, 'static', 'icon-192.png')),
             log_path=os.path.join(_root, 'logs', 'call_watch.jsonl'),
             publisher=lambda event, data: sse_broker.publish("system:calls", event, data),
+            action=_action,
+            # The only caller that starts a recording without a click, and only when opted in.
+            auto_record_fn=_auto_record if _action == 'record' else None,
+            reprompt_minutes=_settings.env_int('RECORDING_AUTOPROMPT_REPROMPT_MIN'),
         )
     except Exception as e:
         logger.warning("Call hints failed to start: %s", e, exc_info=True)
@@ -1355,6 +1377,48 @@ def _maybe_start_mail():
         logger.warning("Mail poller failed to start: %s", e, exc_info=True)
 
 
+def _maybe_start_calendar():
+    """Calendar ICS poller (app/services/calendar_ics.py, k6-calendar-ics).
+
+    Only under ``__main__``, never under pytest. ``CALENDAR_SYNC_ENABLED=0`` -> one log
+    line and no thread. A start failure is a warning; the app still boots."""
+    if not _settings.env_bool('CALENDAR_SYNC_ENABLED'):
+        logger.info("Calendar: sync disabled (CALENDAR_SYNC_ENABLED=0)")
+        return
+    try:
+        from app.services.calendar_ics import CalendarPoller
+
+        poller = CalendarPoller(app.config['DATABASE'])
+        app.extensions['calendar_poller'] = poller
+        poller.start()
+    except Exception as e:
+        app.extensions.pop('calendar_poller', None)
+        logger.warning("Calendar poller failed to start: %s", e, exc_info=True)
+
+
+def _maybe_start_meeting_brief():
+    """Pre-meeting brief ticker (app/services/meeting_brief.py, wave4-client-calls).
+
+    Only under ``__main__``, never under pytest. Starts next to the calendar poller when
+    ``MEETING_BRIEF_ENABLED`` and the bot is configured; otherwise one log line and no thread."""
+    if not _settings.env_bool('MEETING_BRIEF_ENABLED'):
+        logger.info("Meeting brief: disabled (MEETING_BRIEF_ENABLED=0)")
+        return
+    try:
+        from app.services import tg_bot
+        from app.services.meeting_brief import MeetingBriefTicker
+
+        if not tg_bot.is_configured():
+            logger.info("Meeting brief: the bot is not configured, ticker not started")
+            return
+        ticker = MeetingBriefTicker(app.config['DATABASE'], tg_bot.send)
+        app.extensions['meeting_brief_ticker'] = ticker
+        ticker.start()
+    except Exception as e:
+        app.extensions.pop('meeting_brief_ticker', None)
+        logger.warning("Meeting brief ticker failed to start: %s", e, exc_info=True)
+
+
 # config-registry-profiles S2: the module-level boot sequence is complete
 # (DB/migrations/JobQueue/recorder gate/counters/blueprints/auth/error handler
 # all above). The Telegram listener is launched below only under `__main__` (reloader
@@ -1374,13 +1438,13 @@ if __name__ == '__main__':
 
     # Bind address: a safe default of 127.0.0.1 (the local machine only). Exposing
     # to the whole LAN — only by an explicit opt-in (RECALL_BIND_ALL=1 or FLASK_HOST=0.0.0.0),
-    # because the app has no authentication yet (see docs/REMEDIATION_PLAN.md T1.2).
+    # because the app has no authentication yet (see docs/SECURITY.md).
     bind_all = _settings.env_bool('RECALL_BIND_ALL')
     host = '0.0.0.0' if (bind_all or cfg.HOST == '0.0.0.0') else cfg.HOST
     if host == '0.0.0.0':
         logger.warning(
             "RECALL_BIND_ALL/FLASK_HOST=0.0.0.0: the app is reachable over the network "
-            "WITHOUT authentication (see T1.2 in docs/REMEDIATION_PLAN.md) — "
+            "WITHOUT authentication (see docs/SECURITY.md) — "
             "enable only on a trusted LAN."
         )
 
@@ -1395,5 +1459,7 @@ if __name__ == '__main__':
         _maybe_start_call_watcher()
         _maybe_start_pipes()
         _maybe_start_mail()
+        _maybe_start_calendar()
+        _maybe_start_meeting_brief()
     # threaded=True for SSE: each connection in its own thread, does not block the others.
     app.run(debug=debug_mode, host=host, port=cfg.PORT, threaded=True)

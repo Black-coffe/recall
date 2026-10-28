@@ -844,6 +844,14 @@ html, body { margin: 0; padding: 0; }
 }
 .rc-task__flag[data-s="done"] { background: var(--rc-ok-tint); color: var(--rc-ok); border-color: transparent; }
 .rc-task__flag[data-s="cancelled"] { background: var(--rc-err-tint); color: var(--rc-err); border-color: transparent; }
+/* ADR-056 proposals: Yes / No rows on /tasks and the proposal mark in the transcript */
+.rc-task__flag[data-s="proposed"] { background: var(--rc-accent-tint); color: var(--rc-accent-deep); border-color: transparent; }
+.rc-task__flag[data-s="rejected"] { background: var(--rc-err-tint); color: var(--rc-err); border-color: transparent; }
+.rc-task__status[data-s="proposed"] { background: var(--rc-surface-2); color: var(--rc-accent-deep); border: 1px dashed var(--rc-accent-deep); }
+.rc-task__forwhom, .rc-task__imp { font-family: var(--rc-mono); font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-task__imp[data-imp="3"] { color: var(--rc-err); }
+.rc-task__decided { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-task.is-decided .rc-task__text { color: var(--rc-ink-3); }
 
 /* Urgency buckets on /tasks */
 .rc-bucket { margin-bottom: var(--rc-6); }
@@ -1174,6 +1182,17 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-rec-dev { display: grid; grid-template-columns: 200px 1fr; gap: var(--rc-4); align-items: center; }
 .rc-rec-dev .rc-check { font-size: var(--rc-t-body); color: var(--rc-ink); }
 .rc-rec-hint { font-size: var(--rc-t-xs); color: var(--rc-ink-3); display: flex; gap: var(--rc-2); align-items: baseline; max-width: 64ch; }
+.rc-rec-dev__hint { grid-column: 2; }
+.rc-recgain { display: grid; gap: var(--rc-2); margin-bottom: var(--rc-3); }
+.rc-recgain__head { font-size: var(--rc-t-sm); color: var(--rc-ink-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--rc-2); }
+.rc-recgain__cap { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-recgain__row { display: grid; grid-template-columns: 44px 1fr 64px; gap: var(--rc-3); align-items: center; }
+.rc-recgain__lbl, .rc-recgain__val { font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-recgain__val { text-align: right; }
+.rc-recgain__range { width: 100%; accent-color: var(--rc-accent); }
+.rc-recpart__pick { border: 1px solid var(--rc-hairline-2); border-radius: var(--rc-r-1); padding: 4px 6px; background: var(--rc-surface); }
+.rc-recpart__in { flex: 1; min-width: 160px; border: 0; padding: 4px; background: transparent; }
+.rc-recpart__list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .rc-rec-active { margin-top: var(--rc-5); max-width: 720px; }
 .rc-rec-top { display: flex; align-items: center; gap: var(--rc-4); margin-bottom: var(--rc-5); }
 .rc-rec-pill {
@@ -1442,6 +1461,11 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-updbar__link { margin-left: auto; color: var(--rc-accent-deep); font-weight: 600; }
 .rc-updbar__x { background: none; border: none; font-size: 1.2rem; line-height: 1; color: var(--rc-ink-3); cursor: pointer; padding: 0 var(--rc-2); }
 .rc-updbar__x:hover { color: var(--rc-ink); }
+/* topbar REC badge (every screen while a recording runs; hidden on /record) */
+.rc-recbadge { display: inline-flex; align-items: center; gap: 6px; padding: 0 var(--rc-2); font-size: var(--rc-t-xs); font-weight: 600; color: var(--rc-err); text-decoration: none; }
+.rc-recbadge[hidden] { display: none; }
+.rc-recbadge__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rc-err); animation: rc-recpulse 1.4s var(--rc-ease) infinite; }
+.rc-recbadge__n { font-variant-numeric: tabular-nums; }
 .rc-updrow { display: flex; align-items: center; gap: var(--rc-3); flex-wrap: wrap; margin-bottom: var(--rc-3); }
 .rc-updrow code { background: var(--rc-surface-2); border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-1); padding: 1px 8px; }
 
@@ -2325,3 +2349,37 @@ audio.rc-audio { width: 100%; margin-bottom: var(--rc-4); }
 .rc-cmp__row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--rc-4); }
 .rc-cmp__blank { min-height: 1.5em; background: repeating-linear-gradient(135deg, transparent 0 6px, var(--rc-surface-2) 6px 8px); border-radius: var(--rc-r-2); }
 .rc-diff { background: var(--rc-accent-tint); color: inherit; border-radius: 2px; padding: 0 1px; }
+
+/* /copilot — post-call copilot review (views/copilot.js) */
+.rc-cpr__table { width: 100%; border-collapse: collapse; font-size: var(--rc-t-sm); }
+.rc-cpr__table th { text-align: left; font-weight: 600; color: var(--rc-ink-3); font-size: var(--rc-t-xs); padding: var(--rc-2); border-bottom: 1px solid var(--rc-hairline); }
+.rc-cpr__table td { padding: var(--rc-2); border-bottom: 1px solid var(--rc-hairline); }
+.rc-cpr__row { cursor: pointer; }
+.rc-cpr__row:hover { background: var(--rc-surface-2); }
+.rc-cpr__pager { display: flex; align-items: center; gap: var(--rc-3); justify-content: flex-end; margin: var(--rc-3) 0 var(--rc-5); }
+.rc-cpr__panel { border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-3); background: var(--rc-surface); overflow: hidden; }
+.rc-cpr__head { display: flex; align-items: center; gap: var(--rc-3); flex-wrap: wrap; padding: var(--rc-3) var(--rc-4); border-bottom: 1px solid var(--rc-hairline); background: var(--rc-surface-2); }
+.rc-cpr__title { font-weight: 600; }
+.rc-cpr__exp { margin-left: auto; display: flex; gap: var(--rc-2); }
+.rc-cpr__filters { display: flex; gap: var(--rc-2); padding: var(--rc-3) var(--rc-4) 0; }
+.rc-cpr__filt { font-size: var(--rc-t-xs); padding: 2px var(--rc-2); border-radius: 999px; cursor: pointer; border: 1px solid var(--rc-hairline); background: var(--rc-surface); color: var(--rc-ink-2); }
+.rc-cpr__filt.is-active { background: var(--rc-accent-tint); border-color: var(--rc-accent-ring); color: var(--rc-accent-deep); font-weight: 600; }
+.rc-cpr__cards { padding: var(--rc-3) var(--rc-4) var(--rc-4); }
+.rc-cpr__empty { color: var(--rc-ink-3); padding: var(--rc-4) 0; text-align: center; }
+.rc-cpr__topic { margin-bottom: var(--rc-4); }
+.rc-cpr__topic-title { font-size: var(--rc-t-sm); font-weight: 600; margin: 0 0 var(--rc-2); color: var(--rc-accent-deep); }
+.rc-cpr__card { padding: var(--rc-2) var(--rc-3); border-left: 2px solid var(--rc-accent); border-radius: var(--rc-r-1); margin-bottom: 2px; }
+.rc-cpr__card.is-muted { opacity: .55; border-left-color: var(--rc-hairline-2); }
+.rc-cpr__card-meta { display: flex; gap: var(--rc-2); align-items: center; font-size: var(--rc-t-xs); color: var(--rc-ink-3); }
+.rc-cpr__card-text { font-size: var(--rc-t-sm); line-height: 1.5; color: var(--rc-ink); }
+.rc-cpr__badge { padding: 0 var(--rc-1); border: 1px solid var(--rc-hairline); border-radius: 999px; }
+.rc-cpr__badge--muted { background: var(--rc-canvas-2); }
+.rc-cpr__rating { color: var(--rc-accent-deep); }
+.rc-cpr__ev { color: var(--rc-accent-deep); text-decoration: none; }
+
+/* calendar connect guide in Settings → Calendars (calendar-connect-guide) */
+.rc-calguide { margin: 0 0 var(--rc-4); }
+.rc-calguide__list { margin: var(--rc-3) 0 0; padding-left: 20px; display: grid; gap: var(--rc-4); }
+.rc-calguide__cap { margin: 0 0 6px; color: var(--rc-ink-2); font-size: var(--rc-t-sm); }
+.rc-calguide__img { display: block; max-width: 100%; height: auto; border: 1px solid var(--rc-hairline); border-radius: var(--rc-r-2); }
+.rc-calguide__note { margin: var(--rc-4) 0 0; padding: 8px 10px; border-left: 3px solid var(--rc-warn); background: var(--rc-warn-tint); color: var(--rc-ink-2); font-size: var(--rc-t-sm); }

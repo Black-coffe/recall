@@ -210,7 +210,7 @@ REGISTRY: tuple[Setting, ...] = (
             "Minimum k-NN confidence for the autosave to set the direction itself.",
             "Below it the direction stays empty and the Audio library asks the user.", profile="desktop"),
     Setting("RECORDING_AUTOPROMPT_APPS",
-            "zoom.exe,ms-teams.exe,teams.exe,telegram.exe,viber.exe,whatsapp.root.exe,whatsapp.exe,"
+            "zoom.exe,ms-teams.exe,teams.exe,viber.exe,whatsapp.root.exe,whatsapp.exe,"
             "chrome.exe,msedge.exe,firefox.exe,discord.exe,slack.exe,signal.exe", "str", "Recording",
             "Calling applications for K2 prompts: exe names separated by commas (case-insensitive, \".exe\" may be omitted).",
             "Only these applications can trigger \"Record?\"; dictation tools (VoiceDrop, Wispr Flow) must not be added here "
@@ -220,10 +220,23 @@ REGISTRY: tuple[Setting, ...] = (
             "sides) before \"Record?\" appears.",
             "Less → the prompt comes sooner, but more chance of a false one; works only with RECORDING_AUTOPROMPT.",
             profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT_ACTION", "prompt", "str", "Recording",
+            "What a detected call does: prompt (show \"Record?\" and wait for a click) or record "
+            "(start recording by itself and show \"Recording started\" with Stop / Keep).",
+            "prompt → nothing starts without a click; record → opt-in auto-record of a confirmed call, "
+            "a failed start falls back to the prompt; works only with RECORDING_AUTOPROMPT.",
+            profile="desktop"),
+    Setting("RECORDING_AUTOPROMPT_REPROMPT_MIN", "10", "int", "Recording",
+            "Minutes after the first \"Record?\" before one repeat for a call that is still live and unrecorded.",
+            "One repeat per call, never after \"Not needed\" or once a recording covers the call; 0 → no repeat.",
+            profile="desktop"),
     Setting("RECORDING_AUTOSTOP_SILENCE_MIN", "10", "int", "Recording",
             "Minutes of silence on both tracks after \"Stop?\" after which the recording stops by itself.",
             "Applies only to recordings that have already been asked \"Stop?\"; the recording is kept in full, "
             "silence is not counted while paused.", profile="desktop"),
+    Setting("RECORDING_CONSENT_REMINDER", "1", "bool", "Recording",
+            "Show a recording-consent reminder at every recording start, whatever started it.",
+            "Non-blocking: the recording starts regardless; off hides the reminder only.", profile="desktop"),
 
     # --- Video recording (screen capture) ---
     Setting("RECORDING_VIDEO_ENABLED", "True", "bool", "Video recording",
@@ -354,6 +367,20 @@ REGISTRY: tuple[Setting, ...] = (
             "Largest attachment (MB) that is ingested as a document.",
             "Heavier attachments are skipped."),
 
+    # --- Calendar (secret ICS links, k6-calendar-ics) ---
+    Setting("CALENDAR_SYNC_ENABLED", "1", "bool", "Calendar",
+            "Sync the connected ICS calendars in the background.",
+            "Off stops the periodic sync; sources, events and recording bindings stay."),
+    Setting("CALENDAR_SYNC_MINUTES", "15", "int", "Calendar",
+            "Interval (minutes) between calendar syncs.",
+            "Published Google/Outlook feeds refresh on the provider side every few minutes to hours."),
+    Setting("MEETING_BRIEF_ENABLED", "1", "bool", "Calendar",
+            "Send a pre-meeting card to Telegram (people, their open tasks, recent calls with them).",
+            "Off stops the brief; one card per calendar event, same privacy filter as the other briefs."),
+    Setting("MEETING_BRIEF_LEAD_MINUTES", "15", "int", "Calendar",
+            "Minutes before a calendar event at which its brief card is sent; valid range 1..180.",
+            "Range 1..180 is the contract of the brief reader (wave4-client-calls-02); the registry itself does not validate ranges."),
+
     # --- Telegram chat threads ---
     Setting("TG_THREAD_BURST_GAP_MIN", "180", "int", "Telegram threads",
             "Pause (min) after which a conversation counts as a new burst.",
@@ -442,6 +469,12 @@ REGISTRY: tuple[Setting, ...] = (
             "Thread character ceiling for structure extraction.",
             "Accumulating thread messages in tg_tasks.py stops as soon as the total length exceeds this "
             "ceiling."),
+
+    # --- Task proposals ---
+    Setting("TASK_PROPOSAL_MIN_CONFIDENCE", "0.6", "float", "Task proposals",
+            "Minimum model confidence (0..1) for an extracted task to be proposed to the owner.",
+            "task_proposals.filter_candidates drops a candidate whose confidence is below this; a missing "
+            "confidence is kept. Dropped candidates are not stored, so lowering it needs a re-run."),
 
     # --- Unanswered questions ---
     Setting("TG_QUESTIONS_WINDOW_H", "24", "float", "Unanswered questions",
@@ -639,6 +672,10 @@ REGISTRY: tuple[Setting, ...] = (
             "Minimum character window for evaluating a copilot topic.",
             "_min_window_chars in copilot/worker.py — while the transcript window is smaller, topic evaluation does not "
             "start."),
+    Setting("LIVE_MISSED_BUDGET_USD", "0.10", "float", "Copilot",
+            "Claude spend ceiling per call (USD) for the \"What I missed\" live summary.",
+            "The per-call ceiling of the summary button (wave4-client-calls); negative values are invalid. "
+            "The button is not offered for agent recordings."),
 
     # --- Auth / access ---
     Setting("RECALL_BIND_ALL", "", "bool", "Auth / access",

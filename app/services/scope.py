@@ -309,11 +309,14 @@ def apply_chat_categories(db_path: str, *, mapping_path: str = DEFAULT_MAPPING_P
         else:
             conn.commit()
 
+    # Report what was really queued: without embeddings or for stale-epoch ids the
+    # scheduler queues nothing, and `len(changed_ids)` would claim otherwise.
+    stats["reembed_scheduled"] = 0
     if not dry_run and changed_ids:
         from app.services import reembed
-        reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
-                                         reason="apply-chats")
-    stats["reembed_scheduled"] = len(changed_ids) if not dry_run else 0
+        res = reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
+                                               reason="apply-chats")
+        stats["reembed_scheduled"] = int(res.get("count", 0)) if isinstance(res, dict) else 0
     logger.info("apply_chat_categories: chats=%(chats)s bound=%(chats_bound)s "
                 "inserted=%(chats_inserted)s records=%(records_recategorized)s "
                 "tags=%(tags_applied)s", stats)
@@ -569,11 +572,14 @@ def label_uncategorized(db_path: str, *, min_confidence: float = KNN_MIN_CONFIDE
             for cat_id, ids in by_cat.items():
                 changed_ids.update(categories.set_category(conn, ids, cat_id))
 
+    # Report what was really queued: without embeddings or for stale-epoch ids the
+    # scheduler queues nothing, and `len(changed_ids)` would claim otherwise.
+    stats["reembed_scheduled"] = 0
     if not dry_run and changed_ids:
         from app.services import reembed
-        reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
-                                         reason="label-rest")
-    stats["reembed_scheduled"] = len(changed_ids) if not dry_run else 0
+        res = reembed.schedule_records_reembed(sorted(changed_ids), db_path=db_path,
+                                               reason="label-rest")
+        stats["reembed_scheduled"] = int(res.get("count", 0)) if isinstance(res, dict) else 0
     stats["labeled"] = len(updates)
     logger.info("label_uncategorized: scanned=%(scanned)s labeled=%(labeled)s "
                 "low_conf=%(low_confidence)s", stats)

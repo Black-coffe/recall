@@ -5,6 +5,7 @@ Endpoints:
 - POST   /api/transcription/<id>/bookmarks   {segment_index, note?}
 - DELETE /api/bookmarks/<id>
 - PATCH  /api/bookmarks/<id>                 {note}
+- GET    /api/bookmarks/<id>/clip?pad=<0..60> - zip of clip.mp3 + clip.txt
 - GET    /api/saved-searches
 - POST   /api/saved-searches                 {name, query: {search?, source_type?, language?, speaker_id?}}
 - DELETE /api/saved-searches/<id>
@@ -12,14 +13,16 @@ Endpoints:
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 
 from app.core import auth
 from app.core.i18n import tr
 from app.repositories import transcriptions as tx_repo
+from app.services import bookmark_clip
 
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,60 @@ def update_bookmark(bookmark_id):
             return jsonify({'success': False, 'error': tr('transcript.err.not_found')}), 404
         conn.commit()
     return jsonify({'success': True})
+
+
+@bookmarks_bp.route('/api/bookmarks/<int:bookmark_id>/clip', methods=['GET'])
+def bookmark_clip_zip(bookmark_id):
+    """The audio around a bookmarked segment plus its text, as one zip attachment.
+    The file is resolved and refused as in ``GET /api/transcription/<id>/audio``."""
+    raw_pad = request.args.get('pad')
+    try:
+        pad = bookmark_clip.DEFAULT_PAD if raw_pad in (None, '') else float(raw_pad)
+    except ValueError:
+        pad = -1.0
+    if not (0 <= pad <= bookmark_clip.MAX_PAD):
+        return jsonify({'success': False, 'error_code': 'INVALID_ARGUMENT',
+                        'error': tr('transcript.clip.pad_range', max=int(bookmark_clip.MAX_PAD))}), 400
+
+    with _get_db() as conn:
+        bm = conn.execute(
+            'SELECT b.transcription_id, b.segment_index, b.note, t.segments, t.file_path '
+            'FROM segment_bookmarks b JOIN transcriptions t ON t.id = b.transcription_id '
+            'WHERE b.id = ? AND t.deleted_at IS NULL', (bookmark_id,)).fetchone()
+    if bm is None:
+        return jsonify({'success': False, 'error_code': 'NOT_FOUND',
+                        'error': tr('transcript.err.not_found')}), 404
+    try:
+        segments = json.loads(bm['segments']) if bm['segments'] else []
+    except json.JSONDecodeError:
+        segments = []
+    idx = bm['segment_index']
+    if not (0 <= idx < len(segments)):
+        return jsonify({'success': False, 'error_code': 'NOT_FOUND',
+                        'error': tr('transcript.bm.seg_index_range')}), 404
+    seg = segments[idx]
+
+    abs_path, reason = bookmark_clip.resolve_audio(bm['file_path'], current_app.config)
+    if reason == 'no_media':
+        return jsonify({'success': False, 'error_code': 'NO_MEDIA',
+                        'error': tr('transcript.err.audio_unavailable')}), 404
+    if reason == 'forbidden':
+        # Same body as the audio route's refusal.
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    start = float(seg.get('start', 0) or 0)
+    end = float(seg.get('end', start) or start)
+    try:
+        mp3 = bookmark_clip.cut(abs_path, start, end, pad=pad)
+    except bookmark_clip.ClipUnavailable as e:
+        logger.warning("bookmark clip %s failed: %s", bookmark_id, e)
+        return jsonify({'success': False, 'error_code': 'UNAVAILABLE',
+                        'error': tr('transcript.clip.unavailable')}), 503
+
+    text = bookmark_clip.clip_text(seg, bm['note'], tr('transcript.clip.note_label'))
+    data = bookmark_clip.build_zip(mp3, text)
+    return send_file(io.BytesIO(data), mimetype='application/zip', as_attachment=True,
+                     download_name=f"clip-{bm['transcription_id']}-{idx}.zip")
 
 
 # ---------------------------------------------------------------- saved searches

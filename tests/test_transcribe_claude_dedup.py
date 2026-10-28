@@ -172,7 +172,9 @@ class TestPolishEndpointDedupWiring:
         client, _, tid = polish_client
         r = client.post(f'/api/transcription/{tid}/polish', json={})
         assert r.status_code == 400
-        assert 'ANTHROPIC_API_KEY' in r.get_json()['error']
+        from app.core.i18n_catalog.transcript import MESSAGES
+        expected = MESSAGES['transcript.err.api_key_env']
+        assert r.get_json()['error'] in (expected['uk'], expected['en'])
 
     def test_plain_transcript_calls_polish_transcript_not_diarized(self, polish_client, monkeypatch):
         from app.services import text_polishing

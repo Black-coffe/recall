@@ -924,3 +924,120 @@ def test_recover_orphaned_with_source_events_unchanged(store):
     assert svc.recover_orphaned() == ['rec_src']
     assert store.read('rec_src')['status'] == STATUS_CRASHED
     assert finalized == ['rec_src']
+
+
+# ------------------------------------------- device access denied (wave2 story 03)
+
+from _ctypes import COMError
+
+from app.services.recording import recorder as recorder_mod
+from app.services.recording.service import DeviceAccessDeniedError
+
+
+def _denied_mic_factory(**kw):
+    rec = FakeRecorder(**kw)
+
+    def _open():
+        raise recorder_mod.DeviceAccessDeniedRecorderError("mic refused")
+    rec.open = _open
+    return rec
+
+
+def test_denied_mic_raises_typed_error_and_leaves_no_session(store):
+    svc = _svc(store, recorder_factory=_denied_mic_factory)
+    with pytest.raises(DeviceAccessDeniedError) as ei:
+        svc.start(mic_device_index=3)
+    assert ei.value.stream == 'mic'
+    assert ei.value.code == 'DEVICE_ACCESS_DENIED'
+    assert isinstance(ei.value, RecordingError)
+    assert svc.active_session_ids() == []
+    assert store.list_all()[0]['status'] == STATUS_CRASHED
+
+
+@pytest.mark.parametrize('exc', [
+    OSError("process loopback activation failed hr=0x80070005"),
+    COMError(recorder_mod.E_ACCESSDENIED, 'Access is denied.', None),
+], ids=['activation-hr', 'initialize-comerror'])
+def test_denied_system_raises_typed_error_and_closes_mic(store, exc):
+    class DeniedAppSource(FakeAppSource):
+        def start(self):
+            raise exc
+
+    svc = _svc(store, app_source_factory=DeniedAppSource)
+    with pytest.raises(DeviceAccessDeniedError) as ei:
+        svc.start(mic_device_index=3, system_source=SystemSpec('exclude', ('zoom.exe',)))
+    assert ei.value.stream == 'system'
+    assert FakeRecorder.instances[0]._is_closed is True
+    assert svc.active_session_ids() == []
+
+
+def test_denied_system_open_closes_open_mic(store):
+    def factory(**kw):
+        rec = FakeRecorder(**kw)
+        if kw['device_index'] == 20:
+            def _open():
+                raise PermissionError(13, 'Access is denied.', None, recorder_mod.E_ACCESSDENIED)
+            rec.open = _open
+        return rec
+
+    svc = _svc(store, recorder_factory=factory)
+    with pytest.raises(DeviceAccessDeniedError) as ei:
+        svc.start(mic_device_index=3, system_device_index=20)
+    assert ei.value.stream == 'system'
+    assert FakeRecorder.instances[0]._is_closed is True
+    assert svc.active_session_ids() == []
+
+
+def test_unrelated_open_oserror_stays_plain_recording_error(store):
+    def factory(**kw):
+        rec = FakeRecorder(**kw)
+
+        def _open():
+            raise OSError(-9996, 'Invalid device')
+        rec.open = _open
+        return rec
+
+    svc = _svc(store, recorder_factory=factory)
+    with pytest.raises(RecordingError) as ei:
+        svc.start(mic_device_index=3)
+    assert not isinstance(ei.value, DeviceAccessDeniedError)
+    assert ei.value.code == 'RECORDING_ERROR'
+    assert svc.active_session_ids() == []
+
+
+class _FakePa:
+    def __init__(self, loopback):
+        self.loopback = loopback
+        self.terminated = False
+
+    def open(self, **_):
+        raise OSError(-9999, 'Unanticipated host error')
+
+    def get_device_info_by_index(self, _idx):
+        return {'isLoopbackDevice': self.loopback}
+
+    def terminate(self):
+        self.terminated = True
+
+
+@pytest.mark.parametrize('loopback,consent_denied,expect_denied', [
+    (False, True, True),
+    (False, False, False),
+    (True, True, False),
+], ids=['mic-consent-denied', 'mic-consent-allowed', 'loopback-ignores-consent'])
+def test_wasapi_open_failure_classified_by_consent(monkeypatch, loopback, consent_denied,
+                                                   expect_denied):
+    class _Mod:
+        paInt16 = 8
+
+        @staticmethod
+        def PyAudio():
+            return _FakePa(loopback)
+
+    monkeypatch.setattr(recorder_mod, 'pyaudio', _Mod)
+    monkeypatch.setattr(recorder_mod, '_HAS_PYAUDIO', True)
+    monkeypatch.setattr(recorder_mod, 'microphone_consent_denied', lambda: consent_denied)
+    rec = recorder_mod.WasapiRecorder(device_index=4)
+    with pytest.raises(recorder_mod.RecorderError) as ei:
+        rec.open()
+    assert recorder_mod.is_access_denied(ei.value) is expect_denied

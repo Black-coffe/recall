@@ -19,7 +19,7 @@ If the test failed after your change:
      for ingest and chats/toggle), and do not write to the DB directly from this process.
   2. If a direct write is really justified (e.g. a documented legitimate
      second «writer» role) — update ALLOWLIST below with a justifying comment
-     and record the decision in docs/REMEDIATION_PLAN.md + the project's memory/ (Option
+     and record the decision in an ADR (docs/adr/) + the project's memory/ (Option
      B from T2.6 explicitly documents dual-writer + retry/busy_timeout).
 """
 from __future__ import annotations

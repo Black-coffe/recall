@@ -18,6 +18,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
+from app.core import settings as _settings
 from app.core.i18n import tr
 from app.services import local_llm, retrieval
 
@@ -53,7 +54,7 @@ _MAX_TOP_K = 20
 # importing rag.py, so as not to pull its dependencies (the Claude API) into the simple
 # local path. Previously `ask_local` always ran with rerank=False — the divergence
 # from ask_archive is removed by this flag.
-_RERANK_ENABLED = os.environ.get("RECALL_RERANK_ENABLED", "0").strip() in ("1", "true", "True")
+_RERANK_ENABLED = _settings.env_bool("RECALL_RERANK_ENABLED")
 
 _SYSTEM_PROMPT = (
     "Ти — локальний асистент оператора під час дзвінка. Тобі дають ПИТАННЯ і, "

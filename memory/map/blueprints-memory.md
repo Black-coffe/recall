@@ -17,9 +17,8 @@ source `ui` for the UI token else `mcp`. `_chat_change` maps `NotMonitored` 404 
 (stop word in title/username, private direction -> row dropped; failure -> 503 refuse all); `/dialogs` for an agent returns only `{chat_id,title,type,monitored}`. Texts `telegram.err.*`
 (`i18n_catalog/telegram.py`). Older `POST /chats` (upsert) and `POST /chats/toggle` (SPA) change chats WITHOUT a journal row.
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: chat routes); 2026-10-20 (mcp-archive-org 4.26.0, memory.py re-read)
-4.26.0 agent rules in memory.py (`_is_ui` :45): category create stamps `categories.created_source='mcp'`, agent name <=60 (`AGENT_CATEGORY_NAME_MAX`); `bulk-category` for an agent: `ids` only, <=5 (`BULK_LIMIT`), private-direction exit -> 403 `PRIVATE_CATEGORY_CHANGE`/503 `PRIVACY_CHECK_FAILED`; `PUT /<tid>/tags` for an agent adds existing tags only (`source='mcp'`); action-items PATCH/`POST /action-items/<id>/postpone {days 1|7|30}` and `POST /action-events/<id>/undo` (agent: only `source='mcp'` events, `NOT_MCP_EVENT`/`UNDO_NOT_LAST`; agent repeats dedupe via `commitments.apply_action(dedupe=True)` -> `created:false`). The line below "Postponing a deadline from the web is not exposed" is stale.
-
+last-verified: 2026-10-28 (task-approval 4.35.0: action-items PATCH/GET, memory.py lines :1130-1380 re-read); 2026-10-25 (mcp-telegram-automation 4.31.0: chat routes); 2026-10-20 (mcp-archive-org 4.26.0, memory.py re-read)
+4.26.0 agent rules in memory.py (`_is_ui` :45): category create stamps `categories.created_source='mcp'`, agent name <=60 (`AGENT_CATEGORY_NAME_MAX`); `bulk-category` for an agent: `ids` only, <=5 (`BULK_LIMIT`), private-direction exit -> 403 `PRIVATE_CATEGORY_CHANGE`/503 `PRIVACY_CHECK_FAILED`; `PUT /<tid>/tags` for an agent adds existing tags only (`source='mcp'`); action-items PATCH/`POST /action-items/<id>/postpone {days 1|7|30}` and `POST /action-events/<id>/undo` (agent: only `source='mcp'` events, `NOT_MCP_EVENT`/`UNDO_NOT_LAST`; agent repeats dedupe via `commitments.apply_action(dedupe=True)` -> `created:false`).
 ## memory.py (~1260) — `/api/memory/*` (memory graph, RAG, categories, tags)
 Depends on: enrichment, retrieval, rag, embeddings, categories, commitments.
 - Categories: `GET /categories` (:198, `categories.list_tree`, a node carries `path`), `POST` (:269), `PATCH/DELETE
@@ -40,9 +39,11 @@ Depends on: enrichment, retrieval, rag, embeddings, categories, commitments.
   `ask*` `project=` is resolved by `categories.resolve_node` BEFORE rag: several matches → 409
   `{error:"ambiguous",candidates}`, rag is not called.
 - `GET /entities` (:883), `/entities/<eid>` (:964), `GET /action-items` (:1039), `GET /stats` (:1241).
-- `PATCH /action-items/<aid>` (:1220, K5 4.15.0) `{status: open|done|cancelled}`: anything else → 400 `tr('knowledge.memory.err.status_bad')`, missing
-  → 404 (`LookupError`), 200 `{success:true}`; writes `commitments.apply_action(..., source='web', actor='web')` —
-  the same path as the brief buttons, with an event in `action_item_events`. Postponing a deadline from the web is not exposed.
+- `PATCH /action-items/<aid>` (`update_action_item` :1357, K5 4.15.0) `{status: open|done|cancelled}` OR (4.35.0, ADR-056) `{action: approve|reject|edit,
+  task?, due_date?}` (not both; `edit` needs text or ISO date): bad body → 400; missing → 404; a refused move → 409 `INVALID_TRANSITION` (`_task_action` :1332).
+  Writes `commitments.apply_action` (`web` for the UI token, else `mcp` with `dedupe`) — the same path as the brief buttons. `GET /action-items`
+  (4.35.0): `status` is any of `commitments.STATUSES` or `all`; `all` and the default leave `legacy` out (:1169); `status=proposed` uses `proposal_queue` order and,
+  for the UI caller only, `mark_shown(source='web')` starts the 3-day clock (:1308). `POST /action-items/<id>/postpone` stays.
 - Gotchas: entity `min_meetings=2` if there is no `q`; a category name is unique casefold AMONG SIBLINGS (v47); action-items
   period by `meeting_date`. The `owner` filter is an EXACT match on the canonical name OR graph aliases (the alias key is
   `enrichment._normalize`, not SQL `LOWER()`, which does not fold Cyrillic); the raw `owner_name` does not filter. MCP

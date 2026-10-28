@@ -31,7 +31,8 @@ class FakeNotifier:
 class Rig:
     """Ticks the watcher one simulated second at a time."""
 
-    def __init__(self, tmp_path=None, *, prompt_seconds=30, autostop_minutes=10, publisher=None):
+    def __init__(self, tmp_path=None, *, prompt_seconds=30, autostop_minutes=10, publisher=None,
+                 reprompt_minutes=10, action='prompt', auto_record_fn=None):
         self.t = 0.0
         self.snap: dict | None = {}
         self.live: list[dict] = []
@@ -45,7 +46,8 @@ class Rig:
             enumerate_calls=lambda: self.snap, live_sessions=lambda: self.live,
             stop_fn=self._stop, notifier=self.notifier,
             clock=lambda: self.t, wall=lambda: 1_760_000_000.0 + self.t, log_path=self.log_path,
-            publisher=publisher)
+            publisher=publisher, reprompt_minutes=reprompt_minutes, action=action,
+            auto_record_fn=auto_record_fn)
 
     def _stop(self, sid):
         if self.stop_error:
@@ -377,7 +379,7 @@ def test_publisher_sees_the_whole_call_without_tokens_or_urls(tmp_path):
 
 def test_publisher_reports_consumed_dismissed_and_expired():
     bus = Bus()
-    r = Rig(publisher=bus)
+    r = Rig(publisher=bus, reprompt_minutes=0)     # the 3 h jump must expire, not re-prompt
     r.run(31, app_snap())
     [p] = r.w.pending()
     assert r.w.dismiss(p['id'])
@@ -429,3 +431,145 @@ def test_without_publisher_nothing_changes(tmp_path):
     r = Rig(tmp_path)
     r.run(31, app_snap())
     assert [e['event'] for e in r.events()] == ['call_start', 'prompt']
+
+
+# ---------------------------------------------------------------- re-prompt, log_result, auto-record
+
+def test_defaults_without_telegram_and_equal_in_both_copies():
+    from app.core import settings
+    assert 'telegram.exe' not in cw.parse_apps(cw.DEFAULT_APPS)
+    assert cw.parse_apps(settings.by_name()['RECORDING_AUTOPROMPT_APPS'].default) == cw.parse_apps(cw.DEFAULT_APPS)
+    assert cw.app_label('telegram.exe') == 'Telegram'          # an owner .env list may still name it
+
+
+def test_long_unrecorded_call_gets_exactly_one_reprompt(tmp_path):
+    bus = Bus()
+    r = Rig(tmp_path, publisher=bus, reprompt_minutes=10)
+    r.run(31, app_snap())
+    [first] = r.w.pending()
+    r.run(10 * 60 - 2)
+    assert [p['id'] for p in r.w.pending()] == [first['id']]
+    r.run(2)
+    [second] = r.w.pending()
+    assert second['id'] != first['id'] and second['kind'] == 'record'
+    assert first['id'] in r.notifier.removed
+    assert len(r.prompts('record')) == 2
+    ev = r.events()
+    assert {'event': 'prompt_withdrawn', 'reason': 'reprompt', 'prompt': first['id']}.items() <= next(
+        e for e in ev if e['event'] == 'prompt_withdrawn').items()
+    assert [e['prompt_id'] for e in ev if e['event'] == 'reprompt'] == [second['id']]
+    assert ('prompt_withdrawn', {'kind': 'record', 'exe': 'zoom.exe', 'label': 'Zoom',
+                                 'reason': 'reprompt'}) in bus.events
+    r.run(25 * 60)                               # a second interval: no third prompt
+    assert len(r.prompts('record')) == 2
+
+
+def test_no_reprompt_after_dismiss():
+    r = Rig(reprompt_minutes=10)
+    r.run(31, app_snap())
+    assert r.w.dismiss(r.w.pending()[0]['id'])
+    r.run(25 * 60)
+    assert len(r.prompts('record')) == 1 and r.w.pending() == []
+
+
+def test_no_reprompt_when_disabled():
+    r = Rig(reprompt_minutes=0)
+    r.run(31, app_snap())
+    r.run(25 * 60)
+    assert len(r.prompts('record')) == 1
+
+
+def test_log_result_ok_marks_call_recorded_no_reprompt(tmp_path):
+    r = Rig(tmp_path, reprompt_minutes=10)
+    r.run(31, app_snap())
+    token = r.w.pending()[0]['id']
+    r.w.consume(token, 'record')
+    r.live = [recording('rec9', source=None)]    # captures() cannot vouch: only the known sid can
+    r.w.log_result(token, ok=True, session_id='rec9')
+    r.run(25 * 60)
+    assert len(r.prompts('record')) == 1
+    started = [e for e in r.events() if e['event'] == 'record_started']
+    assert started == [{**started[0], 'prompt_id': token, 'exe': 'zoom.exe', 'session_id': 'rec9',
+                        'via': 'click'}]
+
+
+def test_log_result_failure_leaves_call_unrecorded_and_reprompts(tmp_path):
+    r = Rig(tmp_path, reprompt_minutes=10)
+    r.run(31, app_snap())
+    token = r.w.pending()[0]['id']
+    r.w.consume(token, 'record')
+    r.w.log_result(token, ok=False, reason='SESSION_LIMIT')
+    failed = [e for e in r.events() if e['event'] == 'record_failed']
+    assert failed == [{**failed[0], 'prompt_id': token, 'exe': 'zoom.exe', 'reason': 'SESSION_LIMIT',
+                       'via': 'click'}]
+    r.run(10 * 60)
+    assert len(r.prompts('record')) == 2
+    assert 'reprompt' in [e['event'] for e in r.events()]
+
+
+def test_known_session_gets_the_stop_prompt_after_call_end():
+    r = Rig(reprompt_minutes=0)
+    r.run(31, app_snap())
+    token = r.w.pending()[0]['id']
+    r.w.consume(token, 'record')
+    r.live = [recording('rec9', source=None)]
+    r.w.log_result(token, ok=True, session_id='rec9')
+    r.run(30, {})
+    [p] = r.w.pending()
+    assert p['kind'] == 'stop' and p['session_id'] == 'rec9'
+
+
+class AutoRec:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def __call__(self, exe, call_id):
+        self.calls.append((exe, call_id))
+        return self.result
+
+
+def test_auto_record_starts_and_shows_started_prompt(tmp_path):
+    from app.core.i18n import tr
+    bus = Bus()
+    fn = AutoRec({'ok': True, 'session_id': 'rec7'})
+    r = Rig(tmp_path, publisher=bus, action='record', auto_record_fn=fn)
+    r.run(31, app_snap())
+    r.live = [recording('rec7', source={'mode': 'all'})]
+    r.run(25 * 60)
+    assert len(fn.calls) == 1 and fn.calls[0][0] == 'zoom.exe' and fn.calls[0][1]
+    assert r.prompts('record') == []
+    [p] = r.w.pending()
+    assert p['kind'] == 'started' and p['session_id'] == 'rec7' and set(p['actions']) == {'stop', 'keep'}
+    [(tag, title, body, actions)] = r.notifier.shown
+    assert tag == p['id'] and title == tr('svc_recording.call.started.title')
+    assert [a[0] for a in actions] == [tr('svc_recording.call.started.stop'),
+                                       tr('svc_recording.call.started.keep')]
+    assert tr('svc_recording.call.started.title', lang='en') == 'Recall · recording started'
+    assert [tr(f'svc_recording.call.started.{k}', lang='en') for k in ('stop', 'keep')] == ['Stop', 'Keep']
+    started = [e for e in r.events() if e['event'] == 'record_started']
+    assert started == [{**started[0], 'exe': 'zoom.exe', 'session_id': 'rec7', 'via': 'auto'}]
+    assert ('prompt', {'kind': 'started', 'exe': 'zoom.exe', 'label': 'Zoom', 'session_id': 'rec7'}) in bus.events
+    info = r.w.consume(p['id'], 'stop')          # the blueprint's existing stop path takes it from here
+    assert info['kind'] == 'started' and info['session_id'] == 'rec7'
+    assert r.w.consume(p['id'], 'stop') is None
+
+
+def test_auto_record_failure_falls_back_to_prompt(tmp_path):
+    fn = AutoRec({'ok': False, 'reason': 'SESSION_LIMIT'})
+    r = Rig(tmp_path, action='record', auto_record_fn=fn)
+    r.run(60, app_snap())
+    assert len(fn.calls) == 1
+    [p] = r.w.pending()
+    assert p['kind'] == 'record' and len(r.prompts('record')) == 1
+    failed = [e for e in r.events() if e['event'] == 'record_failed']
+    assert failed == [{**failed[0], 'exe': 'zoom.exe', 'reason': 'SESSION_LIMIT', 'via': 'auto'}]
+
+
+def test_default_prompt_action_never_calls_auto_record(tmp_path):
+    fn = AutoRec({'ok': True, 'session_id': 'rec7'})
+    r = Rig(tmp_path, auto_record_fn=fn)
+    r.run(31, app_snap())
+    assert fn.calls == []
+    assert [e['event'] for e in r.events()] == ['call_start', 'prompt']
+    assert r.w.pending()[0]['kind'] == 'record'

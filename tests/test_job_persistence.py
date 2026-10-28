@@ -138,3 +138,28 @@ def test_recover_crashed_marks_running_job_and_makes_it_visible(tmp_path: Path):
         release.set()
         job._future.result(timeout=5)
         executor1.shutdown(wait=True)
+
+
+def test_purge_finished_jobs_keeps_live_and_recent_rows(tmp_path: Path):
+    from app.services import retention
+
+    db = str(tmp_path / "test.db")
+    init_database(db)
+    old = time.time() - 40 * 86400
+    rows = [
+        ("old-done", "completed", old), ("old-failed", "failed", old),
+        ("old-running", "running", old), ("old-queued", "queued", old),
+        ("new-done", "completed", time.time()),
+    ]
+    with get_db_connection(db) as conn:
+        for jid, state, ts in rows:
+            conn.execute(
+                "INSERT INTO jobs (id, kind, state, created_at, finished_at, updated_at) "
+                "VALUES (?, 'transcribe', ?, ?, ?, ?)",
+                (jid, state, ts, ts if state in ("completed", "failed") else None, ts),
+            )
+        conn.commit()
+    assert retention.purge_finished_jobs(db, days=30) == 2
+    with get_db_connection(db) as conn:
+        left = {r[0] for r in conn.execute("SELECT id FROM jobs")}
+    assert left == {"old-running", "old-queued", "new-done"}

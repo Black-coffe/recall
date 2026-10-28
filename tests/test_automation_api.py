@@ -136,7 +136,8 @@ def test_pipes_disabled_without_scheduler_and_pollers_reflect_extensions(env):
     _, body = _status(env, "?sections=pipes,pollers")
     assert body["sections"]["pipes"]["enabled"] is False
     assert body["sections"]["pipes"]["pipes"][0]["name"] == PIPE_NAME
-    assert body["sections"]["pollers"] == {"scheduler": False, "brief_buttons": True, "mail": False}
+    assert body["sections"]["pollers"] == {"scheduler": False, "brief_buttons": True, "mail": False,
+                                           "calendar": False}
 
 
 def test_pipes_section_reports_last_run_and_cooldown(env):

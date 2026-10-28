@@ -1258,3 +1258,123 @@ def test_v56_tg_chat_events_is_additive_and_idempotent(tmp_path: Path):
                          "VALUES ('2026-10-25', 1, 'title', 'mcp')")
     finally:
         conn.close()
+
+
+def test_v58_calendar_tables_are_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    init_database(db)                      # repeated run - no errors
+    conn = sqlite3.connect(db)
+    try:
+        for col in ('id', 'label', 'host', 'enabled', 'last_sync_at', 'last_error',
+                    'events_seen', 'events_with_attendees'):
+            assert col in _columns(conn, 'calendar_sources'), col
+        for col in ('source_id', 'uid', 'occurrence_key', 'start_utc', 'end_utc', 'all_day',
+                    'title', 'organizer', 'attendees', 'status'):
+            assert col in _columns(conn, 'calendar_events'), col
+        assert 'calendar_event_id' in _columns(conn, 'audio_downloads')
+        assert 'calendar_event_id' in _columns(conn, 'transcriptions')
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                            "AND name='idx_calendar_events_start'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 58"
+                            ).fetchone()[0] == 1
+        sid = conn.execute("INSERT INTO calendar_sources (label, host) VALUES ('g', 'h')").lastrowid
+        conn.execute("INSERT INTO calendar_events (source_id, uid, occurrence_key, start_utc, end_utc) "
+                     "VALUES (?, 'u', 'k', 's', 'e')", (sid,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO calendar_events (source_id, uid, occurrence_key, start_utc, end_utc) "
+                         "VALUES (?, 'u', 'k', 's2', 'e2')", (sid,))
+    finally:
+        conn.close()
+
+
+def test_v59_flips_every_old_status_to_legacy_once(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    conn = sqlite3.connect(db)
+    tid = conn.execute("INSERT INTO transcriptions (source_type, source_name) "
+                       "VALUES ('file', 'm')").lastrowid
+    old = ('open', 'stale', 'done', 'cancelled')
+    for st in old:
+        conn.execute("INSERT INTO action_items (transcription_id, task, status) "
+                     "VALUES (?, ?, ?)", (tid, f'task {st}', st))
+    # Pretend the rows were there before v59 ran.
+    conn.execute("UPDATE action_items SET pre_legacy_status = NULL")
+    conn.execute("DELETE FROM schema_versions WHERE version >= 59")
+    conn.commit()
+    conn.close()
+
+    init_database(db)
+    conn = sqlite3.connect(db)
+    try:
+        cols = _columns(conn, 'action_items')
+        for col in ('for_whom', 'confidence', 'importance', 'text_key', 'first_shown_at',
+                    'decided_at', 'pre_legacy_status'):
+            assert col in cols, col
+        assert 'payload_json' in _columns(conn, 'action_item_events')
+        for idx in ('idx_action_items_text_key', 'idx_action_items_status_shown'):
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                                "AND name=?", (idx,)).fetchone()[0] == 1, idx
+        rows = conn.execute("SELECT task, status, pre_legacy_status FROM action_items").fetchall()
+        assert {r[1] for r in rows} == {'legacy'}
+        assert {(r[0], r[2]) for r in rows} == {(f'task {s}', s) for s in old}
+        desc = conn.execute("SELECT description FROM schema_versions WHERE version = 59"
+                            ).fetchone()[0]
+        assert '4 rows' in desc
+    finally:
+        conn.close()
+
+    init_database(db)                      # second run changes nothing
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 59"
+                            ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM action_items WHERE status = 'legacy' "
+                            "AND pre_legacy_status IS NOT NULL").fetchone()[0] == 4
+        assert list(_columns(conn, 'action_items')).count('decided_at') == 1
+    finally:
+        conn.close()
+
+
+def test_v60_meeting_brief_sent_is_additive_and_idempotent(tmp_path: Path):
+    db = str(tmp_path / 'test.db')
+    init_database(db)
+    # Pretend the DB stopped at v59: no marker table, no version 60 row.
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE IF EXISTS meeting_brief_sent")
+    conn.execute("DELETE FROM schema_versions WHERE version >= 60")
+    conn.commit()
+    conn.close()
+
+    init_database(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert _schema_version(conn) == 60
+        cols = _columns(conn, 'meeting_brief_sent')
+        for col in ('event_id', 'start_utc', 'status', 'attempts', 'last_error', 'sent_at'):
+            assert col in cols, col
+        assert cols['attempts']['default'] == '0'
+        assert cols['event_id']['notnull'] and cols['start_utc']['notnull']
+        assert cols['status']['notnull'] and not cols['sent_at']['notnull']
+        conn.execute("INSERT INTO meeting_brief_sent (event_id, start_utc, status) "
+                     "VALUES (1, '2026-10-28T10:00:00Z', 'pending')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO meeting_brief_sent (event_id, start_utc, status) "
+                         "VALUES (1, '2026-10-28T10:00:00Z', 'sent')")
+        # A later occurrence of the same event is a distinct row.
+        conn.execute("INSERT INTO meeting_brief_sent (event_id, start_utc, status) "
+                     "VALUES (1, '2026-10-29T10:00:00Z', 'pending')")
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 60"
+                            ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    init_database(db)                      # repeated run - no errors, no duplicate version row
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM schema_versions WHERE version = 60"
+                            ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM meeting_brief_sent").fetchone()[0] == 2
+    finally:
+        conn.close()

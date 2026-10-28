@@ -931,3 +931,16 @@ def test_map_claude_answer_takes_id_only_from_a_whole_integer(db: str):
     cid, reason, paths = scope._map_claude_answer("Маркетинг", cats)
     assert cid is None and reason == "ambiguous"
     assert paths == ["Фонд Робота → Маркетинг", "Фріланс → Маркетинг"]
+
+
+def test_apply_chats_reports_only_really_queued_reembed(db, tmp_path, monkeypatch):
+    """Records changed, but the scheduler queued nothing (no embeddings / stale epoch):
+    the pass must report 0, not the number of changed records."""
+    monkeypatch.setattr("app.services.reembed.schedule_records_reembed",
+                        lambda ids, **kw: {"mode": "none", "count": 0, "stale": 0})
+    _add_tg_records(db, [(70, -701)])
+    path = _mapping(tmp_path, [{"chat_id": -701, "title": "Маркетинг голий",
+                                "category": "Маркетинг"}])
+    res = scope.apply_chat_categories(db, mapping_path=path)
+    assert res["records_recategorized"] > 0
+    assert res["reembed_scheduled"] == 0

@@ -20,6 +20,8 @@ Endpoints:
 - ``GET    /api/recording/<sid>/live-frames`` — frames (base64 + masked OCR text), paged.
 - ``GET    /api/recording/<sid>/stream``  — SSE: level/status/chunk_saved/error.
 - ``POST   /api/recording/<sid>/system-source`` — retarget system audio (ADR-026 D3).
+- ``POST   /api/recording/<sid>/gain``    — mic/system gain (dB) applied at finalize.
+- ``GET    /api/recording/participants``  — calendar-suggested persons; ``?q=`` adds matches.
 - ``GET    /api/recording/apps``          — applications that are sounding now (C3).
 - ``GET    /api/recording/autoprompt``    — call prompts awaiting an answer (K2).
 - ``GET    /api/recording/autoprompt/<token>/<action>`` — notification buttons (one-shot).
@@ -41,12 +43,13 @@ from urllib.parse import urlencode
 from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, stream_with_context
 
 from app import state
-from app.core import auth
+from app.core import auth, settings
 from app.core.i18n import request_lang, server_lang, tr
 from app.services import record_meta
 from app.services.recording import guards, start_notice, stop_control
 from app.services.recording.audio_source import SystemSpec, UnsupportedSourceSpecError
 from app.services.recording.service import (
+    DeviceAccessDeniedError,
     NoSystemStreamError,
     RecordingError,
     SessionConflictError,
@@ -84,6 +87,12 @@ _AGENT_COPILOT_SPEND_KEYS = ('api_enabled', 'budget_usd', 'escalate')
 # POST /stop gives the background stop this long to finish before answering 'stopping'.
 _STOP_GRACE_SEC = 0.3
 _TOAST_ICON = Path(__file__).resolve().parents[2] / 'static' / 'icon-192.png'
+# Mic/system gain range (dB) the owner may set; finalize applies it to the final mix.
+_GAIN_MIN_DB = -20.0
+_GAIN_MAX_DB = 20.0
+_GAIN_KEYS = ('mic_db', 'system_db')
+# Journal reasons of a call-recording start (start_call_recording).
+_CALL_START_REASONS = ('SESSION_LIMIT', 'DEVICE_ACCESS_DENIED')
 
 
 # ---------------------------------------------------------------- helpers
@@ -449,6 +458,23 @@ def _start_session(data: dict, *, started_by: str):
     rec_name = data.get('name')
     rec_name = (rec_name.strip()[:200] or None) if isinstance(rec_name, str) else None
 
+    # Gain (dB) applied at finalize, and the persons the owner picked as participants.
+    gain = None
+    if data.get('gain') is not None:
+        try:
+            gain = _parse_gain(data['gain'], {'mic_db': 0.0, 'system_db': 0.0})
+        except ValueError:
+            return _bad_gain_response()
+    raw_participants = data.get('participants')
+    if raw_participants is not None and not isinstance(raw_participants, list):
+        return jsonify({
+            'success': False, 'error': 'participants must be a list of person ids',
+            'error_code': 'INVALID_ARGUMENT',
+        }), 400
+    picked = _known_participants(raw_participants) if raw_participants else None
+    # One non-blocking line on every start, whatever started it; off leaves today's responses.
+    consent = settings.env_bool('RECORDING_CONSENT_REMINDER')
+
     if agent:
         # Avoid a toast for a start that cannot happen; a race after the toast stays a 409 below.
         limit = getattr(state.recording_service, '_max_active', None)
@@ -477,6 +503,7 @@ def _start_session(data: dict, *, started_by: str):
             claimed_label=_claimed_label() or 'unknown',
             lang=server_lang(),
             icon_path=str(_TOAST_ICON) if _TOAST_ICON.is_file() else None,
+            **({'consent_reminder': True} if consent else {}),
         )
         if not shown:
             return jsonify({
@@ -505,6 +532,15 @@ def _start_session(data: dict, *, started_by: str):
         }), 409
     except UnsupportedSourceSpecError as e:
         return _unsupported_spec_response(e)
+    except DeviceAccessDeniedError as e:
+        logger.warning("start refused by Windows: %s", e)
+        stream = 'system' if e.stream == 'system' else 'mic'
+        return jsonify({
+            'success': False,
+            'error': tr(f'capture.rec.err.access_denied_{stream}'),
+            'error_code': 'DEVICE_ACCESS_DENIED',
+            'stream': stream,
+        }), 403
     except RecordingError as e:
         return jsonify({
             'success': False,
@@ -517,6 +553,10 @@ def _start_session(data: dict, *, started_by: str):
 
     if max_min is not None or rec_name is not None:
         _apply_start_limits(sid, max_min, rec_name)
+    if gain is not None or picked is not None:
+        _apply_start_meta(sid, gain, picked)
+    if consent:
+        _apply_consent_flag(sid)
 
     # Invalidate the device cache — the next GET will load fresh ones
     with _devices_lock:
@@ -583,7 +623,7 @@ def _start_session(data: dict, *, started_by: str):
     else:
         system_source = None
 
-    return jsonify({
+    body = {
         'success': True,
         'session_id': sid,
         'sse_url': f'/api/recording/{sid}/stream',
@@ -592,7 +632,21 @@ def _start_session(data: dict, *, started_by: str):
         'copilot': copilot_summary,
         'system_source': system_source,
         'video': video_summary,
-    })
+    }
+    if consent:
+        body['consent_reminder'] = True
+    return jsonify(body)
+
+
+def _apply_consent_flag(sid: str) -> None:
+    """Mark the manifest ``consent_reminder: true`` so /state can show the line on attach."""
+    def _write(mf: dict) -> None:
+        mf['consent_reminder'] = True
+
+    try:
+        state.recording_service.store.modify(sid, _write)
+    except SessionStoreError:
+        logger.warning("start: could not write the consent flag into %s", sid, exc_info=True)
 
 
 def _parse_duration_min(raw) -> int | None:
@@ -627,6 +681,144 @@ def _apply_start_limits(sid: str, max_min: int | None, name: str | None) -> None
     if max_min is not None:
         stop_control.arm_timer(sid, max_min, stop_fn=stop_session,
                                is_live=state.recording_service.is_active)
+
+
+def _gain_db(raw) -> float:
+    """One gain value in dB: a finite number in the allowed range, else ValueError."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError('gain must be a number')
+    value = float(raw)
+    if not (_GAIN_MIN_DB <= value <= _GAIN_MAX_DB):   # also refuses NaN
+        raise ValueError('gain out of range')
+    return value
+
+
+def _parse_gain(raw, base: dict) -> dict:
+    """``{mic_db?, system_db?}`` merged over ``base``; ValueError on any bad or unknown key."""
+    if not isinstance(raw, dict) or not raw or any(k not in _GAIN_KEYS for k in raw):
+        raise ValueError('gain takes mic_db and/or system_db')
+    out = {k: float(base.get(k) or 0.0) for k in _GAIN_KEYS}
+    for k, v in raw.items():
+        out[k] = _gain_db(v)
+    return out
+
+
+def _bad_gain_response():
+    return jsonify({
+        'success': False,
+        'error': tr('capture.rec.err.bad_gain', low=int(_GAIN_MIN_DB), high=int(_GAIN_MAX_DB)),
+        'error_code': 'INVALID_ARGUMENT',
+    }), 400
+
+
+def manifest_gain(manifest: dict | None) -> tuple[float, float]:
+    """``(mic_gain_db, system_gain_db)`` of a recording manifest; 0 for an absent or bad value.
+    The finalize callback in app.py passes these to ``finalize_session``."""
+    raw = manifest.get('gain') if isinstance(manifest, dict) else None
+    if not isinstance(raw, dict):
+        return 0.0, 0.0
+    out = []
+    for k in _GAIN_KEYS:
+        try:
+            out.append(_gain_db(raw.get(k, 0.0)))
+        except ValueError:
+            logger.warning("manifest gain %s=%r ignored", k, raw.get(k))
+            out.append(0.0)
+    return out[0], out[1]
+
+
+def _participants_db():
+    """The archive DB path, or None outside a configured app."""
+    return current_app.config.get('DATABASE')
+
+
+def _known_participants(raw: list) -> list[int]:
+    """The ids in ``raw`` that are existing persons, in input order; [] when the DB is unreadable."""
+    from app.db.connection import get_db_connection
+    from app.services.recording import participants
+    ids = participants._person_ids(raw)
+    db = _participants_db()
+    if not ids or not db:
+        return []
+    try:
+        with get_db_connection(db) as conn:
+            known = participants._names(conn, ids)
+    except Exception:
+        logger.warning("start: participants lookup failed, none stored", exc_info=True)
+        return []
+    return [i for i in ids if i in known]
+
+
+def _apply_start_meta(sid: str, gain: dict | None, picked: list[int] | None) -> None:
+    """Write the start gain and the picked participants into the manifest."""
+    def _write(mf: dict) -> None:
+        if gain is not None:
+            mf['gain'] = gain
+        if picked is not None:
+            mf['participants'] = picked
+
+    try:
+        state.recording_service.store.modify(sid, _write)
+    except SessionStoreError:
+        logger.warning("start: could not write gain/participants into %s", sid, exc_info=True)
+
+
+@recording_bp.route('/api/recording/participants', methods=['GET'])
+def recording_participants():
+    """Persons for the participants picker: ``suggested`` from the calendar now; ``?q=`` adds
+    ``matches`` by name or alias. Both lists carry ``{id, name}`` only."""
+    from app.db.connection import get_db_connection
+    from app.services.recording import participants
+    q = (request.args.get('q') or '').strip()
+    body: dict = {'success': True, 'suggested': []}
+    if q:
+        body['matches'] = []
+    db = _participants_db()
+    if not db:
+        return jsonify(body)
+    try:
+        with get_db_connection(db) as conn:
+            body['suggested'] = [{'id': p['id'], 'name': p['name']} for p in participants.suggest(conn)]
+            if q:
+                body['matches'] = [{'id': p['id'], 'name': p['name']}
+                                   for p in participants.search(conn, q)]
+    except Exception as e:
+        logger.exception("participants lookup crashed: %s", e)
+        return _internal_error_response('DB_ERROR')
+    return jsonify(body)
+
+
+@recording_bp.route('/api/recording/<session_id>/gain', methods=['POST'])
+def set_gain(session_id: str):
+    """Set the mic and/or system gain (dB) of a recording; finalize applies it to the final mix.
+
+    Body: ``{mic_db?: number, system_db?: number}``, each in -20..20."""
+    err = _require_service()
+    if err:
+        return err
+    refusal = _owner_session_refusal(session_id)
+    if refusal:
+        return refusal
+    store = state.recording_service.store
+    try:
+        current = store.read(session_id)
+    except SessionStoreError:
+        return jsonify({'success': False, 'error': tr('capture.rec.err.session_not_found'),
+                        'error_code': 'NOT_FOUND'}), 404
+    try:
+        gain = _parse_gain(request.get_json(silent=True), current.get('gain') or {})
+    except ValueError:
+        return _bad_gain_response()
+
+    def _write(mf: dict) -> None:
+        mf['gain'] = gain
+
+    try:
+        store.modify(session_id, _write)
+    except SessionStoreError:
+        return jsonify({'success': False, 'error': tr('capture.rec.err.session_not_found'),
+                        'error_code': 'NOT_FOUND'}), 404
+    return jsonify({'success': True, 'session_id': session_id, 'gain': gain})
 
 
 # ---------------------------------------------------------------- pause/resume/stop/discard
@@ -812,8 +1004,8 @@ def autoprompt_dismiss(prompt_id: str):
 def autoprompt_action(token: str, action: str):
     """Windows notification buttons open this URL in the browser. Token = prompt id,
     one-shot and alive while its call or recording lives: without it nothing
-    starts, so a foreign site cannot turn a recording on. ``record`` starts the microphone + sound
-    of this application only, with the same code as ``POST /start``.
+    starts, so a foreign site cannot turn a recording on. ``record`` starts the owner's default
+    sources (``start_call_recording``, the same code as ``POST /start``) and journals the outcome.
 
     A non-UI caller that names itself (``X-Recall-Actor``) is refused before the token is spent:
     an owner-class start skips the toast and the 180-min clamp, and a stop skips the dialog."""
@@ -843,20 +1035,63 @@ def autoprompt_action(token: str, action: str):
         # recording-autosave: land on THIS recording's save screen, not the empty setup form.
         return redirect('/record?' + urlencode({'stopped': info['session_id']}))
 
-    body: dict = {'system_source': {'mode': 'include', 'apps': [info['exe']]}}
-    mic = _mic_for(info.get('mic_endpoint'))
-    if mic is not None:
-        body['mic_device_index'] = mic['index']
-        body['mic_device_name'] = mic.get('name')
-    resp = _start_session(body, started_by='call_prompt')
-    resp, code = resp if isinstance(resp, tuple) else (resp, resp.status_code)
-    payload = resp.get_json(silent=True) or {}
-    if payload.get('success'):
+    res = start_call_recording(info['exe'], started_by='call_prompt')
+    try:
+        if res['ok']:
+            watcher.log_result(token, ok=True, session_id=res['session_id'])
+        else:
+            watcher.log_result(token, ok=False, reason=res['reason'])
+    except Exception:
+        logger.warning("autoprompt: journaling the record result failed", exc_info=True)
+    if res['ok']:
         return redirect('/record')
-    if payload.get('error_code') == 'SESSION_LIMIT':
+    if res['reason'] == 'SESSION_LIMIT':
         return _autoprompt_page(tr('capture.rec.page.not_started'),
-                                tr('capture.rec.page.limit', limit=payload.get('limit')), 409)
-    return _autoprompt_page(tr('capture.rec.page.not_started'), payload.get('error') or tr('capture.rec.page.see_log'), code)
+                                tr('capture.rec.page.limit', limit=res.get('limit')), 409)
+    return _autoprompt_page(tr('capture.rec.page.not_started'),
+                            res.get('error') or tr('capture.rec.page.see_log'), res.get('status') or 500)
+
+
+def start_call_recording(exe: str, *, started_by: str) -> dict:
+    """Start the owner's default sources for a call in ``exe``: the Windows default microphone and
+    all system audio (``{mode:'all'}``) on the default loopback. Shared by the «Record» button of
+    the call prompt (``started_by='call_prompt'``) and the opt-in auto-record of the call watcher
+    (``'auto_call'``, called from its thread under ``app.app_context()``, no request).
+
+    Never raises. Returns ``{ok: True, session_id}`` or ``{ok: False, reason, error_code, error,
+    status, limit?}`` where ``reason`` is ``SESSION_LIMIT``, ``DEVICE_ACCESS_DENIED``,
+    ``NO_SYSTEM_DEVICE`` or ``RECORDING_START_FAILED`` (the call journal's words)."""
+    try:
+        if state.recording_service is None:
+            return {'ok': False, 'reason': 'RECORDING_START_FAILED', 'error_code': 'RECORDING_DISABLED',
+                    'error': tr('capture.rec.err.disabled'), 'status': 503}
+        loop = _default_loopback()
+        if loop is None:
+            return {'ok': False, 'reason': 'NO_SYSTEM_DEVICE', 'error_code': 'NO_STREAMS',
+                    'error': tr('capture.rec.err.need_source'), 'status': 400}
+        body = {'mic': 'default', 'system_source': {'mode': 'all'},
+                'system_device_index': loop['index'], 'system_device_name': loop.get('name')}
+        resp = _start_session(body, started_by=started_by)
+        resp, code = resp if isinstance(resp, tuple) else (resp, resp.status_code)
+        payload = resp.get_json(silent=True) or {}
+    except Exception as e:
+        logger.exception("call recording start for %s crashed: %s", exe, e)
+        return {'ok': False, 'reason': 'RECORDING_START_FAILED', 'error_code': 'INTERNAL',
+                'error': tr('core.error.internal'), 'status': 500}
+    if payload.get('success'):
+        logger.info("call recording %s started for %s (%s)", payload['session_id'], exe, started_by)
+        out = {'ok': True, 'session_id': payload['session_id']}
+        if payload.get('consent_reminder'):
+            out['consent_reminder'] = True
+        return out
+    error_code = payload.get('error_code') or 'RECORDING_START_FAILED'
+    reason = error_code if error_code in _CALL_START_REASONS else 'RECORDING_START_FAILED'
+    out = {'ok': False, 'reason': reason, 'error_code': error_code,
+           'error': payload.get('error'), 'status': code}
+    if 'limit' in payload:
+        out['limit'] = payload['limit']
+    logger.warning("call recording for %s not started (%s): %s", exe, started_by, error_code)
+    return out
 
 
 def _autosave():
@@ -1185,6 +1420,13 @@ def get_state_endpoint(session_id: str):
         snapshot = state.recording_service.get_state(session_id)
     except SessionNotFoundError as e:
         return jsonify({'success': False, 'error': str(e), 'error_code': 'NOT_FOUND'}), 404
+    try:
+        manifest = state.recording_service.store.read(session_id)
+    except SessionStoreError:
+        manifest = None
+    mic_db, system_db = manifest_gain(manifest)
+    snapshot['gain'] = {'mic_db': mic_db, 'system_db': system_db}
+    snapshot['consent_reminder'] = bool(isinstance(manifest, dict) and manifest.get('consent_reminder'))
     if snapshot.get('is_active') is False:
         # recording-autosave: the save screen needs the deadline and the length of a stopped recording.
         sched = _autosave()

@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.db.connection import get_db_connection
-from app.services import commitments
+from app.services import commitments, task_proposals
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +302,7 @@ def extract_thread(db_path: str, thread_id: int, *, model: Optional[str] = None,
         res = text_polishing.extract_chat_tasks(
             payload, chat_title=head.get("chat_title"), thread_label=head.get("label"),
             model=model or TASKS_MODEL, effort=effort,
+            owner_names=task_proposals.owner_names(db_path),
         )
     except Exception as e:
         # As in _enrich_card: one failed extraction does not fail the pass, the thread
@@ -323,12 +324,17 @@ def extract_thread(db_path: str, thread_id: int, *, model: Optional[str] = None,
         # Idempotence: we erase ONLY this thread's own rows. Tasks that
         # came from a Claude call card (source IS NULL) are not touched — they
         # are not ours, and 152 such rows are already in the archive.
+        # ADR-056: only undecided proposals are erased; a decided row survives the re-run.
         c.execute(
-            "DELETE FROM action_items WHERE source = ? AND transcription_id IN "
-            "(SELECT id FROM transcriptions WHERE tg_thread_id = ?)",
+            "DELETE FROM action_items WHERE source = ? AND status = 'proposed' AND "
+            "transcription_id IN (SELECT id FROM transcriptions WHERE tg_thread_id = ?)",
             (SOURCE, thread_id))
 
-        for t in res.get("tasks", []):
+        kept, dropped = task_proposals.filter_candidates(
+            res.get("tasks", []), min_confidence=task_proposals.min_confidence())
+        skipped_decided = 0
+        keys_by_tx: dict[int, set[str]] = {}
+        for t in kept:
             task = str(t.get("task") or "").strip()
             if not task:
                 continue
@@ -338,6 +344,13 @@ def extract_thread(db_path: str, thread_id: int, *, model: Optional[str] = None,
                 tx_id = fallback_id
             if tx_id is None:
                 continue
+            if tx_id not in keys_by_tx:
+                keys_by_tx[tx_id] = task_proposals.existing_keys(c, tx_id)
+            key = task_proposals.text_key(task)
+            if key in keys_by_tx[tx_id]:
+                skipped_decided += 1
+                continue
+            keys_by_tx[tx_id].add(key)
             owner = _clean_owner(t.get("owner"))
             raw_due = t.get("due")
             raw_due = str(raw_due).strip() if raw_due else None
@@ -349,20 +362,27 @@ def extract_thread(db_path: str, thread_id: int, *, model: Optional[str] = None,
                 due_prec = due_prec or commitments.P_DAY
             c.execute(
                 "INSERT INTO action_items (transcription_id, task, owner_name, "
-                "due, due_date, due_precision, status, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
-                (tx_id, task, owner, raw_due, due_date, due_prec, SOURCE))
+                "due, due_date, due_precision, status, source, text_key, for_whom, "
+                "confidence, importance) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)",
+                (tx_id, task, owner, raw_due, due_date, due_prec, SOURCE,
+                 key, t["for_whom"], t["confidence"], t["importance"]))
             saved += 1
 
         c.execute("UPDATE tg_threads SET tasks_at = CURRENT_TIMESTAMP, tasks_model = ? "
                   "WHERE id = ?", (res.get("model") or "", thread_id))
         conn.commit()
 
-    logger.info("[tg_tasks] thread %s: tasks=%d (in=%d out=%d)", thread_id, saved,
+    logger.info("[tg_tasks] thread %s: tasks=%d skipped_decided=%d dropped_third_party=%d "
+                "dropped_low_confidence=%d (in=%d out=%d)", thread_id, saved, skipped_decided,
+                dropped["third_party"], dropped["low_confidence"],
                 res.get("input_tokens", 0), res.get("output_tokens", 0))
     return {"thread_id": thread_id, "status": "ok", "tasks": saved,
             "input_tokens": res.get("input_tokens", 0),
-            "output_tokens": res.get("output_tokens", 0)}
+            "output_tokens": res.get("output_tokens", 0),
+            "skipped_decided": skipped_decided,
+            "dropped_third_party": dropped["third_party"],
+            "dropped_low_confidence": dropped["low_confidence"]}
 
 
 def extract_all(db_path: str, *, dry_run: bool = True, chat_id: Optional[int] = None,

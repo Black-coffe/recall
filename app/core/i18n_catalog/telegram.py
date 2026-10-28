@@ -268,6 +268,74 @@ MESSAGES: dict = {
         "uk": "Невідома кнопка",
         "en": "Unknown button",
     },
+    "telegram.brief.stuck": {
+        "uk": "⏳ Застрягли — затверджені й не зрушили",
+        "en": "⏳ Stuck — approved and not moving",
+    },
+    "telegram.brief.stuckOld": {
+        "uk": "затверджено понад {days} дн. тому",
+        "en": "approved over {days} days ago",
+    },
+    "telegram.brief.proposals.title": {
+        "uk": "🆕 Пропозиції задач",
+        "en": "🆕 Task proposals",
+    },
+    "telegram.brief.proposals.queue": {
+        "uk": "{n} із {queued} у черзі",
+        "en": "{n} of {queued} in the queue",
+    },
+    "telegram.brief.proposals.expired": {
+        "uk": "Минуло 3 дні без відповіді — сховано: {n} (повертаються в Recall).",
+        "en": "Three days without an answer — hidden: {n} (they come back in Recall).",
+    },
+    "telegram.brief.proposals.forWhom.owner": {
+        "uk": "моя",
+        "en": "mine",
+    },
+    "telegram.brief.proposals.forWhom.promised_to_owner": {
+        "uk": "обіцяли мені",
+        "en": "promised to me",
+    },
+    "telegram.brief.proposals.forWhom.unknown": {
+        "uk": "чия — неясно",
+        "en": "whose — unclear",
+    },
+    "telegram.brief.proposals.importance.1": {
+        "uk": "▫️ дрібниця",
+        "en": "▫️ minor",
+    },
+    "telegram.brief.proposals.importance.2": {
+        "uk": "🔸 звичайна",
+        "en": "🔸 normal",
+    },
+    "telegram.brief.proposals.importance.3": {
+        "uk": "🔺 важлива",
+        "en": "🔺 important",
+    },
+    "telegram.brief.proposals.stats": {
+        "uk": "📊 Пропозиції: показано {shown} → натиснуто {pressed} · днів розбору {days} із {window} · активних задач {active}",
+        "en": "📊 Proposals: shown {shown} → pressed {pressed} · review days {days} of {window} · active tasks {active}",
+    },
+    "telegram.brief.proposals.noTable": {
+        "uk": "таблиці задач ще немає",
+        "en": "there is no task table yet",
+    },
+    "telegram.btn.yes": {
+        "uk": "✅ Так",
+        "en": "✅ Yes",
+    },
+    "telegram.btn.no": {
+        "uk": "❌ Ні",
+        "en": "❌ No",
+    },
+    "telegram.btn.label.approve": {
+        "uk": "✅ прийнято",
+        "en": "✅ approved",
+    },
+    "telegram.btn.label.reject": {
+        "uk": "❌ відхилено",
+        "en": "❌ rejected",
+    },
     "telegram.err.filePath": {
         "uk": "file_path відсутній або поза telegram_media/",
         "en": "file_path is missing or outside telegram_media/",

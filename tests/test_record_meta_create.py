@@ -311,6 +311,42 @@ class TestLibraryInheritance:
         assert _audio_row(db_path, aid)["title"] == TITLE
 
 
+class TestRecordingSourceDescription:
+    """wave2-recording-calls-02: a recording transcript inherits the manifest description."""
+
+    @pytest.fixture
+    def rec_source(self, tx_env, monkeypatch):
+        from types import SimpleNamespace
+        from app.services import diarization_service as ds
+        client, db_path, _, tmp_path = tx_env
+        mp3 = tmp_path / "rec_final.mp3"
+        mp3.write_bytes(b"fake mp3")
+        manifest = {"status": "finalized", "final_mp3_path": str(mp3), "name": "Планірка",
+                    "description": DESCRIPTION}
+        store = SimpleNamespace(read=lambda sid: dict(manifest))
+        monkeypatch.setattr(state, "recording_service", SimpleNamespace(store=store))
+        off = SimpleNamespace(is_available=lambda: False, unavailability_reason=lambda: "test")
+        monkeypatch.setattr(ds.DiarizationService, "get_instance", classmethod(lambda cls: off))
+        return client, db_path
+
+    def _post(self, client, **extra):
+        data = {"source_type": "recording", "recording_session_id": "rec_desc01"}
+        data.update(extra)
+        return client.post("/api/transcribe", data=data)
+
+    def test_empty_form_description_takes_the_manifest_one(self, rec_source):
+        client, db_path = rec_source
+        r = self._post(client, description="  ")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert _tx_row(db_path, r.get_json()["transcription_id"])["description"] == DESCRIPTION
+
+    def test_typed_description_is_kept_verbatim(self, rec_source):
+        client, db_path = rec_source
+        r = self._post(client, description="Свій опис")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert _tx_row(db_path, r.get_json()["transcription_id"])["description"] == "Свій опис"
+
+
 # ============================================================
 # 4. Recorder stop screen -> manifest -> Audio library
 # ============================================================

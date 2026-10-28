@@ -2,7 +2,7 @@
 domain: scheduled-pipes
 tags: [k4, k5, telegram-bot, privacy, scheduler, brief-cards]
 related: [video-timeline-and-screen-secrets.md, rag-context-integrity.md]
-last-verified: 2026-10-25
+last-verified: 2026-10-28
 ---
 
 # Scheduled pipes: what leaves the archive through the bot
@@ -28,6 +28,7 @@ Task buttons (K5, 4.15.0): tasks in a brief are numbered and the message carries
 - Status and due date change only through `commitments.apply_action` / `undo_action` (bot and web `PATCH /api/memory/action-items/<id>`), which write the change and its `action_item_events` row in one transaction. Undo reverts only the latest event of a task. The MCP `task` tool (4.26.0) goes through the same route and is stamped `source='mcp'`; a pipe itself never writes (the registry stays read-only).
 - Daily MCP summary (4.31.0, `pipes/mcp-actions.md`, tool `mcp_actions`, no model): lists what non-UI callers did in 24 h. A line gets an undo button (`m:<n>:t|c:<ref>`) only while its event is the last for that task, or for that chat and kind; offered inverses are task actions, chat direction changes and chat disables only. A chat undo goes through `telegram_chats.undo_event(source='bot')` and is refused when a later change exists (including one made in the SPA without a journal row), when the move would leave a private direction, or when the event created the chat. Items carrying a private `category_id` are hidden like any private item.
 - A pipe can also be run on demand (`POST /api/pipes/<name>/run`, MCP `pipes`): same recipient, same filters, one run per 10 min per pipe, not moving the schedule; `trigger='mcp'`.
+- Pre-meeting card (4.37.0, `app/services/meeting_brief.py`, not a pipe): `MeetingBriefTicker` sends the same filter -> `_Guard` render -> stop-word re-check chain, per event occurrence `(event_id, start_utc)` in `meeting_brief_sent`. Only `sent` and `skipped` (title or card carries a stop word, or no attendee names) close the marker; a `failed` send or `PrivacyError` is retried every tick until the event starts. The skip reason is a code (`private`, `no_people`), never the word. Attendees match EXISTING graph persons only; an unmatched one is shown by name with no tasks (no LIKE on a bare name). The same data after `filter_brief` is served by `GET /api/meeting-brief` and MCP `get_meeting_brief`.
 - `tg_bot.whoami` sets `allowed_updates` explicitly because Telegram remembers the poller's `callback_query`-only filter.
 
 Verified in: `app/services/brief_actions.py` (`handle`, `ButtonPoller`), `app/services/commitments.py:1395-1463`, `app.py:1274-1281`, `app/services/pipes.py` (`run_pipe`, `render_claude`, `_next_attempt`), `app/services/pipes_cards.py` (`render`, `_Guard`, `link_base`), `app/services/pipes_privacy.py` (`filter_data`, `mask`, `leaked_words`), `app/services/tg_bot.py` (`send`, `split_text`), `app/core/auth.py:100-147` (`_proxied_client`, `_is_authorized`), `app.py:1250` (`_maybe_start_pipes`).

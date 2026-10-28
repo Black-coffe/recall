@@ -12,9 +12,17 @@ MESSAGES: dict = {
         "uk": "Ключ Anthropic",
         "en": "Anthropic key",
     },
-    "connect.warning": {
-        "uk": "Продовжуйте лише якщо ви самі попросили підключити цю пошту або задати цей ключ.",
-        "en": "Only continue if you asked to connect this mailbox / set this key.",
+    "connect.warning.mail": {
+        "uk": "Продовжуйте лише якщо ви самі попросили підключити цю пошту.",
+        "en": "Only continue if you asked to connect this mailbox.",
+    },
+    "connect.warning.anthropic_key": {
+        "uk": "Продовжуйте лише якщо ви самі попросили задати цей ключ.",
+        "en": "Only continue if you asked to set this key.",
+    },
+    "connect.warning.calendar": {
+        "uk": "Продовжуйте лише якщо ви самі попросили підключити цей календар.",
+        "en": "Only continue if you asked to connect this calendar.",
     },
     "connect.requestedByMcp": {
         "uk": "Запит від MCP-агента о {time}",
@@ -71,6 +79,34 @@ MESSAGES: dict = {
     "connect.done.anthropic_key": {
         "uk": "Ключ збережено.",
         "en": "The key is saved.",
+    },
+    "connect.title.calendar": {
+        "uk": "Підключення календаря",
+        "en": "Connect a calendar",
+    },
+    "connect.label.calendarName": {
+        "uk": "Календар",
+        "en": "Calendar",
+    },
+    "connect.label.calendarSecret": {
+        "uk": "Секретна адреса ICS (Google: «Секретна адреса у форматі iCal»; Outlook: «Опублікувати календар» → ICS)",
+        "en": "Secret ICS address (Google: \"Secret address in iCal format\"; Outlook: \"Publish a calendar\" → ICS)",
+    },
+    "connect.err.calendarUrl": {
+        "uk": "Це не адреса https:// або webcal:// календаря.",
+        "en": "This is not an https:// or webcal:// calendar address.",
+    },
+    "connect.err.calendarHost": {
+        "uk": "Підтримуються лише адреси Google Calendar і Outlook.",
+        "en": "Only Google Calendar and Outlook addresses are supported.",
+    },
+    "connect.err.calendarParse": {
+        "uk": "За цією адресою не календар ICS.",
+        "en": "The address does not return an ICS calendar.",
+    },
+    "connect.done.calendar": {
+        "uk": "Календар підключено. Подій у вікні ±30 днів: {events}, з них з учасниками: {with_attendees}.",
+        "en": "Calendar connected. Events within ±30 days: {events}, with attendees: {with_attendees}.",
     },
     "connect.done.close": {
         "uk": "Цю вкладку можна закрити.",

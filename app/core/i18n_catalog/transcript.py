@@ -24,6 +24,18 @@ MESSAGES: dict = {
         "uk": "segment_index виходить за межі",
         "en": "segment_index is out of range",
     },
+    "transcript.clip.note_label": {
+        "uk": "Нотатка",
+        "en": "Note",
+    },
+    "transcript.clip.pad_range": {
+        "uk": "pad мусить бути числом від 0 до {max} секунд",
+        "en": "pad must be a number from 0 to {max} seconds",
+    },
+    "transcript.clip.unavailable": {
+        "uk": "Не вдалося вирізати кліп: ffmpeg недоступний або завершився з помилкою",
+        "en": "Could not cut the clip: ffmpeg is unavailable or failed",
+    },
     "transcript.err.already_in_lang": {
         "uk": "Транскрипт вже на мові '{lang}'",
         "en": "The transcript is already in '{lang}'",
@@ -33,8 +45,8 @@ MESSAGES: dict = {
         "en": "Transcription of this record is already running",
     },
     "transcript.err.api_key_env": {
-        "uk": "ANTHROPIC_API_KEY не встановлено. Створіть .env у корені проекту з ключем.",
-        "en": "ANTHROPIC_API_KEY is not set. Create a .env file in the project root with the key.",
+        "uk": "Ключ Claude API не задано. Додайте його в Налаштуваннях (розділ «API-ключ Claude»).",
+        "en": "The Claude API key is not set. Add it in Settings (the «Claude API key» section).",
     },
     "transcript.err.api_key_unset": {
         "uk": "ANTHROPIC_API_KEY не встановлено.",

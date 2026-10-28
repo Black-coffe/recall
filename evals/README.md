@@ -525,3 +525,29 @@ network call or DB access whatsoever. Covered by
 answer strings) — no real `ANTHROPIC_API_KEY` or GPU is needed.
 This is the part that is EASY and NECESSARY to keep in a regular `pytest` run;
 `run_eval.py` (real retrieval/RAG calls) is separate, a manual run.
+
+## Task re-run measurement (`evals.task_rerun_measure`)
+
+ADR-056 matches a re-extracted task to a decided one by an EXACT key
+(`task_proposals.text_key`: sha1 of NFC, casefolded, punctuation-stripped,
+whitespace-collapsed text) within one record. Whether that is enough when the model
+rephrases a task on a re-run is measured here, not assumed.
+
+The script samples records that already hold meeting-card tasks (`action_items.source IS
+NULL`; Telegram threads and comments are not sampled), re-runs `extract_meeting_card` with
+the owner's names, and writes NOTHING to the DB (it opens it `mode=ro`). For each new candidate
+the report lists the nearest existing task of the same record, `exact_hit`, the token
+Jaccard over `commitments._tokens` (a report column only, never a production key),
+`for_whom`, `confidence`, a `missing_fields` flag and an empty `verdict` column for the hand
+pass. The summary gives candidates, exact hits and the non-compliance share.
+
+```bash
+# cost first - no Claude call
+.venv/Scripts/python.exe -m evals.task_rerun_measure --db evals/snapshots/<file>.db --sample 30 --dry-run
+# the paid run (needs a working ANTHROPIC_API_KEY, otherwise exit 2)
+.venv/Scripts/python.exe -m evals.task_rerun_measure --db evals/snapshots/<file>.db --sample 30 \
+    --out docs/specs/task-approval/rerun.local.md
+```
+
+Exit codes: `0` done, `2` usage / no DB / no key, `3` every extraction failed. A miss share
+above 10 % opens the next spec (Jaccard within the record), never embeddings.

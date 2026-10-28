@@ -154,3 +154,5 @@ fastmcp>=3.3,<4
 
 # Gmail ingest: app passwords live in the OS credential store, never in the DB or .env
 keyring>=25.7
+# k6-calendar-ics: ICS parsing + recurrence expansion (EXDATE, RECURRENCE-ID); LGPL-3.0, pip dependency
+recurring-ical-events==3.8.2

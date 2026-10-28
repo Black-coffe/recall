@@ -1,6 +1,10 @@
 """SQLite migrations with schema versioning.
 
-Current versions:
+The authoritative list of versions is the `schema_versions` table: every migration block
+below inserts its version with a one-line description. The notes here cover the early and
+the structurally important versions only; they are not a complete list.
+
+Notes by version:
   v1 - Base tables transcriptions + audio_downloads
   v2 - Indexes on created_at, source_type, language, youtube_id, title
   v3 - FTS5 virtual table + triggers for transcriptions
@@ -2275,6 +2279,101 @@ def init_database(db_path: str):
         c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
                   "(57, 'copilot_sessions.reingest_transcription_id + reingest_by')")
         logger.info("Migration v57: copilot reingest link")
+
+    # === v58: calendar sources + events + recording binding (k6-calendar-ics) ===
+    # The ICS address itself is a secret and lives in the OS keyring, never in this DB.
+    if current_version < 58:
+        c.execute('''CREATE TABLE IF NOT EXISTS calendar_sources (
+                        id INTEGER PRIMARY KEY,
+                        label TEXT NOT NULL UNIQUE,
+                        host TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT,
+                        last_sync_at TEXT,
+                        last_error TEXT,
+                        events_seen INTEGER NOT NULL DEFAULT 0,
+                        events_with_attendees INTEGER NOT NULL DEFAULT 0)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS calendar_events (
+                        id INTEGER PRIMARY KEY,
+                        source_id INTEGER NOT NULL REFERENCES calendar_sources(id) ON DELETE CASCADE,
+                        uid TEXT NOT NULL,
+                        occurrence_key TEXT NOT NULL,
+                        start_utc TEXT NOT NULL,
+                        end_utc TEXT NOT NULL,
+                        all_day INTEGER NOT NULL DEFAULT 0,
+                        title TEXT,
+                        organizer TEXT,
+                        attendees TEXT,
+                        status TEXT NOT NULL DEFAULT 'confirmed'
+                            CHECK(status IN ('confirmed','tentative','cancelled')),
+                        updated_at TEXT,
+                        UNIQUE(source_id, uid, occurrence_key))''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_calendar_events_start '
+                  'ON calendar_events(start_utc, end_utc)')
+        for table in ('audio_downloads', 'transcriptions'):
+            c.execute(f"PRAGMA table_info({table})")
+            tcols = [r[1] for r in c.fetchall()]
+            if tcols and 'calendar_event_id' not in tcols:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN calendar_event_id INTEGER')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                  "(58, 'calendar_sources + calendar_events + calendar_event_id on recordings')")
+        logger.info("Migration v58: calendar sources and events")
+
+    # === v59: task proposals live in action_items (task-approval-01, ADR-056) ===
+    # Proposal columns + two indexes; every row present at migration time flips to 'legacy'
+    # with its old status kept in pre_legacy_status (reverse: `commitments unlegacy`).
+    # No per-row events: the count goes into the schema_versions description.
+    if current_version < 59:
+        c.execute("PRAGMA table_info(action_items)")
+        ai_cols = [r[1] for r in c.fetchall()]
+        flipped = 0
+        if ai_cols:
+            for col, typ in (('for_whom', 'TEXT'), ('confidence', 'REAL'),
+                             ('importance', 'INTEGER'), ('text_key', 'TEXT'),
+                             ('first_shown_at', 'TEXT'), ('decided_at', 'TEXT'),
+                             ('pre_legacy_status', 'TEXT')):
+                if col not in ai_cols:
+                    c.execute(f'ALTER TABLE action_items ADD COLUMN {col} {typ}')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_action_items_text_key '
+                      'ON action_items(transcription_id, text_key)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_action_items_status_shown '
+                      'ON action_items(status, first_shown_at)')
+            c.execute("UPDATE action_items SET pre_legacy_status = status, status = 'legacy' "
+                      "WHERE pre_legacy_status IS NULL")
+            flipped = c.rowcount
+        c.execute("PRAGMA table_info(action_item_events)")
+        ev_cols = [r[1] for r in c.fetchall()]
+        if ev_cols and 'payload_json' not in ev_cols:
+            c.execute('ALTER TABLE action_item_events ADD COLUMN payload_json TEXT')
+        c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES (59, ?)",
+                  (f'action_items proposal columns + legacy flip: {flipped} rows',))
+        logger.info("Migration v59: task proposals, %s rows flipped to legacy", flipped)
+
+    # === v60: pre-meeting brief marker (wave4-client-calls-01) - one row per event occurrence ===
+    # PK (event_id, start_utc) keeps every occurrence of a recurring event apart; status/attempts/
+    # last_error/sent_at drive the one-card-per-event guarantee and retry. Additive, no backfill.
+    if current_version < 60:
+        began_here = not conn.in_transaction
+        if began_here:
+            c.execute('BEGIN IMMEDIATE')
+        try:
+            c.execute('''CREATE TABLE IF NOT EXISTS meeting_brief_sent (
+                            event_id INTEGER NOT NULL,
+                            start_utc TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            attempts INTEGER NOT NULL DEFAULT 0,
+                            last_error TEXT,
+                            sent_at TEXT,
+                            PRIMARY KEY (event_id, start_utc))''')
+            c.execute("INSERT OR IGNORE INTO schema_versions (version, description) VALUES "
+                      "(60, 'meeting_brief_sent: pre-meeting brief marker per event occurrence')")
+            if began_here:
+                conn.commit()
+        except Exception:
+            if began_here:
+                conn.rollback()
+            raise
+        logger.info("Migration v60: meeting_brief_sent table")
 
     conn.commit()
     conn.close()

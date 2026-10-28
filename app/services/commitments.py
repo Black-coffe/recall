@@ -673,14 +673,19 @@ def dedup(db_path: str, *, dry_run: bool = False, threshold: float = DEDUP_THRES
 
     The status does not change: duplicates stay in the DB and are available by direct query,
     but vanish from digests (those filter on dup_of IS NULL).
+
+    `proposed` rows take part too, so a repeat is not proposed twice (ADR-056). A row the
+    owner decided on (`decided_at` set) is never marked: it may be the canonical of a group,
+    and when a group has one it is preferred as the canonical.
     """
     stats = {"groups": 0, "marked": 0, "samples": []}
     with get_db_connection(db_path) as conn:
         rows = _rows(conn,
                      "SELECT ai.id, ai.task, ai.owner_entity_id, ai.owner_name, "
-                     "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS anchor "
+                     "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS anchor, "
+                     "ai.decided_at "
                      "FROM action_items ai LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
-                     "WHERE ai.status = 'open' AND ai.dup_of IS NULL "
+                     "WHERE ai.status IN ('open', 'proposed') AND ai.dup_of IS NULL "
                      "AND t.deleted_at IS NULL ORDER BY ai.id")
         buckets: dict[str, list] = {}
         for r in rows:
@@ -707,15 +712,17 @@ def dedup(db_path: str, *, dry_run: bool = False, threshold: float = DEDUP_THRES
                 if len(group) < 2:
                     continue
                 stats["groups"] += 1
-                canonical = max(group, key=lambda r: ((r["anchor"] or ""), r["id"]))
+                canonical = max(group, key=lambda r: (r["decided_at"] is not None,
+                                                      (r["anchor"] or ""), r["id"]))
                 for r in group:
-                    if r["id"] != canonical["id"]:
+                    if r["id"] != canonical["id"] and r["decided_at"] is None:
                         updates.append((canonical["id"], r["id"]))
                 if len(stats["samples"]) < 15:
                     stats["samples"].append({
                         "keep": {"id": canonical["id"], "task": canonical["task"][:80]},
                         "dups": [{"id": r["id"], "task": r["task"][:80]}
-                                 for r in group if r["id"] != canonical["id"]],
+                                 for r in group if r["id"] != canonical["id"]
+                                 and r["decided_at"] is None],
                     })
         if updates and not dry_run:
             conn.executemany("UPDATE action_items SET dup_of = ? WHERE id = ?", updates)
@@ -741,7 +748,7 @@ def mark_stale(db_path: str, *, days: int = STALE_DAYS, dry_run: bool = False,
         rows = _rows(conn,
                      "SELECT ai.id FROM action_items ai "
                      "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
-                     "WHERE ai.status = 'open' "
+                     "WHERE ai.status = 'open' AND ai.decided_at IS NULL "
                      "AND COALESCE(t.meeting_date, substr(t.created_at,1,10)) < ? "
                      "AND (ai.due_date IS NULL OR ai.due_date < ?)",
                      (cutoff, today_iso))
@@ -799,7 +806,9 @@ def sweep_dropped(db_path: str, *, days: int = 180, min_age_days: int = 30,
     now = datetime.now().isoformat(timespec="seconds")
     src = tuple(sources) if sources else _OWN_SOURCES
 
-    where = ["ai.status = 'open'", "ai.dup_of IS NULL", "t.deleted_at IS NULL",
+    # An approved row (decided_at set) lives until the owner closes it (ADR-056, Ask 8).
+    where = ["ai.status = 'open'", "ai.decided_at IS NULL", "ai.dup_of IS NULL",
+             "t.deleted_at IS NULL",
              "COALESCE(t.meeting_date, substr(t.created_at,1,10)) BETWEEN ? AND ?",
              "(ai.due_date IS NULL OR ai.due_date < ?)"]
     params: list = [lo, hi, today_iso]
@@ -1003,6 +1012,40 @@ def count_commitments(db_path: str, *, window: str = "this_week", owner: Optiona
         return _rows(conn, sql, params)[0]["n"]
 
 
+# Row shape shared by `list_commitments`, `proposal_queue` and the digest `stuck` bucket.
+_ITEM_SELECT = (
+    "SELECT ai.id, ai.task, ai.due AS due_raw, ai.due_date, ai.due_precision, "
+    "ai.status, ai.stale_at, ai.transcription_id, ai.source, "
+    # `owner` is the canonical name from the graph (it merges «Юля»/«Юлія»/«Julia
+    # Bondarenko» into one person), `owner_said` is how it was spoken in the task.
+    # The second field is not cosmetic: in live data some tasksshowed
+    # NOT the name from the task, and among them 43 tasks of the archive owner
+    # («Andrii Melnyk») went under the name «Andrij Kovalenko» — an entity
+    # from a YouTube lecture that got the alias «Andrei». While both names are visible,
+    # a crooked link is noticeable; when only the canonical one is shown it is invisible.
+    "COALESCE(e.canonical_name, ai.owner_name) AS owner, "
+    "ai.owner_name AS owner_said, "
+    "t.source_name AS meeting, c.name AS category, "
+    # Wave 5.2: the digest must say not only "what" but also "where to write". For
+    # a task from a chat the source is a concrete message, so next to the
+    # text go the chat, the author of the message and a link to it. For a call these
+    # fields are empty, honestly: there is no address there.
+    #
+    # `link` is not always present: in legacy groups (chat_id without the -100 prefix)
+    # a Telegram message link physically does not exist — records
+    # of 3959, working chats among them. So the address is the pair
+    # (`chat_id`, `msg_id`), as already done in search output
+    # (`retrieval.py`), and `link` is a convenience where possible.
+    "t.source_type, t.tg_chat_title AS chat, t.tg_sender AS said_by, "
+    "t.tg_link AS link, t.tg_chat_id AS chat_id, t.tg_message_id AS msg_id, "
+    "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
+    "FROM action_items ai "
+    "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
+    "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
+    "LEFT JOIN categories c ON c.id = t.category_id "
+)
+
+
 def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional[str] = None,
                      category_id: Optional[int] = None, status: str = "open",
                      include_dups: bool = False, limit: int = 50,
@@ -1021,35 +1064,7 @@ def list_commitments(db_path: str, *, window: str = "this_week", owner: Optional
         include_dups=include_dups, today=today, tags=tags, since=since, until=until)
 
     sql = (
-        "SELECT ai.id, ai.task, ai.due AS due_raw, ai.due_date, ai.due_precision, "
-        "ai.status, ai.stale_at, ai.transcription_id, ai.source, "
-        # `owner` is the canonical name from the graph (it merges «Юля»/«Юлія»/«Julia
-        # Bondarenko» into one person), `owner_said` is how it was spoken in the task.
-        # The second field is not cosmetic: in live data some tasksshowed
-        # NOT the name from the task, and among them 43 tasks of the archive owner
-        # («Andrii Melnyk») went under the name «Andrij Kovalenko» — an entity
-        # from a YouTube lecture that got the alias «Andrei». While both names are visible,
-        # a crooked link is noticeable; when only the canonical one is shown it is invisible.
-        "COALESCE(e.canonical_name, ai.owner_name) AS owner, "
-        "ai.owner_name AS owner_said, "
-        "t.source_name AS meeting, c.name AS category, "
-        # Wave 5.2: the digest must say not only "what" but also "where to write". For
-        # a task from a chat the source is a concrete message, so next to the
-        # text go the chat, the author of the message and a link to it. For a call these
-        # fields are empty, honestly: there is no address there.
-        #
-        # `link` is not always present: in legacy groups (chat_id without the -100 prefix)
-        # a Telegram message link physically does not exist — records
-        # of 3959, working chats among them. So the address is the pair
-        # (`chat_id`, `msg_id`), as already done in search output
-        # (`retrieval.py`), and `link` is a convenience where possible.
-        "t.source_type, t.tg_chat_title AS chat, t.tg_sender AS said_by, "
-        "t.tg_link AS link, t.tg_chat_id AS chat_id, t.tg_message_id AS msg_id, "
-        "COALESCE(t.meeting_date, substr(t.created_at,1,10)) AS meeting_date "
-        "FROM action_items ai "
-        "LEFT JOIN transcriptions t ON t.id = ai.transcription_id "
-        "LEFT JOIN entities e ON e.id = ai.owner_entity_id "
-        "LEFT JOIN categories c ON c.id = t.category_id "
+        _ITEM_SELECT
         + where_sql + " "
         # Overdue is sorted FRESHEST FIRST: a task overdue since yesterday
         # is still alive, while last year's is archaeology (and often just a bad date extraction).
@@ -1360,10 +1375,61 @@ def _recent_corrections(db_path: str, days: int, limit: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def stuck_commitments(db_path: str, *, owner: Optional[str] = None, limit: int = 15,
+                      today: Optional[date] = None) -> list[dict]:
+    """Approved tasks that need a push: approved `STUCK_DAYS`+ days ago, or overdue (Ask 8).
+
+    Same row shape as the `overdue` bucket. An overdue row matches both buckets, so an id may
+    appear in `stuck` and in `overdue` of the same digest: `overdue` is the date view,
+    `stuck` is the "decide now" list with done / postpone / drop buttons.
+    """
+    t = today or date.today()
+    where_sql, params = _commitments_filter(
+        window="all", owner=owner, category_id=None, status="open",
+        include_dups=False, today=t)
+    sql = (_ITEM_SELECT + where_sql
+           + " AND ((ai.decided_at IS NOT NULL AND substr(ai.decided_at,1,10) <= ?) "
+             "OR ai.due_date < ?) "
+             "ORDER BY ai.due_date IS NULL, ai.due_date, ai.decided_at, ai.id LIMIT ?")
+    params += [(t - timedelta(days=STUCK_DAYS)).isoformat(), t.isoformat(),
+               min(int(limit), 200)]
+    with get_db_connection(db_path) as conn:
+        return [dict(r) for r in _rows(conn, sql, params)]
+
+
+def proposal_stats(db_path: str, *, today: Optional[date] = None,
+                   window_days: int = 7) -> dict:
+    """The shown -> pressed counter (Ask 9), SQL over `action_item_events`.
+
+    `shown` = distinct items with a `show` event, `pressed` = distinct items with an
+    `approve|reject` event (both since day one); `review_days` = distinct dates with an
+    `approve|reject` in the last `window_days` days; `active` = rows with status `open`.
+    No events -> every counter is 0 and present.
+    """
+    t = today or date.today()
+    lo = (t - timedelta(days=window_days - 1)).isoformat()
+    with get_db_connection(db_path) as conn:
+        shown = conn.execute("SELECT COUNT(DISTINCT item_id) FROM action_item_events "
+                             "WHERE action = 'show'").fetchone()[0]
+        pressed = conn.execute("SELECT COUNT(DISTINCT item_id) FROM action_item_events "
+                               "WHERE action IN ('approve', 'reject')").fetchone()[0]
+        review_days = conn.execute(
+            "SELECT COUNT(DISTINCT substr(at,1,10)) FROM action_item_events "
+            "WHERE action IN ('approve', 'reject') AND substr(at,1,10) BETWEEN ? AND ?",
+            (lo, t.isoformat())).fetchone()[0]
+        active = conn.execute("SELECT COUNT(*) FROM action_items WHERE status = 'open'"
+                              ).fetchone()[0]
+    return {"shown": shown or 0, "pressed": pressed or 0, "review_days": review_days or 0,
+            "active": active or 0, "window_days": window_days}
+
+
 def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int = 30,
                   limit: int = 15, today: Optional[date] = None) -> dict:
-    """Monday digest: this week / overdue / dropped / topics that
-    vanished / archive corrections."""
+    """Monday digest: this week / overdue / stuck / dropped / topics that
+    vanished / archive corrections + the proposals counter.
+
+    `stuck` and `overdue` may share ids (an overdue approved task is both) - see
+    `stuck_commitments`."""
     return {
         "generated_for": (today or date.today()).isoformat(),
         "this_week": list_commitments(db_path, window="this_week", owner=owner,
@@ -1372,6 +1438,7 @@ def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int =
                                     limit=limit, today=today),
         "no_date": list_commitments(db_path, window="no_date", owner=owner,
                                     limit=limit, today=today),
+        "stuck": stuck_commitments(db_path, owner=owner, limit=limit, today=today),
         "dropped": dropped_commitments(db_path, days=days_back, limit=limit, today=today),
         "stale_topics": stale_topics(db_path, days=days_back, limit=10, today=today),
         # Places where the archive turned out untrue and the owner corrected it. Until
@@ -1381,23 +1448,41 @@ def weekly_digest(db_path: str, *, owner: Optional[str] = None, days_back: int =
         # the first three buckets share only the dated quarter of tasks. The denominator
         # is computed on the table state and does not depend on `today` — see the docstring.
         "coverage": commitments_coverage(db_path, owner=owner),
+        "proposals": proposal_stats(db_path, today=today),
     }
 
 
 # ============================================================
-# Changing a task's status with a journal (K5 k5-task-buttons)
+# Changing a task's status with a journal (K5 k5-task-buttons, ADR-056)
 # ============================================================
-# The single write path for briefing buttons (source='bot'), /tasks (source='web') and
-# agents over MCP (source='mcp'): the change and the event in `action_item_events` — in one
-# transaction, so the journal cannot diverge from the state.
+# The single write path for briefing buttons (source='bot'), /tasks (source='web'),
+# agents over MCP (source='mcp') and the daily pass (source='system'): the change and the
+# event in `action_item_events` — in one transaction, so the journal cannot diverge from the state.
 
-STATUS_ACTIONS = ("done", "cancelled", "open")
+# Status values of `action_items` (ADR-056). `open` = approved by the owner and alive.
+STATUSES = ("proposed", "open", "done", "cancelled", "stale", "rejected", "expired", "legacy")
+PROPOSAL_WINDOW_DAYS = 3      # from the first show to `expired` (Ask 5)
+PROPOSAL_BATCH = 10           # the daily batch (Ask 4)
+STUCK_DAYS = 14               # approved and untouched this long -> Monday `stuck` (Ask 8)
+DECISION_ACTIONS = ("approve", "reject")
+STATUS_ACTIONS = ("done", "cancelled", "open", "approve", "reject", "edit")
 POSTPONE_DAYS = {"postpone:1": 1, "postpone:7": 7, "postpone:30": 30}
+# Which statuses a decision may start from; anything else -> ValueError (409 INVALID_TRANSITION).
+_DECISION_FROM = {
+    "approve": ("proposed", "expired", "rejected", "legacy"),
+    "reject": ("proposed", "expired"),
+}
+_DECISION_TO = {"approve": "open", "reject": "rejected"}
+_ROW_COLS = "id, status, due_date, due_precision, task, decided_at"
+
+
+def _now_iso(now: Optional[datetime] = None) -> str:
+    return (now or datetime.now()).isoformat(timespec="seconds")
 
 
 def _item_state(conn, item_id: int):
-    row = conn.execute("SELECT id, status, due_date, due_precision FROM action_items "
-                       "WHERE id = ?", (item_id,)).fetchone()
+    row = conn.execute(f"SELECT {_ROW_COLS} FROM action_items WHERE id = ?",
+                       (item_id,)).fetchone()
     if row is None:
         from app.core.i18n import tr
         raise LookupError(tr("svc_tasks.err.itemNotFound", id=item_id))
@@ -1406,50 +1491,102 @@ def _item_state(conn, item_id: int):
 
 def _write_event(conn, row, *, source: str, actor: Optional[str], action: str,
                  status: str, due_date: Optional[str], due_precision: Optional[str],
-                 undo_of: Optional[int] = None) -> dict:
-    conn.execute("UPDATE action_items SET status = ?, due_date = ?, due_precision = ? "
-                 "WHERE id = ?", (status, due_date, due_precision, row["id"]))
+                 undo_of: Optional[int] = None, sets: Optional[dict] = None,
+                 payload: Optional[dict] = None, at: Optional[str] = None,
+                 commit: bool = True) -> dict:
+    """Update the row and journal one event. Nothing is committed until both statements
+    succeeded, so a failing event write leaves the row unchanged."""
+    cols = {"status": status, "due_date": due_date, "due_precision": due_precision,
+            **(sets or {})}
+    conn.execute("UPDATE action_items SET " + ", ".join(f"{k} = ?" for k in cols)
+                 + " WHERE id = ?", (*cols.values(), row["id"]))
     cur = conn.execute(
         "INSERT INTO action_item_events (item_id, at, source, actor, action, old_status, "
-        "new_status, old_due_date, new_due_date, old_due_precision, new_due_precision, undo_of) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (row["id"], datetime.now().isoformat(timespec="seconds"), source, actor, action,
+        "new_status, old_due_date, new_due_date, old_due_precision, new_due_precision, undo_of, "
+        "payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (row["id"], at or _now_iso(), source, actor, action,
          row["status"], status, row["due_date"], due_date, row["due_precision"],
-         due_precision, undo_of))
-    conn.commit()
+         due_precision, undo_of,
+         json.dumps(payload, ensure_ascii=False) if payload is not None else None))
+    if commit:
+        conn.commit()
     return {"event_id": cur.lastrowid, "item_id": row["id"], "status": status,
             "due_date": due_date}
 
 
+def _invalid_transition(action: str, status: str) -> ValueError:
+    from app.core.i18n import tr
+    return ValueError(tr("svc_tasks.err.invalidTransition", action=action, status=status))
+
+
 def apply_action(db_path: str, item_id: int, action: str, *, source: str,
                  actor: Optional[str] = None, today: Optional[date] = None,
-                 dedupe: bool = False) -> dict:
-    """Change the status (`done|cancelled|open`) or postpone the deadline (`postpone:1|7|30`).
+                 dedupe: bool = False, text: Optional[str] = None,
+                 due: Optional[str] = None) -> dict:
+    """Change the status, decide on a proposal, edit it, or postpone the deadline.
 
-    Postponing: `due_date` = today + N days, `due_precision='day'`, status -> `open`
-    (from `stale` too — the owner has just confirmed the task is alive). The raw `due` phrase
-    is not rewritten. -> `{event_id, item_id, status, due_date, created}`.
+    * `done|cancelled|open` - set the status as is; `open` (and `postpone:*`) on a
+      `proposed|expired|rejected|legacy` row -> `ValueError`: only `approve` makes it live.
+    * `postpone:1|7|30` - `due_date` = today + N days, `due_precision='day'`, status -> `open`
+      (from `stale` too — the owner has just confirmed the task is alive). The raw `due` phrase
+      is not rewritten.
+    * `approve` - from `proposed|expired|rejected|legacy` -> `open`, sets `decided_at`.
+    * `reject` - from `proposed|expired` -> `rejected`, sets `decided_at`.
+      The previous `decided_at` rides in `payload_json` so `undo_action` restores it.
+    * `edit` - keeps the status, changes `task` (`text`) and/or `due_date` (`due`, ISO date,
+      `due_precision='day'`); the old text and date ride in `payload_json`.
+
+    -> `{event_id, item_id, status, due_date, created}`.
     `dedupe=True` (agents): when the item is already in the requested state, nothing is
     written and the item's last `event_id` (or None) comes back with `created=False`.
-    Unknown task -> `LookupError`, unknown action -> `ValueError`; the DB is unchanged."""
+    Unknown task -> `LookupError`; unknown action, a disallowed transition or an empty /
+    malformed edit -> `ValueError`; the DB is unchanged."""
     if action not in STATUS_ACTIONS and action not in POSTPONE_DAYS:
         from app.core.i18n import tr
         raise ValueError(tr("svc_tasks.err.unknownAction", action=action))
     with get_db_connection(db_path) as conn:
         row = _item_state(conn, item_id)
+        sets: dict = {}
+        payload: Optional[dict] = None
+        status, due_date, due_precision = row["status"], row["due_date"], row["due_precision"]
+        if (action == "open" or action in POSTPONE_DAYS)                 and row["status"] in _DECISION_FROM["approve"]:
+            # An undecided row goes live only through `approve` (the owner's Yes, with
+            # `decided_at` and the approve event); a plain open / postpone would skip both.
+            raise _invalid_transition(action, row["status"])
         if action in POSTPONE_DAYS:
             new_due = ((today or date.today()) + timedelta(days=POSTPONE_DAYS[action])).isoformat()
             status, due_date, due_precision = "open", new_due, P_DAY
+        elif action in DECISION_ACTIONS:
+            status = _DECISION_TO[action]
+            if not (dedupe and row["status"] == status):
+                if row["status"] not in _DECISION_FROM[action]:
+                    raise _invalid_transition(action, row["status"])
+                sets["decided_at"] = _now_iso()
+                payload = {"decided_at": row["decided_at"]}
+        elif action == "edit":
+            new_text = text.strip() if isinstance(text, str) else ""
+            if not new_text and not due:
+                raise _invalid_transition(action, row["status"])
+            payload = {"task": row["task"], "due_date": row["due_date"]}
+            if new_text and new_text != row["task"]:
+                sets["task"] = new_text
+            if due:
+                try:
+                    due_date = date.fromisoformat(str(due)).isoformat()
+                except ValueError:
+                    raise _invalid_transition(action, row["status"]) from None
+                due_precision = P_DAY
         else:
-            status, due_date, due_precision = action, row["due_date"], row["due_precision"]
-        if dedupe and (row["status"], row["due_date"], row["due_precision"]) == (
+            status = action
+        if dedupe and not sets and (row["status"], row["due_date"], row["due_precision"]) == (
                 status, due_date, due_precision):
             last = conn.execute("SELECT MAX(id) AS m FROM action_item_events WHERE item_id = ?",
                                 (row["id"],)).fetchone()["m"]
             return {"event_id": last, "item_id": row["id"], "status": status,
                     "due_date": due_date, "created": False}
         res = _write_event(conn, row, source=source, actor=actor, action=action,
-                           status=status, due_date=due_date, due_precision=due_precision)
+                           status=status, due_date=due_date, due_precision=due_precision,
+                           sets=sets, payload=payload)
         res["created"] = True
         return res
 
@@ -1460,7 +1597,8 @@ def undo_action(db_path: str, event_id: int, *, source: str,
 
     Only the task's LAST event (otherwise the rollback would wipe a later change) -> else `ValueError`.
     `only_source` (agents): an event written by another source -> `PermissionError`, checked
-    before the last-event rule, nothing changes.
+    before the last-event rule, nothing changes. An `edit` gets its old text back and a
+    decision its old `decided_at`, both from the event's `payload_json`.
     Undoing is an event too (`action='undo'`, `undo_of`), so the journal stays complete."""
     with get_db_connection(db_path) as conn:
         ev = conn.execute("SELECT * FROM action_item_events WHERE id = ?",
@@ -1477,9 +1615,97 @@ def undo_action(db_path: str, event_id: int, *, source: str,
             from app.core.i18n import tr
             raise ValueError(tr("svc_tasks.err.undoLastOnly"))
         row = _item_state(conn, ev["item_id"])
+        old = json.loads(ev["payload_json"]) if ev["payload_json"] else {}
+        sets = {k: old[k] for k in ("task", "decided_at") if k in old}
         return _write_event(conn, row, source=source, actor=actor, action="undo",
                             status=ev["old_status"], due_date=ev["old_due_date"],
-                            due_precision=ev["old_due_precision"], undo_of=event_id)
+                            due_precision=ev["old_due_precision"], undo_of=event_id,
+                            sets=sets)
+
+
+def mark_shown(db_path: str, item_ids: Iterable[int], *, source: str,
+               now: Optional[datetime] = None) -> list[int]:
+    """First show of proposals on any surface: set `first_shown_at` once + one `show` event.
+
+    Only `proposed` rows with `first_shown_at IS NULL` are marked; others are ignored, so a
+    repeat call returns `[]` and writes nothing. -> the ids it marked."""
+    at = _now_iso(now)
+    marked: list[int] = []
+    with get_db_connection(db_path) as conn:
+        for i in dict.fromkeys(int(x) for x in item_ids):
+            row = conn.execute(f"SELECT {_ROW_COLS} FROM action_items WHERE id = ? "
+                               "AND status = 'proposed' AND first_shown_at IS NULL",
+                               (i,)).fetchone()
+            if row is None:
+                continue
+            _write_event(conn, row, source=source, actor=None, action="show",
+                         status=row["status"], due_date=row["due_date"],
+                         due_precision=row["due_precision"],
+                         sets={"first_shown_at": at}, at=at, commit=False)
+            marked.append(i)
+        conn.commit()
+    return marked
+
+
+def expire_proposals(db_path: str, *, now: Optional[datetime] = None,
+                     dry_run: bool = False) -> dict:
+    """The only place a proposal expires (Ask 5): `proposed` rows first shown
+    `PROPOSAL_WINDOW_DAYS`+ days ago -> `expired`, one `expire` event each (`source='system'`).
+
+    Never-shown rows wait: the window counts from the first show, not from extraction.
+    `dry_run` counts only. -> `{"expired": n, "ids": [...], "dry_run": bool}`."""
+    t = now or datetime.now()
+    cutoff = _now_iso(t - timedelta(days=PROPOSAL_WINDOW_DAYS))
+    at = _now_iso(t)
+    with get_db_connection(db_path) as conn:
+        rows = conn.execute(f"SELECT {_ROW_COLS} FROM action_items WHERE status = 'proposed' "
+                            "AND first_shown_at IS NOT NULL AND first_shown_at <= ? "
+                            "ORDER BY id", (cutoff,)).fetchall()
+        ids = [r["id"] for r in rows]
+        if ids and not dry_run:
+            for r in rows:
+                _write_event(conn, r, source="system", actor=None, action="expire",
+                             status="expired", due_date=r["due_date"],
+                             due_precision=r["due_precision"], at=at, commit=False)
+            conn.commit()
+    logger.info("expire_proposals: expired=%s dry_run=%s", len(ids), dry_run)
+    return {"expired": len(ids), "ids": ids, "dry_run": dry_run}
+
+
+def proposal_queue(db_path: str, *, limit: int = PROPOSAL_BATCH,
+                   exclude_ids: Iterable[int] = ()) -> list[dict]:
+    """Proposals in batch order (Ask 4): nearest `due_date` first, then undated by
+    `importance` (high first), then id. Repeats (`dup_of`) are left out.
+
+    The row is the `list_commitments` row + `for_whom, confidence, importance, first_shown_at`."""
+    excl = [int(x) for x in exclude_ids]
+    sql = (_ITEM_SELECT.replace("SELECT ", "SELECT ai.for_whom, ai.confidence, ai.importance, "
+                                "ai.first_shown_at, ", 1)
+           + "WHERE ai.status = 'proposed' AND ai.dup_of IS NULL AND t.deleted_at IS NULL ")
+    params: list = []
+    if excl:
+        sql += "AND ai.id NOT IN (%s) " % ",".join("?" * len(excl))
+        params += excl
+    sql += "ORDER BY ai.due_date IS NULL, ai.due_date, ai.importance DESC, ai.id LIMIT ?"
+    params.append(max(int(limit), 0))
+    with get_db_connection(db_path) as conn:
+        return [dict(r) for r in _rows(conn, sql, params)]
+
+
+def unlegacy(db_path: str, *, dry_run: bool = False) -> int:
+    """The one bulk path out of `legacy` (Ask 7): every row gets its pre-v59 status back
+    and `pre_legacy_status` is cleared. One statement, no per-row events.
+
+    -> the number of rows restored (or that would be, with `dry_run`)."""
+    with get_db_connection(db_path) as conn:
+        if dry_run:
+            return conn.execute("SELECT COUNT(*) FROM action_items WHERE status = 'legacy'"
+                                ).fetchone()[0]
+        n = conn.execute("UPDATE action_items SET status = pre_legacy_status, "
+                         "pre_legacy_status = NULL WHERE status = 'legacy'").rowcount
+        conn.commit()
+    logger.info("unlegacy: restored=%s", n)
+    return n
 
 
 # ============================================================
@@ -1512,6 +1738,10 @@ def _cmd(args) -> int:
         res = sweep_dropped(db, days=args.days, min_age_days=args.min_age,
                             undated_only=args.undated_only,
                             dry_run=args.dry_run or not args.apply)
+    elif args.command == "unlegacy":
+        res = unlegacy(db, dry_run=args.dry_run)
+    elif args.command == "expire-proposals":
+        res = expire_proposals(db, dry_run=args.dry_run)
     else:  # pragma: no cover
         return 2
     print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
@@ -1569,6 +1799,15 @@ def main(argv: Optional[list] = None) -> int:
                     help="Only tasks without a date")
     sw.add_argument("--apply", action="store_true",
                     help="Apply (without it — an estimate)")
+
+    # `--db` is also accepted after the subcommand (`unlegacy --dry-run --db COPY`); SUPPRESS
+    # keeps the top-level value when it is not repeated there.
+    dbopt = argparse.ArgumentParser(add_help=False)
+    dbopt.add_argument("--db", default=argparse.SUPPRESS)
+    sub.add_parser("unlegacy", parents=[common, dbopt],
+                   help="Return every legacy task to its pre-v59 status")
+    sub.add_parser("expire-proposals", parents=[common, dbopt],
+                   help="Proposals shown 3+ days ago -> expired")
 
     args = p.parse_args(argv)
     if args.command == "dedup" and not hasattr(args, "threshold"):

@@ -122,8 +122,37 @@ class TestParallelRecordingSettings:
         import config
         assert config.Config.RECORDING_MAX_ACTIVE == max(1, settings.env_int("RECORDING_MAX_ACTIVE"))
 
+    def test_task_proposal_min_confidence_registered_and_in_env_example(self):
+        s = settings.by_name()["TASK_PROPOSAL_MIN_CONFIDENCE"]
+        assert s.kind == "float" and float(s.default) == 0.6
+        assert "TASK_PROPOSAL_MIN_CONFIDENCE=0.6" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
     def test_whisper_max_parallel_default_stays_one(self):
         assert int(settings.by_name()["WHISPER_MAX_PARALLEL"].default) == 1
+
+
+class TestCallAutopromptSettings:
+    """wave2-recording-calls-01: opt-in auto-record and the one-time re-prompt."""
+
+    def test_autoprompt_action_defaults_to_prompt(self):
+        s = settings.by_name()["RECORDING_AUTOPROMPT_ACTION"]
+        assert s.kind == "str" and s.default == "prompt" and s.profile == "desktop"
+        assert "prompt" in s.doc and "record" in s.doc
+
+    def test_autoprompt_action_values_match_the_watcher(self):
+        from app.services.recording.call_watch import ACTIONS
+        assert ACTIONS == ("prompt", "record")
+
+    def test_reprompt_minutes_default_ten(self):
+        s = settings.by_name()["RECORDING_AUTOPROMPT_REPROMPT_MIN"]
+        assert s.kind == "int" and int(s.default) == 10
+
+    def test_env_example_shows_new_settings_and_apps_without_telegram(self):
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        assert "RECORDING_AUTOPROMPT_ACTION=prompt" in text
+        assert "RECORDING_AUTOPROMPT_REPROMPT_MIN=10" in text
+        apps_line = next(line for line in text.splitlines() if line.startswith("# RECORDING_AUTOPROMPT_APPS="))
+        assert "telegram.exe" not in apps_line
 
 
 class TestRegistryGates:
@@ -283,3 +312,42 @@ class TestConfigNoImportSideEffects:
         assert cfg.RECORDING_ENABLED is False
         assert cfg.RECORDING_VIDEO_ENABLED is False
         sys.modules.pop("config", None)
+
+
+class TestWave4ClientSettings:
+    """wave4-client-calls-01: four registry entries read by the stories 02, 03 and 05."""
+
+    def test_meeting_brief_enabled_defaults_to_true(self):
+        s = settings.by_name()["MEETING_BRIEF_ENABLED"]
+        assert s.kind == "bool" and s.default == "1" and s.group == "Calendar"
+
+    def test_meeting_brief_lead_minutes_defaults_to_fifteen_within_range(self):
+        s = settings.by_name()["MEETING_BRIEF_LEAD_MINUTES"]
+        assert s.kind == "int" and int(s.default) == 15
+        # The registry has no range validator; the 1..180 contract is stated in the help
+        # text and the default lies inside it. Out-of-range rejection lives in the reader.
+        assert 1 <= int(s.default) <= 180
+        assert "1..180" in s.doc
+
+    def test_live_missed_budget_defaults_to_ten_cents(self):
+        s = settings.by_name()["LIVE_MISSED_BUDGET_USD"]
+        assert s.kind == "float" and float(s.default) == 0.10
+        assert float(s.default) >= 0
+
+    def test_recording_consent_reminder_defaults_to_true(self):
+        s = settings.by_name()["RECORDING_CONSENT_REMINDER"]
+        assert s.kind == "bool" and s.default == "1" and s.profile == "desktop"
+
+    def test_help_texts_are_english(self):
+        for name in ("MEETING_BRIEF_ENABLED", "MEETING_BRIEF_LEAD_MINUTES",
+                     "LIVE_MISSED_BUDGET_USD", "RECORDING_CONSENT_REMINDER"):
+            s = settings.by_name()[name]
+            text = s.doc + " " + s.gates
+            assert text.isascii(), name
+            assert s.doc.strip() and s.gates.strip(), name
+
+    def test_env_example_lists_the_four_keys_with_defaults(self):
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for line in ("# MEETING_BRIEF_ENABLED=1", "# MEETING_BRIEF_LEAD_MINUTES=15",
+                     "# LIVE_MISSED_BUDGET_USD=0.10", "# RECORDING_CONSENT_REMINDER=1"):
+            assert line in text.splitlines(), line

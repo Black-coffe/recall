@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import threading
-from datetime import date as _date, timedelta as _timedelta
+from datetime import date as _date, datetime, timedelta as _timedelta
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
@@ -1128,7 +1128,7 @@ def _task_window_sql(window: str, today=None):
 
 @memory_bp.route('/api/memory/action-items', methods=['GET'])
 def list_action_items():
-    """Tasks. Query: status (open|done|cancelled|stale|all), owner_entity_id,
+    """Tasks. Query: status (any of `commitments.STATUSES` or all; all leaves `legacy` out), owner_entity_id,
     owner (canonical or raw name), category_id, tags (comma-separated), since,
     until, period (24h|7d|month|year|all), window (overdue|soon|later|no_date|all),
     limit (contract C4 - an invalid axis category_id/tags/since/until -> 400).
@@ -1136,7 +1136,10 @@ def list_action_items():
     Additionally returns ``windows`` (counters per bucket within the remaining filters)
     and ``owners`` (the owner facet) - so the dashboard shows true sums even
     when the list itself is cut off by the limit."""
-    status = request.args.get('status', 'open')
+    from app.services import commitments
+    status = (request.args.get('status') or 'open').strip().lower()
+    if status != 'all' and status not in commitments.STATUSES:
+        return _err('INVALID_ARGUMENT', tr('knowledge.memory.err.status_bad'), 400)
     owner = request.args.get('owner_entity_id')
     owner_name = (request.args.get('owner') or '').strip()
     try:
@@ -1158,9 +1161,12 @@ def list_action_items():
     # filters (list / bucket counters / owner facet), and stitching them from
     # one flat list without binding params to conditions is impossible.
     common, common_p = [], []
-    if status and status != 'all':
+    if status != 'all':
         common.append("ai.status = ?")
         common_p.append(status)
+    else:
+        # ADR-056: the archived `legacy` rows surface only through their own chip.
+        common.append("ai.status != 'legacy'")
     # T4.6: tasks of a deleted (soft-delete) meeting must not surface
     # on the dashboard - regardless of the category filter below.
     common.append(
@@ -1253,6 +1259,9 @@ def list_action_items():
     order_sql = ("ORDER BY ai.due_date DESC, meeting_date DESC, ai.id DESC"
                  if window == 'overdue'
                  else "ORDER BY ai.due_date IS NULL, ai.due_date, meeting_date DESC, ai.id DESC")
+    if status == 'proposed':
+        # The proposal queue has one order everywhere (`commitments.proposal_queue`).
+        order_sql = "ORDER BY ai.due_date IS NULL, ai.due_date, ai.importance DESC, ai.id"
 
     today = _date.today().isoformat()
     soon_end = _soon_end_iso()
@@ -1262,6 +1271,7 @@ def list_action_items():
             f"SELECT ai.id, ai.task, ai.owner_name, ai.owner_entity_id, ai.due, "
             f"ai.due_date, ai.due_precision, ai.stale_at, ai.dup_of, "
             f"ai.status, ai.transcription_id, ai.source, t.source_name, t.category_id, "
+            f"ai.for_whom, ai.confidence, ai.importance, ai.first_shown_at, ai.decided_at, "
             # Wave 5.1: tasks from correspondence appeared in the list, and source_name in
             # TG is the preview of the message itself («[TG] Так, звичайно, плануємо…»),
             # i.e. a caption that repeats the task text. The card needs an address:
@@ -1294,11 +1304,23 @@ def list_action_items():
             facet_p,
         ).fetchall()]
 
+    items = [dict(r) for r in rows]
+    if status == 'proposed' and items and _is_ui():
+        # A show starts the 3-day clock only on the owner's SPA screen (and a delivered
+        # Telegram card); MCP, agents and scripts read the queue without marking it.
+        now = datetime.now()
+        marked = set(commitments.mark_shown(current_app.config['DATABASE'],
+                                            [a['id'] for a in items], source='web', now=now))
+        at = now.isoformat(timespec='seconds')
+        for a in items:
+            if a['id'] in marked:
+                a['first_shown_at'] = at
+
     windows = {k: (wc[k] or 0) for k in ('no_date', 'overdue', 'soon', 'later')}
     windows['all'] = wc['total'] or 0
     return jsonify({
         "success": True,
-        "action_items": [dict(r) for r in rows],
+        "action_items": items,
         "windows": windows,
         "owners": owners,
         "today": today,
@@ -1307,26 +1329,50 @@ def list_action_items():
     })
 
 
-def _task_action(aid: int, action: str):
+def _task_action(aid: int, action: str, *, text=None, due=None):
     """K5: the same write path as the brief buttons - with an event in the journal.
     The UI writes `source='web'`; an agent `source='mcp'` and a repeated identical action
-    is not written again (`created:false`, the existing `event_id`)."""
+    is not written again (`created:false`, the existing `event_id`).
+    A transition the status machine refuses -> 409 `INVALID_TRANSITION`."""
     from app.services import commitments
     ui = _is_ui()
     try:
         res = commitments.apply_action(current_app.config['DATABASE'], aid, action,
                                        source='web' if ui else 'mcp',
-                                       actor='web' if ui else 'mcp', dedupe=not ui)
+                                       actor='web' if ui else 'mcp', dedupe=not ui,
+                                       text=text, due=due)
     except LookupError:
         return jsonify({"success": False, "error": tr('knowledge.memory.err.task_not_found'),
                         "error_code": "NOT_FOUND"}), 404
+    except ValueError as exc:
+        return _err('INVALID_TRANSITION', str(exc), 409)
     return jsonify({"success": True, **res})
+
+
+#: Decisions on a proposal and the edit (ADR-056); `status` keeps the old body.
+_PATCH_ACTIONS = ('approve', 'reject', 'edit')
 
 
 @memory_bp.route('/api/memory/action-items/<int:aid>', methods=['PATCH'])
 def update_action_item(aid: int):
-    """Update a task status. Body: {"status": "open|done|cancelled"}."""
+    """Update a task. Body: {"status": "open|done|cancelled"} or
+    {"action": "approve|reject|edit", "task"?: str, "due_date"?: "YYYY-MM-DD"} - not both."""
     data = request.get_json(silent=True) or {}
+    if 'action' in data:
+        action = data.get('action')
+        if 'status' in data or action not in _PATCH_ACTIONS:
+            return _err('INVALID_ARGUMENT', tr('knowledge.memory.err.action_bad'), 400)
+        text, due = data.get('task'), data.get('due_date')
+        if action == 'edit':
+            if (text is not None and not isinstance(text, str))                     or (due is not None and not isinstance(due, str))                     or not ((text or '').strip() or due):
+                return _err('INVALID_ARGUMENT', tr('knowledge.memory.err.edit_bad'), 400)
+            if due:
+                try:
+                    _date.fromisoformat(due)
+                except ValueError:
+                    return _err('INVALID_ARGUMENT', tr('knowledge.memory.err.edit_bad'), 400)
+            return _task_action(aid, action, text=text, due=due)
+        return _task_action(aid, action)
     status = data.get('status')
     if status not in ('open', 'done', 'cancelled'):
         return jsonify({"success": False, "error": tr('knowledge.memory.err.status_bad')}), 400

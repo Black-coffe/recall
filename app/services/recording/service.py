@@ -62,6 +62,7 @@ from app.services.recording.pcm_writer import ChunkedPcmWriter
 from app.services.recording.recorder import (
     DeviceNotAvailableError,
     LevelMeter,
+    is_access_denied,
     WasapiRecorder,
     list_input_devices,
     resolve_device_params,
@@ -130,6 +131,19 @@ class NoSystemStreamError(RecordingError):
     """Retarget of a session that started without a system stream."""
 
     code = 'NO_SYSTEM_STREAM'
+
+
+class DeviceAccessDeniedError(RecordingError):
+    """Windows refused a capture stream at start (``code='DEVICE_ACCESS_DENIED'``).
+
+    ``stream`` is ``'mic'`` or ``'system'``. The message is internal English.
+    """
+
+    code = 'DEVICE_ACCESS_DENIED'
+
+    def __init__(self, message: str = '', *, stream: str):
+        super().__init__(message)
+        self.stream = stream
 
 
 # ----------------------------------------------------------------- factories
@@ -421,6 +435,7 @@ class RecordingService:
             )
 
             active = _ActiveSession(session_id=session_id)
+            opening = STREAM_MIC
             try:
                 if mic_device_index is not None:
                     mic_name = mic_device_name or f'mic#{mic_device_index}'
@@ -428,6 +443,7 @@ class RecordingService:
                         active, STREAM_MIC, MicSpec(mic_device_index, mic_name), mic_name,
                     )
                 if sys_spec is not None:
+                    opening = STREAM_SYSTEM
                     self._open_stream(
                         active, STREAM_SYSTEM, sys_spec,
                         system_device_name or f'sys#{sys_spec.device_index}',
@@ -436,10 +452,13 @@ class RecordingService:
                 logger.exception("start() failed: %s", e)
                 self._cleanup_streams(active)
                 self._store.update_status(session_id, STATUS_CRASHED)
+                self._raise_if_access_denied(e, opening)
                 raise RecordingError(tr("svc_recording.err.open_stream", error=e)) from e
 
+            starting = STREAM_MIC
             try:
                 for ss in active.stream_iter():
+                    starting = ss.name
                     ss.recorder.start()
                     ss.lead_seconds = active.elapsed_seconds()
             except Exception as e:
@@ -448,6 +467,7 @@ class RecordingService:
                 logger.exception("start() failed on recorder.start: %s", e)
                 self._cleanup_streams(active)
                 self._store.update_status(session_id, STATUS_CRASHED)
+                self._raise_if_access_denied(e, starting)
                 raise RecordingError(tr("svc_recording.err.start_stream", error=e)) from e
 
             active.stop_event = threading.Event()
@@ -826,6 +846,14 @@ class RecordingService:
         if active.closed:
             raise SessionNotFoundError(
                 tr("svc_recording.err.no_active_session", session_id=active.session_id))
+
+    @staticmethod
+    def _raise_if_access_denied(exc: BaseException, stream: str) -> None:
+        """Re-raise a start failure as :class:`DeviceAccessDeniedError` when Windows refused it."""
+        if is_access_denied(exc):
+            raise DeviceAccessDeniedError(
+                f"Access to the {stream} capture stream was denied: {exc}", stream=stream,
+            ) from exc
 
     def _make_session_id(self) -> str:
         return 'rec_' + uuid.uuid4().hex[:16]

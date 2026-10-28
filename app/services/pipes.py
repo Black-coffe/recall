@@ -242,12 +242,54 @@ def _mcp_actions(db_path: str, now: datetime) -> dict:
     return mcp_actions_summary(db_path, now=now)
 
 
+def task_proposals_batch(db_path: str, *, now: datetime) -> dict:
+    """The daily batch of task proposals (ADR-056 Decision 3).
+
+    First the expiry pass (``commitments.expire_proposals``, the only place a proposal
+    expires), then the queue in ``proposal_queue`` order. Rows the privacy layer would hide
+    are dropped BEFORE taking ``PROPOSAL_BATCH``, so a private proposal never holds a slot
+    (it waits on the SPA tasks screen). -> ``{expired, queued, hidden, items}``; ``queued``
+    is every proposal in the queue, hidden ones included. No ``action_items`` -> ``reason``.
+    ``PrivacyError`` propagates (the run is ``blocked``)."""
+    from app.services import commitments
+    with _connect(db_path) as conn:
+        if not _has_table(conn, "action_items"):
+            return {"reason": tr("telegram.brief.proposals.noTable", lang=server_lang()),
+                    "items": [], "queued": 0, "expired": 0, "hidden": 0}
+    expired = commitments.expire_proposals(db_path, now=now)["expired"]
+    queue = commitments.proposal_queue(db_path, limit=PROPOSAL_QUEUE_MAX)
+    kept, hidden = pipes_privacy.filter_data({"q": {"items": queue}}, db_path=db_path)
+    return {"expired": expired, "queued": len(queue), "hidden": hidden,
+            "items": kept["q"]["items"][:commitments.PROPOSAL_BATCH]}
+
+
+#: How far down the queue the batch looks for rows the privacy layer keeps.
+PROPOSAL_QUEUE_MAX = 10000
+
+
+def _task_proposals(db_path: str, now: datetime) -> dict:
+    return task_proposals_batch(db_path, now=now)
+
+
+def _mark_proposals_shown(db_path: str, item_ids: list[int], now: datetime) -> list[int]:
+    from app.services import commitments
+    return commitments.mark_shown(db_path, item_ids, source="bot", now=now)
+
+
 #: Closed registry of read functions. A new function goes only here, read-only only.
+#: (``task_proposals`` writes one thing: the expiry pass the owner fixed at the start of it.)
 TOOLS: dict[str, Callable[[str, datetime], dict]] = {
     "weekly_digest": _weekly_digest,
     "dropped_commitments": _dropped_commitments,
     "open_questions": _open_questions,
     "mcp_actions": _mcp_actions,
+    "task_proposals": _task_proposals,
+}
+
+#: Tool -> what happens after a SUCCESSFUL delivery with buttons, given the ids of the
+#: proposal cards that were rendered: the window clock starts only on a delivered card.
+AFTER_DELIVER: dict[str, Callable[[str, list[int], datetime], Any]] = {
+    "task_proposals": _mark_proposals_shown,
 }
 
 
@@ -477,6 +519,8 @@ _TOOL_LABELS = ("weekly_digest", "dropped_commitments", "open_questions")
 def _tool_label(tool: str) -> str:
     if tool == "mcp_actions":
         return tr("telegram.brief.mcp.tool", lang=server_lang())
+    if tool == "task_proposals":
+        return tr("telegram.brief.proposals.title", lang=server_lang())
     return tr(f"telegram.brief.tool.{tool}", lang=server_lang()) if tool in _TOOL_LABELS else tool
 
 
@@ -619,6 +663,8 @@ def _run_pipe_locked(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None]
         raw = {t: TOOLS[t](db_path, now) for t in pipe.tools}
         # Private data is dropped BEFORE render: neither Claude nor the cards see it.
         data, hidden = pipes_privacy.filter_data(raw, db_path=db_path)
+        # Rows a tool already dropped through the same filter (the proposals batch).
+        hidden += sum(int(r.get("hidden") or 0) for r in raw.values() if isinstance(r, dict))
         missing = not_collected(data)
         if pipe.skip_if_empty and is_empty(data) and not hidden and not missing:
             res["status"] = "skipped"
@@ -634,10 +680,11 @@ def _run_pipe_locked(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None]
             # link base — pipes_cards.link_base() (RECALL_PUBLIC_URL → RECALL_API_URL).
             item_ids: Optional[list[int]] = [] if buttons else None
             undo_items: Optional[list[dict]] = [] if buttons else None
+            proposal_ids: Optional[list[int]] = [] if buttons else None
             text, leaked = pipes_cards.render(
                 pipes_cards.title_for(pipe.tools), data, db_path=db_path,
                 today=now.date(), headline=headline, missing=missing, hidden=hidden,
-                buttons=item_ids, undo_items=undo_items)
+                buttons=item_ids, undo_items=undo_items, proposals=proposal_ids)
             # Second line: a stop word must not survive message assembly either.
             leaked = leaked or pipes_privacy.leaked_words(html.unescape(text))
             if missing:
@@ -651,13 +698,16 @@ def _run_pipe_locked(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None]
                            error=f"stop word in the finished text ({len(leaked)}) — not sent")
             else:
                 delivering = True
-                kb = (brief_actions.keyboard(item_ids or [], undo_items)
+                kb = (brief_actions.keyboard(item_ids or [], undo_items,
+                                             proposal_ids=frozenset(proposal_ids or ()))
                       if item_ids or undo_items else None)
                 if kb:
                     deliver(text, reply_markup=kb)
                 else:
                     deliver(text)
                 res.update(status="ok", chars=len(text))
+                if proposal_ids:
+                    _after_deliver(pipe, db_path, proposal_ids, now)
     except pipes_privacy.PrivacyError as e:
         logger.warning("Pipe %s: privacy not verified (%s) — not sending", pipe.name, e)
         what = "private.txt unreadable" if str(e).startswith("private.txt") else "directions"
@@ -681,6 +731,20 @@ def _run_pipe_locked(pipe: Pipe, *, db_path: str, deliver: Callable[[str], None]
     logger.info("Pipe %s (%s): %s, %s, %s chars", pipe.name, trigger, res["status"],
                 res["rendered_by"] or "-", res["chars"])
     return res
+
+
+def _after_deliver(pipe: Pipe, db_path: str, ids: list[int], now: datetime) -> None:
+    """``AFTER_DELIVER`` hooks of the pipe's tools; the message is already out, so a failure
+    here is logged and does not turn the run into an error (the next run retries it)."""
+    for tool in pipe.tools:
+        hook = AFTER_DELIVER.get(tool)
+        if hook is None:
+            continue
+        try:
+            hook(db_path, ids, now)
+        except Exception as e:  # noqa: BLE001 - delivered; the clock starts on the next run
+            logger.warning("Pipe %s: after-delivery step of %s failed (%s)", pipe.name, tool,
+                           type(e).__name__, exc_info=True)
 
 
 #: Prefix of ``res["error"]`` (a history row, English: it is read through MCP) → reason key

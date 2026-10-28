@@ -250,6 +250,34 @@ def test_job_never_overwrites_a_name_the_user_gave(archive):
     assert not any(p.endswith('/suggest-meta') for _m, p, _d in http.calls)
 
 
+def test_job_keeps_the_event_title_of_a_calendar_bound_recording(archive):
+    # k6-calendar-ics: owner > event > Claude - a bound row already carries the event title.
+    conn = sqlite3.connect(archive)
+    conn.execute("ALTER TABLE audio_downloads ADD COLUMN calendar_event_id INTEGER")
+    conn.execute("CREATE TABLE calendar_events (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO calendar_events VALUES (7, 'Дзвінок з фондом'), (8, '  ')")
+    conn.execute("UPDATE audio_downloads SET calendar_event_id = 7, title = 'Дзвінок з фондом' WHERE id = 415")
+    conn.commit()
+    conn.close()
+    http = FakeHttp(archive)
+    out = make_job(archive, http)(SID)
+    assert '_event_title_' in out
+    assert not any(p.endswith('/suggest-meta') for _m, p, _d in http.calls)
+
+
+def test_job_asks_claude_when_the_bound_event_has_no_title(archive):
+    conn = sqlite3.connect(archive)
+    conn.execute("ALTER TABLE audio_downloads ADD COLUMN calendar_event_id INTEGER")
+    conn.execute("CREATE TABLE calendar_events (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO calendar_events VALUES (8, '  ')")
+    conn.execute("UPDATE audio_downloads SET calendar_event_id = 8 WHERE id = 415")
+    conn.commit()
+    conn.close()
+    http = FakeHttp(archive)
+    out = make_job(archive, http)(SID)
+    assert '_titled_' in out
+    assert any(p.endswith('/suggest-meta') for _m, p, _d in http.calls)
+
 def test_job_skips_a_recording_that_already_has_a_transcript(archive):
     conn = sqlite3.connect(archive)
     conn.execute("INSERT INTO transcriptions (id, file_path) VALUES (8000, 'E:/rec/final.mp3')")
@@ -360,6 +388,33 @@ def test_typed_fields_reach_the_server_autosave(archive):
     assert 'junk' not in form
     assert '_user_name_' in out
     assert not any(p.endswith('/suggest-meta') for _m, p, _d in http.calls)
+
+
+@pytest.mark.parametrize('typed', ['Е', ' Дз ', 'ab'], ids=['one-letter', 'two-letters-padded', 'latin'])
+def test_a_name_cut_off_mid_typing_is_left_to_claude(archive, typed):
+    """27.10.2026: the browser died after one keystroke and the recording was titled «Е»."""
+    store = FakeStore()
+    sched, _timers, _clock, _runs = make_scheduler(store=store)
+    sched.schedule(SID)
+    sched.hold(SID, {'name': typed, 'description': 'Про 1С'})
+    http = FakeHttp(archive)
+    out = make_job(archive, http, store=store)(SID)
+    form = http.calls[0][2]
+    assert 'title' not in form
+    assert form['description'] == 'Про 1С'
+    assert '_titled_' in out
+    assert _row(archive)[0] == 'Женя: оцифровка 1С і навчання Серьоги'
+
+
+def test_a_three_letter_typed_name_is_kept(archive):
+    store = FakeStore()
+    sched, _timers, _clock, _runs = make_scheduler(store=store)
+    sched.schedule(SID)
+    sched.hold(SID, {'name': 'ДТЕ'})
+    http = FakeHttp(archive)
+    out = make_job(archive, http, store=store)(SID)
+    assert http.calls[0][2]['title'] == 'ДТЕ'
+    assert '_user_name_' in out
 
 
 def test_hold_endpoint_stores_typed_fields(bp):

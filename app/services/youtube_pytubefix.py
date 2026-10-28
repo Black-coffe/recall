@@ -2,7 +2,7 @@
 
 CRITICAL: this module wraps the `_download_youtube_core` flow from app.py
 WITHOUT changing behaviour. pytubefix remains the primary backend
-(stability contract in ROADMAP.md section 0).
+(stability contract; yt-dlp is only the fallback).
 
 Dependencies are injected through parameters:
 - download_progress_set(id, data): callback for status updates.

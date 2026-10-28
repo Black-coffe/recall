@@ -12,7 +12,8 @@ A change goes only through ``commitments.apply_action``/``undo_action`` (the jou
 journal ``tg_chat_events``). A press is accepted only from the chat ``TELEGRAM_BOT_CHAT_ID``.
 
 ``callback_data`` carries everything needed (≤64 bytes, no state on our side):
-    ``a:<n>:<id>:<action>`` — action on a task (done|cancelled|postpone:1|7|30)
+    ``a:<n>:<id>:<action>`` — action on a task (done|cancelled|postpone:1|7|30) or a
+                            decision on a proposal (approve|reject, the Yes / No row)
     ``p:<n>:<id>``       — show the deadline choice
     ``b:<n>:<id>``       — back to the three buttons
     ``u:<n>:<event>``    — undo an event
@@ -41,7 +42,8 @@ MAX_BUTTONS = 100
 _UNDO_KINDS = {"task": "t", "chat": "c"}
 POLL_TIMEOUT = 15            # < tg_bot.TIMEOUT: long-poll must not run into the HTTP timeout
 _DONE_KEYS = {"done": "done", "cancelled": "cancelled", "postpone:1": "postpone1",
-              "postpone:7": "postpone7", "postpone:30": "postpone30"}
+              "postpone:7": "postpone7", "postpone:30": "postpone30",
+              "approve": "approve", "reject": "reject"}
 
 
 def _t(key: str, lang: Optional[str] = None, **vars) -> str:
@@ -74,6 +76,12 @@ def task_row(n: int, item_id: int) -> list[dict]:
             _btn("⏭", f"p:{n}:{item_id}")]
 
 
+def proposal_row(n: int, item_id: int, lang: Optional[str] = None) -> list[dict]:
+    """A task proposal (ADR-056): Yes -> ``approve`` (status ``open``), No -> ``reject``."""
+    return [_btn(f"{n} {_t('yes', lang)}", f"a:{n}:{item_id}:approve"),
+            _btn(_t("no", lang), f"a:{n}:{item_id}:reject")]
+
+
 def postpone_row(n: int, item_id: int, lang: Optional[str] = None) -> list[dict]:
     return [_btn(f"{n} {_t('tomorrow', lang)}", f"a:{n}:{item_id}:postpone:1"),
             _btn(_t("plusWeek", lang), f"a:{n}:{item_id}:postpone:7"),
@@ -94,12 +102,15 @@ def undo_row(n: int, kind: str, ref: int, lang: Optional[str] = None) -> list[di
     return [_btn(f"{n} {_t('undo.button', lang)}", f"m:{n}:{_UNDO_KINDS[kind]}:{ref}")]
 
 
-def keyboard(item_ids: list[int], undo_items: Optional[list[dict]] = None) -> Optional[dict]:
+def keyboard(item_ids: list[int], undo_items: Optional[list[dict]] = None, *,
+             proposal_ids: frozenset = frozenset()) -> Optional[dict]:
     """Numbering from 1 in display order; None — there are no buttons.
 
+    An id in ``proposal_ids`` gets the Yes / No row instead of done / not relevant / postpone.
     ``undo_items`` (``[{n, kind, ref}]`` from the MCP summary) add one row each, numbered
     after the tasks, within Telegram's 100 buttons per message."""
-    rows = [task_row(n, i) for n, i in enumerate(item_ids[:MAX_ITEMS], 1)]
+    rows = [proposal_row(n, i) if i in proposal_ids else task_row(n, i)
+            for n, i in enumerate(item_ids[:MAX_ITEMS], 1)]
     room = MAX_BUTTONS - 3 * len(rows)
     rows += [undo_row(int(u["n"]), u["kind"], int(u["ref"]))
              for u in (undo_items or [])[:max(0, room)] if u.get("kind") in _UNDO_KINDS]
@@ -160,7 +171,9 @@ def handle(cq: dict, *, db_path: str, transport=None) -> Optional[str]:
         elif kind == "u" and len(parts) == 3:
             n, eid = int(parts[1]), int(parts[2])
             res = commitments.undo_action(db_path, eid, source="bot", actor=actor)
-            new_row = task_row(n, res["item_id"])
+            # An undone decision puts the proposal back: Yes / No again, not the task row.
+            new_row = (proposal_row(n, res["item_id"], lang) if res["status"] == "proposed"
+                       else task_row(n, res["item_id"]))
             reply = _t("undone", lang)
             logger.info("Brief buttons: event %s undone", eid)
         elif kind == "m" and len(parts) == 4 and parts[2] in ("t", "c"):

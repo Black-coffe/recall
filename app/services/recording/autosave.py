@@ -40,6 +40,7 @@ WAIT_STEP_SEC = 30        # polling step while waiting for enrichment/embeddings
 WAIT_ENRICH_SEC = 900     # how long to wait for the summary and the embeddings
 WAIT_IDLE_SEC = 4 * 3600  # how long to wait for a running recording to end before titling
 WAIT_TRANSCRIPT_SEC = 2 * 3600  # after a tab save: how long to wait for the tab's transcript
+MIN_TYPED_NAME = 3        # a shorter typed name is a keystroke cut off by a dead tab, not a title
 
 PENDING_STATES = ('pending', 'held')
 OPEN_STATES = PENDING_STATES + ('running',)
@@ -273,7 +274,10 @@ class AutosaveJob:
 
         manifest = self.store.read(sid)
         typed = (manifest.get('autosave') or {}).get('fields') or {}
-        name = (typed.get('name') or manifest.get('name') or '').strip()
+        typed_name = (typed.get('name') or '').strip()
+        if len(typed_name) < MIN_TYPED_NAME:
+            typed_name = ''   # the hold stores every keystroke: Firefox died after one letter
+        name = typed_name or (manifest.get('name') or '').strip()
         form = {'source_type': 'library', 'audio_download_id': str(row['id']),
                 'model': self.model, 'language': self.language}
         # What the user typed on the save screen before the tab went away wins over any guess.
@@ -289,7 +293,13 @@ class AutosaveJob:
             logger.warning("autosave %s: transcribe returned %s %s", sid, status, res.get('error_code'))
             return f'transcribe_failed_{status}'
 
-        titled = self._title(tid) if not name else 'user_name'
+        if name:
+            titled = 'user_name'
+        elif self._event_titled(row):
+            # k6-calendar-ics: the library row already carries the event title (owner > event > Claude).
+            titled = 'event_title'
+        else:
+            titled = self._title(tid)
         filed = self._direction(tid)
         return f'transcribed_{tid}_{titled}_{filed}'
 
@@ -315,10 +325,19 @@ class AutosaveJob:
     def _library_row(self, sid: str):
         with get_db_connection(self.db_path) as conn:
             return conn.execute(
-                'SELECT id, file_path FROM audio_downloads '
+                'SELECT * FROM audio_downloads '
                 'WHERE recording_session_id = ? OR youtube_id = ? LIMIT 1',
                 (sid, f'recording_{sid}'),
             ).fetchone()
+
+    def _event_titled(self, row) -> bool:
+        """A bound row whose event has a title; an untitled event leaves naming to Claude."""
+        if 'calendar_event_id' not in row.keys() or row['calendar_event_id'] is None:
+            return False
+        with get_db_connection(self.db_path) as conn:
+            ev = conn.execute('SELECT title FROM calendar_events WHERE id = ?',
+                              (row['calendar_event_id'],)).fetchone()
+        return bool(ev is not None and (ev['title'] or '').strip())
 
     def _has_transcript(self, file_path: Optional[str]) -> bool:
         return self._transcript_id(file_path) is not None

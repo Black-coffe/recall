@@ -5,6 +5,82 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.38.0] — 2026-10-28
+
+### Added
+- Settings → Calendars: a collapsed step-by-step guide «How to connect Google Calendar» with six English screenshots (personal data blurred, archive counters cropped out) and uk/en captions, plus a note for Google Workspace accounts whose admin hides the secret iCal address.
+
+### Fixed
+- The one-time connect page banner names its own kind: a calendar page no longer says «connect this mailbox / set this key».
+- `docs/adr/057` prose is English again, so `test_docs_english` is green.
+
+## [4.37.0] — 2026-10-28
+
+### Added
+- Pre-meeting brief: a Telegram card `MEETING_BRIEF_LEAD_MINUTES` (default 15) before a calendar event with its people, their open tasks and the last calls with them; one card per event, the briefing privacy filter, a failed send is retried until the event starts and never counted as sent (`MEETING_BRIEF_ENABLED`, migration v60 `meeting_brief_sent`). `GET /api/meeting-brief?event_id=|person=` and the MCP tool `get_meeting_brief` build the same card for an event or for a person by name, without a calendar.
+- "What did I miss" on the record view and as the MCP tool `live_missed`: Claude Sonnet sums up the call since your last utterance, the last 2/5/10 minutes or the whole call (the live summary) in 3-5 lines - decided, promised, asked of you. Per-call spend cap `LIVE_MISSED_BUDGET_USD` (default 0.10); refused for agent recordings; never uses the local LLM.
+- Copilot review screen `/copilot`: sessions with shown and muted cards, the owner's ratings and the md/json export; `/api/copilot/sessions` rows carry shown, suppressed and thumbs counts.
+- Bookmark clip: `GET /api/bookmarks/<id>/clip?pad=` returns a zip with the audio around the bookmarked segment (default +-5 s) and its text; a Clip button on each bookmark.
+- Recording-consent reminder on every recording start (UI, call prompt, auto-record, agent): a dismissible line on the record view, a line on the "Recording started" prompt and the agent start notice. It never blocks the recording (`RECORDING_CONSENT_REMINDER`, on by default).
+
+### Changed
+- MCP: 98 tools (96 -> 98, both new tools are read class).
+- `docs/ROADMAP.md`: wave 2 items P2-P5 and N1 closed with 4.36.0.
+
+## [4.36.0] — 2026-10-28
+
+### Added
+- Call autoprompt: one repeat prompt on a long call that is still unrecorded (`RECORDING_AUTOPROMPT_REPROMPT_MIN`, default 10 minutes, 0 = off), and `call_watch.jsonl` now records whether a click or auto-start really started a recording and why not (`record_started`, `record_failed`, `reprompt`).
+- Opt-in auto-record: `RECORDING_AUTOPROMPT_ACTION=record` (default `prompt`, unchanged) lets the watcher start the recording itself (`started_by='auto_call'`) and immediately shows "Recording started" with Stop / Keep.
+- Per-stream gain (-20..+20 dB) on the start form and during a recording (`POST /api/recording/<sid>/gain`), stored in the manifest and applied to the final mixed file.
+- Participants: pick people from the graph at start, prefilled from calendar events around now (`GET /api/recording/participants`); linked to the transcript as `meeting_entities.source='owner'`.
+- A recording badge on every screen and a banner for recordings recovered after a restart.
+- A denied microphone or loopback answers 403 `DEVICE_ACCESS_DENIED` with the stream; the record view explains it, hints at an empty device list, reports "recording without screen", declares a recording interrupted after a server restart, and resyncs state after a failed pause/resume.
+
+### Changed
+- "Record" from the call prompt now captures the Windows default microphone and all system sound, not only the calling app.
+- `telegram.exe` dropped from the default `RECORDING_AUTOPROMPT_APPS` (it prompted on every voice message); an explicit `.env` list naming it still works.
+- A new transcript inherits the recording's (or library item's) description when the form leaves it empty.
+- `FORCE_CPU` now actually reaches the Whisper manager (it was never read): set in `.env`, transcription runs on the CPU.
+- Finished jobs older than 30 days are pruned at start; missing Claude key messages point to Settings instead of `.env`.
+- `comtypes` logging quieted to WARNING. Service worker cache `recall-v95`.
+
+## [4.35.0] — 2026-10-28
+
+### Added
+- Task approval (`docs/wiki/task-approval.md`, ADR-056): every task Claude extracts (meeting card, Telegram thread, comment analysis) lands as `proposed`, with `for_whom`, `confidence` and `importance` from the same call; third-party and low-confidence ones (`TASK_PROPOSAL_MIN_CONFIDENCE`, 0.6) are not stored. Nothing is a live task until the owner says Yes.
+- Daily pipe `task-proposals` (09:00): expires overdue proposals, then sends up to 10 Telegram cards (nearest deadline, then importance) with Yes / No and undo. The 3-day window starts at the first delivered card or the SPA tasks screen; an MCP listing never starts it. Expired proposals are hidden, not deleted.
+- Decisions are tombstones: re-running extraction replaces only `proposed` rows and never re-proposes text already decided in that record. `evals/task_rerun_measure.py` measures how often the exact key misses across re-runs.
+- Approve / reject / edit (text or date, undoable) through `PATCH /api/memory/action-items/<id>` `{action}`, the SPA tasks screen and MCP `task`; `list_action_items` takes the new statuses. Error code `INVALID_TRANSITION` (409). MCP tool count unchanged (96).
+- Monday digest: tasks stuck over 14 days or overdue, with done / postpone / drop, and a counter line (shown → pressed, review days, active tasks).
+- CLI `python -m app.services.commitments unlegacy [--dry-run]` and `expire-proposals [--dry-run]`.
+
+### Changed
+- Migration v59: proposal columns on `action_items`, `payload_json` on `action_item_events`, and every existing task (5484 rows here) moves to `legacy` with its old status kept. **Day one is empty:** the tasks screen, digest and `list_action_items` show nothing until a proposal is approved; old rows answer only to `status=legacy`, and `unlegacy` undoes the flip in one statement.
+
+### Fixed
+- Recording autosave drops a typed name shorter than 3 characters (a browser that died mid-typing left a one-letter title); Claude titles the recording instead.
+
+## [4.34.1] — 2026-10-27
+
+### Added
+- `python -m app.services.calendar_ics sync [--full] [--source ID]`: one sync now; `--full` pulls the whole feed once, before the backfill (the periodic sync keeps only ±30 days), and prints the earliest timed event it stored.
+
+### Changed
+- `calendar_bind backfill` reports `calendar_earliest` (earliest timed event), `before_calendar` (recordings older than it, no event can exist for them) and `coverable`, the denominator for the bind rate. All-day events never count toward the start of the calendar's history.
+
+## [4.34.0] — 2026-10-26
+
+### Added
+- Calendar through secret ICS links, read-only (K6, `docs/calendar.md`): several Google / Outlook calendars, connected on a one-time local page (`/connect/calendar/<token>`; https/webcal on an allowlisted host, a trial fetch must parse). The address lives only in the OS keyring (`Recall Calendar`), never in the DB, `.env`, logs or MCP. Background sync every `CALENDAR_SYNC_MINUTES` (15) for ±30 days, recurrences expanded with `recurring-ical-events` (EXDATE, moved occurrences); a cancelled or vanished occurrence is kept as `cancelled`. Settings → Calendars: sources, last sync, attendee share, Sync now, Disconnect (behind the Windows dialog).
+- A saved recording is bound to the event with the largest overlap (±10 min, at least a third of the recording; cancelled and all-day events never bind). Title order: the owner's name, then the event title, then Claude's suggestion; an event-titled recording is not renamed by the autosave. Attendees are linked to people who already exist (name, alias, merged spelling), never created; emails are never aliases.
+- `python -m app.services.calendar_bind backfill [--dry-run]`: binds past recordings (start from the session `manifest.json`), titles untouched, with per-calendar counts and the person count before and after.
+- MCP `list_calendar_events` (direct-DB, read-only; private-direction and stop-word events hidden) and `calendar_event` in `get_transcript`. MCP 95 → 96 tools (57 read-only).
+- Migration v58: `calendar_sources`, `calendar_events`, `calendar_event_id` on `audio_downloads` and `transcriptions`. New dependency `recurring-ical-events==3.8.2` (LGPL-3.0).
+
+### Fixed
+- Enrichment no longer wipes `meeting_entities` rows it did not write (`source='calendar'`), and updates a kept row instead of replacing it.
+
 ## [4.33.0] — 2026-10-26
 
 ### Added

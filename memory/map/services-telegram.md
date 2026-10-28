@@ -1,6 +1,6 @@
 # services — Telegram: threads, dossiers, tasks, questions
 
-last-verified: 2026-10-25 (mcp-telegram-automation 4.31.0: telegram_chats.py)
+last-verified: 2026-10-28 (task-approval 4.35.0: tg_tasks writer); 2026-10-25 (mcp-telegram-automation 4.31.0: telegram_chats.py)
 
 Part of `app/services/*`; hub — [services.md](services.md). Waves 4.5–5.3. Bot/pipes — [services-pipes-bot.md](services-pipes-bot.md);
 entity graph from TG — [services-entities.md](services-entities.md). Sibling channel Gmail (in-process poller, not a child process) —
@@ -30,11 +30,12 @@ entity graph from TG — [services-entities.md](services-entities.md). Sibling c
   Callers: `blueprints/telegram.py` (`tg_chat_category|tg_disable_chat|tg_enable_chat`, `_chat_change` maps refusals), `brief_actions._undo_chat_event`.
 - **tg_tasks.py** (5.1) — commitments from chat as a cascade: `triage_candidates/triage_thread/triage_all` (local
   `TG_TASKS_TRIAGE_MODEL`=qwen2.5:7b-instruct, $0), `extract_candidates/extract_thread/extract_all` (Claude on the selected →
-  `action_items` with `source='tg_thread'`), `stats()`. CLI `triage --dry-run|--chat|--force|--limit`, `extract …`, `stats`.
+  `action_items` with `source='tg_thread'`, 4.35.0: `status='proposed'` through `task_proposals.filter_candidates` / `existing_keys`, owner names in the prompt), `stats()`. CLI `triage --dry-run|--chat|--force|--limit`, `extract …`, `stats`.
   *The "no Claude on `source_type='telegram'`" guard is lifted SELECTIVELY. The model sees a PREVIEW of each message. A task
   is attached to a SPECIFIC message (`chat`/`said_by`/`link` in `list_commitments`). `triage_msgs` — a watermark
   (a thread that has grown is re-evaluated). A rerun erases only `source='tg_thread'`. No Ollama → `skipped` with a
-  reason; Claude failure → a thread without `tasks_at` waits for the next pass.*
+  reason; Claude failure → a thread without `tasks_at` waits for the next pass. 4.35.0: a rerun erases only undecided `proposed` rows
+  (`tg_tasks.py:329`); a task whose `text_key` already exists in the record in any status is not re-proposed.*
 - **tg_questions.py** (5.3) — unanswered questions, SQL only (nothing is persisted): `resolve_self()` (`:108`),
   `is_question()`, `addressed_to_me()`, `open_questions(db_path, *, days=90, ...)` (`:185`). MCP `list_open_questions`.
   CLI `list`, `whoami [--refresh]`.

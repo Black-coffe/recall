@@ -53,6 +53,8 @@ D_ACTIONS = ("transcript_delete", "transcript_bulk_delete", "taxonomy_delete", "
              "mailbox_label_enrich", "audio_delete", "transcript_version_evict",
              "document_import_folder", "document_reparse", "video_describe_claude",
              "telegram_enable_chat",
+             # k6-calendar-ics
+             "calendar_disconnect",
              # mcp-recording-live
              "recording_stop", "recording_cancel_own")
 # mcp-recording-live: the only D actions a non-``ui`` caller may run during a recording (still
@@ -83,6 +85,8 @@ _D_ROUTES: dict[str, str] = {
     "documents.reparse_document": "document_reparse",
     "documents.reparse_job": "document_reparse",
     "telegram.tg_enable_chat": "telegram_enable_chat",
+    # k6-calendar-ics: drops the keyring entry, the events and the recording bindings
+    "settings_api.disconnect_calendar": "calendar_disconnect",
 }
 
 

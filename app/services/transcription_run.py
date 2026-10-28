@@ -27,6 +27,7 @@ from app import state
 from app.core.i18n import tr
 from app.db.connection import get_db_connection
 from app.services import dedup_audio, import_roots, vocabulary
+from app.services.recording import participants
 from app.services.recording.state import recording_active
 from app.utils.audio import extract_audio_from_video as _extract_audio_raw
 from app.utils.files import allowed_file, is_video_file
@@ -180,7 +181,22 @@ def _resolve_recording(p: TranscribeParams):
     if not final_mp3 or not os.path.isfile(final_mp3):
         raise TranscribeError('NO_MEDIA', 400, tr('transcript.err.rec_mp3_missing'))
     source_name = manifest.get('name') or manifest.get('auto_name') or sid
-    return final_mp3, source_name, empty_source_meta('recording')
+    meta = empty_source_meta('recording')
+    # wave2-recording-calls-02: an empty form description inherits the recording's own.
+    meta['description'] = manifest.get('description') or None
+    meta['participants'] = participants.session_participants(manifest)
+    return final_mp3, source_name, meta
+
+
+def _manifest_participants(sid: Optional[str]) -> list:
+    """The person ids the recording's manifest carries; ``[]`` when it cannot be read."""
+    if not sid or state.recording_service is None:
+        return []
+    try:
+        return participants.session_participants(state.recording_service.store.read(sid))
+    except Exception:
+        logger.debug("recording manifest read failed for participants sid=%s", sid, exc_info=True)
+        return []
 
 
 def _resolve_library(p: TranscribeParams):
@@ -210,6 +226,7 @@ def _resolve_library(p: TranscribeParams):
     # Phase 21: for a recording keep the sid -> link the copilot session.
     if inherited == 'recording':
         meta['library_recording_sid'] = row['recording_session_id'] if 'recording_session_id' in keys else None
+        meta['participants'] = _manifest_participants(meta['library_recording_sid'])
     if inherited == 'youtube':
         meta['youtube_info'] = {
             'video_id': row['youtube_id'],
@@ -471,6 +488,20 @@ def run(params: TranscribeParams, resolved: Optional[tuple] = None, *, job=None,
             ))
             transcription_id = c.lastrowid
             result['transcription_id'] = transcription_id
+            # k6-calendar-ics: the recording's event binding and its attendees (existing people only).
+            try:
+                from app.services import calendar_bind
+                calendar_bind.apply_to_transcription(conn, transcription_id, meta.get('library_audio_id'))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Calendar binding of transcription %s skipped: %s",
+                               transcription_id, type(exc).__name__)
+            # wave2-recording-calls-02: the participants the owner picked at start.
+            if meta.get('participants'):
+                try:
+                    participants.link_to_transcription(conn, transcription_id, meta['participants'])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Participant links of transcription %s skipped: %s",
+                                   transcription_id, type(exc).__name__)
             if duplicate_of:
                 result['duplicate_of'] = duplicate_of
             # An agent's own title/description is marked as such (as PATCH /api/history does).

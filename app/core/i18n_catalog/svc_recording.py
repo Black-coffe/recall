@@ -62,6 +62,21 @@ MESSAGES: dict = {
         "uk": "{minutes} хв тиші після дзвінка. Запис збережено повністю.",
         "en": "{minutes} min of silence after the call. The recording was saved in full.",
     },
+    "svc_recording.call.started.title": {
+        "uk": "Recall · запис почався",
+        "en": "Recall · recording started",
+    },
+    "svc_recording.call.started.body": {
+        "uk": "Дзвінок у {label} записується автоматично.",
+        "en": "The call in {label} is being recorded automatically.",
+    },
+    "svc_recording.call.started.stop": {"uk": "Зупинити", "en": "Stop"},
+    "svc_recording.call.started.keep": {"uk": "Залишити", "en": "Keep"},
+    # --- consent reminder: one line on every recording start (RECORDING_CONSENT_REMINDER) ---
+    "svc_recording.consent.reminder": {
+        "uk": "Нагадування: попередьте співрозмовників, що розмова записується.",
+        "en": "Reminder: let the other participants know the conversation is being recorded.",
+    },
     # --- live_ask: reasons returned to the MCP tool ask_live ---
     "svc_recording.live_ask.empty_call": {
         "uk": "живий транскрипт дзвінка недоступний (немає активної сесії "

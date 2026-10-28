@@ -36,6 +36,8 @@ TASK_LEN = 160
 META_LEN = 60
 
 _TITLE_KEYS = ("weekly_digest", "dropped_commitments", "open_questions")
+#: Digest bucket of approved tasks that need a push (rendered with the K5 rows).
+_STUCK = "stuck"
 
 
 def _t(key: str, **vars) -> str:
@@ -238,6 +240,77 @@ def _blocks(title: str, cards: list[_Card], d: _Dirs, g: _Guard, base: str, *,
     return out
 
 
+def _stuck(items: list, today: date, d: _Dirs, g: _Guard, base: str) -> list[_Card]:
+    """Approved tasks that need a push (ADR-056 Ask 8): overdue ones show the deadline,
+    the rest "approved over N days ago"; the K5 done / not relevant / postpone row each."""
+    from app.services.commitments import STUCK_DAYS
+    out = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        due = it.get("due_date")
+        if due and str(due) < today.isoformat():
+            when = _t("overdue", date=_dm(due))
+        else:
+            when = _t("stuckOld", days=STUCK_DAYS)
+        out.append(_task_card(it, "⏳", when, d, g, base, (str(due or "9999"), i)))
+    return out
+
+
+#: ``for_whom`` values the cards name (``third_party`` is never stored, ADR-056 Decision 2).
+_FOR_WHOM = ("owner", "promised_to_owner", "unknown")
+
+
+def _proposals(res: dict, g: _Guard, base: str, *, titled: bool,
+               buttons: Optional[list], proposals: Optional[list]) -> list[str]:
+    """The daily batch: numbered cards in queue order (what · for whom · due · importance ·
+    source link). With ``buttons`` the ids join the numbering and ``proposals`` (Yes / No rows)."""
+    from app.services.brief_actions import MAX_ITEMS
+    items = [x for x in res.get("items") or [] if isinstance(x, dict)]
+    if not items:
+        return []
+    count = _t("proposals.queue", n=len(items), queued=int(res.get("queued") or len(items)))
+    lines = [f"<b>{_t('proposals.title')}</b> · {count}" if titled else count]
+    if res.get("expired"):
+        lines.append(f"<i>{_t('proposals.expired', n=int(res['expired']))}</i>")
+    paras = ["\n".join(lines)]
+    for it in items:
+        iid, tid = _int(it.get("id")), _int(it.get("transcription_id"))
+        text = g(it.get("task"), TASK_LEN) or _t("noText")
+        head = (_href(f"{base}/transcript/{tid}?task={iid}", text) if tid and iid
+                else f"<b>{text}</b>")
+        meta = []
+        if it.get("for_whom") in _FOR_WHOM:
+            meta.append(f"👤 {g(_t('proposals.forWhom.' + it['for_whom']), META_LEN)}")
+        if it.get("owner"):
+            meta.append(f"🙋 {g(it['owner'], META_LEN)}")
+        due = it.get("due_date")
+        meta.append("📅 " + (g(_dm(due)) if due else g(_t("noDate"))))
+        imp = _int(it.get("importance"))
+        if imp in (1, 2, 3):
+            meta.append(g(_t(f"proposals.importance.{imp}"), META_LEN))
+        src = it.get("chat") or it.get("meeting")
+        if src:
+            meta.append(f"{'💬' if it.get('chat') else '🎙'} {g(src, META_LEN)}")
+        if it.get("category"):
+            meta.append(f"📁 {g(it['category'], META_LEN)}")
+        mark = "•"
+        if buttons is not None and iid is not None and len(buttons) < MAX_ITEMS:
+            buttons.append(iid)
+            if proposals is not None:
+                proposals.append(iid)
+            mark = f"<b>{len(buttons)}.</b>"
+        paras.append(f"{mark} {head}\n   " + " · ".join(meta))
+    return paras
+
+
+def _proposal_stats(st: dict) -> str:
+    """The Ask 9 counter line: shown -> pressed, review days of the window, active."""
+    return _t("proposals.stats", shown=int(st.get("shown") or 0),
+              pressed=int(st.get("pressed") or 0), days=int(st.get("review_days") or 0),
+              window=int(st.get("window_days") or 7), active=int(st.get("active") or 0))
+
+
 def _stale(items: list, g: _Guard, base: str) -> list[str]:
     items = [it for it in items if isinstance(it, dict)]
     if not items:
@@ -345,14 +418,16 @@ def link_base() -> str:
 
 def title_for(tools: Iterable[str]) -> str:
     return " + ".join(_t("title." + t) if t in _TITLE_KEYS
-                      else _t("mcp.title") if t == "mcp_actions" else t for t in tools)
+                      else _t("mcp.title") if t == "mcp_actions"
+                      else _t("proposals.title") if t == "task_proposals" else t for t in tools)
 
 
 def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optional[str] = None,
            headline: Optional[str] = None, missing: Iterable[str] = (), hidden: int = 0,
            words: Optional[Iterable[str]] = None,
            buttons: Optional[list] = None,
-           undo_items: Optional[list] = None) -> tuple[str, list[str]]:
+           undo_items: Optional[list] = None,
+           proposals: Optional[list] = None) -> tuple[str, list[str]]:
     """→ (message HTML, stop words that occurred in fields). A non-empty list = do not send.
 
     ``words`` is the stop list (default ``privacy.stop_words()``; ``PrivacyError``
@@ -360,14 +435,16 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
     "1.", "2."…, their ids are appended there in number order (→ ``brief_actions.keyboard``),
     and at the bottom a line appears saying the buttons work only with the PC on.
     ``undo_items`` (a list): the MCP summary's undoable items, numbered after the tasks,
-    are appended as ``{n, kind, ref}`` (→ ``brief_actions.keyboard(..., undo_items)``)."""
+    are appended as ``{n, kind, ref}`` (→ ``brief_actions.keyboard(..., undo_items)``).
+    ``proposals`` (a list): the ids of the task-proposal cards numbered in ``buttons``
+    (→ ``keyboard(..., proposal_ids=)`` Yes / No rows, and the ids marked shown after delivery)."""
     from app.services import privacy
     g = _Guard(privacy.stop_words() if words is None else words)
     base = (base_url or link_base()).rstrip("/")
     lists = {(tool, key): v for tool, res in data.items() if isinstance(res, dict)
              for key, v in res.items() if isinstance(v, list)}
     task_ids = {_int(it.get("id")) for (_, key), v in lists.items()
-                if key in (*_TASK_KINDS, "dropped") for it in v if isinstance(it, dict)}
+                if key in (*_TASK_KINDS, "dropped", _STUCK) for it in v if isinstance(it, dict)}
     task_ids.discard(None)
     rec_ids = {_int(it.get("transcription_id")) for (_, key), v in lists.items()
                if key == "questions" for it in v if isinstance(it, dict)}
@@ -388,9 +465,15 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
         if "groups" in res and "items" in res:
             mcp.append(res)
             continue
+        if "queued" in res and "items" in res:
+            body += _proposals(res, g, base, titled=title != _t("proposals.title"),
+                               buttons=buttons, proposals=proposals)
+            continue
         if any(k in res for k in _TASK_KINDS):
             body += _blocks(_t("tasks"), _digest_tasks(res, d, g, base), d, g, base,
                             more_link=True, buttons=buttons)
+        body += _blocks(_t("stuck"), _stuck(res.get(_STUCK) or [], today, d, g, base),
+                        d, g, base, more_link=True, buttons=buttons)
         body += _blocks(_t("dropped"),
                         _dropped(res.get("dropped") or [], d, g, base), d, g, base,
                         more_link=True, buttons=buttons)
@@ -402,6 +485,10 @@ def render(title: str, data: dict, *, db_path: str, today: date, base_url: Optio
         cov = res.get("coverage")
         if isinstance(cov, dict) and cov.get("total"):
             body.append(f"<i>{_t('coverage', dated=cov.get('dated', 0), total=cov['total'])}</i>")
+        st = res.get("proposals")
+        if isinstance(st, dict) and "shown" in st:
+            # Shown even at zeros: the counter exists from the first day (Ask 9).
+            body.append(f"<i>{html.escape(_proposal_stats(st), quote=False)}</i>")
     for res in mcp:          # after the tasks: undo numbers continue the task numbers
         first = len(buttons or []) + len(undo_items or [])
         body += _mcp(res, g, first=first, undo_items=undo_items,

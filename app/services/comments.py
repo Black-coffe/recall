@@ -52,7 +52,7 @@ import numpy as np
 
 from app.core.i18n import tr
 from app.db.connection import get_db_connection
-from app.services import embeddings, record_meta
+from app.services import embeddings, record_meta, task_proposals
 
 
 logger = logging.getLogger(__name__)
@@ -909,20 +909,31 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
         # Own tasks are rewritten entirely, which is exactly why v38 introduced
         # comment_id. Without it a repeated analysis would either erase tasks of neighbouring
         # comments of the same recording or breed duplicates.
-        c.execute("DELETE FROM action_items WHERE comment_id = ?", (comment_id,))
+        # ADR-056: only undecided proposals are rewritten; a decided row survives.
+        c.execute("DELETE FROM action_items WHERE comment_id = ? AND status = 'proposed'",
+                  (comment_id,))
+        kept, dropped = task_proposals.filter_candidates(
+            parsed.get("action_items") or [], min_confidence=task_proposals.min_confidence())
+        known_keys = task_proposals.existing_keys(c, transcription_id)
         written = 0
-        for it in (parsed.get("action_items") or []):
-            if not isinstance(it, dict):
-                continue
+        skipped_decided = 0
+        for it in kept:
             task = (it.get("task") or "").strip()
             if not task:
                 continue
+            key = task_proposals.text_key(task)
+            if key in known_keys:
+                skipped_decided += 1
+                continue
+            known_keys.add(key)
             c.execute(
                 "INSERT INTO action_items (transcription_id, task, owner_name, "
-                "due, due_date, status, source, comment_id) "
-                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
+                "due, due_date, status, source, comment_id, text_key, for_whom, "
+                "confidence, importance) "
+                "VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)",
                 (transcription_id, task, it.get("owner"), it.get("due"),
-                 it.get("due_date"), ACTION_SOURCE, comment_id))
+                 it.get("due_date"), ACTION_SOURCE, comment_id,
+                 key, it["for_whom"], it["confidence"], it["importance"]))
             written += 1
 
         c.execute(
@@ -938,7 +949,10 @@ def _persist_analysis(db_path: str, comment_id: int, transcription_id: int,
         # in 5 minutes when the name cache expires.
         tg_entities.reset_names_cache()
 
-    return {"entities": len(entity_ids), "action_items": written}
+    return {"entities": len(entity_ids), "action_items": written,
+            "proposals": {"skipped_decided": skipped_decided,
+                          "dropped_third_party": dropped["third_party"],
+                          "dropped_low_confidence": dropped["low_confidence"]}}
 
 
 def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
@@ -974,7 +988,8 @@ def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
     try:
         parsed = text_polishing.extract_comment_items(
             c["body"], comment_date=str(c["created_at"])[:10],
-            model=model, effort=effort)
+            model=model, effort=effort,
+            owner_names=task_proposals.owner_names(db_path))
     except Exception as exc:
         # Soft degradation, as in the card phase of enrichment: the comment stays on
         # the card and in search, the analysis can be repeated. We log: a silent failure
@@ -984,8 +999,12 @@ def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
                 "error": str(exc)}
 
     counts = _persist_analysis(db_path, comment_id, tid, parsed)
-    logger.info("[comments] #%s analyzed: entities=%d, tasks=%d (in=%d out=%d)",
+    proposals = counts.pop("proposals")
+    logger.info("[comments] #%s analyzed: entities=%d, tasks=%d, skipped_decided=%d, "
+                "dropped_third_party=%d, dropped_low_confidence=%d (in=%d out=%d)",
                 comment_id, counts["entities"], counts["action_items"],
+                proposals["skipped_decided"], proposals["dropped_third_party"],
+                proposals["dropped_low_confidence"],
                 parsed.get("input_tokens", 0), parsed.get("output_tokens", 0))
     return {
         "status": "analyzed", "comment_id": comment_id,
@@ -994,6 +1013,7 @@ def analyze(db_path: str, comment_id: int, model: Optional[str] = None,
         "input_tokens": parsed.get("input_tokens", 0),
         "output_tokens": parsed.get("output_tokens", 0),
         "cache_read_tokens": parsed.get("cache_read_tokens", 0),
+        "proposals": proposals,
     }
 
 

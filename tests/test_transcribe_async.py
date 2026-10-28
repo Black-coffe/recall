@@ -391,6 +391,52 @@ class TestMetaSource:
         assert row["meta_source"] is None
 
 
+# ============================================================ wave2-recording-calls-02
+
+class TestInheritance:
+    def _library_with_description(self, env):
+        aid = _library_row(env)
+        with get_db_connection(env.db) as conn:
+            conn.execute("UPDATE audio_downloads SET description = ? WHERE id = ?",
+                         ("Опис із бібліотеки", aid))
+            conn.commit()
+        return aid
+
+    def test_library_job_without_description_inherits_the_library_one(self, env):
+        aid = self._library_with_description(env)
+        r = _post(env, {"source": "library", "audio_download_id": aid})
+        job = _finish(env, r.get_json()["job_id"])
+        assert job.state == "completed", job.error
+        assert _tx_row(env, job.meta["transcription_id"])["description"] == "Опис із бібліотеки"
+
+    def test_library_job_typed_description_is_kept(self, env):
+        aid = self._library_with_description(env)
+        r = _post(env, {"source": "library", "audio_download_id": aid, "description": "Свій опис"})
+        job = _finish(env, r.get_json()["job_id"])
+        assert _tx_row(env, job.meta["transcription_id"])["description"] == "Свій опис"
+
+    def test_recording_job_links_the_manifest_participants(self, env):
+        from app.services import enrichment
+        with get_db_connection(env.db) as conn:
+            andriy = enrichment._upsert_entity(conn, "person", "Андрій Коваль")
+            olena = enrichment._upsert_entity(conn, "person", "Олена")
+            project = enrichment._upsert_entity(conn, "project", "Барселона")
+            conn.commit()
+        sid, _ = _finalized_recording(env)
+        env.recorder.store.manifests[sid]["participants"] = [andriy, olena, project, 9999]
+        r = _post(env, {"source": "recording", "recording_session_id": sid})
+        job = _finish(env, r.get_json()["job_id"])
+        assert job.state == "completed", job.error
+        conn = sqlite3.connect(env.db)
+        try:
+            links = sorted(conn.execute(
+                "SELECT entity_id, source FROM meeting_entities WHERE transcription_id = ?",
+                (job.meta["transcription_id"],)).fetchall())
+        finally:
+            conn.close()
+        assert links == sorted([(andriy, "owner"), (olena, "owner")])
+
+
 # ============================================================ import roots helper
 
 def test_import_roots_refuses_everything_when_unset(monkeypatch, tmp_path):

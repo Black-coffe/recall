@@ -27,6 +27,10 @@ must never be silently repointed:**
   suffix only (weaker evidence). Kept as a *separate* constant specifically so
   code that reads `source == "thread_match"` (`entity_dedup.py`, `comments.py`)
   does not start seeing morphological guesses as exact matches.
+- `"calendar"` — attendee of a bound calendar event (`calendar_bind.link_attendees`).
+- `"owner"` (`recording/participants.SOURCE`, 4.36.0) — a person the owner picked
+  at recording start. Re-enrich keeps both `calendar` and `owner` rows
+  (`enrichment.py:347-349`); neither is ever rewritten to the other.
 
 **The morphological matcher is off by default and must stay opt-in.**
 `TG_ENTITIES_MORPH_ENABLED` (env, default `"0"`) gates it; merging or changing

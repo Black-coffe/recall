@@ -123,7 +123,8 @@ class TestPipeFile:
 
     def test_shipped_pipe_files_load(self):
         names = {p.name: p for p in pipes.load_pipes()}
-        assert set(names) == {"weekly-digest", "dropped-commitments", "open-questions", "mcp-actions"}
+        assert set(names) == {"weekly-digest", "dropped-commitments", "open-questions", "mcp-actions",
+                              "task-proposals"}
         assert names["open-questions"].skip_if_empty is True
         assert names["open-questions"].schedule.expr == "0 9 * * 1-5"
         assert names["weekly-digest"].schedule.expr == "0 9 * * 1"

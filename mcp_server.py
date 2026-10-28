@@ -58,7 +58,7 @@ logging.raiseExceptions = False
 # T8.3 (Wave 4): this process had NO logger at all (only raiseExceptions=False
 # above) — unattended crashes went unnoticed. We add a LIGHT (stdlib-only,
 # without app.core.logger.setup_logger and without the heavy torch/e5 imports — search_archive
-# still loads them lazily) file log into its OWN file mcp_server.log, separate
+# proxies to the warm model in app.py) file log into its OWN file mcp_server.log, separate
 # from app.py (whisper_ui.log) and telegram_listener.py (telegram_listener.log) —
 # same reason as there: a shared file across several processes → rollover conflict
 # on Windows (WinError 32). CRITICAL: no handler on stdout — the MCP stdio transport
@@ -549,6 +549,8 @@ _TOOL_CLASS = {
     "list_stale_topics": _r("entity"),
     # Telegram
     "list_open_questions": _r("telegram"),
+    "list_calendar_events": _r("metadata"),  # k6-calendar-ics: never returns a feed address
+    "get_meeting_brief": _r("metadata"),  # wave4-client-calls: the server applies the privacy filter
     "get_chat_context": _r("telegram"),
     "telegram_coverage": _r("telegram", open_world=True),  # the listener asks Telegram live
     "telegram_status": _r("system", open_world=True),  # the listener's get_me() reaches Telegram
@@ -563,6 +565,8 @@ _TOOL_CLASS = {
     "ask_live": _r("copilot"),  # local Ollama only
     "get_live_video": _r("ocr"),
     "get_live_frames": _r("ocr"),
+    # Claude Sonnet summary of the live window: the window text goes to Anthropic (open world)
+    "live_missed": _r("copilot", open_world=True),
     # system
     "get_job_status": _r("system"),
     "get_active_recording": _r("system"),
@@ -1239,7 +1243,10 @@ def get_transcript(transcription_id: int, include_segments: bool = False,
         if email_block and thread is None:
             thread = _email_thread(conn, r["id"])
         attached_to = _attached_to(conn, r["id"]) if r["source_type"] != "email" else []
+        calendar_event = _calendar_event_of(conn, r["id"])
     d = _row(r)
+    if calendar_event:
+        d["calendar_event"] = calendar_event
     d["display_name"] = record_meta.display_name(d)
     if email_block:
         d["email"] = email_block
@@ -1697,10 +1704,36 @@ def _attach_last_events(items: list) -> None:
             i["last_event"] = last.get(i.get("id"))
 
 
+_DECISION_FIELDS = ("for_whom", "confidence", "importance", "first_shown_at", "decided_at")
+
+
+def _attach_decision_fields(items: list) -> None:
+    """The approval fields (ADR-056) on each task, read by id; `None` on a DB before migration v59.
+    A read only: nothing here marks a proposal shown."""
+    ids = [i["id"] for i in items if isinstance(i, dict) and i.get("id") is not None]
+    found: dict = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        try:
+            with get_db_connection(DB_PATH) as conn:
+                for r in conn.execute(f"SELECT id, {', '.join(_DECISION_FIELDS)} FROM action_items "
+                                      f"WHERE id IN ({marks})", ids):
+                    found[r["id"]] = {k: r[k] for k in _DECISION_FIELDS}
+        except sqlite3.OperationalError:
+            logger.debug("action_items predates v59: no approval fields")
+    for i in items:
+        if isinstance(i, dict):
+            i.update(found.get(i.get("id")) or dict.fromkeys(_DECISION_FIELDS))
+
+
+_LIST_TASK_STATUSES = ("proposed", "open", "done", "cancelled", "stale", "rejected", "expired",
+                       "legacy", "all")
+
+
 @_tool
 def list_action_items(window: str = "this_week", owner: Optional[str] = None,
                       category_id: Optional[int] = None, status: str = "open",
-                      limit: int = 50, tags: Optional[str] = None,
+                      limit: Optional[int] = None, tags: Optional[str] = None,
                       since: Optional[str] = None, until: Optional[str] = None) -> dict:
     """Tasks/agreements from calls AND FROM CHATS by TIME WINDOW and owner.
 
@@ -1708,9 +1741,19 @@ def list_action_items(window: str = "this_week", owner: Optional[str] = None,
     `this_week` means "still in time": counted from TODAY to the end of the week, not
     from Monday, so the windows do not overlap and the same thing is not read twice.
     owner — a substring of the owner's name («Юлія» will find «Юля» too, if they are merged in the graph).
-    category_id — narrow to a direction. status: open | stale | done | cancelled | all
-    (`stale` — tasks from old meetings with no future deadline: not deleted,
-    but removed from digests). Duplicates of one task from different meetings are hidden.
+    category_id — narrow to a direction. status: open (default, approved and alive) | proposed |
+    rejected | expired | legacy | stale | done | cancelled | all (an unknown value is
+    INVALID_ARGUMENT). `stale` — tasks from old meetings with no future deadline: not deleted,
+    but removed from digests. Duplicates of one task from different meetings are hidden.
+
+    The approval queue: `status='proposed'` returns the proposals in the daily batch order
+    (nearest due date, then importance, then id), 10 by default (`limit` widens it); window,
+    owner and the other filters do not apply to the queue (passing them is INVALID_ARGUMENT).
+    Listing never marks a proposal shown: only a delivered Telegram card or the owner's own
+    screen starts its 3-day clock. Decide with `task(approve|reject|edit, item_ids=[id])`.
+    `legacy` = the tasks archived when the approval flow began; they answer only when named
+    ("what did I promise in September": status='legacy', window='all', since/until, owner).
+    Every row carries `for_whom, confidence, importance, first_shown_at, decided_at`.
 
     Returns both the raw deadline phrase (`due_raw`, as spoken) and the computed date
     (`due_date` + `due_precision`) — if a date looks odd, look at the raw phrase.
@@ -1758,6 +1801,21 @@ def list_action_items(window: str = "this_week", owner: Optional[str] = None,
     `category_id` — an intersection ("tag AI only in this direction").
     """
     from app.services import commitments
+    if status not in _LIST_TASK_STATUSES:
+        return _err("INVALID_ARGUMENT", f"Unknown status {status!r}.",
+                    hint=f"Allowed: {' | '.join(_LIST_TASK_STATUSES)}.")
+    if status == "proposed":
+        if any(v is not None for v in (owner, category_id, tags, since, until)):
+            return _err("INVALID_ARGUMENT", "The proposal queue takes no owner/category/tags/date filters.",
+                        hint="Call list_action_items(status='proposed', limit=N).")
+        items = commitments.proposal_queue(DB_PATH, limit=min(int(limit or commitments.PROPOSAL_BATCH), 200))
+        matched = commitments.count_commitments(DB_PATH, window="all", status="proposed")
+        _attach_decision_fields(items)
+        _attach_last_events(items)
+        return {"items": items, "coverage": {"window_matched": matched,
+                                             "truncated": matched > len(items)}}
+    if limit is None:
+        limit = 50
     try:
         tag_list = categories.parse_tags(tags)
         since_p = categories.parse_date(since)
@@ -1778,6 +1836,7 @@ def list_action_items(window: str = "this_week", owner: Optional[str] = None,
     # as "here is the whole window, the other 1650 are elsewhere".
     coverage["window_matched"] = matched
     coverage["truncated"] = matched > len(items)
+    _attach_decision_fields(items)
     _attach_last_events(items)
     result = {"items": items, "coverage": coverage}
     if tag_list:
@@ -1879,6 +1938,146 @@ def list_open_questions(days: int = 90, limit: int = 20, window_h: float = 24.0,
     from app.services import tg_questions
     return tg_questions.open_questions(DB_PATH, days=days, limit=limit,
                                        window_h=window_h, chat_id=chat_id)
+
+
+@_tool
+def list_calendar_events(start: Optional[str] = None, end: Optional[str] = None,
+                         limit: int = 50) -> dict:
+    """Calendar events from the owner's connected ICS calendars (Google / Outlook), read-only.
+
+    Window: `start`..`end` as ISO dates or datetimes (UTC when no offset); default from 24 h ago
+    to 7 days ahead, so "what meetings are next" needs no arguments. Each event: `title`,
+    `start`/`end` (UTC), `all_day`, `status`, `source` (the calendar's label), `attendees`
+    (names; the email only for an attendee without a name) and `transcription_id` - the
+    recording bound to this event, or null when nothing was recorded.
+
+    `sources` says when each calendar last synced and how many of its events carry attendees:
+    a published Outlook feed can come without them, then "who was there" is not in the
+    calendar. Events bound to a private-direction record and titles with a stop word are
+    hidden and counted in `hidden`. The secret feed address is never returned."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    def _when(raw, default):
+        if raw is None or str(raw).strip() == "":
+            return default
+        v = _dt.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+        return v if v.tzinfo else v.replace(tzinfo=_tz.utc)
+
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    now = _dt.now(_tz.utc)
+    try:
+        lo = _when(start, now - _td(hours=24)).astimezone(_tz.utc)
+        hi = _when(end, now + _td(days=7)).astimezone(_tz.utc)
+    except ValueError:
+        return _err("INVALID_ARGUMENT", "start/end must be ISO dates, e.g. 2026-10-27 or 2026-10-27T09:00")
+    if hi <= lo:
+        return _err("INVALID_ARGUMENT", "end must be after start")
+    limit = max(1, min(int(limit or 50), 200))
+    window = {"start": lo.strftime(fmt), "end": hi.strftime(fmt)}
+    from app.services import calendar_ics
+    try:
+        events = calendar_ics.events_between(DB_PATH, window["start"], window["end"])
+        sources = calendar_ics.list_sources(DB_PATH, check_keyring=False)   # never read the secret here
+    except sqlite3.OperationalError:
+        return _err("UNAVAILABLE", "The calendar tables are missing: start Recall once to migrate the DB.")
+    bound: dict = {}
+    ids = [e["id"] for e in events]
+    with get_db_connection(DB_PATH) as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for r in conn.execute(
+                    "SELECT calendar_event_id, MIN(id) AS tid FROM transcriptions "
+                    f"WHERE deleted_at IS NULL AND calendar_event_id IN ({','.join('?' * len(chunk))}) "
+                    "GROUP BY calendar_event_id", chunk):
+                bound[r["calendar_event_id"]] = r["tid"]
+    try:
+        private = _privacy.private_tids(DB_PATH, list(bound.values()))
+        words = _privacy.stop_words()
+    except _privacy.PrivacyError:
+        logger.warning("list_calendar_events: privacy check failed - hiding every event", exc_info=True)
+        return {"events": [], "hidden": len(events), "privacy_check_failed": True, "window": window}
+    out, hidden = [], 0
+    for e in events:
+        tid = bound.get(e["id"])
+        if (tid is not None and tid in private) or _privacy.has_stop_word(e["title"], words):
+            hidden += 1
+            continue
+        out.append({
+            "event_id": e["id"], "title": e["title"], "start": e["start"], "end": e["end"],
+            "all_day": e["all_day"], "status": e["status"], "source": e["source_label"],
+            "attendees": [a.get("name") or a.get("email") for a in e["attendees"]
+                          if a.get("name") or a.get("email")],
+            "transcription_id": tid,
+        })
+    return {"events": out[:limit], "truncated": len(out) > limit, "hidden": hidden, "window": window,
+            "sources": [{"label": s["label"], "last_sync_at": s["last_sync_at"],
+                         "last_error": s["last_error"], "events_seen": s["events_seen"],
+                         "events_with_attendees": s["events_with_attendees"]} for s in sources]}
+
+
+def _fit_brief(out: dict, max_tokens) -> dict:
+    """Drop people from the end until the brief fits the budget (`truncated`, `people_shown`,
+    `people_total`). Tasks (5) and calls (5) per person are capped by the service; the attendee
+    list of one event is the only unbounded part, so it is the one trimmed (as `_fit_timeline`)."""
+    limit = _budget_chars(max_tokens)
+    brief = out.get("brief")
+    if limit is None or not isinstance(brief, dict) or _json_len(out) <= limit:
+        return out
+    people = brief.get("people") or []
+    total = len(people)
+    while people and _json_len(out) > limit - _BUDGET_RESERVE:
+        people.pop()
+    out["truncated"] = True
+    out["people_shown"] = len(people)
+    out["people_total"] = total
+    return out
+
+
+@_tool
+def get_meeting_brief(event_id: Optional[int] = None, person: Optional[str] = None,
+                      max_tokens: int = DEFAULT_MAX_TOKENS) -> dict:
+    """The pre-meeting brief (wave4-client-calls): who is in a calendar event, or one person by name.
+
+    Pass exactly one of `event_id` (from `list_calendar_events`) or `person` (a name; works without
+    a calendar). Read-only; the server applies the privacy filter before anything is returned.
+    `brief.people[]` each carry `open_tasks` (up to 5, `open_more` counts the rest), `last_calls`
+    (up to 5) and `matched` (false = no person of that name in the archive). Over `max_tokens` the
+    people at the end are dropped (`truncated`, `people_shown`, `people_total`)."""
+    name = (person or "").strip()
+    if (event_id is not None) == bool(name):
+        return _err("INVALID_ARGUMENT", "Pass exactly one of event_id or person.")
+    if name:
+        params = {"person": name}
+    else:
+        try:
+            params = {"event_id": int(event_id)}
+        except (TypeError, ValueError):
+            return _err("INVALID_ARGUMENT", "event_id must be a whole number.")
+    res = _api("GET", "/api/meeting-brief", params=params)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        return res
+    return _fit_brief({"ok": True, "brief": res.get("brief")}, max_tokens)
+
+
+def _calendar_event_of(conn, transcription_id: int) -> Optional[dict]:
+    """k6-calendar-ics: the event a record is bound to (title, time, calendar, attendee names)."""
+    try:
+        r = conn.execute(
+            "SELECT e.id, e.title, e.start_utc, e.end_utc, e.status, e.attendees, s.label "
+            "FROM transcriptions t JOIN calendar_events e ON e.id = t.calendar_event_id "
+            "JOIN calendar_sources s ON s.id = e.source_id WHERE t.id = ?",
+            (int(transcription_id),)).fetchone()
+    except sqlite3.OperationalError:
+        return None                        # a DB from before v58
+    if r is None:
+        return None
+    try:
+        people = json.loads(r["attendees"] or "[]")
+    except (ValueError, TypeError):
+        people = []
+    return {"event_id": r["id"], "title": r["title"], "start": r["start_utc"], "end": r["end_utc"],
+            "status": r["status"], "source": r["label"],
+            "attendees": [p.get("name") or p.get("email") for p in people if p.get("name") or p.get("email")]}
 
 
 @_tool
@@ -3189,6 +3388,27 @@ def ask_live(question: str, scope: str = "both", session_id: Optional[str] = Non
     return out
 
 
+# The window names of the route (`app/services/live_missed.WINDOWS`). Copied, not imported: this
+# stdio process loads no service that the route needs. A test keeps the two equal.
+_LIVE_MISSED_WINDOWS = ("since_self", "2m", "5m", "10m", "whole")
+
+
+@_tool
+def live_missed(session_id: Optional[str] = None, window: str = "since_self") -> dict:
+    """"What did I miss" on a live call (wave4-client-calls): Claude Sonnet summarises one window of
+    the live preview in 3-5 lines - what was decided, what was promised, what was asked of the owner.
+
+    `window`: `since_self` (default, from the owner's last utterance) | `2m` | `5m` | `10m` | `whole`
+    (the whole call). `session_id=None` → the active recording; several active recordings →
+    `AMBIGUOUS_SESSION` with a `sessions` list. An agent-class recording is refused (`AGENT_SESSION`),
+    the per-call budget is `LIVE_BUDGET_EXHAUSTED` with `spent_usd` and `budget_usd`. Nothing is
+    stored. Needs a running app.py."""
+    if window not in _LIVE_MISSED_WINDOWS:
+        return _err("INVALID_ARGUMENT", f"Unknown window {window!r}.",
+                    hint="window is since_self | 2m | 5m | 10m | whole.")
+    return _api("POST", "/api/copilot/live-missed", body={"session_id": session_id, "window": window})
+
+
 # --- Live screen video (spec live-video-frames, C3): proxies to the app.py live-frame routes.
 # The stdio process never opens the session directory and runs no ffmpeg/OCR. A running session
 # has no direction yet, so only the mode and the stop words apply (no RECALL_PRIVATE_CATEGORIES).
@@ -3553,7 +3773,7 @@ def settings_remove_anthropic_key() -> dict:
 # ---- archive organisation (mcp-archive-org) -------------------------------------------------
 # W tools go through `_api(write=True)` (the app marks every row they write `source='mcp'`), D tools
 # through `_gated` (the owner presses «Yes» in a Windows dialog first). No SQLite write here.
-_TASK_ACTIONS = ("done", "cancelled", "open", "postpone", "undo")
+_TASK_ACTIONS = ("done", "cancelled", "open", "postpone", "undo", "approve", "reject", "edit")
 
 
 def _done(res):
@@ -3603,11 +3823,16 @@ def _batch(results: list) -> dict:
 
 @_tool
 def task(action: str, item_ids: Optional[list[int]] = None, event_id: Optional[int] = None,
-         days: Optional[int] = None) -> dict:
+         days: Optional[int] = None, text: Optional[str] = None, due: Optional[str] = None) -> dict:
     """Change tasks (action items) like the Tasks screen does (a WRITE tool). Actions:
     - done | cancelled | open (item_ids, up to 5): set the status. A task already in that status
       answers `created: false` with its existing `event_id`.
     - postpone (item_ids, days = 1 | 7 | 30): due date = today + days, status open.
+    - approve | reject (item_ids, up to 5): decide on a proposal from
+      `list_action_items(status='proposed')`. approve: proposed/expired/rejected/legacy -> open;
+      reject: proposed/expired -> rejected; any other start is INVALID_TRANSITION.
+    - edit (item_ids=[one id], text?, due? = ISO date YYYY-MM-DD): fix the wording and/or the due
+      date; the status stays. At least one of text, due.
     - undo (event_id): roll back a task change that THIS agent made, and only if it is still the
       task's last event (`list_action_items` gives `last_event`). Refusals: NOT_MCP_EVENT (the owner
       made that change), UNDO_NOT_LAST, NOT_FOUND.
@@ -3623,10 +3848,27 @@ def task(action: str, item_ids: Optional[list[int]] = None, event_id: Optional[i
         return err
     if action == "postpone" and (isinstance(days, bool) or days not in (1, 7, 30)):
         return _err("INVALID_ARGUMENT", "days must be 1, 7 or 30.")
+    if action == "edit":
+        body: dict = {"action": "edit"}
+        if len(item_ids) != 1:
+            return _err("INVALID_ARGUMENT", "edit takes exactly one id in item_ids.")
+        if isinstance(text, str) and text.strip():
+            body["task"] = text.strip()
+        if due is not None:
+            from datetime import date as _date
+            try:
+                body["due_date"] = _date.fromisoformat(str(due)).isoformat()
+            except ValueError:
+                return _err("INVALID_ARGUMENT", "due must be an ISO date (YYYY-MM-DD).")
+        if len(body) == 1:
+            return _err("INVALID_ARGUMENT", "edit needs text or due.")
+        return _batch([_w_call("task", "PATCH", f"/api/memory/action-items/{item_ids[0]}", body)])
     results = []
     for aid in item_ids:
         if action == "postpone":
             res = _w_call("task", "POST", f"/api/memory/action-items/{aid}/postpone", {"days": days})
+        elif action in ("approve", "reject"):
+            res = _w_call("task", "PATCH", f"/api/memory/action-items/{aid}", {"action": action})
         else:
             res = _w_call("task", "PATCH", f"/api/memory/action-items/{aid}", {"status": action})
         results.append(res)
@@ -4751,7 +4993,7 @@ _ABOUT_DIRECT_DB = (
     "list_entities", "get_entity", "list_action_items", "list_dropped_commitments",
     "list_stale_topics", "weekly_digest", "list_open_questions", "research_export",
     "get_chat_context", "list_comments", "grep_archive", "get_live_copilot",
-    "list_pipe_runs", "list_mcp_actions",
+    "list_pipe_runs", "list_mcp_actions", "list_calendar_events",
 )
 _ABOUT_PROXY = (
     "search_archive", "ask_archive", "suggest_category", "research_preview",
@@ -4771,7 +5013,7 @@ _ABOUT_PROXY = (
     "document_import_folder", "document_reparse", "telegram_chats", "telegram", "telegram_enable_chat",
     "telegram_repair_preview", "telegram_backfill", "automation_status", "pipes",
     "recording_devices", "recording", "copilot", "recording_stop", "recording_cancel_own",
-    "get_copilot_timeline",
+    "get_copilot_timeline", "get_meeting_brief", "live_missed",
 )
 
 
@@ -4816,8 +5058,8 @@ def about() -> str:
         "though some keep bookkeeping (e.g. `ask_archive` logs the question to `ask_log`). "
         "`video_analyze` is a write (it stores keyframes and may call Claude with vision_backend='claude'). "
         "`retranscribe` and `activate_transcript_version` are writes too (local, free). "
-        "Archive organisation is writes as well: `task` (done/cancelled/open/postpone, `undo` only of your own "
-        "changes), `bookmark`, `comment`, `taxonomy` (directions, projects, tags; a private direction is never "
+        "Archive organisation is writes as well: `task` (done/cancelled/open/postpone, approve/reject/edit of "
+        "proposals, `undo` only of your own changes), `bookmark`, `comment`, `taxonomy` (directions, projects, tags; a private direction is never "
         "changed), `speaker` (existing ids only), `transcript` (title/description, restore). Everything you write "
         "is marked `source: mcp`. A bookmark delete is HARD (no undo; the answer returns `deleted_snapshot` to "
         "recreate it). A comment you write shows an agent badge and gets no search boost until the owner "
@@ -4834,6 +5076,13 @@ def about() -> str:
         "3. `list_entities`/`get_entity` — the graph of people/projects/topics; `get_speaker_stats`/`get_speaker_timeline`;\n"
         "4. **Commitments:** `weekly_digest()` — the digest in one call («what is on me this week»); "
         "`list_action_items(window=this_week|next_week|overdue|no_date|all, owner=…)`; "
+        "**Task approval queue:** a task has one of eight statuses: proposed, open, done, cancelled, stale, "
+        "rejected, expired, legacy (`status=all` lists every one, the default is `open`). "
+        "`list_action_items(status='proposed')` gives the queue in batch order (10 by default); listing it over "
+        "MCP does NOT start the 3-day clock (only a delivered Telegram card or the owner's screen does). Decide "
+        "with `task(approve|reject, item_ids)`, fix wording or date with `task(edit, item_ids=[id], text, due)`, "
+        "take your last change back with `task(undo, event_id)`. `legacy` tasks are reached by name only: "
+        "`status='legacy'` with `window='all'` and the owner/date filters; "
         "`list_dropped_commitments(days)` — promises with no trace; `list_stale_topics(days)` — topics "
         "that vanished from conversations; `list_open_questions(days)` — Telegram questions addressed personally to the owner "
         "that he did not answer. `research_preview`/`research_export`/`research_summary` — mentions of a term;\n"

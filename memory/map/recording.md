@@ -1,129 +1,52 @@
 # recording — server-side recording (`app/services/recording/`)
 
-Mic + system audio with a live meter, live segments (SSE), pause/resume, finalize in the background,
-recovery of orphaned sessions. **Up to `RECORDING_MAX_ACTIVE` (default 2) parallel sessions**; system
-audio — the whole endpoint or isolated per application. Windows-only (`pyaudiowpatch` for mic/`all`,
-comtypes+pycaw for process loopback). ADR-026 (+ amendments A1-A4). Wiki: `docs/wiki/recording-sources-and-sessions.md`.
+Mic + system audio with live meter, live segments (SSE), pause/resume, background finalize, orphan recovery. **Up to `RECORDING_MAX_ACTIVE` (default 2) parallel sessions**;
+system audio = whole endpoint or per application. Windows-only (`pyaudiowpatch` for mic/`all`, comtypes+pycaw for process loopback). ADR-026 (+A1-A4). Wiki: `docs/wiki/recording-sources-and-sessions.md`.
 
 ## Modules
-- **service.py** — `RecordingService(..., max_active=2, app_source_factory=None)`: a registry
-  `_sessions: dict[sid,_ActiveSession]` under `_registry_lock` (the dict only), `_start_lock` serializes
-  the limit, a per-session `RLock` on pause/resume/stop/retarget/tick. `start(..., system_source=SystemSpec)`,
-  `pause()`, `resume()`, `stop()`, `discard()`, `retarget_system(sid, spec, reason)`, `get_state()`,
-  `active_session_ids()`, `active_session_id` (only when exactly one, otherwise None), `is_active(sid)`,
-  `recover_orphaned()`, `recover_unfinalized()`. `_build_source()` — the single spec→source dispatch.
-  Errors (`code`): `SessionConflictError` `SESSION_LIMIT` (carries `.active`, `.limit`),
-  `SessionNotFoundError` `NOT_FOUND`, `NoSystemStreamError` `NO_SYSTEM_STREAM`, `RecordingError`
-  (`NO_SYSTEM_DEVICE` for `all` without an index).
-- **audio_source.py** — the capture boundary. `AudioSource` Protocol (duck-typed `WasapiRecorder` +
-  `drain_events()`), `MicSpec`, `SystemSpec(mode all|include|exclude, apps, device_index)` with
-  `from_dict/to_dict/validate`, `UnsupportedSourceSpecError` (`UNSUPPORTED_SOURCE_SPEC`),
-  `MAX_INCLUDE_CLIENTS=4`, format `48000/2 s16le`. `ProcessLoopbackSource` (one client pid×mode,
-  bounded queue drop-oldest), `MixedSource` (int16 saturated sum, the part that lags >500 ms
-  is padded with zeros), `AppAudioSource` (holds the clients, watcher thread `app-audio-watcher` every 2 s
-  → `refresh_pids()` → event `pid_change`; pads silence up to wall-clock time on a deficit >50 ms),
-  `resolve_root_pids()` (psutil roots of the exe), `make_app_source()`.
-- **process_loopback.py** — `ProcessLoopbackClient` (ActivateAudioInterfaceAsync
-  `VAD\Process_Loopback`, INCLUDE/EXCLUDE tree, polling on an MTA thread), `LoopbackClient`
-  Protocol, `ClientFactory`, `default_client_factory`. Native code is loaded lazily (`_native()`).
-- **app_audio.py** — `list_sounding_apps(live_specs)` (Active+Inactive sessions on ALL active
-  render endpoints, dedup by exe, `recorded_by`; never raises → `available:false`),
-  `session_pids()`, `session_roots(exe, fallback=)` (session PIDs → root of the exe tree, the tree
-  with an Active session first). Independent of `audio_source.py`.
-  `list_call_sessions(enumerate_sessions=, own_pid=)` (K2) → `{exe: {mic|out: {active, peak, endpoint}}}`
-  over Active/Inactive sessions of both directions (own PID skipped); `None` when the enumeration itself failed.
-- **call_watch.py** (K2, 4.9.0) — `CallWatcher` (thread `call-watch`, 1 s tick, all dependencies injected →
-  `tick()` is testable). Call = listed exe with mic AND out Active for `prompt_seconds` and `SPEECH_PEAK=0.02` on both sides →
-  toast «Record it?»; call end → «Stop recording?», then `autostop_minutes` of silence → `stop_fn` (Stop button path).
-  `pending()/consume(token,action)/dismiss(id)`: one-time token, TTL 3 h. JSONL decision log (rotation 5 MB). `enumerate → None` keeps state.
-  4.31.0: `publisher=` (app.py:1296 -> `sse_broker.publish("system:calls", event, data)`) via `_emit` (queued as an effect, runs outside the lock; a publisher failure only warns):
-  `call_start`, `prompt{kind record|stop}`, `call_end`, `autostop`, `prompt_withdrawn{kind, exe, reason call_end|session_started|expired|consumed|dismissed}` (payload: no token, no URL).
-  `_withdraw_recorded`: a pending «record» prompt is withdrawn when a live recording already captures that app. Read by MCP `wait_for(channel='system:calls')` and `GET /api/automation/status` `calls`.
-- **toast.py** (K2) — Windows toasts via `powershell.exe -EncodedCommand` (WinRT), AUMID `Recall.CallPrompt`; `build_xml`, `show`,
-  `remove`, `ensure_registered`. Buttons = protocol activation (URL). Returns `bool`, never raises.
-- **state.py** (4.20.0) — the one definition of "a recording is in progress": `recording_active(*, default=False)` :23 (any of `state.recording_service.
-  active_session_ids()`; no service -> False; a failing probe -> `default`, 4.22.0: the approval gate passes `True` = fail closed, other callers keep False) and `RECORDING_BLOCKED` (frozenset of actions that must not run during a
-  recording: `transcribe`, `video_analyze:describe_local`, `transcript_suggest_meta`, `transcript_ai:enrich`, `settings:copilot_disable`).
-  The set is data only; nothing enforces it. Callers: `blueprints/transcription.py:931`, `services/reembed.py:238,417`.
-- **autosave.py** (4.23.0) — server safety net for a stopped recording. `AutosaveScheduler(store, delay_sec, run_fn, hold_sec=600,
-  clock, timer_factory, after_save_fn=None)`: one daemon `threading.Timer` per sid, truth = `manifest['autosave']` `{status, at, reason, fields, outcome}`;
-  status pending|held|running|done|failed|cancelled (`off` only in `info()` when disabled). `schedule(sid)` (finalize callback; a prior
-  `cancelled` wins, a prior `held` keeps the later deadline), `hold(sid, fields)` (deadline = max(at, now+600 s), keeps name/description/
-  category_id, refused once running/done/failed/cancelled), `cancel(sid, reason)` (`/save`, `/discard`; leaves running/done/failed alone),
-  `reschedule_pending()` (boot; re-arms pending/held/running at `now+delay`), `info(sid)`, `after_save(sid)` (4.23.3: after the TAB saved,
-  runs `after_save_fn` once on a daemon Timer(0); result -> `manifest['autosave']['direction']`; not persisted, a restart drops it; False when
-  disabled/no fn). `AutosaveJob.file_saved(sid)` is that fn: direction only, never transcribes; waits <=2 h (`WAIT_TRANSCRIPT_SEC`) for
-  the tab's transcript, else `no_transcript`; returns `saved_<tid>_<dir>`. Direction outcomes: `direction_given|ask_user|set|set_meanwhile|patch_<st>`. `AutosaveJob` runs over LOOPBACK HTTP
-  (`http_json`): `POST /api/transcribe` source_type=library -> title via `suggest-meta` (waits for summary <=900 s and for no live
-  recording <=4 h; 409 `RECORDING_ACTIVE` retried) + `PATCH /api/history/<id>` only when no name -> direction via `suggest-category`
-  (waits for embeddings) + `PATCH .../category` only at confidence >= `RECORDING_AUTOSAVE_MIN_CONFIDENCE`. Returns an outcome string
-  (`skipped_already_transcribed`, `transcribe_failed_<code>`, `transcribed_<tid>_<title>_<dir>`). `delay_sec<=0` = off.
-- **recorder.py** — `WasapiRecorder` (+ `drain_events()` → `[]`), `list_input_devices()`,
-  `resolve_device_params()`, `LevelMeter`, `AudioFrame`.
-- **finalize.py** — `pcm_to_wav()`, `finalize_session()` (mic+system → overlay → final.mp3). Reads bytes only.
-- **pcm_writer.py** — `ChunkedPcmWriter`: O_APPEND, fsync ~5s, lazy-open.
-- **session_store.py** — `SessionStore`: a JSON manifest with atomic rename, RLock per sid. Statuses
-  recording/paused/stopping/finalized/crashed/discarded. `create(..., system_source=)`,
-  `set_stream_source(sid, stream, source, event)`, `stream_source(manifest, stream)` (no `source` → `all`).
+- **service.py** — `RecordingService(..., max_active=2, app_source_factory=None)`: `_sessions` under `_registry_lock` (dict only), `_start_lock` serializes the limit, per-session `RLock`.
+  `start(..., system_source=SystemSpec, started_by=)`, `pause/resume/stop/discard`, `retarget_system(sid, spec, reason)`, `get_state`, `active_session_ids()`, `active_session_id` (only when exactly one),
+  `recover_orphaned()`, `recover_unfinalized()`, `_build_source()` (single spec->source dispatch). Errors (`code`): `SessionConflictError` `SESSION_LIMIT` (`.active`, `.limit`), `SessionNotFoundError`,
+  `NoSystemStreamError`, `RecordingError` (`NO_SYSTEM_DEVICE`), 4.36.0 `DeviceAccessDeniedError` `DEVICE_ACCESS_DENIED` (`.stream` mic|system, :136; raised by `_raise_if_access_denied` :851 from the open and `recorder.start` failures at :455/:470).
+- **audio_source.py** — capture boundary: `AudioSource` Protocol, `MicSpec`, `SystemSpec(mode all|include|exclude, apps, device_index)`, `UnsupportedSourceSpecError`, `MAX_INCLUDE_CLIENTS=4`, 48000/2 s16le;
+  `ProcessLoopbackSource`, `MixedSource`, `AppAudioSource` (watcher `app-audio-watcher` every 2 s -> `pid_change`; pads silence to wall clock), `resolve_root_pids()`, `make_app_source()`.
+- **process_loopback.py** — `ProcessLoopbackClient` (ActivateAudioInterfaceAsync `VAD\Process_Loopback`), `ClientFactory`; native code loaded lazily.
+- **app_audio.py** — `list_sounding_apps(live_specs)`, `session_pids()`, `session_roots(exe, fallback=)`, `list_call_sessions(enumerate_sessions=, own_pid=)` (K2: `{exe: {mic|out: {active, peak, endpoint}}}`; `None` = enumeration failed).
+- **call_watch.py** (K2) — `CallWatcher` (thread `call-watch`, 1 s tick, all deps injected). Call = listed exe with mic AND out Active for `prompt_seconds` and `SPEECH_PEAK=0.02` on both sides.
+  Ctor 4.36.0: `action='prompt'|'record'`, `auto_record_fn(exe, call_id)->dict`, `reprompt_minutes=10` (:158-162). Prompt kinds `record|stop|started` (`started` carries `session_id`, takes `stop`/`keep`).
+  `pending()/consume(token, action)/dismiss(id)/log_result(prompt_id, *, ok, session_id=, reason=)` (:488); one-time token, TTL 3 h; JSONL log (rotate 5 MB) events incl. `record_started|record_failed {via click|auto}`, `reprompt`.
+  `_maybe_reprompt` (:266): one repeat per call after `reprompt_sec`, only if live, not dismissed, not `_is_recorded` (:261: known `session_id` live, or a live session whose spec `captures` the exe); withdraws the old prompt (`prompt_withdrawn reason=reprompt`).
+  `_auto_record` (:315, outside the lock): result ok -> `started` prompt; failure -> falls back to the record prompt. `DEFAULT_APPS` (:47) has no `telegram.exe`; `_LABELS` (:65) keeps the label. `publisher=` -> SSE ring `system:calls`
+  (`call_start`, `prompt{kind}`, `call_end`, `autostop`, `prompt_withdrawn{kind, exe, reason call_end|session_started|expired|consumed|dismissed|reprompt}`; no token/URL). Call end -> "Stop?", then `autostop_minutes` silence -> `stop_fn`.
+- **toast.py** (K2) — WinRT toasts via `powershell.exe -EncodedCommand`, AUMID `Recall.CallPrompt`; `build_xml/show/remove/ensure_registered`; returns bool, never raises.
+- **participants.py** (4.36.0, new) — owner-picked meeting people, no HTTP. `suggest(conn, now=None)` (:49; attendees of non-cancelled timed events overlapping now +- `calendar_bind.TOLERANCE`, matched to EXISTING persons via `enrichment._find_entity`; `source:'calendar'`),
+  `search(conn, q, limit=10)` (:88; name or alias, `casefold` in Python, prefix first), `link_to_transcription(conn, tid, ids)` (:118; `INSERT OR IGNORE ... source='owner'`, unknown/non-person ids skipped), `session_participants(manifest)` (:41), `_person_ids`. Never creates an entity or stores an email.
+- **state.py** — `recording_active(*, default=False)` (any `active_session_ids()`; failing probe -> `default`; approval gate passes `True`) and `RECORDING_BLOCKED` frozenset (data only). Callers: `blueprints/transcription.py`, `services/reembed.py`.
+- **autosave.py** (4.23.0) — `AutosaveScheduler(store, delay_sec, run_fn, hold_sec=600, ..., after_save_fn=None)`: one daemon Timer per sid; truth = `manifest['autosave']` `{status pending|held|running|done|failed|cancelled, at, reason, fields, outcome}`.
+  `schedule/hold/cancel/reschedule_pending/info/after_save`. `AutosaveJob` over LOOPBACK HTTP (`http_json`, UI token since 4.26.0): `POST /api/transcribe` -> title via `suggest-meta` (waits for no live recording) -> direction via `suggest-category` only at confidence >= `RECORDING_AUTOSAVE_MIN_CONFIDENCE`. `file_saved(sid)` = direction only. `_event_titled(row)` skips `suggest-meta` for a calendar-titled row.
+- **recorder.py** — `WasapiRecorder` (+`drain_events()`), `list_input_devices()`, `LevelMeter`. 4.36.0: `DeviceAccessDeniedRecorderError` (:179), `E_ACCESSDENIED` (:184), `microphone_consent_denied()` (:189, Windows consent-store registry), `is_access_denied(exc)` (:216; walks the cause chain: that error, COMError hresult, OSError winerror, loopback text `hr=0x80070005`). The mic open raises it on a consent denial (:456-461); the plain `all` loopback has no distinguishable signature, so it stays generic 400 `RECORDING_START_FAILED`.
+- **finalize.py** — `pcm_to_wav()`, `finalize_session(..., mic_gain_db, system_gain_db)` (mix -> final.mp3; gain applied once to the whole file). **pcm_writer.py** — `ChunkedPcmWriter`. **session_store.py** — `SessionStore` JSON manifest, atomic rename; statuses recording/paused/stopping/finalized/crashed/discarded; `create(started_by=)`, `set_stream_source`, `modify`.
+- **guards.py** (ADR-051) — `OWNER_CLASS={ui,call_prompt,auto_call}`, `AGENT_LABELS`, `started_by_for`, `is_owner_session`, `cancel_own_check`, `recording_kept`. **start_notice.py** — `notify_start` toast before an agent start. **stop_control.py** — `request_stop`, `arm_timer/cancel_timer` (memory only).
 
-- **guards.py** (4.32.0, ADR-051) — pure who-may-drive rules: `OWNER_CLASS={ui,call_prompt,auto_call}`, `AGENT_LABELS={mcp,hook}`, `started_by_for(actor_class, claimed)` (`ui` or label or `unknown`;
-  the header is never a proof), `is_owner_session(manifest)` (missing field = owner), `cancel_own_check` (`owner|not_live|too_old`, `CANCEL_OWN_WINDOW_SEC=300`), `recording_kept` (moved here from the blueprint).
-- **start_notice.py** (4.32.0) — `notify_start(...)`: toast before an agent-started capture (`capture.rec.notice.*`); True only if shown; no visible desktop / any failure -> False (never raises).
-- **stop_control.py** (4.32.0) — `request_stop(sid, name, stop_fn=)` -> `started` (daemon thread `rec-stop-<sid>`) | `already`; `is_stopping`; `arm_timer(sid, minutes, stop_fn, is_live)` / `cancel_timer`
-  (wall-clock, in memory only: a restart does NOT re-arm); `reset()` for tests.
+## Blueprint: `app/blueprints/recording.py` (4.32.0, 4.36.0)
+- `_start_session(data, started_by=)` shared by `POST /start` and the call prompt. Agent class: limit pre-check, `start_notice`, copilot limited and local, `max_duration_min` 1..240. `_owner_session_refusal` -> 403 `OWNER_SESSION`.
+- `start_call_recording(exe, *, started_by)` (:1036): never raises; default Windows mic (`'default'`) + `{mode:'all'}` on `_default_loopback()` (:931), then `_start_session`. Returns `{ok, session_id}` | `{ok:False, reason, error_code, error, status, limit?}`; `reason` in `_CALL_START_REASONS` (:95: `SESSION_LIMIT`, `DEVICE_ACCESS_DENIED`) else `RECORDING_START_FAILED` (`NO_SYSTEM_DEVICE` when no loopback). Callers: `/autoprompt/<token>/record` (`call_prompt`, then `watcher.log_result`) and `app.py:1295` `_auto_record` (`auto_call`, own app context). The exe is only logged; it no longer picks the sources.
+- `/autoprompt/<token>/<action>` (:985): a non-ui caller naming an actor -> 403 before the token is spent; `sources` redirects to `/record?app=&mic=`.
+- Gain: `/start` `gain {mic_db, system_db}` and `POST <sid>/gain` (:772); `_parse_gain`, range +-20 (`_GAIN_MIN_DB/_MAX_DB`), else 400 `INVALID_ARGUMENT`; manifest `gain`; `manifest_gain(manifest)` (:695) feeds `_state` (:1405) and the `app.py:702` finalize callback.
+- Participants: `GET /api/recording/participants[?q=]` (:747; `suggested` always, `matches` with `q`); `/start` `participants` list -> `_known_participants` (:716) -> manifest `participants` via `_apply_start_meta` (:733). A `DeviceAccessDeniedError` -> 403 `DEVICE_ACCESS_DENIED` + `stream` (:532; texts `capture.rec.err.access_denied_{mic|system}`).
+- `/api/recordings/recovered?ack=0|1` (:1716; `ack=1` default clears `state.recording_recovery_log`), `/api/recordings/active` (:1791).
+- `/stop` answers `stopping` at once; `/discard` 409 `RECORDING_KEPT`; `/save` first save calls `after_save`.
 
-## Agent-started sessions (4.32.0, mcp-recording-live)
-Manifest gets `started_by` (`session_store.create(started_by=)` :112; `service.start(started_by=)` :379; snapshot carries `started_by`, `max_duration_min`, `expires_at`, `service.py:339-341`).
-`recording.py`: `_start_session(data, started_by=)` shared by `/start` (`_caller_started_by` :291) and the call prompt (`'call_prompt'` :851). For an agent class: limit pre-check (409 `SESSION_LIMIT`, no toast),
-`start_notice.notify_start` (503 `NOTIFY_UNAVAILABLE` when not shown), copilot body limited to mode/importance and forced local (`_AGENT_COPILOT_SPEND_KEYS`), `max_duration_min` 1..`_MAX_DURATION_MIN`=240
-(`_parse_duration_min` :598; writes `expires_at`, arms `stop_control.arm_timer`, :612-628). `_owner_session_refusal` :295 (403 `OWNER_SESSION`) on pause/resume/system-source for a non-`ui` caller.
-`/stop` (:905) answers at once `status:'stopping'` (waits `_STOP_GRACE_SEC=0.3`), repeat/finished -> `already:true`; `/discard` refuses 409 `RECORDING_KEPT` and leaves the duration timer armed. Wiki `approval-gate.md`.
+- Consent reminder (4.37.0): setting `RECORDING_CONSENT_REMINDER` (on). `_start_session` writes manifest `consent_reminder: true` (`recording.py:476-559`, `_apply_consent_flag` :641); `/start` (:637) and `<sid>/state` (:1429, from the manifest) carry `consent_reminder`; `start_call_recording` result carries it (:1084).
+  `call_watch`: `_Prompt.consent_reminder` (:128); the auto-record `started` toast body appends `svc_recording.consent.reminder` (:334-336) and `pending()` items carry the flag (:452). `start_notice.notify_start(..., consent_reminder=)` appends the same line (:49). Display only; recording never waits on it.
 
-## System audio source
-- `all` at start → `recorder_factory` (`WasapiRecorder`, endpoint `device_index`) — byte-for-byte as before 4.7.0.
-- `include:[≤4 exe]` / `exclude:[exactly 1 exe]` → `app_source_factory`; in `app.py:835-841` the PID
-  resolver = `session_roots(exe, fallback=resolve_root_pids)`. Exclude without a running application →
-  EXCLUDE of own PID (= all the sound). Exclude with several trees → only the first (the sounding one).
-- The `.pcm` format of a stream is unchanged: `all` on a stream that started as include/exclude = EXCLUDE-own-PID.
-- Retarget: the new source is opened first, the remainder of the old one is flushed, frames of the new one with
-  `ts < swap_ts` are dropped, a gap >20 ms → silence. On pause only the spec changes (`applied_on_resume`).
-- Every change → a record in `streams.system.source_events` (`reason` user|pid_change|auto_restore;
-  PIDs are not written to the manifest) + SSE `source_changed`.
+## Source, FSM, library
+- `all` at start -> `recorder_factory` (endpoint `device_index`); include/exclude -> `app_source_factory` (resolver `session_roots(exe, fallback=resolve_root_pids)`); `.pcm` format never changes (`all` after include/exclude = EXCLUDE own PID). Retarget opens new first, drops frames older than swap, pads gaps >20 ms. Each change -> `streams.system.source_events` + SSE `source_changed`.
+- FSM: recording <-> paused; stop -> stopping -> finalized; crash -> crashed. Video tracks: `recording_video_tracks`, live segments (`video.py`), reader `services/live_frames.py` (`services-video-privacy.md`).
+- `library.register_recording()`: idempotent upsert into `audio_downloads` (`youtube_id='recording_'+sid`); `_bind_calendar` replaces only an automatic name with the event title (owner > event > Claude; `services-calendar.md`).
+- Description/participants reach the transcript in `transcription_run` (`services.md`): empty request description inherits manifest `description` (:186) or `audio_downloads.description` (:225); `participants.link_to_transcription` runs at :498-501.
 
-## Video tracks → visual timeline (4.10.0)
-Tracks in `recording_video_tracks` (`start_offset_sec`); `video_analysis.resolve_recording_video()` -> `{primary_video_path, session_dir,
-start_offset_sec}`; thumbs cached in `<session_dir>/frames_cache/thumbs.npz`. Rest — `services.md`, wiki `video-timeline-and-screen-secrets`.
-**Live video (4.30.0):** `video.VideoTrack.segments` (`video.py:87`, serialized `:108`) = one `{n, path, start_offset_sec}` per capture file
-(start/resume); `_spawn_track` (`:380-385`) appends, an hevc-fallback respawn into the same path refreshes the last entry. `video_probe`
-capture argv: `-g int(fps)*2` (keyframe each 2 s) and `-flush_packets 1` (`video_probe.py:217,221`), so the growing fMP4 is readable ~2 s behind.
-Reader: `services/live_frames.py` (`services-video-privacy.md`).
+**Gotchas:** a client on a dead PID streams silence — the watcher is the only death detector; copilot is one per process (`copilot.md`); reembed and `suggest-meta` defer while `recording_active()`. K2: the watcher lives only under `__main__` (`app.extensions['call_watcher']`, `app.py:1323`); settings `RECORDING_AUTOPROMPT[_APPS|_SECONDS|_ACTION|_REPROMPT_MIN]`, `RECORDING_AUTOSTOP_SILENCE_MIN` (`settings.py:212-233`); `ACTION=record` is the only click-free start, shipped `prompt`. Autosave: settings `RECORDING_AUTOSAVE_*`, singleton `state.recording_autosave`; restart re-arms with a fresh delay; discard refused once a transcript exists. SSE `recording:{sid}`: level, status, chunk_saved, error, source_changed (all but level/chunk_saved ring-kept for MCP `wait_for`).
+**Tests:** `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,recording_service,recording_blueprint,recording_guards,session_store}.py`.
 
-## FSM (per session)
-recording <-> paused (pause/resume); stop() -> stopping -> finalized; crash -> crashed (recover_orphaned / recover_unfinalized).
-
-## Library (`library.py`)
-`register_recording()` — idempotent upsert into `audio_downloads` (`youtube_id='recording_'+sid`), done by the finalize callback.
-
-**Gotchas:** a client on a dead PID streams silence without an error — the watcher is the only death detector;
-the watcher truncates include >4 processes to 4 (open() raises in the same situation); the copilot is one per
-process (`CopilotBusyError`, `memory/map/copilot.md`); reembed and `suggest-meta` (409 `RECORDING_ACTIVE`) are deferred while at least one recording is alive
-(`state.recording_active()`).
-**K2:** nothing starts without a click; autostop acts only after «Stop recording?» and not on pause; the watcher lives only
-under `__main__` (`app.extensions['call_watcher']`, `app.py:1189`); settings `RECORDING_AUTOPROMPT[_APPS|_SECONDS]`,
-`RECORDING_AUTOSTOP_SILENCE_MIN` (`app/core/settings.py:191-226`); HTTP — `memory/map/blueprints.md`.
-**Autosave (4.23.0):** settings `RECORDING_AUTOSAVE_SEC` (60; 0 = off), `_MODEL` (large-v3), `_LANGUAGE` (auto), `_MIN_CONFIDENCE` (0.6)
-(`settings.py:197-211`); singleton `state.recording_autosave` (`app/state.py:65`). Built in `app.py:858-876` (`_rec_autosave_job` then
-`_rec_autosave` with `after_save_fn=_rec_autosave_job.file_saved`) BEFORE recovery; the finalize
-callback schedules (`app.py:727-745`, result goes into the callback payload as `autosave`); boot re-arm `app.py:925`. Gotcha: a restart
-re-arms with a fresh full delay, and a job interrupted while `running` is re-run (skipped if a transcript already exists).
-`discard` is refused 409 `RECORDING_KEPT` once a transcript exists or autosave is running/done (`guards.recording_kept` via `_recording_kept`, `recording.py:1143`).
-`/save` (4.23.3): cancels the deadline, then sets `autosave.saved` in one locked write; only the FIRST successful save (`saved` not yet
-set) calls `after_save` (`recording.py:826-845`), so a second tab does not file twice.
-**SSE** (`recording:{sid}`): level (10Hz), status, chunk_saved, error, source_changed. Since 4.20.0 every event except `level` and
-`chunk_saved` is also kept in the broker's per-channel ring (`services-infra.md`) and read by MCP `wait_for`.
-**Tests:** `test_recording_devices.py`, `tests/test_{audio_source,app_audio,call_watch,parallel_recordings,
-recording_service,recording_blueprint,session_store}.py`.
-
-last-verified: 2026-10-26 (mcp-recording-live 4.32.0: guards, start_notice, stop_control, agent-started sessions; `_recording_kept` is now `guards.recording_kept`, `recording.py:1143`); 2026-10-25 (mcp-telegram-automation 4.31.0: call_watch publisher, prompt_withdrawn; live-video-frames 4.30.0: video segments section); 2026-10-19 (save-direction 4.23.3: after_save/file_saved; recording-autosave 4.23.0; state.py default=, approval gate reader); 2026-10-18 (SSE ring); video tracks section 2026-10-13; the rest 2026-10-08
-
-> **4.26.0:** autosave `http_json` sends the per-boot UI token (`autosave.py:221`), so its loopback calls count as `ui`, not as an agent (ADR-045).
+last-verified: 2026-10-28 (wave4-client-calls 4.37.0: consent reminder); 2026-10-28 (wave2-recording-calls 4.36.0: participants, device denial, gain, start_call_recording, reprompt/auto-record; slice condensed); older detail dropped (see git history)

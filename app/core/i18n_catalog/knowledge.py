@@ -244,4 +244,12 @@ MESSAGES: dict = {
         "uk": "days: очікую 1, 7 або 30",
         "en": "days: expected 1, 7 or 30",
     },
+    "knowledge.memory.err.action_bad": {
+        "uk": "action: очікую approve, reject або edit, і без status поруч",
+        "en": "action: expected approve, reject or edit, and no status next to it",
+    },
+    "knowledge.memory.err.edit_bad": {
+        "uk": "edit: потрібен непорожній task або due_date у форматі РРРР-ММ-ДД",
+        "en": "edit: a non-empty task or a due_date as YYYY-MM-DD is required",
+    },
 }

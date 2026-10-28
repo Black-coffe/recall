@@ -120,6 +120,31 @@ def purge_soft_deleted(db_path: str, grace_days: Optional[float] = None) -> dict
     return stats
 
 
+def purge_finished_jobs(db_path: str, days: float = 30) -> int:
+    """Delete finished ``jobs`` rows older than ``days``; returns the count."""
+    import sqlite3
+    import time
+
+    from app.services.job_queue import FINISHED_STATES  # queued/running rows are never pruned
+
+    cutoff = time.time() - days * 86400
+    marks = ",".join("?" * len(FINISHED_STATES))
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.execute(
+                f"DELETE FROM jobs WHERE state IN ({marks}) "
+                "AND COALESCE(finished_at, updated_at) < ?",
+                (*FINISHED_STATES, cutoff),
+            )
+            removed = cur.rowcount
+    except Exception as e:
+        logger.warning("[retention] purge_finished_jobs error: %s", e)
+        return 0
+    if removed:
+        logger.info("[retention] purged %d finished jobs older than %s days", removed, days)
+    return removed
+
+
 def purge_mcp_actions(db_path: str, days: float = 90) -> int:
     """Delete audit rows (``mcp_actions``) older than ``days``; returns the count."""
     from app.repositories import mcp_actions
